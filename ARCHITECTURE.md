@@ -432,3 +432,166 @@ this is a REGION map, not a round island):
 ## main.js integration (MINE, not the agent's)
 `input.onKey('KeyM')` toggles; a HUD arrow points to `map.waypoint` with the
 distance in metres, and the minimap draws the same waypoint.
+
+---
+
+# v5 contract (interiors, people, demolition)
+
+Every roof in Pardubice now has rooms under it, you can walk in through a real
+front door, and the helicopter carries a rocket pod that takes buildings apart
+the way Teardown does. Five new modules, none of which knows about the others'
+internals.
+
+## js/interiors.js — the floor plan (pure data, no three.js)
+```js
+export function classify(f) → use            // 'flats'|'house'|'mall'|…
+export function entranceOf(f, roads?, neighbours?) → {i,t,x,z,nx,nz,w}
+export function buildingPlan(f, roads?, neighbours?) → plan   // cached on f._plan
+export function hasInterior(f) → bool
+export function planToWorld(fr, u, v, out)
+export const USE_LABEL
+```
+**Classification** layers, in order: a `shop=`/`amenity=` tag from the data
+pipeline (`f.u`), a BRAND table of the real Pardubice chains, name regexes, the
+OSM `building=` type, then pure geometry (area × levels) for the 2 400 buildings
+tagged `yes`/`no`/`roof`. Over the real data that lands 3 869 houses, 3 378
+garages, 1 165 blocks of flats, 511 industrial, 53 schools, 28 supermarkets and
+7 malls.
+
+**Brands** encode the real thing, not a generic: Palác Pardubice (AFI Palác) is
+three levels, 116-odd units around an atrium with a Cinema City under the roof;
+Obchodní dům Prior is the 1974 department store, escalators, grocery on the
+ground; Kaufland is a single ~4 200 m² hall with eight-plus tills; Lidl six
+aisles, four tills and the non-food middle aisle; Penny the 2026 "Market Hall"
+refit. Sources are cited in the BRANDS block.
+
+**Layouts** are drawn in the footprint's own OBB (u along the longest edge) and
+CLIPPED to the true polygon at geometry time, so an L-shape gets a plausible
+plan with the overhang trimmed. `corridorLayout` (flats/school/hotel/hospital/
+office/civic), `mallLayout`, `openLayout` (industrial/parking/church/garage/
+supermarket), `houseLayout` (BSP). The **stair core** is the one thing that must
+land inside the real outline — candidate positions are tested against the
+polygon and a building where none fits becomes single-storey rather than a lie.
+
+## js/pieces.js — plan → boxes (pure data, no three.js)
+```js
+export function interiorPieces(plan) → piece[]   // floors, lining, partitions,
+export function shellPieces(plan) → piece[]      // stairs, rails, furniture
+```
+BOTH are built the moment a building is ACTIVATED — the shell is not held back
+for damage. That is what makes windows real openings with real panes (you can
+see into a building without shooting it) and what removes the on-hit pop
+entirely: before and after are the same geometry. Each exterior BAY becomes
+plaster-below-sill, plaster-above-lintel, two jambs and a pane, and every solid
+one samples the exact atlas sub-rectangle the painted facade would have used —
+WIN_BAND / WIN_FRAC in meshes.js are the shared agreement on where a window sits
+inside a cell. Slabs subdivide at the footprint boundary so nothing pokes out
+through the facade; ceilings and roofs do not (nobody stands on them).
+Nothing emits a surface. Slabs are grids of TILES, walls rows of PANELS, stairs
+stacks of STEPS — so a wall is not a thing that can be holed, it is forty things
+that can be deleted. A tile touching a void (stair well, atrium) subdivides 4×4
+so the hole stays open; getting that wrong sealed the first version's staircases
+shut. The outer leaf wears the FACADE's own colour, window rhythm and AO
+(`plan.wallHex`, stamped by interiorsim from `meshes.buildingWallHex`) so a
+building does not change identity the instant a rocket promotes it to boxes.
+
+## js/destructible.js — BuildingModel, Debris, Dust
+One InstancedMesh per building (plus one for glass); a hit rewrites the instance
+buffers and drops `count`. **Structure is a grid**: ~1.6 m cells, support
+propagates DOWN a column for free and SIDEWAYS at a cost of one unit per cell
+(SPAN = 6), so a wall stands, a floor plate spans ~10 m, and anything further
+out falls. A second BRACING test drops splinters that have no lateral neighbours
+above stub height. `_collapse` releases the condemned pieces in WAVES lowest
+first, so a collapse travels through the building instead of happening in one
+frame. Cost on a 12 800-piece tower: ~13 ms for the first hit (the pair-wise
+graph this replaced cost 150 ms), ~2 ms after.
+
+## js/interiorsim.js — Interiors (policy + people)
+Activates the interiors of the ~8 nearest buildings while the player is on foot
+(a building whose DOOR you are standing at always wins a slot and is built
+immediately), keeps every wrecked building for the session, owns the shared
+debris/dust pools, and answers `supportY` / `pushOut` / `occupied` / `modelAt`
+for the walk controller and the chase camera. Occupants are the same box people
+as the pavement crowd: they walk between the rooms of their floor, run for the
+stairs when something goes off, and — if the floor is blown out from under them
+— GRAB THE LEDGE and hang there before climbing back or losing their grip.
+
+## js/weapons.js — the rocket pod (V)
+Unguided, 55 m/s off the rail to 210 m/s on the motor, slight droop. Impact is
+resolved by sub-stepping the flight path in 1.2 m bites against the footprint
+index AND `world.solidAt` (the box models), which is what lets a second rocket
+fly through the hole the first one made. `aimPoint()` runs the same integrator
+ahead of time; main.js projects its answer onto the screen, so the reticle hangs
+over the helicopter and slides onto the target as you nose down.
+
+## Integration
+- **city.js** owns `interiors`, and gains `supportY`, `roofY` (land the
+  helicopter on a roof, walk on it), `buildingHitAt`, `solidAt`,
+  `damageBuilding`, `hideBuilding` and `_rebuildBuildings` (re-mesh ONE chunk's
+  building batch in place). `collide(pos, r, opts)` takes `opts.interior` (use
+  the boxes) and `opts.aboveY` (a roof below you is not an obstacle).
+- **player.js** has a `y` now: gravity, and a 0.55 m step-up that turns eighteen
+  tread boxes into a staircase with no stair code at all.
+- **meshes.js** cuts the front door into the facade and dresses it with a
+  surround, a canopy and a lit sign board (two extra batches per chunk), and
+  exports `buildBuildingsMesh` + `buildingWallHex`.
+- **settings.js** gains `interiors` (off on Low). Wrecks survive the toggle.
+
+## Verification
+`npm test` covers classification against the real chains, "every multi-storey
+building has treads you can climb", "no slab roofs over its own staircase",
+piece sanity, and the door being on the footprint.
+
+---
+
+# v6 contract: České dráhy
+
+The region holds 1465 rail ways (532 km) and 25 named `pois` with `t:'station'`
+— Pardubice hl.n., Hradec Králové hl.n., Chrudim, Přelouč, Holice and the rest.
+Trains run on that real network and the player can ride them.
+
+## js/trains.js — AGENT TRAIN
+```js
+export class Trains {
+  constructor(scene, city, opts)      // opts { onBoard?, onAlight? }
+  update(dt, focus)                   // stream, drive, stop at stations
+  nearestBoardable(x, z, r)  → train|null   // a HALTED train within r
+  board(train) / alight()  → bool
+  riding                              // the train being ridden, or null
+  trains                              // live Set
+}
+```
+- ROUTES, not a graph: chain rail ways whose endpoints coincide (≤3 m) into
+  long polylines ONCE per streamed tile, keep routes ≥ 800 m, and drop any
+  `t:'tram'`. Trains own a route + a direction and simply advance along it;
+  at the end they reverse. This is far more stable than the road graph — rails
+  do not need junction choice to look right.
+- STOPS: a station POI within 60 m of a route point becomes a stop on that
+  route. Approaching one, the train brakes to a halt, waits DWELL≈14 s with
+  doors "open" (a lit strip + the door sound), then pulls away. vmax 40 m/s
+  (144 km/h), accel 0.55 m/s², brake 0.9 m/s² — a train must feel heavy.
+- CONSIST: locomotive + 3–5 carriages, coupled and following the SAME
+  polyline offset back by their length, so the set articulates through curves
+  instead of sliding as one rigid box. Bogies ride `world.heightAt`.
+- ČD LIVERY: modern České dráhy — dark blue body (#12305e), a white band at
+  window height, a light-grey roof, dark window strip, and the ČD red accent
+  (#c8102e) on the nose. Low-poly to match the cars. Cab windows, headlights
+  (emissive, toneMapped:false so bloom bites at night), and a small painted
+  "ČD" plate. Carriages get the same band and window rhythm.
+- STREAMING: keep ~6 trains alive within 3.5 km of the focus, spawn beyond
+  600 m so none pops in view, despawn past 4 km. Zero per-frame allocation.
+- RIDING: `board()` hides the player mesh and parks them in the cab; `update`
+  keeps `player.pos` on the train so the camera and streaming follow it.
+  `alight()` only succeeds while halted, and places the player beside the
+  train clear of the track.
+
+## js/audio.js additions — AGENT TRAIN (same agent, keep the existing API)
+`trainStart()/trainStop()/trainSet(speed01)` — a procedural rolling loop:
+filtered noise for wheel roar plus a periodic rail-joint clatter whose rate
+follows speed, and a low traction hum. Plus `sfx()` clips generated by
+scripts/gen-sounds.mjs: `train_horn` (two-tone Czech loco horn), `train_pass`,
+`station_bell` (the ČD platform chime), `train_doors`.
+
+## main.js integration (MINE)
+E boards/alights a halted train the way it does cars; the HUD shows the
+station name and "odjezd" countdown while stopped.

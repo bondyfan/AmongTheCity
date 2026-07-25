@@ -186,7 +186,7 @@ let amb = null;          // { src, lp, gain } while the loop is actually playing
 let ambWant = false;     // ambientStart() called and not yet stopped
 let ambPending = false;  // a load is in flight — don't start a second one
 let ambDuck = 1, ambDuckAt = -1;   // live duck factor + the last one WRITTEN
-let duckDrive = 0, duckHeli = 0;   // the two claimants, 0..1 each
+let duckDrive = 0, duckHeli = 0, duckTrain = 0;   // the claimants, 0..1 each
 
 // exponential (pitch-linear) cutoff travel — a linear Hz ramp would spend
 // almost all its audible movement in the last 10 % of the slider
@@ -238,10 +238,11 @@ function ambBuild() {
   });
 }
 
-// Called from engineSet/heliSet — i.e. every frame — so it must cost nothing
-// when nothing changed: one max, one subtract, one compare, out.
+// Called from engineSet/heliSet/trainSet — i.e. every frame — so it must cost
+// nothing when nothing changed: one max, one subtract, one compare, out.
 function duckUpdate() {
-  const d = duckDrive > duckHeli ? duckDrive : duckHeli;
+  let d = duckDrive > duckHeli ? duckDrive : duckHeli;
+  if (duckTrain > d) d = duckTrain;
   ambDuck = 1 - (1 - AMB.duckMin) * d;
   if (!amb || Math.abs(ambDuck - ambDuckAt) < AMB.step) return;
   ambDuckAt = ambDuck;
@@ -604,4 +605,220 @@ export function heliSet(rotor01, speed01) {
   // rotor noise beats the street flat once it's really turning
   duckHeli = r;
   duckUpdate();
+}
+
+// ---- procedural train: wheels, rail joints, traction --------------------
+// Riding a train is three sounds and no more, and the reason none of them is
+// a sample is that all three are RATE, not timbre:
+//   · the ROAR — broadband wheel-on-rail noise. One looping noise source
+//     through a lowpass that OPENS with speed: standing still you hear only
+//     the bottom of it, at 144 km/h the hiss of the railhead comes right up
+//     into the cabin. Level and brightness move together because that is what
+//     "faster" sounds like.
+//   · the CLATTER — the joints. A second noise voice, bandpassed up where the
+//     crack of a rail joint lives, GATED by a pulse-shaped LFO whose frequency
+//     is the whole trick: joints pass at speed/spacing, so the rate literally
+//     is the speedometer. The LFO wave is ten cosine partials in phase — a
+//     tall narrow peak over a long trough, i.e. a click and then nothing,
+//     where a sine would give a wobble. (Same construction as the rotor's
+//     blade slap, tightened.)
+//   · the HUM — a low triangle at 24→62 Hz for the traction motors, with a
+//     quiet third harmonic so it has an edge rather than being a test tone.
+// Every parameter moves on setTargetAtTime, so pulling out of a station and
+// braking back into one is one continuous glide with nothing to click on.
+const TRAIN = {
+  roarLo: 210, roarHi: 1700,      // wheel-roar lowpass, stopped → flat out
+  roarQ: 0.7,
+  clackLo: 0.6, clackHi: 8.5,     // rail joints per second across the range
+  clackF: 1500, clackQ: 2.2,      // where a joint crack lives
+  clackBase: 0.26, clackDepth: 0.3,   // gate floor + peak (never negative)
+  humLo: 24, humHi: 62,           // traction fundamental
+  humLevel: 0.30, third: 0.10,    // …and its third harmonic, well under
+  vol: 0.30, volFloor: 0.30,      // overall level: floor + the rest from speed
+  tau: 0.12,                      // ~350 ms settle — a train is not a synth
+  duck: 0.85,                     // how hard the ride flattens the city bed
+};
+// ten in-phase cosine partials → the narrow peak that reads as a CLICK
+const CLACK_REAL = new Float32Array([0, 1, 0.96, 0.9, 0.81, 0.7, 0.58, 0.45, 0.32, 0.2, 0.1]);
+const CLACK_IMAG = new Float32Array(CLACK_REAL.length);
+let train = null;
+
+export function trainStart() {
+  if (!ctx || ctx.state !== 'running' || train) return;
+  const t = ctx.currentTime;
+  // roar
+  const roar = ctx.createBufferSource();
+  roar.buffer = noiseBuffer(); roar.loop = true;
+  const roarLP = ctx.createBiquadFilter();
+  roarLP.type = 'lowpass'; roarLP.frequency.value = TRAIN.roarLo; roarLP.Q.value = TRAIN.roarQ;
+  const roarGain = ctx.createGain(); roarGain.gain.value = 0.1;
+  // clatter
+  const clack = ctx.createBufferSource();
+  clack.buffer = noiseBuffer(); clack.loop = true;
+  const clackBP = ctx.createBiquadFilter();
+  clackBP.type = 'bandpass'; clackBP.frequency.value = TRAIN.clackF; clackBP.Q.value = TRAIN.clackQ;
+  const gate = ctx.createGain();
+  gate.gain.value = TRAIN.clackBase;      // the LFO ADDS to this intrinsic value
+  const lfo = ctx.createOscillator();
+  lfo.setPeriodicWave(ctx.createPeriodicWave(CLACK_REAL, CLACK_IMAG));
+  lfo.frequency.value = TRAIN.clackLo;
+  const lfoDepth = ctx.createGain(); lfoDepth.gain.value = TRAIN.clackDepth;
+  const clackGain = ctx.createGain(); clackGain.gain.value = 0;
+  // traction hum
+  const hum = ctx.createOscillator();
+  hum.type = 'triangle'; hum.frequency.value = TRAIN.humLo;
+  const hum3 = ctx.createOscillator();
+  hum3.type = 'sawtooth'; hum3.frequency.value = TRAIN.humLo * 3;
+  const hum3Gain = ctx.createGain(); hum3Gain.gain.value = TRAIN.third;
+  const humGain = ctx.createGain(); humGain.gain.value = TRAIN.humLevel;
+  const gain = ctx.createGain();
+  gain.gain.value = 0;                    // born silent — no start pop
+  roar.connect(roarLP); roarLP.connect(roarGain); roarGain.connect(gain);
+  clack.connect(clackBP); clackBP.connect(gate);
+  lfo.connect(lfoDepth); lfoDepth.connect(gate.gain);
+  gate.connect(clackGain); clackGain.connect(gain);
+  hum.connect(humGain); hum3.connect(hum3Gain); hum3Gain.connect(humGain);
+  humGain.connect(gain);
+  gain.connect(master);
+  roar.start(t, Math.random()); clack.start(t, Math.random());
+  lfo.start(t); hum.start(t); hum3.start(t);
+  gain.gain.setTargetAtTime(TRAIN.vol * TRAIN.volFloor, t, 0.25);
+  train = { roar, roarLP, roarGain, clack, clackBP, gate, lfo, lfoDepth,
+    clackGain, hum, hum3, hum3Gain, humGain, gain };
+}
+
+export function trainStop() {
+  if (!train) return;
+  const tr = train;
+  train = null;                     // trainSet() goes inert immediately
+  duckTrain = 0; duckUpdate();      // off the train → the street comes back
+  const t = ctx.currentTime;
+  tr.gain.gain.cancelScheduledValues(t);
+  tr.gain.gain.setTargetAtTime(0, t, 0.12);
+  setTimeout(() => {
+    try { tr.roar.stop(); tr.clack.stop(); tr.lfo.stop(); tr.hum.stop(); tr.hum3.stop(); } catch {}
+    tr.roar.disconnect(); tr.roarLP.disconnect(); tr.roarGain.disconnect();
+    tr.clack.disconnect(); tr.clackBP.disconnect(); tr.gate.disconnect();
+    tr.lfo.disconnect(); tr.lfoDepth.disconnect(); tr.clackGain.disconnect();
+    tr.hum.disconnect(); tr.hum3.disconnect(); tr.hum3Gain.disconnect();
+    tr.humGain.disconnect(); tr.gain.disconnect();
+  }, 700);
+}
+
+// Per frame while the player is on a train. speed01 = |speed|/vmax. Scalar
+// math and AudioParam writes only, zero allocations.
+export function trainSet(speed01) {
+  if (!train) return;
+  const s = speed01 < 0 ? 0 : speed01 > 1 ? 1 : speed01;
+  const t = ctx.currentTime, tau = TRAIN.tau;
+  // exponential cutoff travel — a linear Hz ramp spends its whole audible
+  // movement in the last tenth of the slider
+  train.roarLP.frequency.setTargetAtTime(
+    TRAIN.roarLo * Math.pow(TRAIN.roarHi / TRAIN.roarLo, s), t, tau);
+  train.roarGain.gain.setTargetAtTime(0.12 + 0.85 * s, t, tau);
+  // the joints ARE the speedometer: rate scales straight off road speed, and
+  // the level with it, so a train drifting into a platform goes tick… tick…
+  train.lfo.frequency.setTargetAtTime(
+    TRAIN.clackLo + (TRAIN.clackHi - TRAIN.clackLo) * s, t, tau);
+  train.clackGain.gain.setTargetAtTime(0.75 * s * s, t, tau);   // late, then hard
+  train.hum.frequency.setTargetAtTime(TRAIN.humLo + (TRAIN.humHi - TRAIN.humLo) * s, t, tau);
+  train.hum3.frequency.setTargetAtTime(
+    (TRAIN.humLo + (TRAIN.humHi - TRAIN.humLo) * s) * 3, t, tau);
+  train.gain.gain.setTargetAtTime(
+    TRAIN.vol * (TRAIN.volFloor + (1 - TRAIN.volFloor) * s), t, tau);
+  // inside a moving train the street is simply gone
+  duckTrain = TRAIN.duck * (0.35 + 0.65 * s);
+  duckUpdate();
+}
+
+// ---- ordnance ------------------------------------------------------------
+// Both cues are synthesized rather than sampled for the same reason the engine
+// is: an explosion has to be a DIFFERENT explosion every time or the tenth
+// rocket sounds like a loop, and the only way to get that from a sample is to
+// ship ten samples. Two voices layered do the whole job:
+//
+//   · the CRACK — filtered noise with a fast attack and an exponential tail,
+//     its lowpass sweeping down from a few kHz to a couple hundred Hz. That
+//     sweep IS the sound of an explosion moving away from you.
+//   · the THUMP — a sine dropping from ~90 Hz to ~28 Hz over a quarter second.
+//     Below the crack, felt more than heard, and it is what makes a small
+//     speaker still read the hit as big.
+//
+// A launch is the same graph with the sweep running the other way: bandpassed
+// noise rising as the motor lights, over in a third of a second.
+
+export function missileLaunch(vol = 1) {
+  if (!ctx || ctx.state !== 'running') return;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer();
+  src.playbackRate.value = 1.4;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass'; bp.Q.value = 0.7;
+  bp.frequency.setValueAtTime(420, t);
+  bp.frequency.exponentialRampToValueAtTime(2600, t + 0.26);   // the motor lights
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.42 * vol, t + 0.035);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
+  src.connect(bp); bp.connect(g); g.connect(master);
+  src.start(t, Math.random() * 0.5, 0.5);
+  src.stop(t + 0.45);
+  src.onended = () => { src.disconnect(); bp.disconnect(); g.disconnect(); };
+}
+
+// k = 0..1 loudness (distance is the caller's business — the blast is always
+// the player's own rocket in v5, so k is really "how big was it")
+export function explosion(k = 1) {
+  if (!ctx || ctx.state !== 'running') return;
+  const t = ctx.currentTime;
+  const v = Math.max(0.05, Math.min(1, k));
+  // crack
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer();
+  src.playbackRate.value = 0.65 + Math.random() * 0.3;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.Q.value = 1.2;
+  lp.frequency.setValueAtTime(3800 + Math.random() * 1800, t);
+  lp.frequency.exponentialRampToValueAtTime(180, t + 1.5);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.75 * v, t + 0.012);    // no attack at all
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 1.7);
+  src.connect(lp); lp.connect(g); g.connect(master);
+  src.start(t, Math.random() * 0.5, 1.9);
+  src.stop(t + 1.8);
+  src.onended = () => { src.disconnect(); lp.disconnect(); g.disconnect(); };
+  // thump
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(95, t);
+  osc.frequency.exponentialRampToValueAtTime(26, t + 0.34);
+  const og = ctx.createGain();
+  og.gain.setValueAtTime(0.0001, t);
+  og.gain.exponentialRampToValueAtTime(0.62 * v, t + 0.02);
+  og.gain.exponentialRampToValueAtTime(0.0001, t + 0.75);
+  osc.connect(og); og.connect(master);
+  osc.start(t); osc.stop(t + 0.8);
+  osc.onended = () => { osc.disconnect(); og.disconnect(); };
+  // …and the rubble that follows it down, a second behind
+  rubble(t + 0.35 + Math.random() * 0.3, v * 0.55);
+}
+
+// The tail of a collapse: a long, dry, mid-heavy noise wash. Deliberately
+// UNfiltered at the top — falling masonry is all clatter, no bottom end.
+function rubble(t, v) {
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer();
+  src.playbackRate.value = 0.4;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.5;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(0.3 * v, t + 0.25);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
+  src.connect(bp); bp.connect(g); g.connect(master);
+  src.start(t, Math.random() * 0.4, 2.6);
+  src.stop(t + 2.5);
+  src.onended = () => { src.disconnect(); bp.disconnect(); g.disconnect(); };
 }

@@ -70,6 +70,37 @@ const SOUNDS = [
     'A police siren several streets away: a European two-tone wailing siren rising and falling, '
     + 'thinned and reverberant with distance echoing between buildings, faint traffic hum '
     + 'underneath. No music, no voice', 4.0],
+
+  // ---- v6: České dráhy ----
+  // The rolling loop under a moving train is procedural (audio.js trainSet),
+  // so these four are only the TRANSIENTS — the moments a synth cannot fake
+  // because they are all attack: an air horn's valve crack, the doppler of a
+  // set going past, a hall's reverb tail, a door seal. Durations follow the
+  // physics rather than a house style: a horn blast is over in under two
+  // seconds, a 150 m consist takes six to clear the microphone.
+  ['train_horn',
+    'A two-tone electric locomotive horn on a Czech railway: a single blast with two pitches '
+    + 'sounding together, hard air-valve attack, brassy and loud, outdoors trackside with a '
+    + 'faint distant echo off the line. Single dry event, no music, no voice', 1.8],
+  // The one clip that is pure doppler, so the pass must happen INSIDE the
+  // window — a long approach would leave no room for the sweep and the tail.
+  ['train_pass',
+    'A passenger train passing at speed on jointed rails, heard from the trackside: an '
+    + 'approaching low rumble swelling with the rhythmic clattering of wheels over rail joints, '
+    + 'a doppler whoosh sweeping past the microphone, then the clatter receding down the line '
+    + 'and fading away. Single event, exterior, no music, no voice', 6.0],
+  // Deliberately NOT dry: the reverb IS the station. The heavy no-speech
+  // wording is load-bearing — a chime "before an announcement" is exactly the
+  // prompt that talks the model into synthesising a station announcer.
+  ['station_bell',
+    'A railway station platform chime sounding before an announcement: three soft electronic '
+    + 'tones descending gently, clean mellow and unhurried, ringing out into a large '
+    + 'reverberant station hall with a long airy tail. Single event, no music, no voice, no '
+    + 'speech, no words, no announcement', 3.0],
+  ['train_doors',
+    'A modern passenger train sliding door closing: a short repeating electronic warning beep, '
+    + 'then a smooth pneumatic hiss as the leaf slides shut and a soft rubber-sealed thud as it '
+    + 'seats home. Single dry event, no music, no voice', 2.2],
 ];
 
 const exists = async (p) => { try { await access(p); return true; } catch { return false; } };

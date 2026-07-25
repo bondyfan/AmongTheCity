@@ -24,6 +24,7 @@ import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
 import { Clouds } from './clouds.js';
 import { WorldMap } from './worldmap.js';
+import { Trains } from './trains.js';
 import { Weapons } from './weapons.js';
 import { MISSILE } from './config.js';
 
@@ -63,6 +64,7 @@ let peds = null;
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
 let heli = null, clouds = null;   // the helipad's machine, and the sky to fly it through
 let worldMap = null;   // the full-region map on M, and the waypoint it owns
+let trains = null;     // České dráhy on the real 532 km network
 let weapons = null;  // the rocket pod under that machine, and what it does to walls
 let aimMark = null;  // the ring on the ground where the next rocket would land
 let _aimT = 0;
@@ -105,6 +107,13 @@ function updateCamera(dt) {
     height = 2.4 + speedK * 1.1;
     tx = c.x; ty = (c.mesh?.position.y ?? 0) + 1.1; tz = c.z;
     fov = BASE_FOV + speedK * 13;   // the road starts to RUSH at speed
+  } else if (trains?.riding) {
+    // only with the doors open — jumping out at 140 km/h is not a feature
+    if (!trains.alight()) { ui_hint('Vystoupit lze jen ve stanici'); return; }
+    sfx('train_doors', 0.7);
+  } else if (trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
+    const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
+    if (trains.board(t)) sfx('train_doors', 0.7);
   } else if (game.heli) {
     // flight: hang back but stay close to the machine's own level — a chase
     // cam perched high enough to look down at the fuselage crops the whole sky
@@ -459,6 +468,10 @@ function updateHud(dt) {
   if (game.car) {
     $id('speed-num').textContent = Math.round(Math.abs(game.car.speed) * 3.6);
     $id('speed-unit').textContent = 'km/h';
+  } else if (trains?.riding) {
+    $id('speedo').classList.remove('hidden');
+    $id('speed-num').textContent = Math.round(Math.abs(trains.riding.speed ?? 0) * 3.6);
+    $id('speed-unit').textContent = 'km/h · ČD';
   } else if (game.heli) {
     // in flight the readout becomes an altimeter with the airspeed beside it,
     // so the trailing unit has to switch too (it used to read "137 m km/h")
@@ -472,6 +485,17 @@ function updateHud(dt) {
     hintT = 0.2;
     const hint = $id('action-hint');
     if (_hintHold > 0) { _hintHold -= 0.2; }
+    else if (trains?.riding) {
+      const t = trains.riding;
+      hint.innerHTML = t.halted
+        ? `<b>${t.stopName ?? 'Stanice'}</b> · odjezd za ${Math.ceil(t.dwellLeft ?? 0)} s · <kbd>E</kbd> vystoupit`
+        : `Jedete do <b>${t.nextStopName ?? 'další stanice'}</b>`;
+      hint.classList.remove('hidden');
+    }
+    else if (trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
+      hint.innerHTML = '<kbd>E</kbd> nastoupit do vlaku';
+      hint.classList.remove('hidden');
+    }
     else if (game.heli) {
       hint.innerHTML = game.heli.airborne
         ? '<kbd>↑</kbd><kbd>↓</kbd> stoupání · <kbd>WASD</kbd> let · <kbd>←</kbd><kbd>→</kbd> otáčení · <kbd>V</kbd> raketa'
@@ -679,6 +703,7 @@ async function boot() {
   vehicles = new Vehicles(scene);
   traffic = new Traffic(city, vehicles);
   minimap = new Minimap($id('minimap'), city);
+  trains = new Trains(scene, city);
   worldMap = new WorldMap(city, minimap);
   peds = new Pedestrians(scene, city);
   clouds = new Clouds(scene);
@@ -862,6 +887,7 @@ function stepGame(dt) {
   vehicles.update(dt);
   traffic.update(dt, player.pos, game.car);
   peds.update(dt, focus);
+  trains?.update(dt, focus);
   if (heli && !game.heli) heli.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
   weapons?.update(dt, { cars: _crashList(), peds });
   updateAim(dt);
@@ -908,4 +934,5 @@ window.__atc = {
   get player() { return player; }, get world() { return world; },
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
   get parked() { return parked; }, get peds() { return peds; },
+  get trains() { return trains; }, get worldMap() { return worldMap; },
 };
