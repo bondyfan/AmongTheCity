@@ -42,7 +42,8 @@ const VMAX = 40;           // m/s = 144 km/h
 const ACCEL = 0.55;        // m/s² — 73 s and 1.45 km from a stand to line speed
 const BRAKE = 0.9;         // m/s² — 44 s and 889 m the other way
 const A_LAT = 1.5;         // m/s² of comfort through a curve
-const CURVE_ARC = 60;      // a polyline vertex angle is read as an arc this long
+const CURVE_WIN = 30;      // m each side — curvature is INTEGRATED over this, so
+                           // the radius does not depend on OSM's node density
 const V_CURVE_MIN = 10;    // …but never crawl below this for geometry alone
 const DWELL = 14;          // s standing at a platform, doors open
 const TURN_DWELL = 9;      // s at the end of the line before reversing
@@ -427,14 +428,26 @@ function buildProfile(R) {
   const lim = new Float32Array(n);
   lim.fill(VMAX);
   for (let i = 1; i < n - 1; i++) {
-    const ax = pts[i][0] - pts[i - 1][0], az = pts[i][1] - pts[i - 1][1];
-    const bx = pts[i + 1][0] - pts[i][0], bz = pts[i + 1][1] - pts[i][1];
+    // Curvature is measured over a WINDOW of track, never off one vertex.
+    // OSM node spacing on this network runs 11 m (p10) to 119 m (p90) with a
+    // median of 27, and surveyors put the nodes CLOSE TOGETHER inside curves —
+    // so reading a vertex angle against any assumed constant spacing over-
+    // estimates the radius exactly where it must not. Measured over ±CURVE_WIN
+    // the answer is the same whether the curve carries four nodes or forty.
+    let a = i, b = i;
+    while (a > 0 && cum[i] - cum[a] < CURVE_WIN) a--;
+    while (b < n - 1 && cum[b] - cum[i] < CURVE_WIN) b++;
+    if (a === i || b === i) continue;            // no room at the line's ends
+    const ax = pts[i][0] - pts[a][0], az = pts[i][1] - pts[a][1];
+    const bx = pts[b][0] - pts[i][0], bz = pts[b][1] - pts[i][1];
     const ang = Math.abs(Math.atan2(ax * bz - az * bx, ax * bx + az * bz));
-    // read the vertex angle as an arc of CURVE_ARC metres → R ≈ arc/ang, and
-    // v = √(a_lat·R). A gentle main-line bend barely registers; a yard curve
+    if (ang <= 0.02) continue;                   // straight enough to ignore
+    // the two chords are tangent at their own midpoints, so the angle between
+    // them is the arc BETWEEN those midpoints over R — i.e. arc/2R, not arc/R.
+    // Then v = √(a_lat·R): a main-line bend barely registers, a yard curve
     // pulls the whole train down to walking pace, which is correct.
-    if (ang > 0.02)
-      lim[i] = clamp(Math.sqrt(A_LAT * CURVE_ARC / ang), V_CURVE_MIN, VMAX);
+    lim[i] = clamp(Math.sqrt(A_LAT * (cum[b] - cum[a]) / (2 * ang)),
+      V_CURVE_MIN, VMAX);
   }
   const vf = new Float32Array(n), vr = new Float32Array(n);
   vf[n - 1] = 0;                                 // forward travel ends here
