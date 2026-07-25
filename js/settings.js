@@ -12,11 +12,11 @@ const LS_KEY = 'atc-settings';
 // The graphics keys a preset owns. mouseLook and volume are personal preferences, not
 // performance knobs — presets leave them alone and changing them never forks to custom.
 const PRESETS = {
-  low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 20,
+  low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 30,
             ortho: false, facades: false, trees: true },
-  medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 45,
+  medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 60,
             ortho: true,  facades: true,  trees: true },
-  high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 80,
+  high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 120,
             ortho: true,  facades: true,  trees: true },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
@@ -183,8 +183,8 @@ export function initSettings(apply) {
       [4096, '4096 (ostré)']]),
     selectRow('viewChunks', 'Dohlednost', [[3, 'Krátká'], [4, 'Střední'],
       [5, 'Daleká'], [6, 'Nejdelší']]),
-    selectRow('traffic', 'Hustota provozu', [[0, 'Žádná'], [20, 'Řídká'],
-      [45, 'Běžná'], [80, 'Hustá']]),
+    selectRow('traffic', 'Hustota provozu', [[0, 'Žádná'], [30, 'Řídká'],
+      [60, 'Běžná'], [120, 'Hustá']]),
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
     toggleRow('facades', 'Textury fasád'),
     toggleRow('trees', 'Stromy'),

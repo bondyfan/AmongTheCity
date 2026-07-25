@@ -1,3 +1,6 @@
 node_modules/
 data/raw/
+data/raw-region/
+public/data/tiles/
+public/data/manifest.json
 .DS_Store

@@ -1,54 +1,125 @@
-// ---- Ortho ground: real ČÚZK aerial photos under the low-poly city ----
-// scripts/fetch-ortho.mjs stores one 1024² JPEG per 480 m supertile (4×4
-// streaming chunks). At runtime each 120 m chunk gets a flat quad whose UVs
-// window into its quarter-of-a-quarter of that shared photo, so a supertile
-// costs ONE texture upload no matter how many chunks sit on it. meshes.js
-// asks orthoGroundMesh(cx, cz) for the quad and falls back to the flat
-// COLORS.groundBase plane when we return null (tile missing, or out of the
-// fetched extent). Loading is lazy and fire-and-forget: the mesh is returned
-// while the JPEG is still in flight — three renders it black until the
-// texture pops in, which reads as ground streaming and is acceptable.
+// ---- Ortho ground: real ČÚZK aerial photos, streamed live from the WMS ----
+// v2 shipped 100 pre-fetched JPEGs covering ±2.4 km; v3's world is the whole
+// agglomeration (~30×38 km) and no local grid can ship that. The ČÚZK
+// ortofoto WMS (open data, CC BY 4.0 — "Podkladová data ČÚZK") answers
+// browser fetches with open CORS (verified), so every 480 m supertile is now
+// requested STRAIGHT from GetMap at 2048² — 0.23 m/px, 4× the old detail:
+// lane arrows and zebra stripes survive a drive-by. Each 120 m chunk still
+// gets a flat quad whose UVs window into its 4×4 slice of the shared
+// supertile texture, so one photo (and one HTTP request) serves 16 chunks.
+//
+// meshes.js asks orthoGroundMesh(cx, cz) and falls back to its flat
+// COLORS.groundBase plane when we return null. Loading stays lazy and
+// fire-and-forget: the quad is handed out immediately with an UNtextured
+// material tinted groundBase, and the photo pops in when the JPEG lands.
+// (v2 rendered black while in flight; with a remote server in the loop that
+// flash gets long enough to read as a bug, so the placeholder now matches
+// the flat-ground fallback color instead.)
+//
+// VRAM is bounded by an LRU: at most LRU_MAX supertiles stay alive; evicted
+// entries dispose texture AND material. That is safe because chunks die at
+// focus ±(viewChunks+2) cells (≤ ±960 m), a footprint of ≤ ~36 supertiles —
+// under the 48 cap, so any material a live chunk still references was
+// touched too recently to be evicted. Failed fetches cache null (flat-color
+// fallback, no server hammering) and sit in the same LRU, which doubles as
+// a natural retry: revisit the area much later and the tile is asked again.
 
 import * as THREE from 'three';
-import { CHUNK, ORTHO } from './config.js';
+import { CHUNK, ORTHO, COLORS } from './config.js';
+
+// GetMap BBOX needs the local-meters ↔ WGS84 mapping. These constants mirror
+// the data pipeline EXACTLY (scripts/fetch-region.mjs → manifest/city JSON:
+// same origin node, same meters-per-degree series at that latitude), so the
+// photo registers with the OSM-derived geometry to centimeters. Duplicated
+// here rather than read from the manifest because chunk builds start before
+// any city JSON needs to have arrived — and the origin is the one constant
+// of this project that can never change without rebuilding every data file.
+const ORIGIN = { lat: 50.0317084, lon: 15.7560881 }; // Pardubice hl.n. — the one world origin
+const M_PER_LAT = 111132.9 - 559.8 * Math.cos(2 * ORIGIN.lat * Math.PI / 180);
+const M_PER_LON = 111412.8 * Math.cos(ORIGIN.lat * Math.PI / 180)
+  - 93.5 * Math.cos(3 * ORIGIN.lat * Math.PI / 180);
+
+const WMS = 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer';
+const WMS_PX = 2048;   // px per 480 m tile (config ORTHO.px stays the legacy fetch script's 1024)
+const LRU_MAX = 48;    // supertiles alive at once — see the eviction-safety note up top
+const SANITY = 30000;  // region data ends ~±25 km from origin; beyond that don't ask the server
+
+// Supertile (sx, sz) covers x ∈ [sx·T, (sx+1)·T), z ∈ [sz·T, (sz+1)·T) local
+// meters. CRS:84 BBOX wants lonW,latS,lonE,latN — and because our z axis
+// points SOUTH, the tile's smaller-z edge is its NORTH edge, i.e. the LARGER
+// latitude: latN comes from sz·T, latS from (sz+1)·T. Get this backwards and
+// every photo arrives mirrored top-to-bottom.
+function tileUrl(sx, sz) {
+  const T = ORTHO.tile;
+  const lonW = ORIGIN.lon + (sx * T) / M_PER_LON;
+  const lonE = ORIGIN.lon + ((sx + 1) * T) / M_PER_LON;
+  const latN = ORIGIN.lat - (sz * T) / M_PER_LAT;
+  const latS = ORIGIN.lat - ((sz + 1) * T) / M_PER_LAT;
+  const bbox = [lonW, latS, lonE, latN].map((v) => v.toFixed(7)).join(',');
+  return `${WMS}?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=0&STYLES=&CRS=CRS:84`
+    + `&BBOX=${bbox}&WIDTH=${WMS_PX}&HEIGHT=${WMS_PX}&FORMAT=image/jpeg`;
+}
 
 export function initOrtho() {
-  const loader = new THREE.TextureLoader();
+  const loader = new THREE.TextureLoader(); // default crossOrigin 'anonymous' — the WMS allows it
   const S = ORTHO.tile / CHUNK;             // chunks per supertile edge (480/120 = 4)
-  const range = ORTHO.extent / ORTHO.tile;  // supertile indices live in [−range, range)
 
-  // Per-supertile cache: key → { tex, mat } once requested, or null once a
-  // load FAILED (file never fetched / server offline). Failures are sticky so
-  // a dead tile costs one HTTP request ever; every later chunk on it goes
-  // straight to the flat-color fallback. NOTE: chunks built BEFORE the
-  // failure keep their (black) quad until they stream out — we deliberately
-  // don't dispose the entry either, because their meshes still reference the
-  // material, and a texture that never loaded holds no GPU memory anyway.
+  // key "sx,sz" → { tex, mat }, or null once a fetch FAILED. Map iteration
+  // order IS the LRU order: a touch deletes + re-inserts the entry, eviction
+  // pops the head (the least recently requested tile).
   const tiles = new Map();
+
+  function evict() {
+    while (tiles.size > LRU_MAX) {
+      const [key, entry] = tiles.entries().next().value;
+      tiles.delete(key);
+      if (entry) { entry.mat.dispose(); entry.tex.dispose(); }
+    }
+  }
 
   function makeEntry(sx, sz) {
     const key = sx + ',' + sz;
-    const tex = loader.load(`${ORTHO.dir}/${sx}_${sz}.jpg`, undefined, undefined,
-      () => { tiles.set(key, null); });    // 404 → cache the failure (see note above)
+    // The material starts WITHOUT its map, tinted the flat-ground color:
+    // Lambert over a not-yet-loaded texture samples black, and black squares
+    // chasing the car read broken. When the JPEG lands, the callback attaches
+    // the map and resets the tint to white so the photo shows unfiltered;
+    // needsUpdate recompiles the shader with the map define — once per
+    // supertile, cheap. (Both callbacks fire async, so `entry` exists.)
+    const mat = new THREE.MeshLambertMaterial({ color: COLORS.groundBase });
+    const tex = loader.load(tileUrl(sx, sz),
+      () => {
+        if (tiles.get(key) !== entry) { tex.dispose(); return; } // evicted mid-flight
+        mat.map = tex; mat.color.set(0xffffff); mat.needsUpdate = true;
+      },
+      undefined,
+      // The WMS reports its own failures as HTTP 200 + XML the image decoder
+      // rejects, so onError covers server-side errors too, not just network
+      // loss. Cache the null: chunks already holding this mat keep a correct
+      // flat-colored quad, later chunks take the geometry fallback directly,
+      // and the dead tile costs one request until the LRU forgets it.
+      () => { if (tiles.get(key) === entry) tiles.set(key, null); });
     tex.colorSpace = THREE.SRGBColorSpace; // JPEGs are sRGB; skip this and the photo washes out
-    tex.magFilter = THREE.LinearFilter;
-    tex.minFilter = THREE.LinearFilter;    // no mips: the ground never minifies hard at our
-    tex.generateMipmaps = false;           // camera heights, and skipping them saves 33% VRAM
+    // Trilinear mips stay ON (v2 disabled them): at 0.23 m/px the far ground
+    // minifies ~10:1 and would boil with sparkle on every camera move. The
+    // +33% VRAM is inside what the LRU cap already budgets for.
     tex.anisotropy = 4;                    // keeps far streets legible at grazing angles
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping; // each chunk samples strictly its own tile
-    // Lambert (not Basic) so the photo takes the day/night cycle: hemi + sun
-    // dim it at dusk and the sunset tint washes over it like everything else
-    const entry = { tex, mat: new THREE.MeshLambertMaterial({ map: tex }) };
+    const entry = { tex, mat };
     tiles.set(key, entry);
+    evict();
     return entry;
   }
 
   // Ground quad for streaming chunk (cx, cz) — chunk GRID indices, not meters.
   function orthoGroundMesh(cx, cz) {
-    const sx = Math.floor(cx / S), sz = Math.floor(cz / S);
-    if (sx < -range || sx >= range || sz < -range || sz >= range) return null; // beyond fetched area
-    const entry = tiles.get(sx + ',' + sz) ?? makeEntry(sx, sz);
-    if (entry === null) return null;       // known-missing tile → flat-color fallback
+    // no fixed extent anymore (the world streams outward as tiles load), just
+    // a sanity clamp so absurd indices never turn into WMS requests
+    if (Math.abs(cx * CHUNK) > SANITY || Math.abs(cz * CHUNK) > SANITY) return null;
+    const sx = Math.floor(cx / S), sz = Math.floor(cz / S), key = sx + ',' + sz;
+    let entry = tiles.get(key);
+    if (entry === undefined) entry = makeEntry(sx, sz); // ?? would re-fetch failed (null) tiles
+    if (entry === null) return null;       // known-dead tile → flat-color fallback
+    tiles.delete(key); tiles.set(key, entry); // LRU touch — move to the tail
 
     // UV window: the chunk sits at column lx, row lz inside its supertile
     // (both 0..S−1, counted from the tile's WEST and NORTH edges). u is easy:

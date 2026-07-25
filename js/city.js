@@ -22,9 +22,24 @@ export class CityWorld {
     this.queue = [];            // keys waiting to build, nearest first
     this._queued = new Set();
     this.viewChunks = VIEW_CHUNKS; // runtime-adjustable (settings: draw distance)
+    this._tileT = 0;            // ensureTiles throttle — 1 Hz, fetches run km ahead
+    // Region tiles can land AFTER their chunks were already built: the boot
+    // frames raise empty spawn cells before the first fetch returns, and long
+    // features (the Labe, a km-long road) overhang far into neighbours' cells.
+    // geo reports exactly which cells gained features — drop those groups so
+    // the normal streamer rebuilds them with the new data on its next pass.
+    city.onTileLoaded?.((t) => this._dropCells(t.cells));
   }
 
   update(dt, focus) {
+    // grow the world as we drive: ask geo (at most once per second) to start
+    // fetching any manifest tile now in reach — fire-and-forget, a failure
+    // just logs and geo retries that tile on a later call
+    this._tileT -= dt;
+    if (this._tileT <= 0) {
+      this._tileT = 1;
+      this.city.ensureTiles(focus.x, focus.z).catch(console.error);
+    }
     const fx = Math.floor(focus.x / CHUNK), fz = Math.floor(focus.z / CHUNK);
     // enqueue missing cells in view, nearest first
     for (let r = 0; r <= this.viewChunks; r++) {
@@ -67,6 +82,22 @@ export class CityWorld {
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++)
       if (!this.built.has((fx + dx) + ',' + (fz + dz))) return false;
     return true;
+  }
+
+  // Drop the built groups of specific cells (a freshly indexed tile put new
+  // features in them) — the ring scan in update() re-enqueues any that are
+  // still in view, and out-of-view ones simply rebuild when approached.
+  _dropCells(cells) {
+    if (!cells) return;
+    for (const key of cells) {
+      if (!this.built.has(key)) continue; // never built — nothing stale to shed
+      const group = this.built.get(key);
+      if (group) {
+        this.scene.remove(group);
+        group.traverse(o => { o.geometry?.dispose?.(); });
+      }
+      this.built.delete(key);
+    }
   }
 
   // Drop every built chunk so the next update() rebuilds it — used when a

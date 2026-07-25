@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 import { SPAWN, CITY_DATA_URL, DAY_LENGTH, START_TOD, CAR_COLORS, CAR } from './config.js';
-import { loadCity } from './geo.js';
+import { loadCity, chunkKey } from './geo.js';
 import { CityWorld } from './city.js';
 import { input } from './input.js';
 import { Player } from './player.js';
@@ -178,10 +178,15 @@ function placeParkedCars(city) {
   for (const [x, z, h] of spots) {
     const pos = { x, z };
     world.collide(pos, 1.2); // never inside a wall
-    const kind = ['sedan', 'hatch', 'van'][(Math.random() * 3) | 0];
+    const kind = ['sedan', 'hatch', 'kombi', 'suv', 'van'][(Math.random() * 5) | 0];
     const car = vehicles.add(kind, pos.x, pos.z, h, CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0]);
     parked.push(car);
   }
+}
+
+// every car the player can hit — traffic + parked, self filtered in driveStep
+function _crashList() {
+  return traffic ? [...traffic.cars, ...parked] : parked;
 }
 
 // ---------- HUD ----------
@@ -264,7 +269,17 @@ function applySettings(s, key) {
 
 // ---------- boot ----------
 async function boot() {
-  const city = await loadCity(CITY_DATA_URL);
+  // Region manifest first (tiled world); the single-city file is the
+  // fallback — ALSO when the manifest exists but its download hasn't reached
+  // the spawn yet (the region fetcher writes tiles spawn-first, but a fresh
+  // clone mid-download must still boot into a full Pardubice).
+  let city = await loadCity('data/manifest.json').catch(() => null);
+  if (city) {
+    await city.ensureTiles(SPAWN.x, SPAWN.z);
+    const cell = city.chunkIndex.get(chunkKey(SPAWN.x, SPAWN.z));
+    if (!cell || !cell.roads.length) city = null; // manifest too young — legacy
+  }
+  if (!city) city = await loadCity(CITY_DATA_URL);
   world = new CityWorld(scene, city);
   sky = makeSky(scene);
   player = new Player(scene, SPAWN.x, SPAWN.z, SPAWN.heading);
@@ -379,7 +394,7 @@ function stepGame(dt) {
       gas,                                     // W forward, S reverse/brake
       steer: input.moveX,
       brake: input.keys.has('Space') ? 1 : 0,
-    }, dt, world);
+    }, dt, world, _crashList());
     player.update(dt, { input, camYaw, world }); // keeps player glued to the car
     engineSet(Math.min(1, Math.abs(game.car.speed) / CAR.vmax), Math.abs(gas));
   } else {
@@ -402,7 +417,7 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v5-realism',   // bump on risky changes — tells us which code a tab runs
+  build: 'v6-region',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   get player() { return player; }, get world() { return world; },

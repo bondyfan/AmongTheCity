@@ -247,3 +247,78 @@ ortho (on/off), facades (on/off), trees (on/off), mouseLook (on/off),
 volume (0..1). Changing anything calls `apply(settings, changedKey)`;
 preset writes all keys then apply('preset'). Defaults = medium + ortho on +
 mouseLook ON. Export `getSettings()`.
+
+---
+
+# v3 contract (region + driving feel)
+
+## Tiled world (agent TILES)
+The world is now the whole agglomeration (~30×38 km), streamed as 4.8 km data
+tiles produced by scripts/build-region.mjs from data/raw-region/*.json (one
+combined Overpass response per tile — see fetch-region.mjs). Same origin
+(Pardubice hl.n.), same feature format as pardubice.json plus per-tile
+`signals: [[x,z],…]` (highway=traffic_signals). Output:
+`public/data/tiles/<tx>_<tz>.json` + `public/data/manifest.json`
+{ origin, mPerLat, mPerLon, tile: 4800, tiles: [{tx,tz,f,n}] }.
+Runtime (geo.js): `loadCity(url)` detects a manifest (`.tiles`) vs the legacy
+single file and returns the same `city` object either way; city gains
+`ensureTiles(x, z)` → Promise (fetches+indexes every manifest tile whose
+bounds come within 2600 m; incremental bucketize into chunkIndex; tiles never
+unload in v3), `city.signals` (growing array) and `city.onTileLoaded(cb)`
+(cb({roads, signals}) AFTER indexing). city.js CityWorld.update() calls
+`city.ensureTiles(focus.x, focus.z)` (throttled ~1 s, fire-and-forget) so the
+world grows as you drive. minimap.js re-renders its offscreen city bitmap
+(debounced 2 s) on tile load and re-centers its world window when the player
+strays >1500 m from the last render center.
+
+## Vehicles v3 (agent VEHICLES)
+`driveStep(car, ctl, dt, world, others)` — others: iterable of other cars.
+- Realistic acceleration: per-kind engine curve `a = accel * (1 − v/vmax)^1.3`
+  (sedan 0–100 in ~9 s), so top speed approaches asymptotically.
+- Kinds with distinct silhouettes AND specs { accel, vmax(m/s), grip }:
+  sedan (175 km/h), hatch (150), kombi (165), suv (160), van (130), truck (95,
+  box body), bus (105, long). Muted real-world colors.
+- DRIFT: lateral grip drops as steer×speed grows (progressive rear slip →
+  visible countersteer slides), handbrake cuts grip hard (proper smyk).
+- CAR-CAR collision: each car ≈ two circles (front/rear, r≈wid·0.62). Test
+  against `others` within 12 m; on overlap separate both bodies, exchange a
+  momentum impulse along the contact normal (other car gets shoved), scrub
+  40-70% of closing speed, small yaw kick, set `other._rammedT = 2.5` so the
+  traffic AI knows it was hit.
+## Traffic v3 (agent TRAFFIC)
+- `addTile({roads, signals})` — incremental graph growth: node keys are
+  rounded coordinates, so cross-tile edges stitch themselves. Re-run spawn
+  logic against the grown graph. Called via city.onTileLoaded (wire it in the
+  constructor: `city.onTileLoaded(t => this.addTile(t))`; the initial
+  city.roads array may already hold pre-loaded tiles).
+- `this.maxCars` honored (settings sends 0/30/60/120); spawnR 400→460.
+- TRAFFIC LIGHTS: cluster signals within 30 m → one junction controller,
+  2-phase (N-S-ish vs E-W-ish by approach bearing), green 11 s / amber 1.5 s
+  alternating, phase offset hashed per junction. Simple pole meshes (dark
+  cylinder 3.6 m + 3-lamp box, emissive lamp of the active color) at each
+  signal node, oriented to its road, added to vehicles.scene, ONE shared
+  geometry+materials, state flips by material emissive swap on ≤4 Meshes per
+  junction (cheap). AI: a red/amber light on the car's edge ahead → smooth
+  stop 5 m short (reuse the follow-brake math); pull away on green.
+- Cars with `_rammedT > 0`: AI control suspended (car keeps momentum, decays
+  by friction), timer down, then re-snap onto the nearest own-edge point and
+  resume driving.
+- Use the full kind roster: mostly sedan/hatch/kombi/suv, sprinkle van/truck/
+  bus on big roads (speed ≥ 50 km/h edges).
+## Audio v2 (agent AUDIO)
+Engine gains VIRTUAL GEARS: 5 ratios; rpm01 cycles 0.25→1 within a gear as
+speed01 crosses its band, drops on upshift (~120 ms dip in freq+gain — the
+"shift"). Richer voice: add a square osc at 2× fundamental (−14 dB), mild
+frequency vibrato (~4 Hz, ±1.5 %) at low rpm for idle lope, sharper filter
+response to throttle. Keep API identical (engineSet(speed01, throttle01)).
+## Facades v2 + runtime ortho (agent FACADES)
+- meshes.js atlas grows real variety: aged Czech plaster (subtle streaking),
+  brick industrial, panel prefab with joint grid, glass storefront, sills +
+  lintels around windows, window glass with sky-gradient reflections + a few
+  warm lit rooms; 12+ generic variants; keep cell layout/UV contract.
+- ortho.js: RUNTIME WMS (CORS confirmed working) — no local tiles: fetch
+  `https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer?...`
+  480 m tiles at **2048 px** (0.23 m/px, 4× current detail) straight into
+  THREE.Texture via TextureLoader/createImageBitmap, LRU-cache ~48 tiles
+  (dispose evicted), same orthoGroundMesh(cx,cz) API, flat-color fallback
+  while loading. public/data/ortho/*.jpg are DELETED (integrator does it).

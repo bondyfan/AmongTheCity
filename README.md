@@ -12,12 +12,15 @@ npm install
 npm run dev        # http://localhost:5180
 ```
 
-## Data pipeline (už spuštěná, výstup je v repu)
+## Data pipeline
 ```
-npm run fetch-city   # Overpass API → data/raw/*.json (~15 MB)
-npm run build-city   # → public/data/pardubice.json (3.5 MB, lokální metry)
-npm test             # sanity testy dat + souvislost silniční sítě
+npm run fetch-city    # jen centrum Pardubic → public/data/pardubice.json (v repu, fallback)
+node scripts/fetch-region.mjs   # CELÝ region PCE+HK+Chrudim (~30×38 km, ~1 h, resumable)
+node scripts/build-region.mjs   # → public/data/tiles/* + manifest.json (gitignored, ~60 MB)
+npm test              # sanity testy dat + souvislost silniční sítě
 ```
+Hra načte region-manifest, když existuje; jinak spadne zpět na samotné
+Pardubice. Ortofoto se streamuje za běhu přímo z ČÚZK WMS (2048 px/480 m).
 
 ## Data a licence
 Mapová data © přispěvatelé OpenStreetMap (ODbL). Letecký podklad: Ortofoto ČR

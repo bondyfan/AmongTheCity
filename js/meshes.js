@@ -41,10 +41,11 @@ const DASH_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tert
 const FOOT_CLASSES = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestrian', 'track']);
 
 // facade rhythm: one window bay per 2.7 m of wall, one atlas row per storey.
-// The 1024² atlas is an 8×4 grid of 128×256 cells; each cell holds a BAND of
-// 4 window bays, because an atlas cell cannot wrap-repeat — walls subdivide
+// The 2048×1024 atlas is an 8×4 grid of 256×256 cells; each cell holds a BAND
+// of 4 window bays, because an atlas cell cannot wrap-repeat — walls subdivide
 // into ≤4-bay pieces instead, each sampling a sub-range of one cell.
 const WIN_W = 2.7, STOREY_H = 3.1, BAYS = 4;
+const ATLAS_W = 2048, ATLAS_H = 1024;                // v3 doubled u-resolution: sills/mullions survive
 const ATLAS_N = 8, ATLAS_M = 4;
 const cellRect = (ci, ri) => [ci / ATLAS_N, 1 - (ri + 1) / ATLAS_M, (ci + 1) / ATLAS_N, 1 - ri / ATLAS_M];
 const PIN_U = 0.5 / ATLAS_N, PIN_V = 1 - 0.5 / ATLAS_M; // plain-plaster cell centre — roofs pin here
@@ -53,6 +54,12 @@ const GENERIC = [];                                  // every cell except the th
 for (let ri = 0; ri < ATLAS_M; ri++) for (let ci = 0; ci < ATLAS_N; ci++)
   if (!(ri === 0 && ci < 3)) GENERIC.push(cellRect(ci, ri));
 const STORE_TYPES = new Set(['retail', 'commercial', 'supermarket', 'kiosk', 'hotel']);
+// Four GENERIC cells the painter dresses in brick courses. They stay generic
+// (any building may roll one — brick apartments exist), but industrial types
+// are STEERED onto them so factory halls stop wearing plaster windows.
+const BRICK_CELLS = [[7, 2], [5, 3], [6, 3], [7, 3]];
+const BRICK_UV = BRICK_CELLS.map(([ci, ri]) => cellRect(ci, ri));
+const BRICK_TYPES = new Set(['industrial', 'warehouse']);
 
 // module-level scratch — build-time only, but the loops shouldn't churn
 const _c = new THREE.Color();
@@ -376,19 +383,29 @@ function trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb) {
     const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
     const c = clipSeg(ax, az, bx, bz, x0, z0, x1, z1);
     if (!c) { flush(false); continue; }
-    const sx = ax + (bx - ax) * c.t0, sz = az + (bz - az) * c.t0;
-    const ex = ax + (bx - ax) * c.t1, ez = az + (bz - az) * c.t1;
-    if (inWater((sx + ex) / 2, (sz + ez) / 2, cell.water)) { flush(false); continue; }
+    if (run && c.t0 > 0) flush(false); // the previous segment's end isn't shared — gap
     // cut ends use the plain segment perp — both neighbours derive it from the
-    // same segment, so the trench edge matches exactly across the border
+    // same segment, so the trench edge matches exactly across the border; miter
+    // perps only apply at true polyline joints (ta 0 / tb 1)
     const L = Math.hypot(bx - ax, bz - az) || 1, spx = (bz - az) / L, spz = -(bx - ax) / L;
-    if (!run || c.t0 > 0) {
-      flush(false);
-      run = [{ x: sx, z: sz, px: c.t0 === 0 ? per[i][0] : spx, pz: c.t0 === 0 ? per[i][1] : spz }];
-      run.cap0 = i === 0 && c.t0 === 0;
+    // walk the in-rect window in ≤6 m pieces so a stream MOUTH only pokes a
+    // couple of meters into the river's own carve hole before the in-water
+    // test drops it — overlapping holes confuse earcut, and trench walls
+    // across the junction would dam the confluence
+    const steps = Math.max(1, Math.ceil(L * (c.t1 - c.t0) / 6));
+    for (let k = 0; k < steps; k++) {
+      const ta = k === 0 ? c.t0 : c.t0 + (c.t1 - c.t0) * k / steps;
+      const tb = k + 1 === steps ? c.t1 : c.t0 + (c.t1 - c.t0) * (k + 1) / steps;
+      const sx = ax + (bx - ax) * ta, sz = az + (bz - az) * ta;
+      const ex = ax + (bx - ax) * tb, ez = az + (bz - az) * tb;
+      if (inWater((sx + ex) / 2, (sz + ez) / 2, cell.water)) { flush(false); continue; }
+      if (!run) {
+        run = [{ x: sx, z: sz, px: ta === 0 ? per[i][0] : spx, pz: ta === 0 ? per[i][1] : spz }];
+        run.cap0 = i === 0 && ta === 0;
+      }
+      run.push({ x: ex, z: ez, px: tb === 1 ? per[i + 1][0] : spx, pz: tb === 1 ? per[i + 1][1] : spz });
     }
-    run.push({ x: ex, z: ez, px: c.t1 === 1 ? per[i + 1][0] : spx, pz: c.t1 === 1 ? per[i + 1][1] : spz });
-    if (c.t1 < 1) flush(false);
+    if (c.t1 < 1) flush(false); // cut at the cell border — neighbour continues it
   }
   flush(true); // a run still open here reached the polyline's true end uncut
 }
@@ -483,53 +500,154 @@ function railWay(sink, f) {
   }
 }
 
-// ---- facades: one shared 1024² window atlas, built lazily on first use ----
+// ---- facades: one shared 2048×1024 window atlas, built lazily on first use ----
 // Drawn LIGHT (near-white plaster, dark glass) so per-building vertex tints
-// multiply through legibly. Every cell keeps plaster at its borders, so
+// multiply through legibly. Every cell keeps plaster near its borders, so
 // mipmap bleed between cells blends plaster with plaster and stays invisible.
 // Cell (0,0) is PLAIN plaster — roofs, prisms and any accidental uv land
-// there and read as flat color. (1,0) is a storefront ground module, (2,0) a
-// concrete panel module with seams; the rest are window-band variants.
+// there and read as flat color. (1,0) is a glass storefront ground module,
+// (2,0) a prefab-panel module with a concrete joint grid; the remaining 29
+// cells are generic storey variants — seeded window rhythm, sills + lintels,
+// sky-gradient glass, curtains, the odd warm lit room, French-balcony rails,
+// and the four BRICK_CELLS in industrial brick courses. All randomness is
+// rnd(cellSeed, salt): the identical canvas on every rebuild, every machine.
 let _atlas = null;
 function facadeAtlas() {
   if (_atlas) return _atlas;
   const cv = document.createElement('canvas');
-  cv.width = cv.height = 1024;
+  cv.width = ATLAS_W; cv.height = ATLAS_H;
   const g = cv.getContext('2d');
-  const CW = 1024 / ATLAS_N, CH = 1024 / ATLAS_M, BAY = CW / BAYS;
+  const CW = ATLAS_W / ATLAS_N, CH = ATLAS_H / ATLAS_M, BAY = CW / BAYS;
   g.fillStyle = '#edebe4';
-  g.fillRect(0, 0, 1024, 1024);
+  g.fillRect(0, 0, ATLAS_W, ATLAS_H);
   for (let ci = 0; ci < ATLAS_N; ci++) for (let ri = 0; ri < ATLAS_M; ri++) {
     const X = ci * CW, Y = ri * CH, R = (n) => rnd(1 + ci + ri * ATLAS_N, n);
     // faint per-cell plaster shift — variants differ even before tinting
     g.fillStyle = `rgba(${205 + R(0) * 30 | 0},${200 + R(1) * 28 | 0},${188 + R(2) * 26 | 0},0.5)`;
     g.fillRect(X, Y, CW, CH);
-    if (ci === 0 && ri === 0) continue;               // plain plaster stays plain
-    if (ci === 1 && ri === 0) {                       // storefront: fascia + glazing run
-      g.fillStyle = '#4a4640'; g.fillRect(X + 6, Y + 30, CW - 12, 34);
-      g.fillStyle = '#2c3138'; g.fillRect(X + 6, Y + 72, CW - 12, CH - 96);
+    if (ci === 0 && ri === 0) continue;               // the PIN cell stays untouched plaster
+
+    // aged plaster: faint vertical weather streaks under everything else.
+    // Rain runs DOWN, so all grime here is vertical; alpha stays whisper-low
+    // because the vertex-tint multiply would double a bold stain into soot.
+    const nStreak = 8 + (R(50) * 10 | 0);
+    for (let k = 0; k < nStreak; k++) {
+      const w = 3 + R(300 + k) * 10;
+      g.fillStyle = `rgba(98,92,80,${(0.02 + R(340 + k) * 0.035).toFixed(3)})`;
+      g.fillRect(X + 5 + R(320 + k) * (CW - 12 - w), Y + 3, w, CH - 6);
+    }
+
+    if (ci === 1 && ri === 0) {
+      // storefront: a dark fascia strip up top (where the shop sign hangs),
+      // then a full-width glazing run down to near the pavement. The glass
+      // carries a real vertical sky gradient — bright horizon light up high,
+      // street-shadow murk at knee height — with a heavy mullion post at
+      // every bay seam and a lighter meeting stile mid-bay. One bay becomes
+      // the door: darker inset glass and a brass push bar.
+      const gz0 = Y + 78, gz1 = Y + CH - 26;          // glazing run; plaster kept at cell borders
+      g.fillStyle = `rgb(${64 + R(4) * 26 | 0},${58 + R(5) * 22 | 0},${52 + R(6) * 18 | 0})`;
+      g.fillRect(X + 10, Y + 36, CW - 20, 34);
+      const sky = g.createLinearGradient(0, gz0, 0, gz1);
+      sky.addColorStop(0, '#8298ab'); sky.addColorStop(0.5, '#4c5663'); sky.addColorStop(1, '#2c323b');
+      g.fillStyle = sky;
+      g.fillRect(X + 10, gz0, CW - 20, gz1 - gz0);
+      const db = Math.min(BAYS - 1, R(7) * BAYS | 0);
+      g.fillStyle = 'rgba(24,27,32,0.8)';
+      g.fillRect(X + db * BAY + 10, gz0 + 24, BAY - 20, gz1 - gz0 - 24);
+      g.fillStyle = '#b09a6a';
+      g.fillRect(X + db * BAY + 14, gz0 + (gz1 - gz0) * 0.55 | 0, BAY - 28, 4);
       g.fillStyle = '#8a857c';
-      for (let b = 1; b < BAYS; b++) g.fillRect(X + b * BAY - 1, Y + 72, 2, CH - 96);
+      for (let b = 1; b < BAYS; b++) g.fillRect(X + b * BAY - 2, gz0, 4, gz1 - gz0);
+      g.fillStyle = 'rgba(138,133,124,0.55)';
+      for (let b = 0; b < BAYS; b++) g.fillRect(X + b * BAY + BAY / 2 - 1, gz0, 2, gz1 - gz0);
       continue;
     }
-    if (ci === 2 && ri === 0) {                       // panel joints, then normal windows
-      g.fillStyle = '#b3b3ac';
-      g.fillRect(X, Y, 3, CH); g.fillRect(X + CW - 3, Y, 3, CH); g.fillRect(X, Y, CW, 3);
+
+    const brick = BRICK_CELLS.some(([a, b]) => a === ci && b === ri);
+    if (brick) {
+      // brick courses for the industrial cells. Painted WASHED-OUT light
+      // terracotta on purpose: the grayish industrial palette multiplies on
+      // top and lands on believable sooty brick — true brick red here would
+      // double-darken into mud. Joints are drawn LIGHT (mortar over brick).
+      g.fillStyle = `rgb(${198 + R(60) * 18 | 0},${152 + R(61) * 16 | 0},${130 + R(62) * 14 | 0})`;
+      g.fillRect(X + 5, Y + 4, CW - 10, CH - 8);
+      const course = 6;                               // ~75 mm at ~82 px/m — real CZ brick format
+      g.fillStyle = 'rgba(228,221,208,0.5)';
+      for (let y = Y + 4 + course; y < Y + CH - 4; y += course)
+        g.fillRect(X + 5, y, CW - 10, 1);             // bed joints
+      g.fillStyle = 'rgba(228,221,208,0.3)';
+      let row = 0;
+      for (let y = Y + 4; y < Y + CH - 4 - course; y += course, row++)
+        for (let x = X + 5 + (row % 2) * 3; x < X + CW - 5; x += 7)
+          g.fillRect(x, y, 1, course);                // head joints, stretcher-bond staggered
     }
-    // a band of BAYS windows; texel density is anisotropic (12 px/m across,
-    // 88 px/m up) but the quad mapping stretches it back to true aspect
-    const ww = 10 + R(3) * 8, wh = 90 + R(4) * 70, wy = Y + 60 + R(5) * 50;
+    if (ci === 2 && ri === 0) {
+      // prefab panel joints: a concrete seam at every bay edge plus along the
+      // storey top and bottom — wallUV tiles this cell per storey, so the
+      // edge seams chain into the continuous joint grid of a real panelák
+      g.fillStyle = '#b3b3ac';
+      for (let b = 0; b <= BAYS; b++) g.fillRect(X + Math.min(b * BAY, CW - 3), Y, 3, CH);
+      g.fillRect(X, Y, CW, 3);
+      g.fillRect(X, Y + CH - 3, CW, 3);
+    }
+
+    // a band of BAYS windows; texel density is anisotropic (~24 px/m across,
+    // ~82 px/m up) but the wall quads stretch it back to true aspect. wh is
+    // clamped so window + sill + streaks never cross into the cell below.
+    const ww = (22 + R(3) * 18) | 0;
+    const wy = (Y + 56 + R(4) * 52) | 0;
+    const wh = Math.min((92 + R(5) * 68) | 0, Y + CH - 30 - wy);
+    const lintel = R(7) < 0.72, mull = R(8) < 0.55;
+    const balc = ri > 0 && !brick && R(9) < 0.22;     // rails only on some plaster variants
     for (let b = 0; b < BAYS; b++) {
-      const wx = X + b * BAY + (BAY - ww) / 2, s = R(10 + b);
-      g.fillStyle = s < 0.14 ? '#b9a878' : s < 0.28 ? '#7d838c'
-        : `rgb(${46 + R(20 + b) * 16 | 0},${52 + R(21 + b) * 16 | 0},${62 + R(22 + b) * 16 | 0})`;
-      g.fillRect(wx, wy, ww, wh);                     // glass: lit / hazy / dark variation
-      if (s >= 0.28 && s < 0.45) {                    // curtain: lighter upper half
-        g.fillStyle = 'rgba(214,209,199,0.55)';
-        g.fillRect(wx, wy, ww, wh * 0.45);
+      const sb = 100 + b * 10;                        // per-bay salt block — no collisions
+      const wx = (X + b * BAY + (BAY - ww) / 2) | 0, s = R(sb);
+      if (lintel) {                                   // concrete lintel shadow over the opening
+        g.fillStyle = 'rgba(118,110,98,0.35)';
+        g.fillRect(wx - 4, wy - 9, ww + 8, 6);
       }
-      g.fillStyle = '#c8c3b8';
-      g.fillRect(wx - 2, wy + wh, ww + 4, 5);         // sill
+      g.fillStyle = '#dad5c8';                        // painted frame proud of the reveal
+      g.fillRect(wx - 2, wy - 2, ww + 4, wh + 4);
+      if (s < 0.11) {                                 // warm lit interior — the evening rooms
+        const gl = g.createLinearGradient(0, wy, 0, wy + wh);
+        gl.addColorStop(0, '#e6c88f'); gl.addColorStop(1, '#b28c50');
+        g.fillStyle = gl;
+      } else if (s < 0.24) {                          // net-curtained pale window
+        g.fillStyle = `rgb(${196 + R(sb + 1) * 18 | 0},${190 + R(sb + 2) * 16 | 0},${178 + R(sb + 3) * 16 | 0})`;
+      } else {                                        // glass mirrors the sky: bright up, murky down
+        const t = R(sb + 4) * 20 | 0;
+        const gl = g.createLinearGradient(0, wy, 0, wy + wh);
+        gl.addColorStop(0, `rgb(${116 + t},${134 + t},${150 + t})`);
+        gl.addColorStop(0.55, `rgb(${70 + t},${80 + t},${92 + t})`);
+        gl.addColorStop(1, `rgb(${42 + t},${48 + t},${58 + t})`);
+        g.fillStyle = gl;
+      }
+      g.fillRect(wx, wy, ww, wh);
+      if (s >= 0.24 && s < 0.36) {                    // half-drawn curtain over sky glass
+        g.fillStyle = 'rgba(214,209,199,0.5)';
+        g.fillRect(wx, wy, ww, wh * 0.45 | 0);
+      }
+      if (mull) {                                     // T-profile: meeting stile + transom bar
+        g.fillStyle = 'rgba(224,220,210,0.9)';
+        g.fillRect(wx + (ww / 2 | 0) - 1, wy, 2, wh);
+        g.fillRect(wx, wy + (wh * 0.3 | 0), ww, 2);
+      }
+      g.fillStyle = '#cfcabf';                        // sill…
+      g.fillRect(wx - 4, wy + wh + 3, ww + 8, 5);
+      g.fillStyle = 'rgba(105,98,86,0.8)';
+      g.fillRect(wx - 4, wy + wh + 8, ww + 8, 1);     // …and its cast shadow line
+      const sy = wy + wh + 9, sl = Math.min(28, Y + CH - 4 - sy);
+      if (sl > 4) {                                   // rain-wash streaks off the sill ends
+        g.fillStyle = 'rgba(105,98,86,0.14)';
+        g.fillRect(wx - 3, sy, 2, sl);
+        g.fillRect(wx + ww + 1, sy, 2, sl);
+      }
+      if (balc) {                                     // French balcony: rail bars over lower glass
+        g.fillStyle = 'rgba(56,56,54,0.55)';
+        const by = wy + (wh * 0.52 | 0);
+        for (let rx = wx - 4; rx <= wx + ww + 2; rx += 6) g.fillRect(rx, by, 2, wy + wh - by + 6);
+        g.fillRect(wx - 6, by, ww + 12, 2);
+      }
     }
   }
   _atlas = new THREE.CanvasTexture(cv);
@@ -585,10 +703,10 @@ function capInto(sink, outer, holes, y, up, r, g, b) {
   try { tris = THREE.ShapeUtils.triangulateShape(pts, hpts); } catch { return; }
   const all = pts.concat(...hpts);
   for (const [ia, ib, ic] of tris) {
-    const a = all[ia], b = all[ib], c = all[ic];
-    const cross = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
-    if (up === cross > 0) sink.tri(a.x, y, a.y, c.x, y, c.y, b.x, y, b.y, r, g, b);
-    else sink.tri(a.x, y, a.y, b.x, y, b.y, c.x, y, c.y, r, g, b);
+    const pa = all[ia], pb = all[ib], pc = all[ic]; // p-prefixed: r/g/b already name the color
+    const cross = (pb.x - pa.x) * (pc.y - pa.y) - (pc.x - pa.x) * (pb.y - pa.y);
+    if (up === cross > 0) sink.tri(pa.x, y, pa.y, pc.x, y, pc.y, pb.x, y, pb.y, r, g, b);
+    else sink.tri(pa.x, y, pa.y, pb.x, y, pb.y, pc.x, y, pc.y, r, g, b);
   }
 }
 
@@ -609,11 +727,14 @@ function buildingInto(f, geos, sink, facades) {
   if (facades) {
     // storey count prefers the RÚIAN level tag; the variant cell hashes the
     // building type (neighbourhoods stay coherent) with a pinch of _id so
-    // twin rows don't read as photocopies
+    // twin rows don't read as photocopies. Paneláky and industrial types skip
+    // the hash and go straight to their purpose-painted cells.
     const storeys = Math.max(1, Math.min(60, Math.round(f.lv ?? depth / STOREY_H)));
     const P = {
       y0, top: y0 + depth, sH: depth / storeys, storeys, wr, wg, wb,
-      cellA: f.t === 'panel' ? PANEL_CELL : GENERIC[(hashStr(f.t ?? '') + f._id % 5) % GENERIC.length],
+      cellA: f.t === 'panel' ? PANEL_CELL
+        : BRICK_TYPES.has(f.t) ? BRICK_UV[f._id % BRICK_UV.length]
+        : GENERIC[(hashStr(f.t ?? '') + f._id % 5) % GENERIC.length],
       storeC: STORE_TYPES.has(f.t) ? STORE_CELL : null,
     };
     ringFacade(sink, f.o, false, P);
