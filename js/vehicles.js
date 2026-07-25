@@ -28,8 +28,10 @@ const wheelMat = new THREE.MeshLambertMaterial({ color: 0x24262a });
 // truck cargo boxes are always that faded fleet-white, never body-color
 const cargoMat = new THREE.MeshLambertMaterial({ color: 0xbcbfba });
 // lamps overbright (×2.5) so the bloom pass has something to bite on at night
-const headMat = new THREE.MeshLambertMaterial({ color: 0xfff3d0, emissive: 0xffedb8, emissiveIntensity: 2.5 });
-const tailMat = new THREE.MeshLambertMaterial({ color: 0x7a1616, emissive: 0xff2418, emissiveIntensity: 2.5 });
+const headMat = new THREE.MeshLambertMaterial({ color: 0xfff3d0, emissive: 0xffedb8, emissiveIntensity: 2.5, toneMapped: false });
+const tailMat = new THREE.MeshLambertMaterial({ color: 0x7a1616, emissive: 0xff2418, emissiveIntensity: 2.5, toneMapped: false });
+// main drives these at dusk: one assignment lights every car in the city
+export const lampMats = { head: headMat, tail: tailMat };
 const _bodyMats = new Map();
 const bodyMatFor = (hex) => {
   let m = _bodyMats.get(hex);

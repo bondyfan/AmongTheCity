@@ -8,7 +8,7 @@
 // Directions follow the ARCHITECTURE.md convention throughout:
 //   dir(h) = (−sin h, −cos h), mesh.rotation.y = heading, h = atan2(−dx, −dz).
 
-import { WALK } from './config.js';
+import { WALK, PLAYER_SCALE } from './config.js';
 import { makeCitizen } from './citizen.js';
 
 const TWO_PI = Math.PI * 2;
@@ -27,6 +27,7 @@ export class Player {
     this.inCar = null;       // car object (vehicles.js) or null
     this._dirX = 0; this._dirZ = -1;  // last move direction — decel glides along it
     this._world = null;      // remembered from update() so setInCar(null) can collide
+    this.mesh.scale.setScalar(PLAYER_SCALE);
     this.mesh.position.set(x, 0, z);
     this.mesh.rotation.y = heading;
     scene.add(this.mesh);

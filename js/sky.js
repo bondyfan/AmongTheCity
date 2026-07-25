@@ -216,7 +216,14 @@ export function updateSky(sky, tod, camera, scene) {
   // (hemi ~0.10, sun off) so street lamps and headlights are what carve out
   // the visible bubble — we darken the LIGHTS, never a screen overlay, which
   // would flatten any local light sources into the murk too.
-  hemi.intensity = 0.74 * (1 - 0.86 * nightK);
+  // A CITY at night is not a forest at night: sodium street lighting bounces
+  // off tarmac and facades into a permanent warm glow (light pollution), so
+  // the floor sits well above the Woods' near-black and drifts amber as the
+  // sun goes. Pitch dark would also hide the pedestrians and the traffic that
+  // make the place feel alive.
+  hemi.intensity = 0.74 * (1 - 0.70 * nightK);
+  hemi.color.setRGB(0.87 - 0.10 * nightK, 0.91 - 0.19 * nightK, 1.0 - 0.42 * nightK);
+  hemi.groundColor.setRGB(0.23 + 0.16 * nightK, 0.24 + 0.10 * nightK, 0.26);
   // the directional sun switches off as it crosses the horizon — fading over
   // the ~4° around it, like the disc sinking in: it must still rake warm light
   // down the streets AT sunset, not switch off a degree early

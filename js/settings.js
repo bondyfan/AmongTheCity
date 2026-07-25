@@ -13,11 +13,11 @@ const LS_KEY = 'atc-settings';
 // performance knobs — presets leave them alone and changing them never forks to custom.
 const PRESETS = {
   low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 30,
-            ortho: false, facades: false, trees: true },
+            ortho: false, facades: false, trees: true, peds: 12, bloom: false, rays: false },
   medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 60,
-            ortho: true,  facades: true,  trees: true },
+            ortho: true,  facades: true,  trees: true, peds: 34, bloom: true,  rays: true },
   high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 120,
-            ortho: true,  facades: true,  trees: true },
+            ortho: true,  facades: true,  trees: true, peds: 60, bloom: true,  rays: true },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
 const DEFAULTS = { preset: 'medium', ...PRESETS.medium, mouseLook: true, volume: 0.8 };
@@ -187,7 +187,10 @@ export function initSettings(apply) {
       [60, 'Běžná'], [120, 'Hustá']]),
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
     toggleRow('facades', 'Textury fasád'),
+    toggleRow('bloom', 'Bloom (záře světel)'),
+    toggleRow('rays', 'Sluneční paprsky'),
     toggleRow('trees', 'Stromy'),
+    selectRow('peds', 'Chodci', [[0, 'Žádní'], [12, 'Málo'], [34, 'Běžně'], [60, 'Rušno']]),
   );
   body.appendChild(gGrid);
   body.appendChild(el('h3', 'atc-set-h3', 'Hra'));

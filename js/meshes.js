@@ -88,6 +88,9 @@ export function makeMaterials() {
     flat: new THREE.MeshLambertMaterial({ vertexColors: true }),
     building: new THREE.MeshLambertMaterial({ vertexColors: true }),
     trunk: new THREE.MeshLambertMaterial({ color: COLORS.treeTrunk }),
+    lampPost: new THREE.MeshLambertMaterial({ color: 0x4a4d52 }),
+    // emissiveIntensity is driven from main at dusk (0 by day, ~2.6 at night)
+    lampHead: new THREE.MeshLambertMaterial({ color: 0x2e3033, emissive: 0xffdc96, emissiveIntensity: 0, toneMapped: false }),
     crown: new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
   };
 }
@@ -839,6 +842,24 @@ function carveOrtho(mesh, x0, z0, x1, z1, holes) {
   mesh.updateMatrix();
 }
 
+// ---- street lamps: the detail that makes a road read as a street ----
+// A plain post with a short arm and a lamp head, placed along the drivable
+// carriageway every LAMP_STEP meters and alternating sides. Two instanced
+// meshes per chunk (post + head); the head material is emissive so dusk turns
+// the whole city on for free — no lights, no shadow cost.
+const LAMP_STEP = 34, LAMP_MIN_W = 5.4, LAMP_H = 7.2;
+let _lPost = null, _lHead = null;
+function lampTemplates() {
+  if (!_lPost) {
+    // post + arm merged: one upright cylinder, one short horizontal box
+    const post = new THREE.CylinderGeometry(0.075, 0.11, LAMP_H, 6, 1).translate(0, LAMP_H / 2, 0);
+    const arm = new THREE.BoxGeometry(1.05, 0.11, 0.11).translate(0.5, LAMP_H - 0.16, 0);
+    _lPost = mergeGeometries([post, arm], false);
+    _lHead = new THREE.BoxGeometry(0.66, 0.17, 0.3).translate(1.0, LAMP_H - 0.3, 0);
+  }
+  return [_lPost.clone(), _lHead.clone()];
+}
+
 // ---- trees: shared low-poly template, CLONED per chunk (chunk unload
 // disposes geometries; a shared template would lose its GPU buffers) ----
 let _tTrunk = null, _tCrown = null;
@@ -945,6 +966,49 @@ export function buildChunkMeshes(city, cx, cz, mats) {
     const m = new THREE.Mesh(mergeGeometries(bGeos, false), mat);
     m.castShadow = m.receiveShadow = true;
     group.add(m);
+  }
+
+  // -- street lamps along the wider drivable roads --
+  if (mats.lamps !== false) {
+    const spots = [];
+    for (const r of cell.roads) {
+      if (!r.d || r.w < LAMP_MIN_W || r._home !== key) continue;
+      const half = r.w / 2 + 0.7;              // just off the kerb
+      let carry = (r._id % 17) * 2;            // stagger so junctions aren't twinned
+      for (let i = 0; i < r.p.length - 1; i++) {
+        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+        let dx = bx - ax, dz = bz - az;
+        const L = Math.hypot(dx, dz);
+        if (L < 0.01) continue;
+        dx /= L; dz /= L;
+        for (let d = LAMP_STEP - carry; d < L; d += LAMP_STEP) {
+          const px = ax + dx * d, pz = az + dz * d;
+          if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue; // this cell only
+          const side = ((spots.length + (r._id % 2)) & 1) ? 1 : -1; // alternate kerbs
+          // arm points at the road: post sits on the kerb, head reaches in
+          const nx = -dz * side, nz = dx * side;
+          spots.push([px + nx * half, pz + nz * half, Math.atan2(-nx, -nz) + Math.PI]);
+        }
+        carry = (carry + L) % LAMP_STEP;
+      }
+    }
+    if (spots.length) {
+      const [pg, hg] = lampTemplates();
+      const posts = new THREE.InstancedMesh(pg, mats.lampPost, spots.length);
+      const heads = new THREE.InstancedMesh(hg, mats.lampHead, spots.length);
+      posts.castShadow = true;
+      for (let i = 0; i < spots.length; i++) {
+        const [px, pz, rot] = spots[i];
+        _q.setFromAxisAngle(_up, rot);
+        _v.set(px, 0, pz); _s.set(1, 1, 1);
+        _m4.compose(_v, _q, _s);
+        posts.setMatrixAt(i, _m4);
+        heads.setMatrixAt(i, _m4);
+      }
+      posts.instanceMatrix.needsUpdate = true;
+      heads.instanceMatrix.needsUpdate = true;
+      group.add(posts, heads);
+    }
   }
 
   // -- trees: two InstancedMeshes (trunks / crowns) sharing transforms --

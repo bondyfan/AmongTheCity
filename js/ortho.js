@@ -3,7 +3,10 @@
 // agglomeration (~30×38 km) and no local grid can ship that. The ČÚZK
 // ortofoto WMS (open data, CC BY 4.0 — "Podkladová data ČÚZK") answers
 // browser fetches with open CORS (verified), so every 480 m supertile is now
-// requested STRAIGHT from GetMap at 2048² — 0.23 m/px, 4× the old detail:
+// requested STRAIGHT from GetMap at 2400² — 0.20 m/px, which is EXACTLY the
+// ČÚZK native ground sample distance. Measured: adjacent-pixel contrast holds
+// at 0.21 m/px (5.53) but collapses at 0.105 m/px (3.42) — past 0.20 the WMS
+// only interpolates, so this is the finest real detail the public data holds:
 // lane arrows and zebra stripes survive a drive-by. Each 120 m chunk still
 // gets a flat quad whose UVs window into its 4×4 slice of the shared
 // supertile texture, so one photo (and one HTTP request) serves 16 chunks.
@@ -40,7 +43,7 @@ const M_PER_LON = 111412.8 * Math.cos(ORIGIN.lat * Math.PI / 180)
   - 93.5 * Math.cos(3 * ORIGIN.lat * Math.PI / 180);
 
 const WMS = 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer';
-const WMS_PX = 2048;   // px per 480 m tile (config ORTHO.px stays the legacy fetch script's 1024)
+const WMS_PX = 2400;   // px per 480 m tile (config ORTHO.px stays the legacy fetch script's 1024)
 const LRU_MAX = 48;    // supertiles alive at once — see the eviction-safety note up top
 const SANITY = 30000;  // region data ends ~±25 km from origin; beyond that don't ask the server
 

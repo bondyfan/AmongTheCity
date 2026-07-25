@@ -11,13 +11,15 @@ import { loadCity, chunkKey } from './geo.js';
 import { CityWorld } from './city.js';
 import { input } from './input.js';
 import { Player } from './player.js';
-import { Vehicles, driveStep } from './vehicles.js';
+import { Vehicles, driveStep, lampMats } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
 import { initAudio, sfx, engineStart, engineStop, engineSet, setVolume } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
+import { Pedestrians } from './pedestrians.js';
+import { PostFX } from './postfx.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -50,14 +52,20 @@ const game = {
 };
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
+let peds = null;
+let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
 const parked = [];      // cars placed by us, enterable
 
 // ---------- camera rig ----------
 // Walk: orbit-follow — eases behind the player's heading, right-drag orbits
 // freely, wheel zooms. Drive: chase cam with speed-based distance + FOV kick.
 let camYaw = SPAWN.heading;
-let camPitch = 0.30;         // radians above horizontal
-let camDist = 7.5;
+let camPitch = 0.38;         // radians above horizontal
+// The character model is correctly scaled (1.77 m against a 4.9 m car), so
+// "the player looks huge" is FRAMING, not size: at 7.5 m with FOV 55 a person
+// filled 19 % of the screen height. Standing further back and higher halves
+// that and lets the street read as a street.
+let camDist = 14;
 const camSmooth = new THREE.Vector3();
 let camInit = false;
 const BASE_FOV = 55;
@@ -70,7 +78,7 @@ function updateCamera(dt) {
   if (drag.x || drag.y) _lastLookT = performance.now() * 0.001;
   camYaw -= drag.x * sens;
   camPitch = Math.max(0.06, Math.min(1.15, camPitch + drag.y * sens));
-  camDist = Math.max(4.2, Math.min(16, camDist + input.takeWheel() * 0.9));
+  camDist = Math.max(5, Math.min(26, camDist + input.takeWheel() * 1.4));
 
   let tx, ty, tz, wantYaw, dist, height, fov;
   if (game.car) {
@@ -85,7 +93,7 @@ function updateCamera(dt) {
   } else {
     wantYaw = player.heading;
     dist = camDist;
-    height = 1.7;
+    height = 2.1;
     tx = player.pos.x; ty = player.mesh.position.y + 1.5; tz = player.pos.z;
     fov = BASE_FOV;
   }
@@ -189,6 +197,56 @@ function _crashList() {
   return traffic ? [...traffic.cars, ...parked] : parked;
 }
 
+// ---------- night lights ----------
+// Two real headlight cones ride the player's car and switch on with dusk, so
+// driving after dark actually lights the road ahead instead of relying on the
+// (unlit) emissive lamp boxes. Only the player gets real lights — 120 traffic
+// cars with spotlights would melt the shadow budget; their emissive lamps read
+// fine as distant points.
+let _beamL = null, _beamR = null, _beamsOn = false;
+const _beamTarget = new THREE.Object3D();
+function updateNightLights(dt) {
+  // how dark it is, read off the sun the sky module already computes
+  const nightK = sky ? Math.max(0, Math.min(1, 1 - (sky.sun?.intensity ?? 1.8) / 0.6)) : 0;
+  // street lamps: one shared material drives every instanced lamp head in the
+  // city, so dusk lights the whole map with a single assignment
+  const lm = world?.mats?.lampHead;
+  if (lm) lm.emissiveIntensity = 4.5 * nightK;   // >1 in linear = bloom bites
+  // car lamps: a dim daytime marker, a real glare after dark
+  const vm = lampMats;
+  if (vm) {
+    vm.head.emissiveIntensity = 1.4 + 5.0 * nightK;
+    vm.tail.emissiveIntensity = 1.4 + 4.0 * nightK;
+  }
+  const want = !!game.car && nightK > 0.3;
+  if (want && !_beamL) {
+    const mk = () => {
+      const s = new THREE.SpotLight(0xfff0cc, 3.2, 55, 0.55, 0.45, 1.4);
+      s.castShadow = false; // the beams light the road; shadows stay on the sun
+      scene.add(s);
+      return s;
+    };
+    _beamL = mk(); _beamR = mk();
+    scene.add(_beamTarget);
+    _beamL.target = _beamTarget; _beamR.target = _beamTarget;
+  }
+  if (_beamL) {
+    _beamsOn = want;
+    _beamL.visible = _beamR.visible = want;
+    if (want) {
+      const c = game.car;
+      const fx = -Math.sin(c.heading), fz = -Math.cos(c.heading);
+      const rx = Math.cos(c.heading), rz = -Math.sin(c.heading);
+      const y = (c.mesh?.position.y ?? 0) + 0.75;
+      _beamL.position.set(c.x + fx * 1.9 - rx * 0.62, y, c.z + fz * 1.9 - rz * 0.62);
+      _beamR.position.set(c.x + fx * 1.9 + rx * 0.62, y, c.z + fz * 1.9 + rz * 0.62);
+      // aim well down the road, dipped slightly toward the tarmac
+      _beamTarget.position.set(c.x + fx * 26, y - 2.2, c.z + fz * 26);
+      _beamTarget.updateMatrixWorld();
+    }
+  }
+}
+
 // ---------- HUD ----------
 let hintT = 0;
 function updateHud(dt) {
@@ -238,6 +296,7 @@ function applySettings(s, key) {
   renderer.setPixelRatio(s.resScale === 2 ? Math.min(window.devicePixelRatio, 2) : s.resScale);
   if (world) world.viewChunks = s.viewChunks;
   if (traffic) traffic.maxCars = s.traffic;
+  if (peds) peds.max = s.peds ?? 34;
   if (sky) {
     const sun = sky.sun;
     if (renderer.shadowMap.enabled !== !!s.shadows) {
@@ -286,6 +345,7 @@ async function boot() {
   vehicles = new Vehicles(scene);
   traffic = new Traffic(city, vehicles);
   minimap = new Minimap($id('minimap'), city);
+  peds = new Pedestrians(scene, city);
   placeParkedCars(city);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)
@@ -368,7 +428,28 @@ function tick(src) {
     // sub-step loop turned a throttled hidden tab into 20 draws per second of
     // covered time and froze the main thread solid
     const r0 = performance.now();
-    renderer.render(scene, camera);
+    // The post stack is why night lights read as LIGHT: bloom thresholds at
+    // linear 1.0 ("brighter than white") and the lamp/headlight materials are
+    // deliberately overbright (and toneMapped:false, so ACES can't squash them
+    // back under the bar). Without this pass emissive is just a pale box.
+    // God rays ride the same pass at dawn and dusk.
+    const gs = getSettings();
+    const wantPost = game.mode === 'play' && (gs.bloom !== false || gs.rays !== false);
+    if (wantPost && !postfx) {
+      postfx = new PostFX(renderer);
+      postfx.setSize(renderer.domElement.width, renderer.domElement.height);
+    }
+    if (wantPost && postfx) {
+      postfx.setSize(renderer.domElement.width, renderer.domElement.height);
+      let rays = null;
+      if (gs.rays !== false && sky?.sunDir) {
+        const dayK = Math.min(1, Math.max(0, (sky.sun?.intensity ?? 0) / 1.4));
+        if (dayK > 0.02) rays = { dir: sky.sunDir, color: sky.sun.color, strength: dayK * 0.7 };
+      }
+      postfx.render(scene, camera, { ssao: false, bloom: gs.bloom !== false, rays, canopy: null });
+    } else {
+      renderer.render(scene, camera);
+    }
     if (window.__atc) {
       const ms = performance.now() - r0;
       window.__atc.frameMs += (ms - window.__atc.frameMs) * 0.1;
@@ -402,6 +483,8 @@ function stepGame(dt) {
   }
   vehicles.update(dt);
   traffic.update(dt, player.pos, game.car);
+  peds.update(dt, focus);
+  updateNightLights(dt);
 
   updateCamera(dt);
   updateSky(sky, game.tod, camera, scene);
@@ -417,10 +500,12 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v6-region',   // bump on risky changes — tells us which code a tab runs
+  build: 'v8-glow',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
+  cam: () => ({ camDist, camPitch, camYaw }),
+  get postfx() { return postfx; },
   get player() { return player; }, get world() { return world; },
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
-  get parked() { return parked; },
+  get parked() { return parked; }, get peds() { return peds; },
 };

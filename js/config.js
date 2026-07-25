@@ -86,5 +86,10 @@ export const TRAFFIC = {
   lookAhead: 22, stopGap: 2.5,
 };
 
+// Character scale. The model is anatomically right (1.77 m against a 4.9 m
+// car), but on a third-person camera it read as oversized, so the player is
+// rendered smaller by request. 1 = true human scale.
+export const PLAYER_SCALE = 0.5;
+
 // walk speeds
 export const WALK = { jog: 4.2, sprint: 7.0, accel: 14, turn: 12, radius: 0.38 };
