@@ -230,11 +230,29 @@ async function boot() {
 }
 
 // ---------- main loop ----------
+// rAF normally; a hidden tab suspends rAF entirely AND clamps timers to 1 Hz,
+// so the interval fallback covers the real elapsed time in stable 50 ms
+// sub-steps (max 1 s per fire) — the sim keeps true pace while hidden (day
+// clock, traffic, automated tests; same reason the Woods co-op runs a worker
+// clock for hidden partners).
 const clock = new THREE.Clock();
-function tick() {
-  requestAnimationFrame(tick);
-  const dt = Math.min(clock.getDelta(), 0.05);
-  if (game.mode !== 'play') { renderer.render(scene, camera); return; }
+setInterval(() => { if (document.hidden) tick(true); }, 66);
+function tick(fromInterval) {
+  if (!fromInterval) requestAnimationFrame(tick);
+  let remaining = Math.min(clock.getDelta(), fromInterval ? 1.0 : 0.05);
+  while (remaining > 0) {
+    const dt = Math.min(remaining, 0.05);
+    remaining -= dt;
+    stepGame(dt);
+  }
+  // render ONCE per fire, after every sub-step — rendering inside the
+  // sub-step loop turned a throttled hidden tab into 20 draws per second of
+  // covered time and froze the main thread solid
+  renderer.render(scene, camera);
+}
+
+function stepGame(dt) {
+  if (game.mode !== 'play') return;
 
   game.tod = (game.tod + dt / DAY_LENGTH) % 1;
 
@@ -258,8 +276,6 @@ function tick() {
   updateCamera(dt);
   updateSky(sky, game.tod, camera, scene);
   updateHud(dt);
-
-  renderer.render(scene, camera);
 }
 
 boot().catch(err => {
@@ -267,3 +283,12 @@ boot().catch(err => {
   console.error(err);
 });
 tick();
+
+// dev/debug handle — lets an automated harness (or the console) inspect and
+// drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
+window.__atc = {
+  game, input,
+  get player() { return player; }, get world() { return world; },
+  get traffic() { return traffic; }, get vehicles() { return vehicles; },
+  get parked() { return parked; },
+};

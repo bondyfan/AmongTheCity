@@ -160,8 +160,10 @@ export function sunDirOf(tod, out = new THREE.Vector3()) {
 }
 
 // "HH:MM" for the HUD clock. Floors to the minute; tolerates tod outside 0..1.
+// The epsilon absorbs float error at exact minute boundaries (23:59 read as
+// 23:58 without it — 1439/1440 * 1440 lands a hair under the integer).
 export function todClock(tod) {
-  const m = Math.floor((((tod % 1) + 1) % 1) * 24 * 60);
+  const m = Math.floor((((tod % 1) + 1) % 1) * 24 * 60 + 1e-6);
   return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 }
 

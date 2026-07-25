@@ -1,9 +1,11 @@
 // ---- Among The City: all tunables in one place ----
 
-// The world origin is the railway=station node of Pardubice hlavní nádraží.
-// The 305 m functionalist hall spans x −145..160 at z −108..−50 (north of the
-// origin); the spawn stands on the forecourt in front of it, facing the hall.
-export const SPAWN = { x: 25, z: -25, heading: 0 }; // heading 0 = facing north (−z)
+// The world origin is the railway=station node of Pardubice hlavní nádraží —
+// which OSM parks amid the TRACKS. The 305 m functionalist hall spans
+// x −145..160 at z −108..−50, and the forecourt with the bus terminal (every
+// "Hlavní nádraží" stop) lies just past it at z −120..−157. Spawn there,
+// facing the hall (heading π = facing +z in this frame).
+export const SPAWN = { x: 25, z: -122, heading: Math.PI };
 export const CITY_DATA_URL = 'data/pardubice.json';
 
 // streaming

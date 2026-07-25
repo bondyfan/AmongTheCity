@@ -8,7 +8,6 @@
 // Directions follow the ARCHITECTURE.md convention throughout:
 //   dir(h) = (−sin h, −cos h), mesh.rotation.y = heading, h = atan2(−dx, −dz).
 
-import * as THREE from 'three';
 import { WALK } from './config.js';
 import { makeCitizen } from './citizen.js';
 

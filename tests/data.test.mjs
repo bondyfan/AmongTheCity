@@ -68,7 +68,7 @@ test('drivable roads form one big connected component', () => {
 });
 
 test('spawn area has drivable roads close by', () => {
-  const SPAWN = { x: 25, z: -25 };
+  const SPAWN = { x: 25, z: -122 };
   let best = 1e9;
   for (const r of city.roads) {
     if (!r.d) continue;

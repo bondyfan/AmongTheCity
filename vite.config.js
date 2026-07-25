@@ -1,8 +1,13 @@
+import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
   server: { port: 5180 },
-  // libs/three.module.js is loaded via the importmap in index.html — keep
-  // vite from trying to prebundle a bare "three" specifier it can't resolve
-  optimizeDeps: { exclude: ['three'] },
+  // bare "three" resolves to the vendored module (same trick as AmongTheWoods) —
+  // the importmap in index.html covers the no-bundler case, this covers vite
+  resolve: {
+    alias: {
+      three: resolve(__dirname, 'libs/three.module.js'),
+    },
+  },
 });
