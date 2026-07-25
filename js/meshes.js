@@ -31,6 +31,8 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH } from './config.js';
 import { bridgeElevation, polygonArea, pointInPolygon, chunkKey } from './geo.js';
+import { entranceOf } from './interiors.js';
+import { INTERIOR } from './config.js';
 
 // geometry dimensions (meters) — construction sizes, not art direction
 const CAP_SEGS = 8;                                  // endpoint disc fan
@@ -687,19 +689,81 @@ function ringFacade(sink, ring, isHole, P) {
     if (L < 0.02) continue;
     const fx = S * ez, fz = -S * ex;
     const cols = Math.max(1, Math.round(L / WIN_W)), bayW = L / cols;
+    // v5: the street door. Its span is skipped on the ground storey and a
+    // header emitted over it, so the facade grows a REAL opening at exactly
+    // the place interiors.js told pieces.js to leave a gap in the lining.
+    const door = (!isHole && P.door && P.door.i === i) ? P.door : null;
+
+    // Emit [t0,t1] of the edge, chunked into ≤BAYS bays so each piece samples a
+    // sub-range of one atlas cell (a cell cannot wrap-repeat). v0/v1 pick how
+    // much of the cell's height this band covers — a header takes the top slice.
+    const run = (t0, t1, yB, yT, cell, v0, v1, kB, kT) => {
+      const bayT = bayW / L;
+      let s = t0;
+      while (s < t1 - 1e-6) {
+        const e = Math.min(t1, s + bayT * BAYS);
+        sink.wallUV(ax + ex * s, az + ez * s, ax + ex * e, az + ez * e, yB, yT, fx, fz,
+          cell[0], v0, cell[0] + ((e - s) / bayT) / BAYS / ATLAS_N, v1,
+          P.wr * kB, P.wg * kB, P.wb * kB, P.wr * kT, P.wg * kT, P.wb * kT);
+        s = e;
+      }
+    };
+
     for (let s = 0; s < P.storeys; s++) {
       const yB = P.y0 + s * P.sH, yT = P.y0 + (s + 1) * P.sH;
       const kB = WALL_AO + (1 - WALL_AO) * Math.min(1, (yB - P.y0) / aoH);
       const kT = WALL_AO + (1 - WALL_AO) * Math.min(1, (yT - P.y0) / aoH);
       const cell = s === 0 && P.storeC ? P.storeC : P.cellA;
-      for (let b0 = 0; b0 < cols; b0 += BAYS) {
-        const b1 = Math.min(cols, b0 + BAYS), t0 = b0 * bayW / L, t1 = b1 * bayW / L;
-        sink.wallUV(ax + ex * t0, az + ez * t0, ax + ex * t1, az + ez * t1, yB, yT, fx, fz,
-          cell[0], cell[1], cell[0] + (b1 - b0) / BAYS / ATLAS_N, cell[3],
-          P.wr * kB, P.wg * kB, P.wb * kB, P.wr * kT, P.wg * kT, P.wb * kT);
-      }
+      const cutDoor = door && s === 0 && P.sH > INTERIOR.entryH + 0.35;
+      if (!cutDoor) { run(0, 1, yB, yT, cell, cell[1], cell[3], kB, kT); continue; }
+      const hw = door.w / 2 / L, c = door.t;
+      const d0 = Math.max(0, c - hw), d1 = Math.min(1, c + hw);
+      if (d0 > 1e-4) run(0, d0, yB, yT, cell, cell[1], cell[3], kB, kT);
+      if (d1 < 1 - 1e-4) run(d1, 1, yB, yT, cell, cell[1], cell[3], kB, kT);
+      const hy = yB + INTERIOR.entryH;
+      const vMid = cell[1] + (cell[3] - cell[1]) * (INTERIOR.entryH / P.sH);
+      const kH = WALL_AO + (1 - WALL_AO) * Math.min(1, (hy - P.y0) / aoH);
+      run(d0, d1, hy, yT, cell, vMid, cell[3], kH, kT);
     }
   }
+}
+
+// The doorway behind the hole. Three things, all cheap, and the third is the
+// one that matters: jambs and a soffit turn the opening into a REVEAL (a flat
+// hole in a flat wall reads as a texture error), and a dark leaf set back at
+// the interior's own wall depth stops you seeing clean through the building
+// when its interior has not been streamed in yet. The leaf faces outward only,
+// so from inside it is back-face culled and the doorway is simply open — and
+// once a missile promotes the building to boxes, the whole chunk mesh stops
+// drawing it and the opening becomes a real hole in real geometry.
+const DOOR_DEPTH = INTERIOR.extT + INTERIOR.linT;   // = the interior wall face
+function doorInto(sink, ring, P) {
+  const d = P.door;
+  const [ax, az] = ring[d.i], [bx, bz] = ring[(d.i + 1) % ring.length];
+  const ex = bx - ax, ez = bz - az, L = Math.hypot(ex, ez);
+  if (L < 0.05) return;
+  const ux = ex / L, uz = ez / L;
+  const inx = -d.nx, inz = -d.nz;                    // into the building
+  const c = L * d.t, hw = Math.min(d.w, L * 0.9) / 2;
+  const yB = P.y0 + 0.02, yT = P.y0 + Math.min(INTERIOR.entryH, P.sH - 0.3);
+  const jr = P.wr * 0.42, jg = P.wg * 0.42, jb = P.wb * 0.42;   // shaded reveal
+  for (const sgn of [-1, 1]) {
+    const px = ax + ux * (c + sgn * hw), pz = az + uz * (c + sgn * hw);
+    // the jamb faces the middle of the opening
+    wallQuad(sink, px, pz, px + inx * DOOR_DEPTH, pz + inz * DOOR_DEPTH,
+      yT, yB, -sgn * ux, -sgn * uz, jr, jg, jb);
+  }
+  const A = [ax + ux * (c - hw), az + uz * (c - hw)];
+  const B = [ax + ux * (c + hw), az + uz * (c + hw)];
+  sink.triFacing(A[0], yT, A[1], B[0], yT, B[1],
+    B[0] + inx * DOOR_DEPTH, yT, B[1] + inz * DOOR_DEPTH, 0, -1, 0, jr, jg, jb);
+  sink.triFacing(A[0], yT, A[1], B[0] + inx * DOOR_DEPTH, yT, B[1] + inz * DOOR_DEPTH,
+    A[0] + inx * DOOR_DEPTH, yT, A[1] + inz * DOOR_DEPTH, 0, -1, 0, jr, jg, jb);
+  // the leaf: dark, single-sided, standing where the interior wall's inner
+  // face is, so stepping through it is stepping through the wall plane
+  wallQuad(sink, A[0] + inx * DOOR_DEPTH, A[1] + inz * DOOR_DEPTH,
+    B[0] + inx * DOOR_DEPTH, B[1] + inz * DOOR_DEPTH, yT, yB, d.nx, d.nz,
+    P.wr * 0.16, P.wg * 0.15, P.wb * 0.14);
 }
 
 // flat cap via earcut straight into the sink — keeps every facade-mode
@@ -721,7 +785,7 @@ function capInto(sink, outer, holes, y, up, r, g, b) {
   }
 }
 
-function buildingInto(f, geos, sink, facades) {
+function buildingInto(f, geos, sink, facades, roads) {
   if (!f.o || f.o.length < 3) return;
   const y0 = f.y ?? 0;
   const depth = Math.max(1, Math.max(2.2, f.h ?? 6) - y0); // h is total height; skyways start at y0
@@ -747,8 +811,14 @@ function buildingInto(f, geos, sink, facades) {
         : BRICK_TYPES.has(f.t) ? BRICK_UV[f._id % BRICK_UV.length]
         : GENERIC[(hashStr(f.t ?? '') + f._id % 5) % GENERIC.length],
       storeC: STORE_TYPES.has(f.t) ? STORE_CELL : null,
+      // v5: every building that has an inside gets a front door in its facade.
+      // entranceOf caches its answer on the feature, so the hole never moves
+      // between rebuilds and always matches the gap pieces.js leaves in the
+      // interior lining.
+      door: y0 < 0.5 && Math.abs(polygonArea(f.o)) >= 14 ? entranceOf(f, roads) : null,
     };
     ringFacade(sink, f.o, false, P);
+    if (P.door && P.sH > INTERIOR.entryH + 0.35) doorInto(sink, f.o, P);
     for (const h of f.i ?? []) if (h.length >= 3) ringFacade(sink, h, true, P);
     capInto(sink, f.o, f.i, y0 + depth, true, rr, rg, rb);
     if (y0 > 0.5) capInto(sink, f.o, f.i, y0, false, rr, rg, rb); // skyway underside
@@ -850,6 +920,38 @@ function carveOrtho(mesh, x0, z0, x1, z1, holes) {
   mesh.updateMatrix();
 }
 
+// ---- one chunk's buildings, as a single mesh ----
+// Split out of buildChunkMeshes so ONE building can leave the batch without
+// paying for a whole chunk rebuild: when a missile promotes a building to its
+// own box model (destructible.js), city.js adds the id to `mats.hidden` and
+// re-runs just this function for that cell. Roads are handed through so the
+// front door can be aimed at the street (entranceOf caches the answer, so the
+// scan happens once per building for the life of the session).
+// mesh.name = 'buildings' is how city.js finds the old one to swap out.
+export function buildBuildingsMesh(city, cx, cz, mats) {
+  const key = cx + ',' + cz;
+  const cell = city.chunkIndex.get(key);
+  if (!cell) return null;
+  const facades = !!mats.facades;
+  const hidden = mats.hidden;
+  const bGeos = [], bSink = new TriSink(facades);
+  for (const f of cell.buildings) {
+    if (f._home !== key) continue;
+    if (hidden && hidden.has(f._id)) continue;   // now made of boxes instead
+    buildingInto(f, bGeos, bSink, facades, cell.roads);
+  }
+  const pg = bSink.geo();
+  if (pg) bGeos.push(pg);
+  if (!bGeos.length) return null;
+  const mat = facades
+    ? (mats._facadeMat ??= new THREE.MeshLambertMaterial({ vertexColors: true, map: facadeAtlas() }))
+    : mats.building;
+  const m = new THREE.Mesh(mergeGeometries(bGeos, false), mat);
+  m.name = 'buildings';
+  m.castShadow = m.receiveShadow = true;
+  return m;
+}
+
 // ---- street lamps: the detail that makes a road read as a street ----
 // A plain post with a short arm and a lamp head, placed along the drivable
 // carriageway every LAMP_STEP meters and alternating sides. Two instanced
@@ -873,8 +975,12 @@ function lampTemplates() {
 let _tTrunk = null, _tCrown = null;
 function treeTemplates() {
   if (!_tTrunk) {
-    _tTrunk = new THREE.CylinderGeometry(0.09, 0.15, 1.9, 5, 1).translate(0, 0.95, 0);
-    _tCrown = new THREE.IcosahedronGeometry(1.4, 0).scale(1, 0.95, 1).translate(0, 2.6, 0);
+    // A mature tree is a BUILDING-sized object: a Czech boulevard lime runs
+    // 10–15 m, a spruce in the floodplain 20–30 m. The first template topped
+    // out at 3.9 m before jitter, which put a full-grown tree barely above
+    // head height — the single loudest scale error in the city.
+    _tTrunk = new THREE.CylinderGeometry(0.16, 0.27, 5.0, 6, 1).translate(0, 2.5, 0);
+    _tCrown = new THREE.IcosahedronGeometry(3.2, 0).scale(1, 1.05, 1).translate(0, 7.4, 0);
   }
   return [_tTrunk.clone(), _tCrown.clone()];
 }
@@ -1081,19 +1187,8 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   }
 
   // -- buildings: facade walls or v1 extrudes, one casting mesh either way --
-  const facades = !!mats.facades;
-  const bGeos = [], bSink = new TriSink(facades);
-  for (const f of cell.buildings) if (f._home === key) buildingInto(f, bGeos, bSink, facades);
-  const pg = bSink.geo();
-  if (pg) bGeos.push(pg);
-  if (bGeos.length) {
-    const mat = facades
-      ? (mats._facadeMat ??= new THREE.MeshLambertMaterial({ vertexColors: true, map: facadeAtlas() }))
-      : mats.building;
-    const m = new THREE.Mesh(mergeGeometries(bGeos, false), mat);
-    m.castShadow = m.receiveShadow = true;
-    group.add(m);
-  }
+  const bm = buildBuildingsMesh(city, cx, cz, mats);
+  if (bm) group.add(bm);
 
   // -- street lamps along the wider drivable roads --
   if (mats.lamps !== false) {
@@ -1157,10 +1252,10 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
     for (let i = 0; i < trees.length; i++) {
       const t = trees[i], id = t.seed;
       // forest stock grows taller and leaner than the pruned boulevard rows
-      // (≈4–11 m against 3–5.5 m) and its crowns go deeper, darker green —
+      // (≈11–25 m against 7–12 m) and its crowns go deeper, darker green —
       // a canopy that shades itself, not a line of park lollipops
-      const s = t.forest ? 0.95 + rnd(id, 4) * 0.95 : 0.75 + rnd(id, 4) * 0.6;
-      const yk = t.forest ? 1.0 + rnd(id, 6) * 0.55 : 0.85 + rnd(id, 6) * 0.4;
+      const s = t.forest ? 1.05 + rnd(id, 4) * 0.70 : 0.70 + rnd(id, 4) * 0.42;
+      const yk = t.forest ? 1.0 + rnd(id, 6) * 0.45 : 0.88 + rnd(id, 6) * 0.30;
       _v.set(t.x, 0, t.z);
       _q.setFromAxisAngle(_up, rnd(id, 5) * Math.PI * 2);
       _s.set(s, s * yk, s);
