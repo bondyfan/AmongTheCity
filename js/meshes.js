@@ -93,6 +93,9 @@ export function makeMaterials() {
     flat: new THREE.MeshLambertMaterial({ vertexColors: true }),
     building: new THREE.MeshLambertMaterial({ vertexColors: true }),
     trunk: new THREE.MeshLambertMaterial({ color: COLORS.treeTrunk }),
+    // far tier fallback when a chunk has no aerial tile yet: plain terrain
+    // colour, no vertex colours (the far quad carries none)
+    flatFar: new THREE.MeshLambertMaterial({ color: 0x8a9182 }),
     lampPost: new THREE.MeshLambertMaterial({ color: 0x4a4d52 }),
     // emissiveIntensity is driven from main at dusk (0 by day, ~2.6 at night)
     lampHead: new THREE.MeshLambertMaterial({ color: 0x2e3033, emissive: 0xffdc96, emissiveIntensity: 0, toneMapped: false }),
@@ -970,13 +973,26 @@ function scatterForest(f, x0, z0, x1, z1, waters, out) {
 }
 
 // ---- the chunk builder ----
-export function buildChunkMeshes(city, cx, cz, mats) {
+// groundOnly builds the FAR tier: nothing but the aerial photo on a quad.
+// From a helicopter the ortho already shows the roads, roofs and fields, so a
+// ring of these carries the view out to kilometres for one draw call each —
+// the alternative was watching the fully-detailed world simply stop.
+export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   const key = cx + ',' + cz;
   const cell = city.chunkIndex.get(key);
   if (!cell) return null;                       // outside the mapped city
   const group = new THREE.Group();
   group.name = 'chunk:' + key;
   const x0 = cx * CHUNK, z0 = cz * CHUNK, x1 = x0 + CHUNK, z1 = z0 + CHUNK;
+  if (groundOnly) {
+    const g = mats.ortho?.orthoGroundMesh?.(cx, cz);
+    if (g) { group.add(g); return group; }
+    const q = new THREE.Mesh(new THREE.PlaneGeometry(CHUNK, CHUNK), mats.flatFar ?? mats.flat);
+    q.rotation.x = -Math.PI / 2;
+    q.position.set(x0 + CHUNK / 2, 0, z0 + CHUNK / 2);
+    group.add(q);
+    return group;
+  }
   const flat = [], sink = new TriSink();
 
   // -- water first: it decides the holes the ground must be carved with --

@@ -24,6 +24,8 @@ export class CityWorld {
     this.viewChunks = VIEW_CHUNKS; // runtime-adjustable (settings: draw distance)
     this.chunksPerFrame = CHUNKS_PER_FRAME; // raised in flight — the edge must
                                             // stay ahead of a 60 m/s nose
+    this.farChunks = 0;         // ground-only ring BEYOND viewChunks (flight)
+    this._detail = new Map();   // key -> true when built at full detail
     this._tileT = 0;            // ensureTiles throttle — 1 Hz, fetches run km ahead
     // Region tiles can land AFTER their chunks were already built: the boot
     // frames raise empty spawn cells before the first fetch returns, and long
@@ -43,12 +45,19 @@ export class CityWorld {
       this.city.ensureTiles(focus.x, focus.z).catch(console.error);
     }
     const fx = Math.floor(focus.x / CHUNK), fz = Math.floor(focus.z / CHUNK);
-    // enqueue missing cells in view, nearest first
-    for (let r = 0; r <= this.viewChunks; r++) {
+    const outer = this.viewChunks + this.farChunks;
+    // enqueue missing cells in view, nearest first. Cells inside viewChunks
+    // want full detail; the ring beyond wants the cheap ground-only tier, and
+    // a cell already built at the WRONG level is re-queued so flying low over
+    // a distant suburb fills it in rather than leaving a flat photo.
+    for (let r = 0; r <= outer; r++) {
       for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue; // ring only
         const key = (fx + dx) + ',' + (fz + dz);
-        if (!this.built.has(key) && !this._queued.has(key)) {
+        const wantFull = r <= this.viewChunks;
+        const have = this.built.has(key);
+        const stale = have && wantFull && this._detail.get(key) === false;
+        if ((!have || stale) && !this._queued.has(key)) {
           this.queue.push(key);
           this._queued.add(key);
         }
@@ -59,21 +68,26 @@ export class CityWorld {
       const key = this.queue.shift();
       this._queued.delete(key);
       const [cx, cz] = key.split(',').map(Number);
-      // may have drifted out of view while queued
-      if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > this.viewChunks) continue;
-      const group = buildChunkMeshes(this.city, cx, cz, this.mats);
+      const ring = Math.max(Math.abs(cx - fx), Math.abs(cz - fz));
+      if (ring > outer) continue;               // drifted out while queued
+      const full = ring <= this.viewChunks;
+      const prev = this.built.get(key);         // upgrading a far tile in place
+      if (prev) { this.scene.remove(prev); prev.traverse(o => o.geometry?.dispose?.()); }
+      const group = buildChunkMeshes(this.city, cx, cz, this.mats, !full);
       if (group) this.scene.add(group);
       this.built.set(key, group ?? null);
+      this._detail.set(key, full);
     }
     // drop cells far behind us (hysteresis +2 so the edge doesn't flicker)
     for (const [key, group] of this.built) {
       const [cx, cz] = key.split(',').map(Number);
-      if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > this.viewChunks + 2) {
+      if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > outer + 2) {
         if (group) {
           this.scene.remove(group);
           group.traverse(o => { o.geometry?.dispose?.(); });
         }
         this.built.delete(key);
+        this._detail.delete(key);
       }
     }
   }

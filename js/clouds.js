@@ -36,17 +36,24 @@ import * as THREE from 'three';
 // the camera, which is why the sky looked empty. A real cumulus field is far
 // busier, so: many more bodies, and a field only wide enough that the ones you
 // can actually SEE are dense.
-const CLUSTERS = 46;             // drifting cloud bodies alive at once
-const PUFFS = [6, 8];            // sprites per cluster (inclusive range)
+const CLUSTERS = 120;            // drifting cloud bodies alive at once
+// A real cumulus is a pile of many lobes, not six blobs — more puffs per body
+// is what turns a smudge into cauliflower with an actual silhouette.
+const PUFFS = [11, 16];          // sprites per cluster (inclusive range)
 const FIELD = 2600;              // half-width of the field
 const PERIOD = FIELD * 2;        // the torus the clusters tile the sky with
 // Sit the deck low enough that it fills the sky ABOVE THE HORIZON from the
 // ground (the chase camera pitches down, so anything directly overhead is out
 // of frame) and low enough that the helicopter can climb into and above it.
-const ALT = [190, 400];          // cluster altitude band, meters
-const SPREAD_H = 115;            // puff scatter around the cluster axis, meters
-const SPREAD_V = 52;             // …and vertically: flat base, towering top
-const PUFF_D = [155, 255];       // puff sprite diameter, meters
+// Two decks, like a real sky: fair-weather cumulus low down that the
+// helicopter can climb through, and a thinner, wider layer above them.
+const ALT = [230, 620];          // cluster altitude band, meters
+const SPREAD_H = 210;            // puff scatter around the cluster axis, meters
+const SPREAD_V = 88;             // …and vertically: flat base, towering top
+// Real fair-weather cumulus run 0.5–2 km across. At 155–255 m these read as
+// dabs of mist; the bodies now measure hundreds of metres, which is also what
+// lets you fly INTO one instead of past it.
+const PUFF_D = [300, 520];       // puff sprite diameter, meters
 const WIND = { x: 2.7, z: 0.95 };// prevailing westerly, drifting east-southeast
 
 // ---- look ----

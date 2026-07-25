@@ -253,17 +253,23 @@ function _crashList() {
 //   2. The fog wall must always end INSIDE that radius. It sat at 900 m while
 //      the city was only built to 720 m, so the world visibly stopped against
 //      bare sky — exactly the "blue plane where nothing is loaded" report.
-const GROUND_CHUNKS = 6, AIR_CHUNKS_MAX = 11;
+const GROUND_CHUNKS = 6, AIR_CHUNKS_MAX = 10, AIR_FAR_MAX = 20;
 function updateHorizon(dt) {
   if (!world || !sky) return;
   const gs = getSettings();
   const base = gs.viewChunks ?? GROUND_CHUNKS;
   const alt = game.heli ? Math.max(0, game.heli.y) : 0;
+  const climb = Math.min(1, alt / 300);
   // climb 0 → 300 m widens the view from the ground setting to the air cap
-  const want = Math.round(base + (AIR_CHUNKS_MAX - base) * Math.min(1, alt / 300));
+  const want = Math.round(base + (AIR_CHUNKS_MAX - base) * climb);
   world.viewChunks = Math.max(base, want);
-  world.chunksPerFrame = alt > 20 ? 6 : 2;   // keep the edge ahead of the nose
-  const radius = world.viewChunks * 120;
+  // …and unrolls a ground-only ORTHO ring far beyond it. That ring is one
+  // textured quad per cell, so it costs almost nothing, and since the aerial
+  // photo already contains the roads and roofs it reads as real city out to
+  // kilometres — which is what stops the world ending in mid-air.
+  world.farChunks = Math.round(AIR_FAR_MAX * climb);
+  world.chunksPerFrame = alt > 20 ? 8 : 2;   // keep the edge ahead of the nose
+  const radius = (world.viewChunks + world.farChunks) * 120;
   // haze reaches 88 % of the built radius: geometry has fully dissolved before
   // the streamed edge, so there is nothing to notice
   sky.fogScale = (radius * 0.88) / 900;
@@ -600,7 +606,10 @@ function stepGame(dt) {
     // reads the raw keys instead — otherwise ↑ would also pitch the nose down.
     const k = input.keys;
     const ctl = {
-      pitch: (k.has('KeyS') ? 1 : 0) - (k.has('KeyW') ? 1 : 0),
+      // helicopter.js: pitch +1 = stick FORWARD (nose down, accelerate along
+      // the heading). W must therefore be +1 — it was mapped to −1, which
+      // flew the machine backwards.
+      pitch: (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0),
       roll:  (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0),
       yaw:   (k.has('ArrowRight') ? 1 : 0) - (k.has('ArrowLeft') ? 1 : 0),
       lift:  (k.has('ArrowUp') ? 1 : 0) - (k.has('ArrowDown') ? 1 : 0),
@@ -652,7 +661,7 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v11-horizon',   // bump on risky changes — tells us which code a tab runs
+  build: 'v12-cumulus',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   cam: () => ({ camDist, camPitch, camYaw }),
