@@ -1,4 +1,4 @@
-// ---- Audio: one-shot SFX + a fully procedural car engine (v2: virtual gears) ----
+// ---- Audio: one-shot SFX, city bed, procedural car engine + heli rotor ----
 // One AudioContext for the whole game. Browsers park fresh contexts in
 // 'suspended' until a user gesture, so main wires initAudio() to every
 // click/keydown — it creates the context once and merely resumes it after
@@ -12,6 +12,15 @@
 // maps straight to pitch, it picks a GEAR, and pitch follows in-gear revs —
 // so accelerating climbs-drops-climbs like a real drivetrain instead of one
 // long glissando.
+//
+// v4 adds the CITY layer, and it is deliberately three things and not thirty:
+//   · one looping sample bed (city_ambience) that ducks when you drive fast,
+//   · ONE procedural low rumble standing in for all nearby traffic — a
+//     PannerNode per AI car would be 45 voices of mush at 45× the cost, and
+//     you cannot localise tyre roar anyway, only its density,
+//   · one procedural helicopter rotor (LFO-gated noise) — a rotor is a gate
+//     rate and a filter, i.e. exactly the two things a sample can't follow
+//     while the machine spools up and flies away.
 
 let ctx = null;      // the one AudioContext (created on first gesture)
 let master = null;   // master gain — setVolume() scales everything at once
@@ -30,7 +39,11 @@ export function initAudio() {
   }
   // we are called FROM user gestures, so resume() is legal here (and a no-op
   // once running) — this is the whole trick that satisfies autoplay policy
-  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  if (ctx.state === 'suspended') ctx.resume().then(ambBuild).catch(() => {});
+  else if (ctx.state === 'running') ambBuild();
+  // ...and THAT is why ambBuild is called from here: main boots the ambience
+  // during load, long before the first click, so the wish is remembered and
+  // the loop actually starts on whichever gesture finally unlocks the context.
 }
 
 export function setVolume(v) {
@@ -46,6 +59,16 @@ export function sfx(name, vol = 1) {
   if (buf === null) { fallback(name, vol); return; }   // known missing
   // first request: fetch+decode exactly once and play on arrival — ~100 ms of
   // first-play latency beats dropping the cue; every later call is instant
+  loadBuffer(name).then(b => { if (b) playBuffer(b, vol); else fallback(name, vol); });
+}
+
+// One fetch+decode per name for the whole session, shared by sfx() and the
+// looping ambience. NEVER rejects: a missing file resolves to null and is
+// remembered as null, so a bare checkout costs one 404 per sound, not one per
+// call. Only reached on a cache miss, so the promise it allocates is rare.
+function loadBuffer(name) {
+  const have = buffers.get(name);
+  if (have !== undefined) return Promise.resolve(have);
   let p = loading.get(name);
   if (!p) {
     p = fetch('assets/sounds/' + name + '.mp3')
@@ -56,7 +79,16 @@ export function sfx(name, vol = 1) {
       .finally(() => loading.delete(name));
     loading.set(name, p);
   }
-  p.then(b => { if (b) playBuffer(b, vol); else fallback(name, vol); });
+  return p;
+}
+
+// Two horns, picked at random per honk so a jam doesn't sound like one car
+// with a stutter: horn_far is the polite "the light is green" beep, horn_angry
+// is somebody actually furious. Volume jitters ±12 % for the same reason.
+// Callers (traffic AI, the player's key) never choose — the mix decides.
+export function horn() {
+  const angry = Math.random() < 0.4;   // most honks are the mild one
+  sfx(angry ? 'horn_angry' : 'horn_far', (angry ? 0.75 : 0.6) * (0.88 + Math.random() * 0.24));
 }
 
 function playBuffer(buf, vol) {
@@ -69,12 +101,18 @@ function playBuffer(buf, vol) {
   src.start();
 }
 
-// Enter/exit MUST give feedback whether or not the ElevenLabs assets were
-// ever generated: a 90 ms slice of lowpassed noise with a fast decay reads
-// as a car-door thunk. Open is brighter (the latch click), close sits low
-// (the solid slam). Everything else missing stays silent by design.
+// Cues the PLAYER acts on must survive a bare checkout with no generated
+// assets — doors (did I get in?) and horns (traffic is yelling at me) both
+// carry information, so both get a synthesized stand-in. Everything else
+// missing stays silent by design.
 function fallback(name, vol) {
-  if (name !== 'door_open' && name !== 'door_close') return;
+  if (name === 'door_open' || name === 'door_close') doorThunk(name, vol);
+  else if (name === 'horn' || name === 'horn_far' || name === 'horn_angry') hornBeep(name, vol);
+}
+
+// A 90 ms slice of lowpassed noise with a fast decay reads as a car door.
+// Open is brighter (the latch click), close sits low (the solid slam).
+function doorThunk(name, vol) {
   const t = ctx.currentTime;
   const src = ctx.createBufferSource();
   src.buffer = noiseBuffer();
@@ -90,6 +128,30 @@ function fallback(name, vol) {
   src.start(t, Math.random() * 0.5, 0.09);   // random slice → repeats differ
 }
 
+// A real car horn is two reeds a rough minor third apart (≈ 2:2.4) — that
+// beating dyad, not the pitch, is what makes it read as "car" instead of
+// "beep". Distance is faked the way distance actually works: the far horn
+// loses its top end to a lowpass and most of its level, the angry one holds
+// longer and stays bright.
+function hornBeep(name, vol) {
+  const t = ctx.currentTime;
+  const far = name === 'horn_far';
+  const dur = name === 'horn_angry' ? 0.85 : 0.3;
+  const a = ctx.createOscillator(); a.type = 'square'; a.frequency.value = far ? 392 : 415;
+  const b = ctx.createOscillator(); b.type = 'square'; b.frequency.value = (far ? 392 : 415) * 1.19;
+  const f = ctx.createBiquadFilter();
+  f.type = 'lowpass'; f.frequency.value = far ? 900 : 2600; f.Q.value = 0.8;
+  const g = ctx.createGain();
+  const peak = (far ? 0.11 : 0.2) * vol;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(peak, t + 0.012);   // hard attack — horns bark
+  g.gain.setValueAtTime(peak, t + dur);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.06);
+  a.connect(f); b.connect(f); f.connect(g); g.connect(master);
+  a.start(t); b.start(t); a.stop(t + dur + 0.08); b.stop(t + dur + 0.08);
+  b.onended = () => { a.disconnect(); b.disconnect(); f.disconnect(); g.disconnect(); };
+}
+
 // one second of shared white noise — door thunks and the engine's intake
 // hiss both loop/slice this single buffer, allocated once per session
 let _noise = null;
@@ -101,6 +163,91 @@ function noiseBuffer() {
     for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
   }
   return _noise;
+}
+
+// ---- looping city ambience ---------------------------------------------
+// The bed the whole mix sits on: one buffer, looped forever, at a level low
+// enough that you notice it only when it's gone. It DUCKS — quieter AND
+// duller — while you drive fast or a rotor is beating overhead, because both
+// physically drown the street out; the lowpass is what turns "turned down" into
+// "heard through a closed window", which is the difference between a mixing
+// desk move and a place. The duck factor is a single scalar shared by every
+// source that can claim the mix, so two claims never stack into silence.
+const AMB = {
+  vol: 0.42,          // sits under engine + SFX; it is the floor, not a track
+  duckMin: 0.34,      // full duck leaves a third — never a hard mute, that reads as a bug
+  lpOpen: 16000,      // undisturbed street: no filtering worth the name...
+  lpShut: 900,        // ...fully ducked: the world outside the windscreen
+  fadeIn: 1.4, fadeOut: 0.5,
+  tau: 0.45,          // duck glide — slow, a mix move you feel and don't hear
+  step: 0.02,         // ignore duck wobble smaller than this (per-frame callers)
+};
+let amb = null;          // { src, lp, gain } while the loop is actually playing
+let ambWant = false;     // ambientStart() called and not yet stopped
+let ambPending = false;  // a load is in flight — don't start a second one
+let ambDuck = 1, ambDuckAt = -1;   // live duck factor + the last one WRITTEN
+let duckDrive = 0, duckHeli = 0;   // the two claimants, 0..1 each
+
+// exponential (pitch-linear) cutoff travel — a linear Hz ramp would spend
+// almost all its audible movement in the last 10 % of the slider
+const ambCut = () => AMB.lpShut
+  * Math.pow(AMB.lpOpen / AMB.lpShut, (ambDuck - AMB.duckMin) / (1 - AMB.duckMin));
+
+export function ambientStart() {
+  ambWant = true;
+  ambBuild();   // silently does nothing until the context is unlocked
+}
+
+export function ambientStop() {
+  ambWant = false;
+  if (!amb) return;
+  const a = amb;
+  amb = null;                     // duck writes go inert immediately
+  const t = ctx.currentTime;
+  a.gain.gain.cancelScheduledValues(t);
+  a.gain.gain.setTargetAtTime(0, t, AMB.fadeOut / 3);
+  setTimeout(() => {
+    try { a.src.stop(); } catch {}
+    a.src.disconnect(); a.lp.disconnect(); a.gain.disconnect();
+  }, AMB.fadeOut * 1000 + 250);
+}
+
+// graph: buffer(loop) → lowpass(duck) → gain(duck) → master
+function ambBuild() {
+  if (!ctx || ctx.state !== 'running' || amb || ambPending || !ambWant) return;
+  ambPending = true;
+  loadBuffer('city_ambience').then(buf => {
+    ambPending = false;
+    // the wish may have been cancelled, or the file may simply not exist yet
+    // (nobody has run gen-sounds.mjs) — either way, stay silent, never throw
+    if (!buf || !ambWant || amb || !ctx || ctx.state !== 'running') return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = ambCut(); lp.Q.value = 0.4;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;            // fade in — a bed that snaps on is a cue
+    src.connect(lp); lp.connect(gain); gain.connect(master);
+    // start at a random point in the loop so two sessions (or a stop/start)
+    // never hear the same ten seconds in the same order
+    src.start(t, Math.random() * buf.duration);
+    gain.gain.setTargetAtTime(AMB.vol * ambDuck, t, AMB.fadeIn / 3);
+    amb = { src, lp, gain };
+    ambDuckAt = ambDuck;
+  });
+}
+
+// Called from engineSet/heliSet — i.e. every frame — so it must cost nothing
+// when nothing changed: one max, one subtract, one compare, out.
+function duckUpdate() {
+  const d = duckDrive > duckHeli ? duckDrive : duckHeli;
+  ambDuck = 1 - (1 - AMB.duckMin) * d;
+  if (!amb || Math.abs(ambDuck - ambDuckAt) < AMB.step) return;
+  ambDuckAt = ambDuck;
+  const t = ctx.currentTime;
+  amb.gain.gain.setTargetAtTime(AMB.vol * ambDuck, t, AMB.tau);
+  amb.lp.frequency.setTargetAtTime(ambCut(), t, AMB.tau);
 }
 
 // ---- procedural engine loop --------------------------------------------
@@ -201,6 +348,7 @@ export function engineStop() {
   if (!eng) return;
   const e = eng;
   eng = null;                          // engineSet() goes inert immediately
+  duckDrive = 0; duckUpdate();         // out of the car → the street comes back
   const t = ctx.currentTime;
   e.gain.gain.cancelScheduledValues(t);
   e.gain.gain.setTargetAtTime(0, t, 0.05);
@@ -279,4 +427,181 @@ export function engineSet(speed01, throttle01) {
   // idle lope dies off with revs — ±25 cents at the bottom of a gear, none at
   // the top, so cruising in high gear stays clean and steady
   eng.lfoDepth.gain.setTargetAtTime(ENGINE.lopeCents * (1 - frac), t, tau);
+
+  // The city bed ducks with ROAD SPEED, not revs: coasting at 120 km/h with
+  // your foot off is just as loud inside the cabin as pulling, and ducking off
+  // the throttle instead would pump the whole mix on every gear change.
+  // Nothing below ~25 km/h ducks at all — crawling through town, you can still
+  // hear the town. (s = speed01, so 0.2·vmax ≈ 27 km/h, 0.7·vmax ≈ 96 km/h.)
+  const dd = (s - 0.2) / 0.5;
+  duckDrive = dd < 0 ? 0 : dd > 1 ? 1 : dd;
+  duckUpdate();
+}
+
+// ---- one rumble for ALL nearby traffic ----------------------------------
+// Forty-five AI cars must never become forty-five voices: you cannot pick a
+// single car out of city traffic by ear anyway, only sense how much of it is
+// around you. So this is ONE looping noise source through ONE lowpass, whose
+// level and cutoff track a scalar "how much traffic is close" — near traffic
+// is both louder AND brighter (you hear tyre hiss on top of the rumble), far
+// traffic is a formless low drone. Zero traffic leaves the graph silent but
+// alive; building/tearing it down as cars come and go would click.
+const HUM = {
+  vol: 0.09,          // ceiling, only reached when you're stood in a jam
+  cutLo: 110, cutHi: 520,
+  ref: 38,            // meters where one car counts as one "unit" of presence
+  nK: 4.2,            // √n / nK — the 12th car adds far less than the 2nd;
+                      // tuned so a busy junction (12 cars, 25 m) is the ceiling
+                      // and ordinary driving (6 cars, 45 m) sits at half of it
+  tau: 0.55,          // traffic density is a slow thing; glide slowly
+  step: 0.01,         // per-frame caller: ignore changes smaller than this
+};
+let hum = null, humAt = -1;
+
+// Sound power falls ~1/d and n incoherent sources sum as √n — this is that,
+// clamped to 0..1. Pure scalar, no allocation, safe against 0 cars / 0 dist.
+function humAmount(nCars, avgDist) {
+  if (!(nCars > 0)) return 0;
+  const d = avgDist > 6 ? avgDist : 6;        // a car "0 m away" is the player's own
+  const a = (HUM.ref / d) * (Math.sqrt(nCars) / HUM.nK);
+  return a > 1 ? 1 : a;
+}
+
+export function nearbyTrafficHum(nCars, avgDist) {
+  const a = humAmount(nCars, avgDist);
+  if (!hum) {
+    if (a < 0.004 || !ctx || ctx.state !== 'running') return;   // silence needs no graph
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer(); src.loop = true;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = HUM.cutLo; lp.Q.value = 0.9;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    src.connect(lp); lp.connect(gain); gain.connect(master);
+    src.start(ctx.currentTime, Math.random());
+    hum = { src, lp, gain };
+  }
+  if (Math.abs(a - humAt) < HUM.step) return;
+  humAt = a;
+  const t = ctx.currentTime;
+  // a^1.5: a couple of distant cars stay genuinely subliminal, the top of the
+  // range still gets there — a linear map makes light traffic too present
+  hum.gain.gain.setTargetAtTime(HUM.vol * a * Math.sqrt(a), t, HUM.tau);
+  hum.lp.frequency.setTargetAtTime(HUM.cutLo + (HUM.cutHi - HUM.cutLo) * a, t, HUM.tau);
+}
+
+// ---- procedural helicopter rotor ----------------------------------------
+// What makes a helicopter is not a tone, it's a RATE: each blade passing the
+// tail boom slaps the air, and the ear counts those slaps. So the voice is a
+// gate — bandpassed noise (the air) plus a low oscillator (the mass of the
+// disc) multiplied by an LFO running at the blade-slap rate, 7 Hz on a lazy
+// idle up to 22 Hz at flight revs. Two details do the heavy lifting:
+//   · the LFO is a PULSE-shaped periodic wave, not a sine. A sine gives a
+//     wobble; a narrow peak over a long trough gives a THUMP, which is what
+//     a rotor actually sounds like.
+//   · the body oscillator sits at an exact harmonic (6×) of the slap rate, so
+//     the tone and the thumps stay phase-locked as the machine spools up
+//     instead of drifting into a beat-frequency warble.
+// The lowpass opens with SPEED, not revs: hovering, you hear a muffled chop;
+// running at 200 km/h the blade slap turns hard and bright as the disc bites.
+// Everything moves on setTargetAtTime, so a rotor going from 0 to full and
+// back can never click, and heliSet() allocates nothing.
+const HELI = {
+  rateLo: 7, rateHi: 22,      // blade-slap Hz across rotor01 (contract)
+  oscMult: 6,                 // body tone = 6× slap → 42 Hz idle, 132 Hz flat out
+  whineMult: 11,              // turbine whine above that: 462 Hz → 1452 Hz
+  bandF: 480, bandQ: 0.6,     // where the air noise lives before the main lowpass
+  cutBase: 340, cutRotor: 420,// lowpass floor: 340 Hz stopped → 760 Hz at full revs
+  cutSpeedK: 4.5,             // ...× up to 4.5 as speed01 → 1 (≈ 3.4 kHz)
+  chopBase: 0.5, chopDepth: 0.5,   // gate: base ± depth·wave, so peaks reach 1
+  depthIdle: 0.55,            // slap depth at rest — softer, less "attack"
+  oscLevel: 0.55, whineLevel: 0.05,
+  vol: 0.2, volSpeed: 0.035,
+  tau: 0.09,                  // ~250 ms settle: a rotor has inertia, so should its sound
+};
+// Cosine partials, all in phase → a tall narrow peak and a long shallow
+// trough (WebAudio normalizes the result to ±1 for us). Allocated once at
+// module load, copied by createPeriodicWave, never touched per frame.
+const CHOP_REAL = new Float32Array([0, 1, 0.82, 0.58, 0.34, 0.16]);
+const CHOP_IMAG = new Float32Array(CHOP_REAL.length);
+let heli = null;
+
+export function heliStart() {
+  if (!ctx || ctx.state !== 'running' || heli) return;
+  const t = ctx.currentTime;
+  const noise = ctx.createBufferSource();
+  noise.buffer = noiseBuffer(); noise.loop = true;
+  const band = ctx.createBiquadFilter();
+  band.type = 'bandpass'; band.frequency.value = HELI.bandF; band.Q.value = HELI.bandQ;
+  const osc = ctx.createOscillator();             // the disc's mass
+  osc.type = 'triangle'; osc.frequency.value = HELI.rateLo * HELI.oscMult;
+  const oscGain = ctx.createGain(); oscGain.gain.value = HELI.oscLevel;
+  const whine = ctx.createOscillator();           // turbine — NOT gated: the
+  whine.type = 'sawtooth';                        // engine screams continuously,
+  whine.frequency.value = HELI.rateLo * HELI.oscMult * HELI.whineMult;  // only
+  const whineGain = ctx.createGain();             // the blades chop the air
+  whineGain.gain.value = 0;                       // (fades in with revs)
+  const lfo = ctx.createOscillator();
+  lfo.setPeriodicWave(ctx.createPeriodicWave(CHOP_REAL, CHOP_IMAG));
+  lfo.frequency.value = HELI.rateLo;
+  const lfoDepth = ctx.createGain();
+  lfoDepth.gain.value = HELI.chopDepth * HELI.depthIdle;
+  const chop = ctx.createGain();
+  chop.gain.value = HELI.chopBase;   // LFO output ADDS to this intrinsic value
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = HELI.cutBase; lp.Q.value = 0.8;
+  const gain = ctx.createGain();
+  gain.gain.value = 0;               // born silent; heliSet() drives it up
+  noise.connect(band); band.connect(chop);
+  osc.connect(oscGain); oscGain.connect(chop);
+  lfo.connect(lfoDepth); lfoDepth.connect(chop.gain);
+  chop.connect(lp);
+  whineGain.connect(lp); whine.connect(whineGain);
+  lp.connect(gain); gain.connect(master);
+  noise.start(t, Math.random()); osc.start(t); whine.start(t); lfo.start(t);
+  heli = { noise, band, osc, oscGain, whine, whineGain, lfo, lfoDepth, chop, lp, gain };
+}
+
+export function heliStop() {
+  if (!heli) return;
+  const h = heli;
+  heli = null;                       // heliSet() goes inert immediately
+  duckHeli = 0; duckUpdate();        // the sky quietens, the street returns
+  const t = ctx.currentTime;
+  h.gain.gain.cancelScheduledValues(t);
+  h.gain.gain.setTargetAtTime(0, t, 0.08);   // spool-down is a fade, not a cut
+  setTimeout(() => {
+    try { h.noise.stop(); h.osc.stop(); h.whine.stop(); h.lfo.stop(); } catch {}
+    h.noise.disconnect(); h.band.disconnect(); h.osc.disconnect(); h.oscGain.disconnect();
+    h.whine.disconnect(); h.whineGain.disconnect(); h.lfo.disconnect(); h.lfoDepth.disconnect();
+    h.chop.disconnect(); h.lp.disconnect(); h.gain.disconnect();
+  }, 500);
+}
+
+// Per frame while a helicopter is running. rotor01 = spin-up fraction (0 =
+// stopped, 1 = flight revs), speed01 = |velocity|/vmax. Scalar math + param
+// writes only, zero allocations.
+export function heliSet(rotor01, speed01) {
+  if (!heli) return;
+  const r = rotor01 < 0 ? 0 : rotor01 > 1 ? 1 : rotor01;
+  const sp = speed01 < 0 ? 0 : speed01 > 1 ? 1 : speed01;
+  const t = ctx.currentTime, tau = HELI.tau;
+  const rate = HELI.rateLo + (HELI.rateHi - HELI.rateLo) * r;
+  const fBody = rate * HELI.oscMult;
+  heli.lfo.frequency.setTargetAtTime(rate, t, tau);
+  heli.osc.frequency.setTargetAtTime(fBody, t, tau);
+  heli.whine.frequency.setTargetAtTime(fBody * HELI.whineMult, t, tau);
+  heli.whineGain.gain.setTargetAtTime(HELI.whineLevel * r * r, t, tau);  // late, quiet
+  // slap deepens as the blades load up — a barely-turning rotor whooshes,
+  // a working one cracks
+  heli.lfoDepth.gain.setTargetAtTime(
+    HELI.chopDepth * (HELI.depthIdle + (1 - HELI.depthIdle) * r), t, tau);
+  heli.lp.frequency.setTargetAtTime(
+    (HELI.cutBase + HELI.cutRotor * r) * Math.pow(HELI.cutSpeedK, sp), t, tau);
+  // pow(r, 0.7): audible early in the spin-up (you hear it before you can fly
+  // it), then the last stretch adds little — matches how lift feels
+  heli.gain.gain.setTargetAtTime(HELI.vol * Math.pow(r, 0.7) + HELI.volSpeed * sp, t, tau);
+  // rotor noise beats the street flat once it's really turning
+  duckHeli = r;
+  duckUpdate();
 }

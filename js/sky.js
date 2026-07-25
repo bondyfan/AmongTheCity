@@ -12,7 +12,15 @@
 //   makeSky(scene)                     → sky { dome, hemi, sun, target }
 //   updateSky(sky, tod, camera, scene) — tod 0..1 (0 = midnight); every frame
 //   sunDirOf(tod, out)                 → unit sun direction (x east, z south)
+//   nightKOf(tod)                      → 0 day … 1 deep night (same curve)
 //   todClock(tod)                      → "HH:MM" for the HUD
+//
+// Two live values hang off the sky object for everyone else to read rather
+// than re-derive: `sky.sunDir` and `sky.nightK`. clouds.js lights its puffs
+// from exactly those, which is the whole point — the clouds, the streets and
+// the fog must agree about where the sun is, and guessing night back out of
+// sun.intensity (as callers used to) breaks the moment the intensity curve is
+// retuned.
 
 import * as THREE from 'three';
 
@@ -159,6 +167,15 @@ export function sunDirOf(tod, out = new THREE.Vector3()) {
   return out.set(Math.cos(elev) * Math.cos(az), Math.sin(elev), Math.cos(elev) * Math.sin(az));
 }
 
+// How dark it is, on the same continuous curve the lights and the fog use:
+// 0 while the sun is well up, 1 once it is properly under. Exported so
+// modules that only need the darkness (clouds) don't have to reach into the
+// light rig for it, and so it can be sampled for a time of day nobody is
+// currently rendering.
+export function nightKOf(tod) {
+  return nightAtHour((((tod % 1) + 1) % 1) * 24);
+}
+
 // "HH:MM" for the HUD clock. Floors to the minute; tolerates tod outside 0..1.
 // The epsilon absorbs float error at exact minute boundaries (23:59 read as
 // 23:58 without it — 1439/1440 * 1440 lands a hair under the integer).
@@ -190,7 +207,9 @@ export function makeSky(scene) {
   return {
     dome, hemi, sun, target: sun.target,
     sunDir: new THREE.Vector3(0.704, 0.557, 0.44), // live direction, updated per frame
-    cloudAmt: 0.82,   // main may thin/hide the clouds (0 = clear sky)
+    nightK: 0,        // live darkness 0..1, updated per frame (clouds read it)
+    cloudAmt: 0.82,   // main may thin/hide the DOME's painted clouds (0 = clear);
+                      // the 3D cluster field in clouds.js is separate from these
     time: 0, _last: 0, // internal cloud-drift clock (wall time, clamped)
   };
 }
@@ -210,6 +229,7 @@ export function updateSky(sky, tod, camera, scene) {
 
   const dir = sunDirOf(tod, sky.sunDir);
   const nightK = nightAtHour((((tod % 1) + 1) % 1) * 24);
+  sky.nightK = nightK; // published for clouds.js & co — see the header note
   const sunElev = Math.asin(Math.max(-1, Math.min(1, dir.y))) * 180 / Math.PI;
 
   // Night bites hard: the world's own lights drop close to nothing after dark

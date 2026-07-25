@@ -15,11 +15,14 @@ import { Vehicles, driveStep, lampMats } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
-import { initAudio, sfx, engineStart, engineStop, engineSet, setVolume } from './audio.js';
+import { initAudio, sfx, engineStart, engineStop, engineSet, setVolume,
+  heliStart, heliStop, heliSet, ambientStart, nearbyTrafficHum } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
 import { Pedestrians } from './pedestrians.js';
 import { PostFX } from './postfx.js';
+import { Helicopter, makeHelipad } from './helicopter.js';
+import { Clouds } from './clouds.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -49,11 +52,13 @@ const game = {
   tod: START_TOD,       // 0..1 day clock
   mode: 'boot',         // boot → play
   car: null,            // the car the player is driving (null = on foot)
+  heli: null,           // the helicopter being flown (null = not flying)
 };
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let peds = null;
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
+let heli = null, clouds = null;   // the helipad's machine, and the sky to fly it through
 const parked = [];      // cars placed by us, enterable
 
 // ---------- camera rig ----------
@@ -90,6 +95,16 @@ function updateCamera(dt) {
     height = 2.4 + speedK * 1.1;
     tx = c.x; ty = (c.mesh?.position.y ?? 0) + 1.1; tz = c.z;
     fov = BASE_FOV + speedK * 13;   // the road starts to RUSH at speed
+  } else if (game.heli) {
+    // flight: hang further back and higher so the machine reads against the
+    // ground rushing past, and widen the lens as speed builds
+    const h = game.heli;
+    wantYaw = h.heading;
+    const speedK = Math.min(1, Math.hypot(h.vx ?? 0, h.vz ?? 0) / 62);
+    dist = camDist + 6 + speedK * 6;
+    height = 3.4 + speedK * 1.5;
+    tx = h.x; ty = h.y + 2.2; tz = h.z;
+    fov = BASE_FOV + speedK * 10;
   } else {
     wantYaw = player.heading;
     dist = camDist;
@@ -100,7 +115,8 @@ function updateCamera(dt) {
   // auto-follow: yaw eases toward the travel heading only while moving and
   // the mouse hasn't steered for a moment — with mouse look on, the player's
   // hand owns the camera and auto-follow must not wrestle it back
-  const moving = game.car ? Math.abs(game.car.speed) > 1.5 : player.speed > 0.5;
+  const moving = game.car ? Math.abs(game.car.speed) > 1.5
+    : game.heli ? true : player.speed > 0.5;
   const lookIdle = performance.now() * 0.001 - _lastLookT > 1.6;
   if (moving && !input.mouse.right && lookIdle) {
     let d = wantYaw - camYaw;
@@ -152,6 +168,23 @@ input.onKey('KeyE', () => {
     $id('speedo').classList.add('hidden');
     engineStop();
     sfx('door_close', 0.8);
+  } else if (game.heli) {
+    // step out of the helicopter — only with the skids down
+    if (game.heli.airborne) { ui_hint('Nejdřív přistaň'); return; }
+    player.setInCar(null);
+    player.pos.x = game.heli.x + 3; player.pos.z = game.heli.z + 3;
+    game.heli = null;
+    $id('speedo').classList.add('hidden');
+    heliStop?.();
+    sfx('door_close', 0.8);
+  } else if (heli && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5
+      && !heli.airborne) {
+    game.heli = heli;
+    player.setInCar(heli);              // rides along, hidden, like a car
+    $id('speedo').classList.remove('hidden');
+    sfx('door_open', 0.8);
+    sfx('heli_start', 0.75);
+    heliStart?.();
   } else {
     const car = nearestEnterableCar();
     if (!car) return;
@@ -166,6 +199,15 @@ input.onKey('KeyE', () => {
     setTimeout(() => { if (game.car) { sfx('engine_start', 0.7); engineStart(); } }, 350);
   }
 });
+
+// brief nudge in the action-hint slot (e.g. "land first")
+let _hintHold = 0;
+function ui_hint(text) {
+  const el = $id('action-hint');
+  el.textContent = text;
+  el.classList.remove('hidden');
+  _hintHold = 1.6;
+}
 
 // ---------- parked cars around the spawn ----------
 // A handful of cars wait on the forecourt and the nearby parking lots, so the
@@ -207,7 +249,9 @@ let _beamL = null, _beamR = null, _beamsOn = false;
 const _beamTarget = new THREE.Object3D();
 function updateNightLights(dt) {
   // how dark it is, read off the sun the sky module already computes
-  const nightK = sky ? Math.max(0, Math.min(1, 1 - (sky.sun?.intensity ?? 1.8) / 0.6)) : 0;
+  // sky.js publishes the authoritative night curve — deriving it from
+  // sun.intensity broke the moment that curve was retuned
+  const nightK = sky?.nightK ?? 0;
   // street lamps: one shared material drives every instanced lamp head in the
   // city, so dusk lights the whole map with a single assignment
   const lm = world?.mats?.lampHead;
@@ -253,13 +297,31 @@ function updateHud(dt) {
   $id('tod-clock').textContent = todClock(game.tod);
   if (game.car) {
     $id('speed-num').textContent = Math.round(Math.abs(game.car.speed) * 3.6);
+    $id('speed-unit').textContent = 'km/h';
+  } else if (game.heli) {
+    // in flight the readout becomes an altimeter with the airspeed beside it,
+    // so the trailing unit has to switch too (it used to read "137 m km/h")
+    const kmh = Math.round(Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) * 3.6);
+    $id('speed-num').textContent = `${kmh}`;
+    $id('speed-unit').textContent = `km/h · ${Math.round(game.heli.y)} m`;
   }
   // action hint, re-checked a few times a second
   hintT -= dt;
   if (hintT <= 0) {
     hintT = 0.2;
     const hint = $id('action-hint');
-    if (game.car) {
+    if (_hintHold > 0) { _hintHold -= 0.2; }
+    else if (game.heli) {
+      hint.innerHTML = game.heli.airborne
+        ? '<kbd>↑</kbd><kbd>↓</kbd> stoupání · <kbd>WASD</kbd> let · <kbd>←</kbd><kbd>→</kbd> otáčení'
+        : '<kbd>E</kbd> vystoupit · <kbd>↑</kbd> vzlet';
+      hint.classList.remove('hidden');
+    }
+    else if (heli && !game.car && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5) {
+      hint.innerHTML = '<kbd>E</kbd> nastoupit do vrtulníku';
+      hint.classList.remove('hidden');
+    }
+    else if (game.car) {
       hint.innerHTML = '<kbd>E</kbd> vystoupit';
       hint.classList.remove('hidden');
     } else {
@@ -282,6 +344,7 @@ setTimeout(() => { const el = $id('location-name'); if (el) el.style.opacity = '
 // open, so its controls stay clickable.
 renderer.domElement.addEventListener('click', () => {
   initAudio();
+  ambientStart?.();
   if (game.mode !== 'play') return;
   if (document.body.dataset.panelOpen) return;
   if (getSettings().mouseLook && !input.locked) renderer.domElement.requestPointerLock();
@@ -346,6 +409,13 @@ async function boot() {
   traffic = new Traffic(city, vehicles);
   minimap = new Minimap($id('minimap'), city);
   peds = new Pedestrians(scene, city);
+  clouds = new Clouds(scene);
+  // The heliport: a pad on the open forecourt apron east of the hall, clear of
+  // the bus stands, with the machine sitting on it — visible the moment you
+  // spawn, so the sky is an obvious invitation rather than a secret.
+  const padX = SPAWN.x + 62, padZ = SPAWN.z - 16;
+  scene.add(makeHelipad(padX, padZ));
+  heli = new Helicopter(scene, padX, padZ, Math.PI * 0.75);
   placeParkedCars(city);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)
@@ -469,7 +539,22 @@ function stepGame(dt) {
   const focus = game.car ?? player.pos;
   world.update(dt, { x: focus.x, z: focus.z });
 
-  if (game.car) {
+  if (game.heli) {
+    // WASD flies the machine, the ARROWS work the collective and the pedals.
+    // input.moveX/moveZ alias the arrows onto WASD for walking, so flight
+    // reads the raw keys instead — otherwise ↑ would also pitch the nose down.
+    const k = input.keys;
+    const ctl = {
+      pitch: (k.has('KeyS') ? 1 : 0) - (k.has('KeyW') ? 1 : 0),
+      roll:  (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0),
+      yaw:   (k.has('ArrowRight') ? 1 : 0) - (k.has('ArrowLeft') ? 1 : 0),
+      lift:  (k.has('ArrowUp') ? 1 : 0) - (k.has('ArrowDown') ? 1 : 0),
+    };
+    game.heli.update(dt, ctl, world);
+    player.update(dt, { input, camYaw, world });   // stays glued to the cabin
+    heliSet?.(Math.min(1, (game.heli.rotorSpeed ?? 0) / 60),
+      Math.min(1, Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) / 62));
+  } else if (game.car) {
     const gas = -input.moveZ;
     driveStep(game.car, {
       gas,                                     // W forward, S reverse/brake
@@ -484,7 +569,18 @@ function stepGame(dt) {
   vehicles.update(dt);
   traffic.update(dt, player.pos, game.car);
   peds.update(dt, focus);
+  if (heli && !game.heli) heli.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
+  clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
   updateNightLights(dt);
+  // one cheap rumble for the whole nearby fleet — never per-car audio
+  if (traffic) {
+    let n = 0, sum = 0;
+    for (const c of traffic.cars) {
+      const d = Math.hypot(c.x - focus.x, c.z - focus.z);
+      if (d < 90) { n++; sum += d; }
+    }
+    nearbyTrafficHum?.(n, n ? sum / n : 999);
+  }
 
   updateCamera(dt);
   updateSky(sky, game.tod, camera, scene);
@@ -500,11 +596,12 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v8-glow',   // bump on risky changes — tells us which code a tab runs
+  build: 'v9-heli',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   cam: () => ({ camDist, camPitch, camYaw }),
   get postfx() { return postfx; },
+  get heli() { return heli; }, get clouds() { return clouds; },
   get player() { return player; }, get world() { return world; },
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
   get parked() { return parked; }, get peds() { return peds; },

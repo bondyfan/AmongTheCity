@@ -17,6 +17,11 @@
 // mats.ortho swaps the ground quad for a ČÚZK aerial photo; mats.facades
 // swaps flat building walls for a shared procedural window atlas.
 //
+// v4: woods are no longer green paint — every wood/forest polygon (and every
+// park big enough to have a canopy) scatters real trees into the chunk's tree
+// InstancedMeshes, and its fill darkens to a forest floor so the gaps between
+// the trunks read as shade instead of meadow.
+//
 // Color discipline: renderer output is sRGB with three's color management on,
 // so every palette hex goes through Color.setHex() (sRGB → linear working
 // space) BEFORE it lands in a vertex-color attribute.
@@ -871,6 +876,99 @@ function treeTemplates() {
   return [_tTrunk.clone(), _tCrown.clone()];
 }
 
+// ---- forests: real trees where the data only says "green" ----
+// A wood drawn as a flat polygon reads as PAINT the moment you drive past it.
+// Kunětická hora and the Labe floodplain are supposed to feel like the woods
+// of AmongTheWoods, so every wood/forest polygon — and every park big enough
+// to be canopy rather than lawn — grows actual trees into the chunk's tree
+// InstancedMeshes.
+//
+// The scatter is a jittered grid ANCHORED TO THE WORLD, not to the polygon
+// bbox and not to the chunk: grid cell (gi,gj) always produces the same point
+// for the same polygon, so a tree belongs to exactly ONE chunk (half-open rect
+// test) and no rebuild — of this cell or of a lone neighbour — can duplicate,
+// drop or shift it. Every draw hashes the polygon _id, never Math.random, so
+// two machines streaming the same tile grow the identical forest.
+const FOREST_STEP = Math.sqrt(55);        // ≈7.42 m grid → one candidate per 55 m²
+const FOREST_INSET = 0.08;                // jitter window inset — trees in adjacent
+const FOREST_JIT = 1 - 2 * FOREST_INSET;  // cells keep ≥0.16·step ≈ 1.2 m apart
+const FOREST_CAP = 400;                   // per polygon per chunk: a 900 ha wood must
+                                          // not outspend the cell it happens to cross
+const PARK_WOODED = 4000;                 // m² — below this a "park" is lawn, and its
+                                          // mapped natural=tree points are the trees
+const WOOD_TYPES = new Set(['wood', 'forest']);
+const FOREST_FLOOR = 0x3a4a30;            // shade + litter under a canopy, not meadow
+
+// (polygon _id, grid cell) → seed for rnd(). Deliberately folded down to ~2^20:
+// rnd() multiplies its id by 374761393 in DOUBLE precision, so a full 32-bit
+// seed would lose the low bits of that product and neighbouring cells would
+// draw correlated jitter (visible as trees marching in rows).
+function forestSeed(id, gi, gj) {
+  let h = Math.imul(id ^ 0x9e3779b1, 2654435761);
+  h = Math.imul(h ^ Math.imul(gi, 0x27d4eb2d), 2246822519);
+  h = Math.imul(h ^ Math.imul(gj, 0x165667b1), 3266489917);
+  h ^= h >>> 15;
+  return (h >>> 0) % 1000003;
+}
+
+// which green polygons deserve a canopy. Parks are area-gated because the OSM
+// "park" bucket holds everything from Tyršovy sady down to a 200 m² traffic
+// island — filling those with 7 m trees would bury the streets they decorate.
+function woodedGreen(f) {
+  if (!f.o || f.o.length < 3) return false;
+  if (WOOD_TYPES.has(f.t)) return true;
+  if (f.t !== 'park') return false;
+  return (f._area ??= Math.abs(polygonArea(f.o))) >= PARK_WOODED;
+}
+
+// Scatter one wooded polygon's share of THIS chunk into `out` (the spots the
+// tree instancer consumes). Candidates come from the world grid over the part
+// of the polygon that reaches into the cell, then survive three rejects:
+// inside the outline, outside every hole, and — because floodplain woods are
+// mapped straight across the Labe — not standing in open water, which renders
+// 2 m below them.
+//
+// The rings are CLIPPED to the cell once up front rather than point-tested
+// against the full outline: a Labe wood carries thousands of nodes, and
+// ~290 candidates × 3000 edges per chunk was a 50 ms build spike measured on
+// the real tiles. Sutherland–Hodgman leaves the inside/outside answer exact
+// for points within the rect (all of ours are, by the half-open test below)
+// and hands back a ring that is usually a handful of vertices.
+function scatterForest(f, x0, z0, x1, z1, waters, out) {
+  if (!woodedGreen(f)) return;
+  const ring = clipRingToRect(f.o, x0, z0, x1, z1);
+  if (!ring) return;                          // polygon only grazes this cell
+  const holes = [];
+  for (const h of f.i ?? []) {
+    if (h.length < 3) continue;
+    const ch = clipRingToRect(h, x0, z0, x1, z1);
+    if (ch) holes.push(ch);
+  }
+  let ax = 1e9, bx = -1e9, az = 1e9, bz = -1e9;
+  for (const [x, z] of ring) {
+    if (x < ax) ax = x; if (x > bx) bx = x;
+    if (z < az) az = z; if (z > bz) bz = z;
+  }
+  let n = 0;
+  const gi0 = Math.floor(ax / FOREST_STEP), gj0 = Math.floor(az / FOREST_STEP);
+  for (let gi = gi0; gi * FOREST_STEP < bx; gi++) {
+    for (let gj = gj0; gj * FOREST_STEP < bz; gj++) {
+      if (n >= FOREST_CAP) return;        // capped, silently — a thin patch in a
+      const seed = forestSeed(f._id, gi, gj); // distant wood beats a frame spike
+      const x = (gi + FOREST_INSET + FOREST_JIT * rnd(seed, 1)) * FOREST_STEP;
+      const z = (gj + FOREST_INSET + FOREST_JIT * rnd(seed, 2)) * FOREST_STEP;
+      if (x < x0 || x >= x1 || z < z0 || z >= z1) continue; // half-open: one owner
+      if (!pointInPolygon(x, z, ring)) continue;
+      let ok = true;
+      for (const h of holes) if (pointInPolygon(x, z, h)) { ok = false; break; }
+      if (ok && waters.length && inWater(x, z, waters)) ok = false;
+      if (!ok) continue;
+      out.push({ x, z, seed, forest: true });
+      n++;
+    }
+  }
+}
+
 // ---- the chunk builder ----
 export function buildChunkMeshes(city, cx, cz, mats) {
   const key = cx + ',' + cz;
@@ -883,6 +981,11 @@ export function buildChunkMeshes(city, cx, cz, mats) {
 
   // -- water first: it decides the holes the ground must be carved with --
   const holes = [];
+  // the cell's water rings, already clipped to it: the forest scatter borrows
+  // them so it never plants a tree in the river (floodplain woods are mapped
+  // straight over the Labe), and it can only afford that test because these
+  // rings are cut down to this one cell instead of running the whole river
+  const wet = [];
   let flooded = false;                          // some ring swallowed the whole cell
   _c.setHex(BANK_COL);
   const kr = _c.r, kg = _c.g, kb = _c.b;
@@ -895,6 +998,7 @@ export function buildChunkMeshes(city, cx, cz, mats) {
       if (Math.abs(polygonArea(clip)) >= CHUNK * CHUNK * 0.999) flooded = true;
       else holes.push(clip);
       const iClip = (f.i ?? []).map((h) => clipRingToRect(h, x0, z0, x1, z1)).filter(Boolean);
+      wet.push({ o: clip, i: iClip });
       const surf = shapePoly(clip, iClip, WATER_Y, COLORS.water);
       if (surf) flat.push(surf);
       // islands are land: give them a lid just under the green-fill layer,
@@ -930,9 +1034,16 @@ export function buildChunkMeshes(city, cx, cz, mats) {
 
   // -- green/paved fills: only on the flat ground — the photo already shows
   // every lawn and parking lot, painting solid color on top would undo it --
+  const scatter = mats.trees !== false;
   if (!orthoGround) {
+    // A wood keeps its fill (the trees don't close ranks, and a bare base plane
+    // between the trunks would be worse) but it goes to forest-floor tone —
+    // meadow green glowing through a canopy is exactly what made these read as
+    // paint. With trees switched off the honest wood green comes back.
+    const greenOf = (f) => (scatter && WOOD_TYPES.has(f.t) ? FOREST_FLOOR
+      : COLORS.green[f.t] ?? (WOOD_TYPES.has(f.t) ? COLORS.green.wood : COLORS.green.grass));
     const polyKinds = [
-      [cell.green, LAYER_Y.green, (f) => COLORS.green[f.t] ?? COLORS.green.grass],
+      [cell.green, LAYER_Y.green, greenOf],
       [cell.paved, LAYER_Y.paved, (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza],
     ];
     for (const [list, y, pick] of polyKinds) for (const f of list) {
@@ -1012,23 +1123,37 @@ export function buildChunkMeshes(city, cx, cz, mats) {
   }
 
   // -- trees: two InstancedMeshes (trunks / crowns) sharing transforms --
-  // (settings can switch street trees off entirely — mats.trees === false)
-  const trees = mats.trees === false ? [] : cell.trees.filter((t) => t._home === key);
+  // Mapped street trees (natural=tree points, rendered from their home cell)
+  // and FOREST trees (scattered through every wooded polygon that reaches into
+  // this cell) share one batch — the draw-call budget is per chunk, not per
+  // source, and a floodplain cell would otherwise pay twice for the same pair
+  // of meshes. Settings can switch the whole lot off (mats.trees === false).
+  const trees = [];
+  if (scatter) {
+    for (const t of cell.trees) if (t._home === key)
+      trees.push({ x: t.p[0][0], z: t.p[0][1], seed: t._id, forest: false });
+    for (const f of cell.green) scatterForest(f, x0, z0, x1, z1, wet, trees);
+  }
   if (trees.length) {
     const [tg, cg] = treeTemplates();
     const trunk = new THREE.InstancedMesh(tg, mats.trunk, trees.length);
     const crown = new THREE.InstancedMesh(cg, mats.crown, trees.length);
     for (let i = 0; i < trees.length; i++) {
-      const t = trees[i], [x, z] = t.p[0];
-      const s = 0.75 + rnd(t._id, 4) * 0.6;     // 3–5.5 m street trees
-      _v.set(x, 0, z);
-      _q.setFromAxisAngle(_up, rnd(t._id, 5) * Math.PI * 2);
-      _s.set(s, s * (0.85 + rnd(t._id, 6) * 0.4), s);
+      const t = trees[i], id = t.seed;
+      // forest stock grows taller and leaner than the pruned boulevard rows
+      // (≈4–11 m against 3–5.5 m) and its crowns go deeper, darker green —
+      // a canopy that shades itself, not a line of park lollipops
+      const s = t.forest ? 0.95 + rnd(id, 4) * 0.95 : 0.75 + rnd(id, 4) * 0.6;
+      const yk = t.forest ? 1.0 + rnd(id, 6) * 0.55 : 0.85 + rnd(id, 6) * 0.4;
+      _v.set(t.x, 0, t.z);
+      _q.setFromAxisAngle(_up, rnd(id, 5) * Math.PI * 2);
+      _s.set(s, s * yk, s);
       _m4.compose(_v, _q, _s);
       trunk.setMatrixAt(i, _m4);
       crown.setMatrixAt(i, _m4);
-      _c.setHex(COLORS.treeCrown[t._id % COLORS.treeCrown.length]);
-      _c.offsetHSL(0, 0, (rnd(t._id, 7) - 0.5) * 0.08);
+      _c.setHex(COLORS.treeCrown[id % COLORS.treeCrown.length]);
+      if (t.forest) _c.offsetHSL(0.012, 0.05, -0.085 + (rnd(id, 7) - 0.5) * 0.06);
+      else _c.offsetHSL(0, 0, (rnd(id, 7) - 0.5) * 0.08);
       crown.setColorAt(i, _c);
     }
     // instance matrices live in world space — recompute bounds or the whole

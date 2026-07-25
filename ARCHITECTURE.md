@@ -322,3 +322,66 @@ response to throttle. Keep API identical (engineSet(speed01, throttle01)).
   THREE.Texture via TextureLoader/createImageBitmap, LRU-cache ~48 tiles
   (dispose evicted), same orthoGroundMesh(cx,cz) API, flat-color fallback
   while loading. public/data/ortho/*.jpg are DELETED (integrator does it).
+
+---
+
+# v4 contract (helicopter, clouds, forests, city sound)
+
+## js/helicopter.js — AGENT HELI
+```js
+export function makeHelipad(x, z)                  → THREE.Group (static pad)
+export class Helicopter {
+  constructor(scene, x, z, heading)
+  update(dt, ctl, world)   // ctl {pitch,roll,yaw,lift} each -1..1
+  x, z, y, heading, mesh, rotorSpeed, airborne
+}
+```
+Low-poly Robinson-ish: cabin (rounded box + glass band), tail boom, tail
+rotor, skids, main rotor = 2 thin blades on a hub (spin by rotorSpeed, blur
+to a translucent disc past ~40 rad/s). Flight model, arcade but weighty:
+lift builds with rotorSpeed (spin-up ~3 s after start); collective from
+ctl.lift (arrows ↑/↓) sets target climb rate ±9 m/s with lag; WASD is
+pitch/roll — the machine BANKS (mesh tilts up to 0.35 rad) and accelerates
+along its tilt, vmax ~62 m/s, drag pulls it back level; yaw eases with roll
+so turns coordinate. Ground: y never below world.heightAt(x,z); landing
+below 0.4 m of ground with descent <3 m/s settles it (airborne=false), a
+harder impact just clamps. Collision: buildings via world.collide at the
+fuselage radius while below 40 m. No per-frame allocation.
+Heliport: `makeHelipad` = dark asphalt disc + painted H + white ring +
+4 corner lights (emissive, toneMapped:false so bloom bites at night).
+
+## clouds — AGENT SKY (js/clouds.js + a small sky.js hook)
+```js
+export class Clouds { constructor(scene); update(dt, camera, sunDir, nightK) }
+```
+VOLUMETRIC-LOOKING without a raymarch: a field of ~90 camera-facing billboard
+puffs grouped into ~14 clusters drifting on the wind, each puff a soft radial
+CanvasTexture sprite, cluster puffs jittered in 3 axes so a cluster reads as a
+volume from any angle; sprites lit per-cluster by dot(sunDir, offsetDir) →
+bright rims toward the sun, grey-blue undersides; they sit 260–420 m up, cover
+±1800 m around the camera and RECENTER on it (infinite sky, no seams);
+opacity/tint follow nightK. Additive-free (normal blend, depthWrite false,
+fog false, renderOrder −900 so the city always draws over them).
+Also: helicopters must be able to fly INTO them — no special casing.
+
+## forests — AGENT FOREST (js/meshes.js only)
+Where the data says `green.t === 'wood'|'forest'` (and large `park`), scatter
+REAL trees instead of a flat green polygon: deterministic Poisson-ish points
+(hash the polygon _id, ~1 tree per 55 m², capped 400/chunk-polygon), each a
+2-cone-or-icosphere crown + trunk, size/hue jitter, clipped to the polygon
+(pointInPolygon) AND to the chunk rect, merged into the existing per-chunk
+tree InstancedMeshes. Keep the ground polygon underneath (dark forest floor).
+Respect mats.trees === false. This is what makes Kunětická hora and the
+Labe floodplain read like AmongTheWoods rather than green paint.
+
+## sounds — AGENT AUDIO2 (scripts/gen-sounds.mjs + js/audio.js)
+Generate via ElevenLabs (same pattern as the existing script, env
+ELEVENLABS_API_KEY) into assets/sounds/: `city_ambience` (10 s loopable urban
+hum: distant traffic, faint voices), `traffic_pass` (a single car passing at
+speed), `horn_far`, `horn_angry`, `heli_start`, `siren_far`.
+js/audio.js gains: `ambientStart()/ambientStop()` (looping city_ambience via
+a GainNode, ducked while driving fast), `nearbyTrafficHum(nCars, avgDist)`
+(a cheap procedural low rumble scaled by how much traffic is close — no
+per-car audio), `horn()` (random of the two), and a procedural HELI rotor
+loop `heliStart/heliStop/heliSet(rotor01, speed01)` (thumping LFO-gated
+noise + low osc, blade-slap rate follows rotor01).
