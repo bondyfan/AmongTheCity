@@ -1,0 +1,80 @@
+/* ---- Among The City ---- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1016; }
+body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-select: none; -webkit-user-select: none; }
+
+#game, #game canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+.hidden { display: none !important; }
+
+/* boot cover */
+#enter-overlay {
+  position: fixed; inset: 0; z-index: 40; background: #0d1016;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity 0.5s ease;
+}
+#enter-overlay.fade { opacity: 0; pointer-events: none; }
+.enter-inner { text-align: center; color: #cfd6e4; }
+.enter-spinner {
+  width: 46px; height: 46px; margin: 0 auto 14px;
+  border: 3px solid #232a38; border-top-color: #7fa8e8; border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#enter-label { font-size: 15px; letter-spacing: 0.4px; }
+
+/* HUD */
+#hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+#location-name {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  color: #e8ecf4; font-size: 15px; font-weight: 700; letter-spacing: 3px;
+  text-shadow: 0 1px 6px rgba(0,0,0,0.8); opacity: 0.92;
+  transition: opacity 1s ease;
+}
+#tod-clock {
+  position: absolute; top: 14px; right: 16px; color: #dfe6f2; font-size: 14px;
+  font-weight: 600; text-shadow: 0 1px 4px rgba(0,0,0,0.8); opacity: 0.85;
+}
+#speedo {
+  position: absolute; right: 22px; bottom: 96px; color: #f2f5fb; text-align: right;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.85);
+}
+#speedo #speed-num { font-size: 44px; font-weight: 800; letter-spacing: 1px; }
+#speedo small { font-size: 13px; margin-left: 5px; opacity: 0.75; }
+#action-hint {
+  position: absolute; left: 50%; bottom: 26vh; transform: translateX(-50%);
+  background: rgba(12, 16, 24, 0.82); color: #e8ecf4; padding: 8px 16px;
+  border-radius: 8px; font-size: 14px; border: 1px solid rgba(140,170,220,0.25);
+}
+#action-hint kbd, #controls-hint b {
+  background: #26304a; border-radius: 4px; padding: 1px 7px; margin: 0 2px;
+  font-family: inherit; font-size: 12.5px; color: #cfe0ff;
+}
+#minimap {
+  position: absolute; left: 16px; bottom: 16px; border-radius: 50%;
+  border: 2px solid rgba(150, 175, 215, 0.4);
+  background: rgba(10, 13, 19, 0.72);
+  box-shadow: 0 4px 18px rgba(0,0,0,0.5);
+}
+#controls-hint {
+  position: absolute; right: 16px; bottom: 14px; color: #aab6cc; font-size: 12px;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.9); opacity: 0.8;
+}
+
+#banner {
+  position: fixed; top: 20vh; left: 50%; transform: translateX(-50%);
+  color: #f5f7fb; font-size: 30px; font-weight: 800; letter-spacing: 6px;
+  text-shadow: 0 2px 14px rgba(0,0,0,0.9); z-index: 30; pointer-events: none;
+  animation: bannerIn 3.2s ease forwards;
+}
+@keyframes bannerIn {
+  0% { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  12% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@media (max-width: 760px) {
+  #controls-hint { display: none; }
+  #minimap { width: 150px; height: 150px; }
+}

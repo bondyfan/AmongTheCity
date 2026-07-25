@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Among The City — Pardubice</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+    { "imports": { "three": "./libs/three.module.js" } }
+  </script>
+</head>
+<body>
+  <div id="game"></div>
+
+  <!-- boot cover: hides the world while the city streams in around the spawn -->
+  <div id="enter-overlay">
+    <div class="enter-inner">
+      <div class="enter-spinner"></div>
+      <div id="enter-label">Přijíždíte do Pardubic…</div>
+    </div>
+  </div>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="location-name">PARDUBICE HLAVNÍ NÁDRAŽÍ</div>
+    <div id="tod-clock" title="Time of day"></div>
+    <div id="speedo" class="hidden"><span id="speed-num">0</span><small>km/h</small></div>
+    <div id="action-hint" class="hidden"></div>
+    <canvas id="minimap" width="220" height="220"></canvas>
+    <div id="controls-hint">
+      <b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>Shift</b> sprint ·
+      <b>myš (drag)</b> kamera · <b>kolečko</b> zoom
+    </div>
+  </div>
+
+  <div id="banner" class="hidden"></div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

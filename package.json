@@ -1,0 +1,16 @@
+{
+  "name": "among-the-city",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "fetch-city": "node scripts/fetch-city.mjs",
+    "build-city": "node scripts/build-city.mjs",
+    "test": "node --test tests/"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}
