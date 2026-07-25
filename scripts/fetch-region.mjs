@@ -7,7 +7,7 @@
 // processed by build-region.mjs into runtime-streamable tiles. Re-runnable:
 // existing raw files are skipped, so a crashed run just resumes.
 //
-// Usage: node scripts/fetch-region.mjs
+// Usage: node scripts/fetch-region.mjs   (builds the runtime tiles when done)
 
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 
@@ -105,3 +105,13 @@ for (const [tx, tz] of jobs) {
   await new Promise(r => setTimeout(r, 1800));
 }
 console.log(`done — ${done} tiles (${skipped} already present)`);
+
+// Build straight away. Downloading and building were two commands, and the
+// gap between them is exactly where a whole region went missing: 46 tiles sat
+// on disk while the game still shipped the 26 built days earlier, so every
+// village outside Pardubice looked unmapped. Downloading data the game cannot
+// see is not a useful end state, so the fetch owns the build.
+console.log('\nbuilding runtime tiles…');
+const { spawnSync } = await import('node:child_process');
+const r = spawnSync(process.execPath, ['scripts/build-region.mjs'], { stdio: 'inherit' });
+process.exit(r.status ?? 0);
