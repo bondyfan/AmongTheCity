@@ -117,9 +117,14 @@ export class CityWorld {
       if (b.y > 0.5) continue; // skyway/arch — walk under it
       pushed = this._pushOutOfPoly(pos, radius, b.o, b.i, true) || pushed;
     }
-    for (const w of cell.water) {
-      // inside water (and not on an island hole) → push back to the bank
-      pushed = this._pushOutOfPoly(pos, radius, w.o, w.i, false) || pushed;
+    // Water only exists at ground level — ON A BRIDGE the point stands x,z
+    // inside the Labe polygon yet 0.85 m above it, and pushing it to the bank
+    // was exactly the "cars jam on every bridge" bug. Deck height wins.
+    if (this.heightAt(pos.x, pos.z) < 0.3) {
+      for (const w of cell.water) {
+        // inside water (and not on an island hole) → push back to the bank
+        pushed = this._pushOutOfPoly(pos, radius, w.o, w.i, false) || pushed;
+      }
     }
     return pushed;
   }
