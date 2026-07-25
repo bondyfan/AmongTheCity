@@ -31,13 +31,21 @@
 import * as THREE from 'three';
 
 // ---- field shape ----
-const CLUSTERS = 14;             // drifting cloud bodies alive at once
+// 14 clusters over a ±1800 m field is one cloud per square kilometre — with
+// the far fade biting at 773 m that left one or two faint puffs anywhere near
+// the camera, which is why the sky looked empty. A real cumulus field is far
+// busier, so: many more bodies, and a field only wide enough that the ones you
+// can actually SEE are dense.
+const CLUSTERS = 46;             // drifting cloud bodies alive at once
 const PUFFS = [6, 8];            // sprites per cluster (inclusive range)
-const FIELD = 1800;              // half-width of the field: spread is ±1800 m
+const FIELD = 2600;              // half-width of the field
 const PERIOD = FIELD * 2;        // the torus the clusters tile the sky with
-const ALT = [260, 420];          // cluster altitude band, meters (contracted)
+// Sit the deck low enough that it fills the sky ABOVE THE HORIZON from the
+// ground (the chase camera pitches down, so anything directly overhead is out
+// of frame) and low enough that the helicopter can climb into and above it.
+const ALT = [190, 400];          // cluster altitude band, meters
 const SPREAD_H = 115;            // puff scatter around the cluster axis, meters
-const SPREAD_V = 34;             // …and vertically: flat base, towering top
+const SPREAD_V = 52;             // …and vertically: flat base, towering top
 const PUFF_D = [155, 255];       // puff sprite diameter, meters
 const WIND = { x: 2.7, z: 0.95 };// prevailing westerly, drifting east-southeast
 
@@ -47,13 +55,17 @@ const WIND = { x: 2.7, z: 0.95 };// prevailing westerly, drifting east-southeast
 // merely land high on the ACES curve — but they stay under the postfx bloom
 // threshold (1.0 AFTER tone mapping), because a blooming sky would wash the
 // whole frame the way the overbright lamps are meant to.
-const LIT = new THREE.Color(1.12, 1.10, 1.05);   // sun-facing cauliflower tops
-const SHADE = new THREE.Color(0.42, 0.48, 0.60); // grey-blue undersides
-const LIT_W = new THREE.Color(1.20, 0.78, 0.46); // golden hour: lit sides go amber
-const SHADE_W = new THREE.Color(0.50, 0.42, 0.50);
+// Contrast is the whole game here. The first pass used #dbdfe5 puffs against a
+// horizon sky that is ALSO pale grey-blue — measured as very nearly the same
+// value, so the field rendered correctly and still read as "no clouds". Tops
+// now sit clearly above the sky's brightness and undersides clearly below it.
+const LIT = new THREE.Color(1.45, 1.43, 1.38);   // sun-facing cauliflower tops
+const SHADE = new THREE.Color(0.26, 0.31, 0.44); // grey-blue undersides
+const LIT_W = new THREE.Color(1.55, 0.92, 0.52); // golden hour: lit sides go amber
+const SHADE_W = new THREE.Color(0.34, 0.27, 0.38);
 const LIT_N = new THREE.Color(0.13, 0.16, 0.24); // night: barely-there moonlit grey
 const SHADE_N = new THREE.Color(0.06, 0.07, 0.12);
-const OPACITY = 0.58;            // master alpha; puffs jitter ±18 % around it
+const OPACITY = 0.82;            // master alpha; puffs jitter ±18 % around it
 
 // ---- fades (the two reasons nothing ever pops) ----
 // FAR: derived from camera.far so the field can never straddle the far plane.
@@ -67,7 +79,7 @@ const OPACITY = 0.58;            // master alpha; puffs jitter ±18 % around it
 // is at least 1680 m out — 180 m beyond the widest fade we will ever use.
 // Its opacity is therefore exactly 0 on both sides of the jump: the recentre
 // moves geometry that is not on screen, whatever the camera is doing.
-const FADE_FAR_K = 0.89, FADE_CAP = 1500, FADE_IN_K = 0.62;
+const FADE_FAR_K = 0.89, FADE_CAP = 4200, FADE_IN_K = 0.72;
 // NEAR: a puff you fly into would otherwise fill the screen with one flat
 // smear and then blink out the instant the camera crossed its centre (a
 // point sprite behind the eye is simply gone). Fading it over its own radius

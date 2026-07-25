@@ -269,8 +269,12 @@ export function updateSky(sky, tod, camera, scene) {
   if (!scene.fog) scene.fog = new THREE.Fog(_fogC.getHex(), FOG_DAY.near, FOG_DAY.far);
   scene.fog.color.copy(_fogC);
   if (scene.fog.isFog) { // linear fog: the wall pulls in as night falls
-    scene.fog.near = FOG_DAY.near + (FOG_NIGHT.near - FOG_DAY.near) * nightK;
-    scene.fog.far = FOG_DAY.far + (FOG_NIGHT.far - FOG_DAY.far) * nightK;
+    // sky.fogScale lets the caller stretch the haze when the view radius grows
+    // (flight streams the city much further out). The wall must always sit
+    // INSIDE the streamed edge, or you see the world simply stop.
+    const fs = sky.fogScale ?? 1;
+    scene.fog.near = (FOG_DAY.near + (FOG_NIGHT.near - FOG_DAY.near) * nightK) * fs;
+    scene.fog.far = (FOG_DAY.far + (FOG_NIGHT.far - FOG_DAY.far) * nightK) * fs;
   }
   // background still matters behind the dome: postfx passes and clears see it,
   // and if main ever hides the dome the scene collapses to a sane flat sky

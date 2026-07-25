@@ -65,7 +65,10 @@ const parked = [];      // cars placed by us, enterable
 // Walk: orbit-follow — eases behind the player's heading, right-drag orbits
 // freely, wheel zooms. Drive: chase cam with speed-based distance + FOV kick.
 let camYaw = SPAWN.heading;
-let camPitch = 0.38;         // radians above horizontal
+// Measured: at 0.38 rad plus the height offset the camera looked 30° DOWN and
+// the TOP of the frame sat 2.7° BELOW the horizon — the sky was never on
+// screen at all, which is why the cloud field looked like it did not exist.
+let camPitch = 0.26;         // radians above horizontal
 // The character model is correctly scaled (1.77 m against a 4.9 m car), so
 // "the player looks huge" is FRAMING, not size: at 7.5 m with FOV 55 a person
 // filled 19 % of the screen height. Standing further back and higher halves
@@ -85,7 +88,7 @@ function updateCamera(dt) {
   camPitch = Math.max(0.06, Math.min(1.15, camPitch + drag.y * sens));
   camDist = Math.max(5, Math.min(26, camDist + input.takeWheel() * 1.4));
 
-  let tx, ty, tz, wantYaw, dist, height, fov;
+  let tx, ty, tz, wantYaw, dist, height, fov, pitchK = 1;
   if (game.car) {
     const c = game.car;
     // ease behind the car unless the player is dragging the camera around
@@ -96,14 +99,16 @@ function updateCamera(dt) {
     tx = c.x; ty = (c.mesh?.position.y ?? 0) + 1.1; tz = c.z;
     fov = BASE_FOV + speedK * 13;   // the road starts to RUSH at speed
   } else if (game.heli) {
-    // flight: hang further back and higher so the machine reads against the
-    // ground rushing past, and widen the lens as speed builds
+    // flight: hang back but stay close to the machine's own level — a chase
+    // cam perched high enough to look down at the fuselage crops the whole sky
+    // out of frame, and from a helicopter the sky IS half the view
     const h = game.heli;
     wantYaw = h.heading;
     const speedK = Math.min(1, Math.hypot(h.vx ?? 0, h.vz ?? 0) / 62);
     dist = camDist + 6 + speedK * 6;
-    height = 3.4 + speedK * 1.5;
-    tx = h.x; ty = h.y + 2.2; tz = h.z;
+    height = 1.4 + speedK * 0.8;
+    pitchK = 0.45;                    // flatten the orbit: horizon ~⅔ up frame
+    tx = h.x; ty = h.y + 1.4; tz = h.z;
     fov = BASE_FOV + speedK * 10;
   } else {
     wantYaw = player.heading;
@@ -124,10 +129,11 @@ function updateCamera(dt) {
     camYaw += d * Math.min(1, dt * (game.car ? 2.2 : 1.6));
   }
 
-  const flat = Math.cos(camPitch) * dist;
+  const pitch = camPitch * pitchK;
+  const flat = Math.cos(pitch) * dist;
   const px = tx + Math.sin(camYaw) * flat;
   const pz = tz + Math.cos(camYaw) * flat;
-  const py = ty + height + Math.sin(camPitch) * dist;
+  const py = ty + height + Math.sin(pitch) * dist;
   // keep the camera above ground/bridge decks
   const groundY = world.heightAt(px, pz) + 0.5;
   const want = new THREE.Vector3(px, Math.max(py, groundY), pz);
@@ -237,6 +243,42 @@ function placeParkedCars(city) {
 // every car the player can hit — traffic + parked, self filtered in driveStep
 function _crashList() {
   return traffic ? [...traffic.cars, ...parked] : parked;
+}
+
+// ---------- horizon: how far the world is built, and where the haze sits ----
+// Two rules, and the second is the one that was broken:
+//   1. From the air you see kilometres, so the streamed radius grows with
+//      altitude (and the per-frame build budget with it, or the edge would
+//      chase you).
+//   2. The fog wall must always end INSIDE that radius. It sat at 900 m while
+//      the city was only built to 720 m, so the world visibly stopped against
+//      bare sky — exactly the "blue plane where nothing is loaded" report.
+const GROUND_CHUNKS = 6, AIR_CHUNKS_MAX = 11;
+function updateHorizon(dt) {
+  if (!world || !sky) return;
+  const gs = getSettings();
+  const base = gs.viewChunks ?? GROUND_CHUNKS;
+  const alt = game.heli ? Math.max(0, game.heli.y) : 0;
+  // climb 0 → 300 m widens the view from the ground setting to the air cap
+  const want = Math.round(base + (AIR_CHUNKS_MAX - base) * Math.min(1, alt / 300));
+  world.viewChunks = Math.max(base, want);
+  world.chunksPerFrame = alt > 20 ? 6 : 2;   // keep the edge ahead of the nose
+  const radius = world.viewChunks * 120;
+  // haze reaches 88 % of the built radius: geometry has fully dissolved before
+  // the streamed edge, so there is nothing to notice
+  sky.fogScale = (radius * 0.88) / 900;
+  // The far plane serves the SKY as well as the city. Tied to the city radius
+  // it sat at 1632 m, while the cloud field spans ±2600 m — so 95 % of the
+  // clouds were clipped away before they could be seen (measured: 16 of 319
+  // puffs alive). The floor here lets the whole field render; near moves out
+  // to 0.5 m to buy back the depth precision that costs (nothing in a chase
+  // camera is closer than a metre anyway).
+  const wantFar = Math.max(radius * 1.7, 5200);
+  if (Math.abs(camera.far - wantFar) > 50 || camera.near < 0.4) {
+    camera.far = wantFar;
+    camera.near = 0.5;
+    camera.updateProjectionMatrix();
+  }
 }
 
 // ---------- night lights ----------
@@ -410,6 +452,19 @@ async function boot() {
   minimap = new Minimap($id('minimap'), city);
   peds = new Pedestrians(scene, city);
   clouds = new Clouds(scene);
+  // The world beyond the streamed chunks used to be bare sky, so from the air
+  // the built area showed as a hard-edged square floating in blue. This apron
+  // is a single huge quad at ground level in the fog's own colour: distance
+  // fog paints it the same shade as the horizon haze, so the city now dissolves
+  // into open country instead of stopping against nothing.
+  const apron = new THREE.Mesh(
+    new THREE.PlaneGeometry(60000, 60000),
+    new THREE.MeshBasicMaterial({ color: 0x8a9182, fog: true, depthWrite: false }));
+  apron.rotation.x = -Math.PI / 2;
+  apron.position.y = -0.6;      // under every road, kerb and water surface
+  apron.renderOrder = -800;     // before the city, after the sky dome
+  apron.frustumCulled = false;
+  scene.add(apron);
   // The heliport: a pad on the open forecourt apron east of the hall, clear of
   // the bus stands, with the machine sitting on it — visible the moment you
   // spawn, so the sky is an obvious invitation rather than a secret.
@@ -571,6 +626,7 @@ function stepGame(dt) {
   peds.update(dt, focus);
   if (heli && !game.heli) heli.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
+  updateHorizon(dt);
   updateNightLights(dt);
   // one cheap rumble for the whole nearby fleet — never per-car audio
   if (traffic) {
@@ -596,7 +652,7 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v9-heli',   // bump on risky changes — tells us which code a tab runs
+  build: 'v11-horizon',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   cam: () => ({ camDist, camPitch, camYaw }),

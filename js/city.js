@@ -22,6 +22,8 @@ export class CityWorld {
     this.queue = [];            // keys waiting to build, nearest first
     this._queued = new Set();
     this.viewChunks = VIEW_CHUNKS; // runtime-adjustable (settings: draw distance)
+    this.chunksPerFrame = CHUNKS_PER_FRAME; // raised in flight — the edge must
+                                            // stay ahead of a 60 m/s nose
     this._tileT = 0;            // ensureTiles throttle — 1 Hz, fetches run km ahead
     // Region tiles can land AFTER their chunks were already built: the boot
     // frames raise empty spawn cells before the first fetch returns, and long
@@ -53,7 +55,7 @@ export class CityWorld {
       }
     }
     // build a few per frame
-    for (let i = 0; i < CHUNKS_PER_FRAME && this.queue.length; i++) {
+    for (let i = 0; i < this.chunksPerFrame && this.queue.length; i++) {
       const key = this.queue.shift();
       this._queued.delete(key);
       const [cx, cz] = key.split(',').map(Number);
