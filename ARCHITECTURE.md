@@ -385,3 +385,50 @@ a GainNode, ducked while driving fast), `nearbyTrafficHum(nCars, avgDist)`
 per-car audio), `horn()` (random of the two), and a procedural HELI rotor
 loop `heliStart/heliStop/heliSet(rotor01, speed01)` (thumping LFO-gated
 noise + low osc, blade-slap rate follows rotor01).
+
+---
+
+# v5 contract: the world map (M)
+
+## public/data/places.json (done — produced by scripts/fetch-places.mjs)
+`{ origin, mPerLat, mPerLon, places: [{ n, t, r, p:[x,z], pop? }] }` — 429
+named settlements in local metres, sorted by rank r (0 city … 5 isolated
+dwelling). Fetch it alongside the city; a failure must leave the map working
+without labels.
+
+## js/worldmap.js — AGENT MAP
+```js
+export class WorldMap {
+  constructor(city, minimap)          // reads the LIVE city arrays like Minimap
+  toggle(force?)  → bool              // open/close; returns the new state
+  get open()                          // bool
+  update(player, car, heli)           // per-frame while open: markers + HUD
+  waypoint                            // {x, z} | null — main drives the HUD arrow
+}
+```
+Behaviour (model it on ../AmongTheWoods `#bigmap` + `Minimap.drawBig`, but
+this is a REGION map, not a round island):
+- Full-screen overlay built in JS (inject its own `<style>`; touch no HTML).
+  Dark translucent backdrop, a centred canvas that fills ~92 % of the viewport
+  keeping the region's aspect, a title bar and a legend/hint line in Czech.
+- Renders the whole loaded region: water, green, roads by class (thin for
+  service, thick for motorway/trunk), rails, and building fill as a light
+  wash. Reuse the Minimap's palette so the two read as one map. Render ONCE
+  into an offscreen canvas at open, and again when `city.onTileLoaded` fires
+  while open (debounced 1 s) — never per frame.
+- PAN + ZOOM: drag to pan, wheel to zoom 1×…12×, double-click to recentre on
+  the player. Clamp the view to the region bounds.
+- LABELS from places.json, drawn biggest-rank first with a simple screen-space
+  collision reject (skip a label whose box overlaps one already drawn), and a
+  per-rank zoom threshold so villages only appear once zoomed in. White text,
+  dark outline, a small dot at the place position; cities get a bigger dot.
+- MARKERS: the player as a heading arrow, the parked helicopter as an icon,
+  and the waypoint. Left-click sets/moves the waypoint, right-click clears it.
+  Expose it as `.waypoint`.
+- Escape or M closes; opening pauses nothing (the city keeps streaming).
+- Zero per-frame allocation while open; all geometry work happens in the
+  offscreen render.
+
+## main.js integration (MINE, not the agent's)
+`input.onKey('KeyM')` toggles; a HUD arrow points to `map.waypoint` with the
+distance in metres, and the minimap draws the same waypoint.

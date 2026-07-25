@@ -23,6 +23,9 @@ import { Pedestrians } from './pedestrians.js';
 import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
 import { Clouds } from './clouds.js';
+import { WorldMap } from './worldmap.js';
+import { Weapons } from './weapons.js';
+import { MISSILE } from './config.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -59,6 +62,10 @@ let world = null, player = null, vehicles = null, traffic = null, sky = null, mi
 let peds = null;
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
 let heli = null, clouds = null;   // the helipad's machine, and the sky to fly it through
+let worldMap = null;   // the full-region map on M, and the waypoint it owns
+let weapons = null;  // the rocket pod under that machine, and what it does to walls
+let aimMark = null;  // the ring on the ground where the next rocket would land
+let _aimT = 0;
 const parked = [];      // cars placed by us, enterable
 
 // ---------- camera rig ----------
@@ -130,16 +137,48 @@ function updateCamera(dt) {
   }
 
   const pitch = camPitch * pitchK;
+  // Indoors the orbit has to shrink or a 14 m boom simply lives in the flat
+  // next door. 3.4 m is about as far back as a Czech living room allows.
+  const indoors = !game.car && !game.heli
+    && !!world.interiors?.modelAt(tx, tz);
+  if (indoors) dist = Math.min(dist, 3.4);
   const flat = Math.cos(pitch) * dist;
-  const px = tx + Math.sin(camYaw) * flat;
-  const pz = tz + Math.cos(camYaw) * flat;
-  const py = ty + height + Math.sin(pitch) * dist;
+  let px = tx + Math.sin(camYaw) * flat;
+  let pz = tz + Math.cos(camYaw) * flat;
+  let py = ty + height * (indoors ? 0.25 : 1) + Math.sin(pitch) * dist;
+  // …and then it still has to not be inside a wall. March the boom back in
+  // from full length until the camera sits in air: the same trick every
+  // third-person game uses, done against the interior's own boxes rather than
+  // a raycast, because the boxes are already in a spatial hash.
+  if (world.interiors?.occupied(px, py, pz, 0.28)) {
+    const bx = px - tx, by = py - ty, bz = pz - tz;
+    // MIN_T is a floor, not an option: collapsing the boom onto the target
+    // makes lookAt() aim the camera at its own position, which renders as one
+    // flat grey wall — the bug this replaces. 0.2 of a 3.4 m boom is 0.7 m,
+    // close enough to clear a 1.5 m wide stairwell and still be a camera.
+    const MIN_T = 0.2;
+    let t = 0.82;
+    for (; t > MIN_T; t -= 0.1)
+      if (!world.interiors.occupied(tx + bx * t, ty + by * t, tz + bz * t, 0.24)) break;
+    t = Math.max(MIN_T, t);
+    px = tx + bx * t; py = ty + by * t; pz = tz + bz * t;
+  }
   // keep the camera above ground/bridge decks
   const groundY = world.heightAt(px, pz) + 0.5;
-  const want = new THREE.Vector3(px, Math.max(py, groundY), pz);
+  const want = new THREE.Vector3(px, indoors ? py : Math.max(py, groundY), pz);
   if (!camInit) { camSmooth.copy(want); camInit = true; }
   camSmooth.lerp(want, Math.min(1, dt * 9));
   camera.position.copy(camSmooth);
+  // blast shake: high-frequency positional jitter, decayed by weapons.js. It
+  // rides on the SMOOTHED position rather than the target, so a launch nudges
+  // the frame and a detonation slams it without the follow cam fighting back.
+  const sh = weapons?.shake ?? 0;
+  if (sh > 0.001) {
+    const t = performance.now() * 0.06;
+    camera.position.x += Math.sin(t * 1.7) * sh * 0.42;
+    camera.position.y += Math.sin(t * 2.3 + 1.1) * sh * 0.34;
+    camera.position.z += Math.cos(t * 1.9 + 0.4) * sh * 0.42;
+  }
   camera.lookAt(tx, ty, tz);
   if (Math.abs(camera.fov - fov) > 0.2) {
     camera.fov += (fov - camera.fov) * Math.min(1, dt * 4);
@@ -162,6 +201,15 @@ function nearestEnterableCar() {
   }
   return best;
 }
+
+// M opens the region map. It does not pause anything — the city keeps
+// streaming and the traffic keeps driving underneath it.
+input.onKey('KeyM', () => {
+  if (game.mode !== 'play' || !worldMap) return;
+  const open = worldMap.toggle();
+  document.body.dataset.panelOpen = open ? '1' : '';
+  if (open && input.locked) document.exitPointerLock();
+});
 
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
@@ -206,6 +254,24 @@ input.onKey('KeyE', () => {
   }
 });
 
+// ---------- V: the rocket pod ----------
+// Only from the cockpit, and only with the rotor actually turning — a rocket
+// fired off a cold pad would just skid down the apron. The launcher inherits
+// the machine's own velocity, so a fast pass throws them ahead of you.
+input.onKey('KeyV', () => {
+  if (game.mode !== 'play' || !game.heli || !weapons) return;
+  const h = game.heli;
+  if (!weapons.ready) {
+    if (weapons.reload > 0) ui_hint('Přebíjím…');
+    return;
+  }
+  weapons.fire({
+    x: h.x, y: h.y + 0.9, z: h.z,
+    heading: h.heading, pitch: h.pitch ?? 0,
+    vx: h.vx ?? 0, vy: h.vy ?? 0, vz: h.vz ?? 0,
+  });
+});
+
 // brief nudge in the action-hint slot (e.g. "land first")
 let _hintHold = 0;
 function ui_hint(text) {
@@ -243,6 +309,53 @@ function placeParkedCars(city) {
 // every car the player can hit — traffic + parked, self filtered in driveStep
 function _crashList() {
   return traffic ? [...traffic.cars, ...parked] : parked;
+}
+
+// ---------- how busy the roads are, right here and right now ----------
+// Two multipliers ride on the player's traffic-density setting, because one
+// global number cannot be right for 03:00 on a field track AND 16:00 on
+// Masarykovo náměstí.
+//
+// TIME: a real Czech city has twin peaks — the commute in around 08:00 and the
+// heavier one home around 16:00 — a lunchtime plateau, and a dead trough near
+// 03:00. Values are multipliers on the setting, interpolated smoothly between
+// the anchor hours so the world never jumps at a boundary.
+const TRAFFIC_HOURS = [
+  [0, 0.16], [3, 0.06], [5, 0.22], [7, 0.95], [8, 1.15], [10, 0.72],
+  [12, 0.80], [14, 0.85], [16, 1.45], [17, 1.35], [19, 0.75],
+  [21, 0.42], [23, 0.22], [24, 0.16],
+];
+function trafficTimeK(tod) {
+  const h = (tod ?? 0) * 24;
+  for (let i = 0; i < TRAFFIC_HOURS.length - 1; i++) {
+    const [h0, v0] = TRAFFIC_HOURS[i], [h1, v1] = TRAFFIC_HOURS[i + 1];
+    if (h >= h0 && h <= h1) {
+      const t = (h - h0) / (h1 - h0);
+      return v0 + (v1 - v0) * (t * t * (3 - 2 * t)); // smoothstep, no kinks
+    }
+  }
+  return 0.5;
+}
+
+// PLACE: count the buildings the chunk index already holds around the player.
+// A city block carries hundreds per cell, a village a dozen, open fields none
+// — so this is a free, always-current read on how built-up the surroundings
+// are, with no extra data and no per-place tuning.
+let _densK = 1, _densT = 0;
+function trafficPlaceK(dt, focus) {
+  _densT -= dt;
+  if (_densT <= 0) {
+    _densT = 2;                       // a couple of times a minute is plenty
+    const cx = Math.floor(focus.x / 120), cz = Math.floor(focus.z / 120);
+    let n = 0;
+    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++)
+      n += world?.city?.chunkIndex?.get((cx + dx) + ',' + (cz + dz))?.buildings?.length ?? 0;
+    // 25 cells ≈ 0.36 km². Empty country → 0.18, a village ≈ 0.5,
+    // suburbs ≈ 1, the middle of Pardubice or Hradec ≈ 1.5.
+    const want = Math.max(0.18, Math.min(1.5, 0.18 + Math.sqrt(n) / 26));
+    _densK += (want - _densK) * 0.5;  // ease so a corner never snaps the flow
+  }
+  return _densK;
 }
 
 // ---------- horizon: how far the world is built, and where the haze sits ----
@@ -361,8 +474,8 @@ function updateHud(dt) {
     if (_hintHold > 0) { _hintHold -= 0.2; }
     else if (game.heli) {
       hint.innerHTML = game.heli.airborne
-        ? '<kbd>↑</kbd><kbd>↓</kbd> stoupání · <kbd>WASD</kbd> let · <kbd>←</kbd><kbd>→</kbd> otáčení'
-        : '<kbd>E</kbd> vystoupit · <kbd>↑</kbd> vzlet';
+        ? '<kbd>↑</kbd><kbd>↓</kbd> stoupání · <kbd>WASD</kbd> let · <kbd>←</kbd><kbd>→</kbd> otáčení · <kbd>V</kbd> raketa'
+        : '<kbd>E</kbd> vystoupit · <kbd>↑</kbd> vzlet · <kbd>V</kbd> raketa';
       hint.classList.remove('hidden');
     }
     else if (heli && !game.car && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5) {
@@ -373,13 +486,120 @@ function updateHud(dt) {
       hint.innerHTML = '<kbd>E</kbd> vystoupit';
       hint.classList.remove('hidden');
     } else {
+      // on foot the hint doubles as a sign over the door: walk into a building
+      // and it tells you what you just walked into
+      const inside = world?.interiors?.labelAt(player.pos.x, player.pos.z);
       const car = nearestEnterableCar();
-      if (car) { hint.innerHTML = '<kbd>E</kbd> nastoupit'; hint.classList.remove('hidden'); }
+      if (inside) {
+        const fl = player.y > 1.5 ? ` · ${Math.max(1, Math.round(player.y / 3) + 1)}. patro` : '';
+        hint.innerHTML = `🏠 ${inside}${fl}`;
+        hint.classList.remove('hidden');
+      } else if (car) { hint.innerHTML = '<kbd>E</kbd> nastoupit'; hint.classList.remove('hidden'); }
       else hint.classList.add('hidden');
     }
   }
+  // rocket readout: rounds left, or the reload bar
+  const pod = $id('pod');
+  if (pod) {
+    if (game.heli && weapons) {
+      pod.classList.remove('hidden');
+      pod.textContent = weapons.reload > 0
+        ? '🚀 ' + '·'.repeat(Math.max(1, Math.round(MISSILE.mag * (1 - weapons.reload / MISSILE.reload))))
+        : '🚀 ' + '▮'.repeat(weapons.ammo);
+    } else pod.classList.add('hidden');
+  }
+  // the map draws its own markers while open; the waypoint it owns is mirrored
+  // onto the HUD compass and the minimap so it is useful once the map closes
+  worldMap?.update(player, game.car, heli);
+  const wp = worldMap?.waypoint ?? null;
+  minimap?.setWaypoint?.(wp);
+  const wpEl = $id('waypoint-hud');
+  if (wpEl) {
+    if (wp) {
+      const d = Math.hypot(wp.x - player.pos.x, wp.z - player.pos.z);
+      // bearing relative to where the CAMERA looks, so the arrow reads as
+      // "turn that way" rather than as a compass needle
+      const ang = Math.atan2(wp.x - player.pos.x, wp.z - player.pos.z) - camYaw + Math.PI;
+      wpEl.classList.remove('hidden');
+      wpEl.style.setProperty('--wp-rot', (ang * 180 / Math.PI).toFixed(1) + 'deg');
+      wpEl.querySelector('.wp-dist').textContent = d > 1500
+        ? (d / 1000).toFixed(1) + ' km' : Math.round(d) + ' m';
+    } else wpEl.classList.add('hidden');
+  }
   minimap?.update(player.pos.x, player.pos.z, camYaw,
     traffic ? [...traffic.cars] : []);
+}
+
+// ---------- where the next rocket lands ----------
+// Not a guess: aimPoint() runs the SAME ballistic integrator update() does,
+// against the same world, and reports the first thing it meets. Recomputed a
+// few times a second (nothing about a helicopter changes fast enough to need
+// it per frame), then PROJECTED onto the screen every frame.
+//
+// The projection is the important half. A crosshair pinned to the middle of
+// the screen is a lie in a chase camera: the machine sits below and ahead of
+// the camera, so the rockets leave along its nose, not along the view axis.
+// Putting the reticle where the impact point actually appears means it hangs
+// over the helicopter when you are flying level and slides onto the target as
+// you nose down — which is exactly the information you need to aim.
+const _aimV = new THREE.Vector3();
+let aimHit = null;
+function updateAim(dt) {
+  if (!weapons) return;
+  if (!game.heli) { if (aimMark) aimMark.visible = false; aimHit = null; return; }
+  _aimT -= dt;
+  if (_aimT > 0) return;
+  _aimT = 0.08;
+  const h = game.heli;
+  const src = {
+    x: h.x, y: h.y + 0.9, z: h.z, heading: h.heading, pitch: h.pitch ?? 0,
+    vx: h.vx ?? 0, vy: h.vy ?? 0, vz: h.vz ?? 0,
+  };
+  const hit = weapons.aimPoint(src);
+  if (!aimMark) {
+    const g = new THREE.RingGeometry(2.1, 2.9, 26).rotateX(-Math.PI / 2);
+    aimMark = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+      color: 0xff5a3c, transparent: true, opacity: 0.85, depthTest: false,
+      toneMapped: false, side: THREE.DoubleSide,
+    }));
+    aimMark.renderOrder = 900;
+    scene.add(aimMark);
+  }
+  if (hit) {
+    aimHit = { x: hit.x, y: hit.y, z: hit.z, far: false };
+    aimMark.visible = true;
+    aimMark.position.set(hit.x, hit.y + 0.25, hit.z);
+  } else {
+    // nothing in range — aim at open sky, 400 m down the launch vector, so the
+    // sight never disappears just because you are pointing at the horizon
+    const p = (src.pitch ?? 0) - 0.055, cp = Math.cos(p);
+    aimHit = {
+      x: src.x - Math.sin(src.heading) * cp * 400,
+      y: src.y + Math.sin(p) * 400,
+      z: src.z - Math.cos(src.heading) * cp * 400,
+      far: true,
+    };
+    aimMark.visible = false;
+  }
+}
+
+// Screen placement, every frame and AFTER the camera has moved — a reticle
+// lagging the camera by a frame reads as drift and makes aiming feel greasy.
+function placeReticle() {
+  const el = $id('reticle');
+  if (!el) return;
+  if (!game.heli || !aimHit) { el.classList.add('hidden'); return; }
+  _aimV.set(aimHit.x, aimHit.y, aimHit.z).project(camera);
+  if (_aimV.z > 1) { el.classList.add('hidden'); return; }   // behind the camera
+  el.classList.remove('hidden');
+  el.style.left = ((_aimV.x * 0.5 + 0.5) * window.innerWidth).toFixed(0) + 'px';
+  el.style.top = ((-_aimV.y * 0.5 + 0.5) * window.innerHeight).toFixed(0) + 'px';
+  el.classList.toggle('far', aimHit.far);
+  const span = el.firstElementChild;
+  if (span) {
+    const d = Math.hypot(aimHit.x - game.heli.x, aimHit.y - game.heli.y, aimHit.z - game.heli.z);
+    span.textContent = aimHit.far ? '—' : Math.round(d) + ' m';
+  }
 }
 
 // the big location title fades once you've read it
@@ -408,6 +628,9 @@ function applySettings(s, key) {
   if (world) world.viewChunks = s.viewChunks;
   if (traffic) traffic.maxCars = s.traffic;
   if (peds) peds.max = s.peds ?? 34;
+  // interiors are a live toggle: switching them off sheds every un-shot
+  // building's rooms on the next scan, and keeps the wrecks
+  if (world?.interiors) world.interiors.enabled = s.interiors !== false;
   if (sky) {
     const sun = sky.sun;
     if (renderer.shadowMap.enabled !== !!s.shadows) {
@@ -456,6 +679,7 @@ async function boot() {
   vehicles = new Vehicles(scene);
   traffic = new Traffic(city, vehicles);
   minimap = new Minimap($id('minimap'), city);
+  worldMap = new WorldMap(city, minimap);
   peds = new Pedestrians(scene, city);
   clouds = new Clouds(scene);
   // The world beyond the streamed chunks used to be bare sky, so from the air
@@ -477,6 +701,9 @@ async function boot() {
   const padX = SPAWN.x + 62, padZ = SPAWN.z - 16;
   scene.add(makeHelipad(padX, padZ));
   heli = new Helicopter(scene, padX, padZ, Math.PI * 0.75);
+  // the pod shares the interior manager's dust pool: one set of sprites does
+  // rocket smoke, blast plume and the dust off a collapsing floor alike
+  weapons = new Weapons(scene, world, { dust: world.interiors.dust });
   placeParkedCars(city);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)
@@ -596,9 +823,11 @@ function stepGame(dt) {
 
   game.tod = (game.tod + dt / DAY_LENGTH) % 1;
 
-  // world streams around whoever leads the view
+  // world streams around whoever leads the view. `onFoot` is what gates the
+  // interior streamer: rooms only matter to somebody who can walk into them,
+  // and building them for a car doing 130 km/h would be a hitch for nothing.
   const focus = game.car ?? player.pos;
-  world.update(dt, { x: focus.x, z: focus.z });
+  world.update(dt, { x: focus.x, z: focus.z }, { onFoot: !game.car && !game.heli });
 
   if (game.heli) {
     // WASD flies the machine, the ARROWS work the collective and the pedals.
@@ -634,7 +863,13 @@ function stepGame(dt) {
   traffic.update(dt, player.pos, game.car);
   peds.update(dt, focus);
   if (heli && !game.heli) heli.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
+  weapons?.update(dt, { cars: _crashList(), peds });
+  updateAim(dt);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
+  if (traffic) {
+    const base = getSettings().traffic ?? 60;
+    traffic.maxCars = Math.round(base * trafficTimeK(game.tod) * trafficPlaceK(dt, focus));
+  }
   updateHorizon(dt);
   updateNightLights(dt);
   // one cheap rumble for the whole nearby fleet — never per-car audio
@@ -648,6 +883,7 @@ function stepGame(dt) {
   }
 
   updateCamera(dt);
+  placeReticle();          // after the camera: a lagging sight reads as drift
   updateSky(sky, game.tod, camera, scene);
   updateHud(dt);
 }
@@ -661,10 +897,12 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v12-cumulus',   // bump on risky changes — tells us which code a tab runs
+  build: 'v13-interiors',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   cam: () => ({ camDist, camPitch, camYaw }),
+  get weapons() { return weapons; },
+  get interiors() { return world?.interiors; },
   get postfx() { return postfx; },
   get heli() { return heli; }, get clouds() { return clouds; },
   get player() { return player; }, get world() { return world; },

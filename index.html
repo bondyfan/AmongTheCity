@@ -26,10 +26,15 @@
     <div id="tod-clock" title="Time of day"></div>
     <div id="speedo" class="hidden"><span id="speed-num">0</span><small id="speed-unit">km/h</small></div>
     <div id="action-hint" class="hidden"></div>
+    <!-- waypoint compass: an arrow that turns toward the map marker, with the
+         distance under it. Rotation comes from a CSS var main.js writes. -->
+    <div id="waypoint-hud" class="hidden"><span class="wp-arrow">➤</span><span class="wp-dist"></span></div>
+    <div id="pod" class="hidden"></div>
+    <div id="reticle" class="hidden"><span></span></div>
     <canvas id="minimap" width="220" height="220"></canvas>
     <div id="controls-hint">
       <b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>Shift</b> sprint ·
-      <b>myš (drag)</b> kamera · <b>kolečko</b> zoom
+      <b>V</b> raketa (z vrtulníku) · <b>myš (drag)</b> kamera · <b>kolečko</b> zoom
     </div>
   </div>
 

@@ -50,6 +50,35 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
   background: #26304a; border-radius: 4px; padding: 1px 7px; margin: 0 2px;
   font-family: inherit; font-size: 12.5px; color: #cfe0ff;
 }
+/* rocket pod: rounds left, sitting just under the speed/altitude readout */
+#pod {
+  position: absolute; right: 22px; bottom: 68px;
+  color: #ffb27a; font-size: 17px; letter-spacing: 3px; font-weight: 700;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.9);
+}
+/* Flight reticle. NOT pinned to the middle of the screen: main.js projects the
+   rocket's own predicted impact point and drops the sight there, so it hangs
+   over the helicopter in level flight and slides onto the target as you nose
+   down. `.far` (nothing in range) hollows it out so a solved shot and an open-
+   sky one never look the same. */
+#reticle {
+  position: absolute; left: 50%; top: 50%; width: 30px; height: 30px;
+  transform: translate(-50%, -50%);
+  border: 2px solid rgba(255,110,70,0.95); border-radius: 50%;
+  box-shadow: 0 0 10px rgba(0,0,0,0.8), inset 0 0 6px rgba(255,110,70,0.35);
+}
+#reticle.far { border-color: rgba(255,190,140,0.5); border-style: dashed; box-shadow: none; }
+#reticle::before, #reticle::after {
+  content: ''; position: absolute; background: rgba(255,110,70,0.95);
+}
+#reticle::before { left: 50%; top: -11px; width: 2px; height: 8px; margin-left: -1px; }
+#reticle::after { left: 50%; bottom: -11px; width: 2px; height: 8px; margin-left: -1px; }
+#reticle span {
+  position: absolute; left: 50%; top: 34px; transform: translateX(-50%);
+  font-size: 11px; font-weight: 700; letter-spacing: 0.5px; white-space: nowrap;
+  color: #ffb27a; text-shadow: 0 1px 4px rgba(0,0,0,0.95);
+}
+
 #minimap {
   position: absolute; left: 16px; bottom: 16px; border-radius: 50%;
   border: 2px solid rgba(150, 175, 215, 0.4);
@@ -78,3 +107,20 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
   #controls-hint { display: none; }
   #minimap { width: 150px; height: 150px; }
 }
+
+
+/* ---- waypoint compass (world map marker) ---- */
+#waypoint-hud {
+  position: fixed; left: 50%; top: 12px; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  pointer-events: none; z-index: 12;
+  font: 600 13px/1 system-ui, sans-serif; color: #e8eef6;
+  text-shadow: 0 1px 3px rgba(0,0,0,.85);
+}
+#waypoint-hud .wp-arrow {
+  font-size: 26px; line-height: 1; color: #ffd166;
+  /* the arrow glyph points right, so −90° puts 0 rad at "straight ahead" */
+  transform: rotate(calc(var(--wp-rot, 0deg) - 90deg));
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,.9));
+}
+#waypoint-hud.hidden { display: none; }
