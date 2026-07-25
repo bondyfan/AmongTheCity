@@ -19,8 +19,17 @@ export const LAYER_Y = {
   green: 0.05, water: 0.08, paved: 0.10, rail: 0.14,
   footway: 0.16, road: 0.20, marking: 0.26,
 };
-export const BRIDGE_Y = 5.0;     // deck height over the Labe
-export const BRIDGE_RAMP = 18;   // meters of ramp at each bridge end
+// Real bridges don't hump: the deck runs FLAT barely above street level and
+// what sells the bridge is the river sunk below it (Labe embankments), so
+// water renders at WATER_Y with vertical bank skirts down from the ground.
+export const BRIDGE_Y = 0.85;    // flat deck height
+export const BRIDGE_RAMP = 6;    // short end blend, not a climb
+export const WATER_Y = -2.0;     // rivers sit sunken between their banks
+export const BANK_DEPTH = -2.4;  // bank skirts reach just under the water
+
+// ČÚZK ortofoto ground (open data, CC BY 4.0 — "Podkladová data ČÚZK"):
+// 480 m supertiles fetched by scripts/fetch-ortho.mjs into public/data/ortho
+export const ORTHO = { tile: 480, px: 1024, dir: 'data/ortho', extent: 2400 };
 
 // day clock — one in-game day in 24 real minutes, spawning mid-morning
 export const DAY_LENGTH = 24 * 60;

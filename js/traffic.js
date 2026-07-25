@@ -186,7 +186,7 @@ export class Traffic {
     if (this._spawnT <= 0) {
       this._spawnT = 0.2;
       let tries = 6;
-      while (this.cars.size < TRAFFIC.maxCars && tries-- > 0) this._trySpawn(px, pz);
+      while (this.cars.size < (this.maxCars ?? TRAFFIC.maxCars) && tries-- > 0) this._trySpawn(px, pz);
     }
     for (const car of this.cars) this._drive(car, dt, playerPos, playerCar);
   }

@@ -15,6 +15,9 @@ import { Vehicles, driveStep } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
+import { initAudio, sfx, engineStart, engineStop, engineSet, setVolume } from './audio.js';
+import { initSettings, getSettings } from './settings.js';
+import { initOrtho } from './ortho.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -59,10 +62,14 @@ const camSmooth = new THREE.Vector3();
 let camInit = false;
 const BASE_FOV = 55;
 
+let _lastLookT = -9; // when the mouse last steered — pauses auto-follow
 function updateCamera(dt) {
   const drag = input.takeDrag();
-  camYaw -= drag.x * 0.004;
-  camPitch = Math.max(0.06, Math.min(1.15, camPitch + drag.y * 0.004));
+  // pointer-locked mouse look uses a finer touch than right-drag
+  const sens = input.locked ? 0.0026 : 0.004;
+  if (drag.x || drag.y) _lastLookT = performance.now() * 0.001;
+  camYaw -= drag.x * sens;
+  camPitch = Math.max(0.06, Math.min(1.15, camPitch + drag.y * sens));
   camDist = Math.max(4.2, Math.min(16, camDist + input.takeWheel() * 0.9));
 
   let tx, ty, tz, wantYaw, dist, height, fov;
@@ -83,9 +90,11 @@ function updateCamera(dt) {
     fov = BASE_FOV;
   }
   // auto-follow: yaw eases toward the travel heading only while moving and
-  // not fighting the player's own drag
+  // the mouse hasn't steered for a moment — with mouse look on, the player's
+  // hand owns the camera and auto-follow must not wrestle it back
   const moving = game.car ? Math.abs(game.car.speed) > 1.5 : player.speed > 0.5;
-  if (moving && !input.mouse.right) {
+  const lookIdle = performance.now() * 0.001 - _lastLookT > 1.6;
+  if (moving && !input.mouse.right && lookIdle) {
     let d = wantYaw - camYaw;
     d = Math.atan2(Math.sin(d), Math.cos(d));
     camYaw += d * Math.min(1, dt * (game.car ? 2.2 : 1.6));
@@ -133,6 +142,8 @@ input.onKey('KeyE', () => {
     parked.includes(game.car) || parked.push(game.car);
     game.car = null;
     $id('speedo').classList.add('hidden');
+    engineStop();
+    sfx('door_close', 0.8);
   } else {
     const car = nearestEnterableCar();
     if (!car) return;
@@ -143,6 +154,8 @@ input.onKey('KeyE', () => {
     game.car = car;
     player.setInCar(car);
     $id('speedo').classList.remove('hidden');
+    sfx('door_open', 0.8);
+    setTimeout(() => { if (game.car) { sfx('engine_start', 0.7); engineStart(); } }, 350);
   }
 });
 
@@ -199,6 +212,56 @@ function updateHud(dt) {
 // the big location title fades once you've read it
 setTimeout(() => { const el = $id('location-name'); if (el) el.style.opacity = '0'; }, 7000);
 
+// ---------- pointer-lock mouse look (default ON) + audio unlock ----------
+// Click into the game → the cursor locks and the mouse always steers the
+// camera; Escape releases it (native pointer-lock behaviour). The same first
+// gesture unlocks WebAudio. Clicks are ignored while the settings panel is
+// open, so its controls stay clickable.
+renderer.domElement.addEventListener('click', () => {
+  initAudio();
+  if (game.mode !== 'play') return;
+  if (document.body.dataset.panelOpen) return;
+  if (getSettings().mouseLook && !input.locked) renderer.domElement.requestPointerLock();
+});
+window.addEventListener('keydown', () => initAudio(), { once: true });
+
+// ---------- settings → engine application ----------
+let orthoMgr = null;
+function applySettings(s, key) {
+  // cheap, always-safe knobs first
+  setVolume(s.volume ?? 0.8);
+  renderer.setPixelRatio(s.resScale === 2 ? Math.min(window.devicePixelRatio, 2) : s.resScale);
+  if (world) world.viewChunks = s.viewChunks;
+  if (traffic) traffic.maxCars = s.traffic;
+  if (sky) {
+    const sun = sky.sun;
+    if (renderer.shadowMap.enabled !== !!s.shadows) {
+      renderer.shadowMap.enabled = !!s.shadows;
+      sun.castShadow = !!s.shadows;
+      scene.traverse(o => { if (o.material) o.material.needsUpdate = true; });
+    }
+    if (sun.shadow.mapSize.x !== s.shadowRes) {
+      sun.shadow.mapSize.set(s.shadowRes, s.shadowRes);
+      sun.shadow.map?.dispose();
+      sun.shadow.map = null;
+    }
+  }
+  if (!s.mouseLook && input.locked) document.exitPointerLock();
+  // chunk-recipe knobs: flip the flags on the shared mats and rebuild
+  if (world) {
+    const wantOrtho = s.ortho ? orthoMgr : null;
+    const recipeChanged = world.mats.ortho !== wantOrtho
+      || world.mats.facades !== !!s.facades
+      || world.mats.trees !== (s.trees !== false);
+    world.mats.ortho = wantOrtho;
+    world.mats.facades = !!s.facades;
+    world.mats.trees = s.trees !== false;
+    if (recipeChanged && (key === undefined || ['ortho', 'facades', 'trees', 'preset'].includes(key))) {
+      world.rebuildAll();
+    }
+  }
+}
+
 // ---------- boot ----------
 async function boot() {
   const city = await loadCity(CITY_DATA_URL);
@@ -209,7 +272,11 @@ async function boot() {
   traffic = new Traffic(city, vehicles);
   minimap = new Minimap($id('minimap'), city);
   placeParkedCars(city);
-  input.rpgMode = true; // right-drag orbits the camera
+  input.rpgMode = true;   // right-drag orbits the camera
+  input.mouseLook = true; // locked pointer steers it too (settings can disable)
+  orthoMgr = initOrtho();
+  initSettings(applySettings);
+  applySettings(getSettings());
 
   // warm up: build the spawn's neighbourhood before revealing the city.
   // Exceptions here used to vanish (setTimeout swallows them out of the
@@ -307,12 +374,14 @@ function stepGame(dt) {
   world.update(dt, { x: focus.x, z: focus.z });
 
   if (game.car) {
+    const gas = -input.moveZ;
     driveStep(game.car, {
-      gas: -input.moveZ,                       // W forward, S reverse/brake
+      gas,                                     // W forward, S reverse/brake
       steer: input.moveX,
       brake: input.keys.has('Space') ? 1 : 0,
     }, dt, world);
     player.update(dt, { input, camYaw, world }); // keeps player glued to the car
+    engineSet(Math.min(1, Math.abs(game.car.speed) / CAR.vmax), Math.abs(gas));
   } else {
     player.update(dt, { input, camYaw, world });
   }
@@ -333,7 +402,7 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v4-raf-fix',   // bump on risky changes — tells us which code a tab runs
+  build: 'v5-realism',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   get player() { return player; }, get world() { return world; },

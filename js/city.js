@@ -21,12 +21,13 @@ export class CityWorld {
     this.built = new Map();     // key -> Group (or null for empty cells)
     this.queue = [];            // keys waiting to build, nearest first
     this._queued = new Set();
+    this.viewChunks = VIEW_CHUNKS; // runtime-adjustable (settings: draw distance)
   }
 
   update(dt, focus) {
     const fx = Math.floor(focus.x / CHUNK), fz = Math.floor(focus.z / CHUNK);
     // enqueue missing cells in view, nearest first
-    for (let r = 0; r <= VIEW_CHUNKS; r++) {
+    for (let r = 0; r <= this.viewChunks; r++) {
       for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue; // ring only
         const key = (fx + dx) + ',' + (fz + dz);
@@ -42,7 +43,7 @@ export class CityWorld {
       this._queued.delete(key);
       const [cx, cz] = key.split(',').map(Number);
       // may have drifted out of view while queued
-      if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > VIEW_CHUNKS) continue;
+      if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > this.viewChunks) continue;
       const group = buildChunkMeshes(this.city, cx, cz, this.mats);
       if (group) this.scene.add(group);
       this.built.set(key, group ?? null);
@@ -50,7 +51,7 @@ export class CityWorld {
     // drop cells far behind us (hysteresis +2 so the edge doesn't flicker)
     for (const [key, group] of this.built) {
       const [cx, cz] = key.split(',').map(Number);
-      if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > VIEW_CHUNKS + 2) {
+      if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > this.viewChunks + 2) {
         if (group) {
           this.scene.remove(group);
           group.traverse(o => { o.geometry?.dispose?.(); });
@@ -66,6 +67,20 @@ export class CityWorld {
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++)
       if (!this.built.has((fx + dx) + ',' + (fz + dz))) return false;
     return true;
+  }
+
+  // Drop every built chunk so the next update() rebuilds it — used when a
+  // setting flips the chunk RECIPE itself (ortofoto ground, facades, trees).
+  rebuildAll() {
+    for (const [key, group] of this.built) {
+      if (group) {
+        this.scene.remove(group);
+        group.traverse(o => { o.geometry?.dispose?.(); });
+      }
+    }
+    this.built.clear();
+    this.queue.length = 0;
+    this._queued.clear();
   }
 
   // Ground height. Pardubice is flat (y=0) — the only relief is bridge decks:

@@ -38,8 +38,9 @@ export function distPointToSegment(px, pz, ax, az, bx, bz, out) {
   return Math.hypot(px - cx, pz - cz);
 }
 
-// Bridge decks sit at BRIDGE_Y with a ramp at each end of the way, so cars
-// glide up over the Labe and back down. dist/totalLen in meters along the way.
+// Bridge decks run FLAT at BRIDGE_Y — the river below them is what's sunken
+// (WATER_Y), which is how real Pardubice bridges read. Only a short blend at
+// each way end eases the curb-height step onto the approach street.
 export function bridgeElevation(dist, totalLen) {
   const edge = Math.min(dist, totalLen - dist);
   return Math.max(0, Math.min(BRIDGE_Y, (edge / BRIDGE_RAMP) * BRIDGE_Y));
