@@ -248,7 +248,13 @@ function tick(fromInterval) {
   // render ONCE per fire, after every sub-step — rendering inside the
   // sub-step loop turned a throttled hidden tab into 20 draws per second of
   // covered time and froze the main thread solid
+  const r0 = performance.now();
   renderer.render(scene, camera);
+  if (window.__atc) {
+    const ms = performance.now() - r0;
+    window.__atc.frameMs += (ms - window.__atc.frameMs) * 0.1;
+    window.__atc.fps = Math.round(1000 / Math.max(1, ms));
+  }
 }
 
 function stepGame(dt) {
@@ -287,7 +293,8 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  game, input,
+  game, input, renderer, scene, camera, stepGame,
+  fps: 0, frameMs: 0,
   get player() { return player; }, get world() { return world; },
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
   get parked() { return parked; },
