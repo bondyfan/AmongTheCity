@@ -165,6 +165,9 @@ export async function loadCity(url) {
   // the next ensureTiles pass retries — the region download may still be
   // filling the server, or the network hiccuped; either way we self-heal.
   const tiles = data.tiles.map(t => ({ tx: t.tx, tz: t.tz, f: t.f, state: 0 }));
+  // The world map needs the region's EXTENT before any of it has streamed —
+  // fitting to the loaded arrays alone showed Pardubice and hid 400 villages.
+  city.manifestTiles = tiles;
   const loadTile = async (t) => {
     try {
       const res = await fetch(t.f); // f is app-root-relative, like CITY_DATA_URL

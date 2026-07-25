@@ -21,6 +21,11 @@ const OFF_PX = 2048;     // offscreen city bitmap resolution
 const VIEW_R = 110;      // meters of world from the center to the rim
 const RECENTER_M = 1500; // player drift from render center that forces a redraw
 const TAU = Math.PI * 2;
+// Waypoint yellow. Not from COLORS on purpose: the palette describes the
+// WORLD (asphalt, water, plaster), while this is HUD chrome that must never
+// blend into it — the same flag color the world map paints, so a glance at
+// either surface reads as the same flag.
+const WP_COLOR = '#ffd21a';
 
 // 0xrrggbb → '#rrggbb' with an optional brightness factor. The 3D palette is
 // tuned for sunlit asphalt; on a tiny map dark-on-dark vanishes, so drivable
@@ -44,6 +49,7 @@ export class Minimap {
     this._bg = css(COLORS.groundBase, 0.92);
     this._R = -1;                    // cached HUD radius → font/arrow sizes
     this._renderT = 0;               // pending debounced-render timer (0 = none)
+    this.waypoint = null;            // {x,z} mirrored from the world map, or null
     this._bounds(city);
     this._prerender(city);
     // region tiles stream in while driving — redraw the bitmap when new data
@@ -166,6 +172,23 @@ export class Minimap {
     }
   }
 
+  // ---- waypoint: the world map's flag, mirrored onto the HUD ----
+  // The point is stored BY REFERENCE, not copied: the world map owns the
+  // object, main.js is free to push it every frame, and one small allocation
+  // per frame is exactly what this file refuses to do. Anything that isn't a
+  // finite point (null, a cleared waypoint, a bad click) means "no flag", so
+  // the draw path below never has to defend itself.
+  setWaypoint(wp) {
+    this.waypoint = wp && Number.isFinite(wp.x) && Number.isFinite(wp.z) ? wp : null;
+  }
+
+  // Meters from (px,pz) to the flag, or null when there is none. The HUD
+  // prints this readout, so the distance math lives in exactly ONE place and
+  // can never disagree with the arrow drawn from the same waypoint.
+  distanceTo(px, pz) {
+    return this.waypoint ? Math.hypot(this.waypoint.x - px, this.waypoint.z - pz) : null;
+  }
+
   // Blit the pre-rendered city so (px,pz) sits dead center, then decorate.
   // cars is any iterable of {x,z} (the Traffic set passes straight through).
   update(px, pz, heading, cars) {
@@ -226,6 +249,57 @@ export class Minimap {
     g.strokeStyle = 'rgba(20,24,28,0.85)';
     g.stroke();
     g.restore();
+    // waypoint: a yellow diamond sitting on its map position while the flag is
+    // inside the 110 m window, and — because at region scale it is off the
+    // window nearly always — a chevron clamped to the rim on the same bearing
+    // otherwise, so the direction to it is readable even from 20 km away.
+    // North-up map ⇒ no rotation by heading here, only the bearing itself.
+    // The blit's clip was popped above (cars use a radial gate instead), so
+    // re-arm one: the rim chevron straddles the ring and its stroke would
+    // spill outside the circle into the 3D view without it.
+    if (this.waypoint) {
+      const wx = (this.waypoint.x - px) * k, wz = (this.waypoint.z - pz) * k;
+      const d = Math.hypot(wx, wz);
+      g.save();
+      g.beginPath();
+      g.arc(cx, cy, R, 0, TAU);
+      g.clip();
+      g.translate(cx, cy);
+      g.fillStyle = WP_COLOR;
+      g.strokeStyle = 'rgba(38,30,4,0.9)';
+      g.lineWidth = 1.2;
+      if (d < R - a * 0.9) {                 // whole diamond fits inside the rim
+        const s = a * 0.72;
+        g.beginPath();
+        g.moveTo(wx, wz - s);
+        g.lineTo(wx + s * 0.72, wz);
+        g.lineTo(wx, wz + s);
+        g.lineTo(wx - s * 0.72, wz);
+        g.closePath();
+        g.fill();
+        g.stroke();
+        g.beginPath();                       // dark eye — reads as a marker, not a dot
+        g.arc(wx, wz, Math.max(1, s * 0.26), 0, TAU);
+        g.fillStyle = 'rgba(38,30,4,0.9)';
+        g.fill();
+      } else {
+        // slide onto the rim along the same bearing, far enough in that the
+        // chevron's own tip (+0.8a) and stroke stay inside the ring uncut
+        const len = d || 1, rr = R - a * 0.95;
+        g.translate(wx / len * rr, wz / len * rr);
+        g.rotate(Math.atan2(wz, wx));        // local +x now points at the flag
+        const s = a * 0.8;
+        g.beginPath();
+        g.moveTo(s, 0);                      // tip outward, notched tail like the player arrow
+        g.lineTo(-s * 0.55, s * 0.72);
+        g.lineTo(-s * 0.18, 0);
+        g.lineTo(-s * 0.55, -s * 0.72);
+        g.closePath();
+        g.fill();
+        g.stroke();
+      }
+      g.restore();
+    }
     // rim ring + north tick at the top of the circle
     g.beginPath();
     g.arc(cx, cy, R, 0, TAU);
