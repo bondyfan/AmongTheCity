@@ -120,6 +120,7 @@ export const INTERIOR = {
   coreW: 2.95,          // stair shaft: 1.45 m run + 1.45 m landing
   minStorey: 2.55, maxStorey: 5.6,
   pieceBudget: 5800,    // per building — tiles coarsen until the plan fits
+  groundLift: 0.30,     // ground floor sits above config's whole LAYER_Y ladder
   stepUp: 0.55,         // how high the player walks up without jumping
   headroom: 1.72,       // collider height (a real person, not the scaled model)
 };
@@ -141,6 +142,7 @@ export const INTERIOR_PALETTES = {
   parking:     { floor: 0x86898d, wall: 0x9ea1a4, ceil: 0xaaadb0, trim: 0x74787c, accent: 0xd8d4c8 },
   church:      { floor: 0xa89a80, wall: 0xe6e0cf, ceil: 0xefe9da, trim: 0xc0b294, accent: 0x8a6a2c },
   garage:      { floor: 0x8b8d8f, wall: 0xc6c2b8, ceil: 0xd0ccc2, trim: 0x9c9890, accent: 0x7a6a52 },
+  restaurant:  { floor: 0x8c5a3a, wall: 0xe8ddc8, ceil: 0xf2ead8, trim: 0xb08c5c, accent: 0xda291c },
   civic:       { floor: 0xa3937a, wall: 0xe6e1d4, ceil: 0xf2eee4, trim: 0xb8b0a0, accent: 0x6a7f9c },
 };
 

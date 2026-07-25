@@ -8,10 +8,17 @@
 // Directions follow the ARCHITECTURE.md convention throughout:
 //   dir(h) = (−sin h, −cos h), mesh.rotation.y = heading, h = atan2(−dx, −dz).
 
-import { WALK, PLAYER_SCALE } from './config.js';
+import { WALK, PLAYER_SCALE, INTERIOR } from './config.js';
 import { makeCitizen } from './citizen.js';
 
 const TWO_PI = Math.PI * 2;
+// v5: the player now has a y. Buildings have floors, so "the ground" stopped
+// being a function of (x,z) alone — it is whatever surface is under your feet
+// at or just above your current level, and the walk controller finds it every
+// frame. That single change is all a staircase needs: eighteen boxes each
+// 175 mm above the last, and STEP_UP quietly carries you up them.
+const GRAVITY = 21;          // m/s² — game gravity, snappier than the real thing
+const TERMINAL = 42;         // m/s cap so a fall off a tower block can't tunnel
 // the protagonist's fixed outfit — blue jacket so you always find yourself
 const LOOK = { jacket: 0x3a63a8, pants: 0x2f3540, skin: 0xd9a066, hair: 0x3a2a1a };
 
@@ -21,6 +28,9 @@ export class Player {
     this.mesh = c.group;
     this._animate = c.walk;
     this.pos = { x, z };
+    this.y = 0;              // feet height — floors, stairs, rooftops, falling
+    this.vy = 0;
+    this.grounded = true;
     this.heading = heading;
     this.speed = 0;          // m/s along _dir
     this.walkT = 0;          // stride phase, advanced by distance
@@ -40,6 +50,8 @@ export class Player {
       this.pos.x = this.inCar.x; this.pos.z = this.inCar.z;
       this.heading = this.inCar.heading;
       this.speed = this.inCar.speed;
+      this.y = this.inCar.y ?? this.inCar.mesh?.position.y ?? 0;
+      this.vy = 0;
       return;
     }
 
@@ -72,19 +84,43 @@ export class Player {
     }
 
     // --- move + collide; substep so a dt spike can't tunnel a thin wall ---
+    // The collider is now a CAPSULE in spirit: only what overlaps the band
+    // between "high enough that I'd have to step over it" and head height can
+    // stop you. That is what lets you walk over a doorstep and a fallen slab
+    // while a wall panel and a wardrobe still block.
+    const cOpts = this._c ??= { interior: true, yLo: 0, yHi: 0, aboveY: 0 };
     const dist = this.speed * dt;
     if (dist > 0) {
       const steps = Math.max(1, Math.ceil(dist / (WALK.radius * 0.8)));
       const sx = this._dirX * dist / steps, sz = this._dirZ * dist / steps;
       for (let i = 0; i < steps; i++) {
         this.pos.x += sx; this.pos.z += sz;
-        world.collide(this.pos, WALK.radius);
+        cOpts.yLo = this.y + INTERIOR.stepUp - 0.06;
+        cOpts.yHi = this.y + INTERIOR.headroom;
+        cOpts.aboveY = this.y + 0.3;   // roofs below the feet aren't obstacles
+        world.collide(this.pos, WALK.radius, cOpts);
       }
       this.walkT += dist * 1.6; // stride phase rides on distance, not time
     }
 
-    // --- place + animate; heightAt handles bridge decks ---
-    this.mesh.position.set(this.pos.x, world.heightAt(this.pos.x, this.pos.z), this.pos.z);
+    // --- vertical: stand, climb or fall ---
+    // supportY answers "highest surface at or below where I could step", so
+    // the three cases fall out of one query: it is above me but within a step
+    // (climb), it is right under me (stand), or it is further down (fall).
+    const support = world.supportY(this.pos.x, this.pos.z, this.y + INTERIOR.stepUp);
+    if (support > this.y + 0.002 && support <= this.y + INTERIOR.stepUp) {
+      this.y = support; this.vy = 0; this.grounded = true;
+    } else if (this.y <= support + 0.04) {
+      this.y = support; this.vy = 0; this.grounded = true;
+    } else {
+      this.vy = Math.max(-TERMINAL, this.vy - GRAVITY * dt);
+      this.y += this.vy * dt;
+      if (this.y <= support) { this.y = support; this.vy = 0; this.grounded = true; }
+      else this.grounded = false;
+    }
+
+    // --- place + animate ---
+    this.mesh.position.set(this.pos.x, this.y, this.pos.z);
     this.mesh.rotation.y = this.heading;
     this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog));
   }
@@ -108,13 +144,16 @@ export class Player {
       this.speed = 0;
       this._dirX = -Math.sin(c.heading); this._dirZ = -Math.cos(c.heading);
       const world = this._world;
-      let y = 0;
+      let y = c.y ?? c.mesh?.position.y ?? 0;
       if (world) {
         // a couple of passes settle corner cases (door opens into a wall AND
         // the river bank, say); collide() returns false once we sit clean
         for (let i = 0; i < 3 && world.collide(this.pos, WALK.radius); i++);
-        y = world.heightAt(this.pos.x, this.pos.z);
+        // stepping out of a helicopter parked on a roof must not drop you to
+        // the street: take the surface nearest the machine's own level
+        y = world.supportY(this.pos.x, this.pos.z, y + INTERIOR.stepUp);
       }
+      this.y = y; this.vy = 0; this.grounded = true;
       this.mesh.position.set(this.pos.x, y, this.pos.z);
       this.mesh.rotation.y = this.heading;
       this._animate(this.walkT, 0); // limbs relaxed the instant we appear

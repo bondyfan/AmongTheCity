@@ -64,6 +64,8 @@ export class Pedestrians {
 
     // --- walk ---
     for (const p of this.peds) {
+      // a scared walker calms down again over a few seconds
+      if (p.calm > 0 && (p.calm -= dt) <= 0) p.speed = SPEED[0] + Math.random() * (SPEED[1] - SPEED[0]);
       const path = p.path.p;
       // The walker always stands ON node i and moves toward i+dir, so that
       // neighbour must exist. A turn-around at an endpoint keeps i and only
@@ -95,6 +97,24 @@ export class Pedestrians {
       p.mesh.position.set(p.x, 0, p.z);
       p.mesh.rotation.y = p.heading;
       p.animate(p.walkT, p.speed / 1.4);
+    }
+  }
+
+  // A blast on the street: everyone within reach turns round and legs it down
+  // their own pavement. They keep using the path graph — a citizen sprinting
+  // across the Labe would be a worse bug than one sprinting the wrong way —
+  // so "flee" is a direction flip plus a burst of speed that decays back to a
+  // stroll over the next few seconds.
+  panic(x, z, r) {
+    for (const p of this.peds) {
+      if (Math.hypot(p.x - x, p.z - z) > r) continue;
+      const path = p.path.p;
+      const next = path[p.i + p.dir];
+      // if the way we're walking leads TOWARD the bang, turn around
+      if (next && Math.hypot(next[0] - x, next[1] - z) < Math.hypot(p.x - x, p.z - z))
+        p.dir = -p.dir;
+      p.speed = Math.min(6.2, p.speed + 3.4);
+      p.calm = 6 + Math.random() * 4;
     }
   }
 
@@ -158,6 +178,7 @@ export class Pedestrians {
       x, z, heading: 0, walkT: Math.random() * 10,
       side: Math.random() < 0.5 ? 1 : -1,
       speed: SPEED[0] + Math.random() * (SPEED[1] - SPEED[0]),
+      calm: 0,
     });
   }
 

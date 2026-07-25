@@ -9,7 +9,9 @@
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME } from './config.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeElevation } from './geo.js';
-import { makeMaterials, buildChunkMeshes } from './meshes.js';
+import { makeMaterials, buildChunkMeshes, buildBuildingsMesh } from './meshes.js';
+import { Interiors } from './interiorsim.js';
+import { stampFranchises } from './interiors.js';
 
 const _closest = { x: 0, z: 0, t: 0 };
 
@@ -18,6 +20,12 @@ export class CityWorld {
     this.scene = scene;
     this.city = city;
     this.mats = makeMaterials();
+    // v5: the inside of the city. The manager owns which buildings currently
+    // have rooms, the debris pools, and the people in them; the chunk mesh
+    // reads its `hidden` set so a building promoted to boxes stops being
+    // drawn twice.
+    this.interiors = new Interiors(scene, city, this);
+    this.mats.hidden = this.interiors.hidden;
     this.built = new Map();     // key -> Group (or null for empty cells)
     this.queue = [];            // keys waiting to build, nearest first
     this._queued = new Set();
@@ -32,10 +40,19 @@ export class CityWorld {
     // features (the Labe, a km-long road) overhang far into neighbours' cells.
     // geo reports exactly which cells gained features — drop those groups so
     // the normal streamer rebuilds them with the new data on its next pass.
-    city.onTileLoaded?.((t) => this._dropCells(t.cells));
+    // Fast food is not in the data (OSM keeps it as amenity nodes, which the
+    // pipeline drops), so it is stamped onto suitable host buildings as they
+    // stream in — deterministically, from the building's own id, so the same
+    // shed is the same restaurant every session.
+    this._stamped = 0;
+    this._stampFranchises();
+    city.onTileLoaded?.((t) => { this._dropCells(t.cells); this._stampFranchises(); });
   }
 
-  update(dt, focus) {
+  update(dt, focus, opts) {
+    // interiors stream on their own schedule (they only matter on foot, and
+    // they must keep running even while the chunk streamer has nothing to do)
+    this.interiors.update(dt, focus, opts?.onFoot ?? false);
     // grow the world as we drive: ask geo (at most once per second) to start
     // fetching any manifest tile now in reach — fire-and-forget, a failure
     // just logs and geo retries that tile on a later call
@@ -90,6 +107,15 @@ export class CityWorld {
         this._detail.delete(key);
       }
     }
+  }
+
+  // city.buildings only ever grows, so a running index is all the bookkeeping
+  // the franchise pass needs
+  _stampFranchises() {
+    const all = this.city.buildings;
+    if (this._stamped >= all.length) return;
+    stampFranchises(all.slice(this._stamped));
+    this._stamped = all.length;
   }
 
   // are the 3×3 cells around a position built? (gates the boot overlay)
@@ -153,15 +179,67 @@ export class CityWorld {
     return y;
   }
 
+  // What is (x, z) standing on, at or below `maxY`? Terrain and bridge decks
+  // as before, plus the floor slabs and stairs of any streamed-in interior —
+  // which is the whole mechanism behind walking upstairs: nothing knows what a
+  // staircase is, the walk controller merely keeps finding a surface 175 mm
+  // higher than the last one.
+  supportY(x, z, maxY) {
+    let best = this.heightAt(x, z);
+    const roof = this.roofY(x, z, maxY);
+    if (roof > best) best = roof;
+    const inside = this.interiors.supportY(x, z, maxY);
+    return inside > best ? inside : best;
+  }
+
+  // The top of a building you are ABOVE, or terrain height if there is none.
+  // Roofs are surfaces, not just the tops of collision blocks: this is what
+  // lets a helicopter set down on a block of flats and the pilot climb out and
+  // stand there. `fromY` is the querier's own level — a building whose roof is
+  // over your head is not something you are standing on, it is something you
+  // are inside or beside, so it is skipped. Wrecks are skipped too: their roofs
+  // are boxes now, and interiorsim answers for those.
+  roofY(x, z, fromY) {
+    const cell = this.city.chunkIndex.get(chunkKey(x, z));
+    if (!cell) return 0;
+    let best = 0;
+    for (const b of cell.buildings) {
+      if (b.h <= best || b.h > fromY + 0.05) continue;
+      if (this.interiors.hidden.has(b._id)) continue;
+      if (pointInPolygon(x, z, b.o) && !(b.i ?? []).some((h) => pointInPolygon(x, z, h))) best = b.h;
+    }
+    return best;
+  }
+
+  /** Is there destructible-model geometry at this point? (rocket impacts) */
+  solidAt(x, y, z) { return this.interiors.occupied(x, y, z, 0.12); }
+
   // Push a {x,z} point out of building footprints and open water. Returns
   // true if it moved. radius = how fat the collider is (player 0.38, car
   // corners ~0.5). Buildings with a min-height (skyways) are passable.
-  collide(pos, radius) {
+  //
+  // `opts.interior` switches a WALKER onto the box model: buildings whose
+  // inside exists stop being solid blocks and become their own walls, doors
+  // and (once shot at) holes. Cars and the helicopter never pass it, so for
+  // them a building stays the impenetrable footprint it always was.
+  collide(pos, radius, opts) {
     const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
     if (!cell) return false;
     let pushed = false;
+    const walker = !!opts?.interior;
+    if (walker) {
+      pushed = this.interiors.pushOut(pos, radius,
+        opts.yLo ?? 0, opts.yHi ?? 1.8) || pushed;
+    }
+    // `aboveY`: the caller's own level. A building whose ROOF is below you is
+    // not in your way — you are over it. Without this the helicopter was
+    // shoved off every rooftop it tried to hover onto, and a player standing
+    // on one was pushed straight off the edge.
+    const above = opts?.aboveY;
     for (const b of cell.buildings) {
       if (b.y > 0.5) continue; // skyway/arch — walk under it
+      if (above !== undefined && b.h <= above) continue;
+      if (walker && this.interiors.isActive(b)) continue;   // its boxes did it
       pushed = this._pushOutOfPoly(pos, radius, b.o, b.i, true) || pushed;
     }
     // Water only exists at ground level — ON A BRIDGE the point stands x,z
@@ -229,5 +307,80 @@ export class CityWorld {
     for (const b of cell.buildings)
       if (pointInPolygon(x, z, b.o) && !(b.i ?? []).some(h => pointInPolygon(x, z, h))) return b;
     return null;
+  }
+
+  // ---- v5: taking the city apart -----------------------------------------
+
+  /**
+   * The building a point in SPACE is inside — footprint AND height, which is
+   * what a rocket needs (buildingAt would call a hit at 200 m altitude over a
+   * bungalow). A building already made of boxes returns null: its own pieces
+   * answer for it, so the rocket flies in through the hole it made last time.
+   */
+  buildingHitAt(x, y, z) {
+    const cell = this.city.chunkIndex.get(chunkKey(x, z));
+    if (!cell) return null;
+    for (const b of cell.buildings) {
+      if (y > b.h || y < (b.y ?? 0)) continue;
+      if (this.interiors.hidden.has(b._id)) continue;
+      if (pointInPolygon(x, z, b.o) && !(b.i ?? []).some(h => pointInPolygon(x, z, h))) return b;
+    }
+    return null;
+  }
+
+  /**
+   * damageBuilding(hit, x, y, z, r) — route a blast into every building the
+   * sphere actually reaches, not only the one the nose touched. A rocket into
+   * a party wall has to open BOTH flats, and one into the street has to chew
+   * the shopfronts either side of it, which is why `hit` may be null.
+   */
+  damageBuilding(hit, x, y, z, r) {
+    const seen = new Set();
+    const targets = [];
+    const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const cell = this.city.chunkIndex.get((cx + dx) + ',' + (cz + dz));
+      if (!cell) continue;
+      for (const b of cell.buildings) {
+        if (seen.has(b._id)) continue;
+        seen.add(b._id);
+        if ((b.y ?? 0) > 0.5 || !b.o || b.o.length < 3) continue;
+        if (y - r > b.h || y + r < (b.y ?? 0)) continue;      // over or under it
+        let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
+        for (const [px, pz] of b.o) {
+          if (px < minX) minX = px; if (px > maxX) maxX = px;
+          if (pz < minZ) minZ = pz; if (pz > maxZ) maxZ = pz;
+        }
+        const bd = Math.hypot(Math.max(minX - x, 0, x - maxX), Math.max(minZ - z, 0, z - maxZ));
+        if (bd <= r) targets.push([bd, b]);
+      }
+    }
+    targets.sort((a, b) => a[0] - b[0]);
+    let n = 0;
+    for (const [, b] of targets) {
+      if (n++ >= 4) break;                 // a blast that reaches five buildings
+      this.interiors.damage(b, x, y, z, r); // is a blast in an alley — cap it
+    }
+  }
+
+  /** Stop drawing one building in its chunk mesh (its boxes take over). */
+  hideBuilding(f) { this._rebuildBuildings(f._home); }
+  /** …and put it back, when a wreck is finally recycled far from the player. */
+  unhideBuilding(f) { this._rebuildBuildings(f._home); }
+
+  // Re-mesh ONE chunk's buildings in place. Everything else in the group —
+  // ground, roads, lamps, trees — is untouched, which is what makes promoting
+  // a building to boxes a sub-millisecond event instead of a chunk rebuild.
+  _rebuildBuildings(key) {
+    const group = this.built.get(key);
+    if (!group) return;
+    const old = group.getObjectByName('buildings');
+    if (old) {
+      group.remove(old);
+      old.traverse((o) => o.geometry?.dispose?.());   // it is a Group: walls,
+    }                                                 // door trim and signs
+    const [cx, cz] = key.split(',').map(Number);
+    const m = buildBuildingsMesh(this.city, cx, cz, this.mats);
+    if (m) group.add(m);
   }
 }

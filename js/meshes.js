@@ -31,7 +31,7 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH } from './config.js';
 import { bridgeElevation, polygonArea, pointInPolygon, chunkKey } from './geo.js';
-import { entranceOf } from './interiors.js';
+import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
 
 // geometry dimensions (meters) — construction sizes, not art direction
@@ -52,6 +52,11 @@ const FOOT_CLASSES = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestria
 // of 4 window bays, because an atlas cell cannot wrap-repeat — walls subdivide
 // into ≤4-bay pieces instead, each sampling a sub-range of one cell.
 const WIN_W = 2.7, STOREY_H = 3.1, BAYS = 4;
+// Where the window sits inside one atlas cell, as a fraction of the cell's
+// height, and how much of a bay's width it takes. SHARED with pieces.js (via
+// facadeCells) so the box shell can cut its opening in the same place the paint
+// draws one — see the note in facadeAtlas().
+const WIN_BAND = [0.29, 0.74], WIN_FRAC = 0.54;
 const ATLAS_W = 2048, ATLAS_H = 1024;                // v3 doubled u-resolution: sills/mullions survive
 const ATLAS_N = 8, ATLAS_M = 4;
 const cellRect = (ci, ri) => [ci / ATLAS_N, 1 - (ri + 1) / ATLAS_M, (ci + 1) / ATLAS_N, 1 - ri / ATLAS_M];
@@ -102,6 +107,13 @@ export function makeMaterials() {
     // emissiveIntensity is driven from main at dusk (0 by day, ~2.6 at night)
     lampHead: new THREE.MeshLambertMaterial({ color: 0x2e3033, emissive: 0xffdc96, emissiveIntensity: 0, toneMapped: false }),
     crown: new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+    // door dressing: matte surround/canopy, and a sign board that is always a
+    // touch overbright so the bloom pass finds every entrance in the city
+    doorTrim: new THREE.MeshLambertMaterial({ vertexColors: true }),
+    // Illuminated signage: FULL BRIGHT, never shaded, never tone-mapped — which
+    // is exactly how a backlit retail fascia behaves, and lets the vertex colour
+    // carry each chain's own red/blue/yellow straight past the lighting.
+    doorSign: new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false }),
   };
 }
 
@@ -607,9 +619,14 @@ function facadeAtlas() {
     // a band of BAYS windows; texel density is anisotropic (~24 px/m across,
     // ~82 px/m up) but the wall quads stretch it back to true aspect. wh is
     // clamped so window + sill + streaks never cross into the cell below.
-    const ww = (22 + R(3) * 18) | 0;
-    const wy = (Y + 56 + R(4) * 52) | 0;
-    const wh = Math.min((92 + R(5) * 68) | 0, Y + CH - 30 - wy);
+    // FIXED window band and bay width. They used to jitter per cell, which was
+    // prettier — but the destructible shell has to cut a REAL opening exactly
+    // where the paint puts one (that is how you see into a building through its
+    // windows), and it can only do that if every cell agrees on where the
+    // window is. WIN_BAND / WIN_FRAC below are that agreement.
+    const ww = (BAY * WIN_FRAC) | 0;
+    const wy = (Y + CH * WIN_BAND[0]) | 0;
+    const wh = (CH * (WIN_BAND[1] - WIN_BAND[0])) | 0;
     const lintel = R(7) < 0.72, mull = R(8) < 0.55;
     const balc = ri > 0 && !brick && R(9) < 0.22;     // rails only on some plaster variants
     for (let b = 0; b < BAYS; b++) {
@@ -737,7 +754,15 @@ function ringFacade(sink, ring, isHole, P) {
 // once a missile promotes the building to boxes, the whole chunk mesh stops
 // drawing it and the opening becomes a real hole in real geometry.
 const DOOR_DEPTH = INTERIOR.extT + INTERIOR.linT;   // = the interior wall face
-function doorInto(sink, ring, P) {
+// A doorway you cannot find is a doorway that does not exist, and the first
+// version's was a dark rectangle in a dark reveal — technically there, visually
+// absent from ten metres. So the opening now gets the three things that make a
+// real Czech street door readable at a glance: a light SURROUND standing proud
+// of the plaster, a CANOPY over the pavement, and a lit SIGN board on its face.
+// The surround and canopy go into the facade mesh; the sign board goes into its
+// own emissive batch, so it glows at dusk exactly like the street lamps.
+const CANOPY_D = 1.15, CANOPY_T = 0.2, SURROUND = 0.26;
+function doorInto(sink, trim, sign, ring, P) {
   const d = P.door;
   const [ax, az] = ring[d.i], [bx, bz] = ring[(d.i + 1) % ring.length];
   const ex = bx - ax, ez = bz - az, L = Math.hypot(ex, ez);
@@ -747,14 +772,15 @@ function doorInto(sink, ring, P) {
   const c = L * d.t, hw = Math.min(d.w, L * 0.9) / 2;
   const yB = P.y0 + 0.02, yT = P.y0 + Math.min(INTERIOR.entryH, P.sH - 0.3);
   const jr = P.wr * 0.42, jg = P.wg * 0.42, jb = P.wb * 0.42;   // shaded reveal
+  const at = (s, o) => [ax + ux * s + d.nx * (o ?? 0), az + uz * s + d.nz * (o ?? 0)];
+
   for (const sgn of [-1, 1]) {
     const px = ax + ux * (c + sgn * hw), pz = az + uz * (c + sgn * hw);
     // the jamb faces the middle of the opening
     wallQuad(sink, px, pz, px + inx * DOOR_DEPTH, pz + inz * DOOR_DEPTH,
       yT, yB, -sgn * ux, -sgn * uz, jr, jg, jb);
   }
-  const A = [ax + ux * (c - hw), az + uz * (c - hw)];
-  const B = [ax + ux * (c + hw), az + uz * (c + hw)];
+  const A = at(c - hw), B = at(c + hw);
   sink.triFacing(A[0], yT, A[1], B[0], yT, B[1],
     B[0] + inx * DOOR_DEPTH, yT, B[1] + inz * DOOR_DEPTH, 0, -1, 0, jr, jg, jb);
   sink.triFacing(A[0], yT, A[1], B[0] + inx * DOOR_DEPTH, yT, B[1] + inz * DOOR_DEPTH,
@@ -764,6 +790,48 @@ function doorInto(sink, ring, P) {
   wallQuad(sink, A[0] + inx * DOOR_DEPTH, A[1] + inz * DOOR_DEPTH,
     B[0] + inx * DOOR_DEPTH, B[1] + inz * DOOR_DEPTH, yT, yB, d.nx, d.nz,
     P.wr * 0.16, P.wg * 0.15, P.wb * 0.14);
+
+  if (!trim) return;
+  // ---- the surround: a pale frame 6 cm proud of the wall ----
+  const fr = 0.93, fg = 0.92, fb = 0.88;
+  const O = 0.06;                                  // how far it stands out
+  const box = (s0, s1, y0, y1) => {
+    const p0 = at(s0), p1 = at(s1), q0 = at(s0, O), q1 = at(s1, O);
+    // face, two returns and a top/bottom — a slab, cheaply
+    trim.quad(q0[0], y1, q0[1], q1[0], y1, q1[1], q1[0], y0, q1[1], q0[0], y0, q0[1], fr, fg, fb);
+    trim.quad(p0[0], y1, p0[1], q0[0], y1, q0[1], q0[0], y0, q0[1], p0[0], y0, p0[1], fr, fg, fb);
+    trim.quad(q1[0], y1, q1[1], p1[0], y1, p1[1], p1[0], y0, p1[1], q1[0], y0, q1[1], fr, fg, fb);
+  };
+  box(c - hw - SURROUND, c - hw, yB, yT + SURROUND);
+  box(c + hw, c + hw + SURROUND, yB, yT + SURROUND);
+  box(c - hw - SURROUND, c + hw + SURROUND, yT, yT + SURROUND);
+
+  // ---- the canopy: a slab over the pavement, and its underside ----
+  const cy = yT + SURROUND + 0.16;
+  if (cy + CANOPY_T < P.y0 + P.sH - 0.15) {
+    const w0 = c - hw - SURROUND - 0.2, w1 = c + hw + SURROUND + 0.2;
+    const p0 = at(w0), p1 = at(w1);
+    const o0 = at(w0, CANOPY_D), o1 = at(w1, CANOPY_D);
+    const cr = fr * 0.8, cg = fg * 0.8, cb = fb * 0.8;
+    // top, front edge, and the underside (which is what you see from below)
+    trim.triFacing(p0[0], cy + CANOPY_T, p0[1], p1[0], cy + CANOPY_T, p1[1],
+      o1[0], cy + CANOPY_T, o1[1], 0, 1, 0, cr, cg, cb);
+    trim.triFacing(p0[0], cy + CANOPY_T, p0[1], o1[0], cy + CANOPY_T, o1[1],
+      o0[0], cy + CANOPY_T, o0[1], 0, 1, 0, cr, cg, cb);
+    trim.triFacing(p0[0], cy, p0[1], p1[0], cy, p1[1], o1[0], cy, o1[1],
+      0, -1, 0, cr * 0.7, cg * 0.7, cb * 0.7);
+    trim.triFacing(p0[0], cy, p0[1], o1[0], cy, o1[1], o0[0], cy, o0[1],
+      0, -1, 0, cr * 0.7, cg * 0.7, cb * 0.7);
+    trim.quad(o0[0], cy + CANOPY_T, o0[1], o1[0], cy + CANOPY_T, o1[1],
+      o1[0], cy, o1[1], o0[0], cy, o0[1], cr, cg, cb);
+    // ---- the sign board, on the canopy's front edge, lit ----
+    if (sign) {
+      const s0 = at(w0 + 0.15, CANOPY_D + 0.03), s1 = at(w1 - 0.15, CANOPY_D + 0.03);
+      const [sr, sg, sb] = P.signRGB ?? [1, 0.86, 0.62];
+      sign.quad(s0[0], cy + CANOPY_T - 0.03, s0[1], s1[0], cy + CANOPY_T - 0.03, s1[1],
+        s1[0], cy + 0.03, s1[1], s0[0], cy + 0.03, s0[1], sr, sg, sb);
+    }
+  }
 }
 
 // flat cap via earcut straight into the sink — keeps every facade-mode
@@ -785,17 +853,85 @@ function capInto(sink, outer, holes, y, up, r, g, b) {
   }
 }
 
-function buildingInto(f, geos, sink, facades, roads) {
-  if (!f.o || f.o.length < 3) return;
-  const y0 = f.y ?? 0;
-  const depth = Math.max(1, Math.max(2.2, f.h ?? 6) - y0); // h is total height; skyways start at y0
-  // wall color: explicit OSM colour wins, else palette by type; unnamed stock
-  // gets a light tint jitter so shared footprints don't read as copy-paste —
-  // NAMED landmarks keep the pure palette hue so they pop
+// The one true wall colour of a building — explicit OSM colour if it has one,
+// else the palette for its type; unnamed stock gets a light tint jitter so
+// shared footprints don't read as copy-paste, while NAMED landmarks keep the
+// pure palette hue so they pop.
+//
+// EXPORTED and cached on the feature because pieces.js needs the same answer.
+// When a rocket promotes a building from this facade mesh to its own box model,
+// the boxes must come out the colour the facade already was — otherwise the
+// building visibly changes identity at the instant you hit it, which reads as a
+// bug rather than as damage.
+export function buildingWallHex(f) {
+  if (f._wallHex !== undefined) return f._wallHex;
+  // a chain paints its own boxes: a Kaufland is not "commercial beige"
+  const brand = brandOf(f);
+  if (brand?.wall !== undefined) return (f._wallHex = brand.wall);
   const pal = BUILDING_PALETTES[f.t] ?? BUILDING_PALETTES.default;
   const hex = f.c ? parseInt(f.c.slice(1), 16) : pal[Math.floor(rnd(f._id, 0) * pal.length)];
   _c.setHex(hex);
   if (!f.n) _c.offsetHSL((rnd(f._id, 1) - 0.5) * 0.02, -0.06 * rnd(f._id, 2), (rnd(f._id, 3) - 0.5) * 0.07);
+  return (f._wallHex = _c.getHex());
+}
+
+// Which atlas cells this building's facade is painted from, and the bay pitch.
+// EXPORTED because the destructible shell has to sample the SAME cells: that is
+// the only way a building can stop being a textured quad and start being a pile
+// of boxes without visibly changing. See pieces.js emitPerimeter('ext').
+export function facadeCells(f) {
+  return {
+    cellA: f.t === 'panel' ? PANEL_CELL
+      : BRICK_TYPES.has(f.t) ? BRICK_UV[f._id % BRICK_UV.length]
+      : GENERIC[(hashStr(f.t ?? '') + f._id % 5) % GENERIC.length],
+    storeC: STORE_TYPES.has(f.t) ? STORE_CELL : null,
+    bayW: WIN_W, bays: BAYS, atlasN: ATLAS_N,
+    band: WIN_BAND, frac: WIN_FRAC,
+    pin: [PIN_U, PIN_V],
+    atlas: facadeAtlas(),
+  };
+}
+
+// The band of brand colour that runs along the top of a retail shed's street
+// frontage — the parapet fascia every Kaufland, Lidl and Penny in the country
+// wears, and the reason you know which one it is from three hundred metres.
+// Only the two LONGEST edges get it (a supermarket signs its front and its
+// flank, never its bin store), and it is drawn 8 cm proud of the wall.
+function brandBand(sign, ring, P) {
+  const [sr, sg, sb] = P.signRGB;
+  const edges = [];
+  for (let i = 0; i < ring.length; i++) {
+    const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
+    edges.push({ i, L: Math.hypot(bx - ax, bz - az) });
+  }
+  edges.sort((a, b) => b.L - a.L);
+  // Under the parapet, not down at first-floor level: a retail fascia is the
+  // highest thing on the building, which is exactly why you can read it from
+  // the far side of the car park.
+  const H = Math.min(1.5, (P.top - P.y0) * 0.22), O = 0.1;
+  const top = P.top - H - 0.35;
+  for (const e of edges.slice(0, 2)) {
+    if (e.L < 8) continue;
+    const [ax, az] = ring[e.i], [bx, bz] = ring[(e.i + 1) % ring.length];
+    const ux = (bx - ax) / e.L, uz = (bz - az) / e.L;
+    // outward normal of this edge, same convention as entranceOf
+    const s = (polygonArea(ring) > 0 ? 1 : -1);
+    const nx = s * uz, nz = -s * ux;
+    const inset = e.L * 0.06;
+    const p0 = [ax + ux * inset + nx * O, az + uz * inset + nz * O];
+    const p1 = [bx - ux * inset + nx * O, bz - uz * inset + nz * O];
+    sign.quad(p0[0], top + H, p0[1], p1[0], top + H, p1[1],
+      p1[0], top, p1[1], p0[0], top, p0[1], sr, sg, sb);
+    sign.quad(p1[0], top + H, p1[1], p0[0], top + H, p0[1],
+      p0[0], top, p0[1], p1[0], top, p1[1], sr * 0.5, sg * 0.5, sb * 0.5);
+  }
+}
+
+function buildingInto(f, geos, sink, facades, cell, trim, sign) {
+  if (!f.o || f.o.length < 3) return;
+  const y0 = f.y ?? 0;
+  const depth = Math.max(1, Math.max(2.2, f.h ?? 6) - y0); // h is total height; skyways start at y0
+  _c.setHex(buildingWallHex(f));
   const wr = _c.r, wg = _c.g, wb = _c.b;
   const rr = wr * ROOF_DARKEN, rg = wg * ROOF_DARKEN, rb = wb * ROOF_DARKEN;
 
@@ -815,10 +951,19 @@ function buildingInto(f, geos, sink, facades, roads) {
       // entranceOf caches its answer on the feature, so the hole never moves
       // between rebuilds and always matches the gap pieces.js leaves in the
       // interior lining.
-      door: y0 < 0.5 && Math.abs(polygonArea(f.o)) >= 14 ? entranceOf(f, roads) : null,
+      door: y0 < 0.5 && Math.abs(polygonArea(f.o)) >= 14
+        ? entranceOf(f, cell?.roads, cell?.buildings) : null,
     };
+    // a chain's fascia colour rides on the plan, so the canopy sign and the
+    // brand band come out Kaufland red / Lidl blue rather than generic amber
+    const brand = brandOf(f);
+    if (brand?.sign !== undefined) {
+      _c.setHex(brand.sign);
+      P.signRGB = [_c.r, _c.g, _c.b];
+    }
     ringFacade(sink, f.o, false, P);
-    if (P.door && P.sH > INTERIOR.entryH + 0.35) doorInto(sink, f.o, P);
+    if (P.door && P.sH > INTERIOR.entryH + 0.35) doorInto(sink, trim, sign, f.o, P);
+    if (brand?.sign !== undefined && sign) brandBand(sign, f.o, P);
     for (const h of f.i ?? []) if (h.length >= 3) ringFacade(sink, h, true, P);
     capInto(sink, f.o, f.i, y0 + depth, true, rr, rg, rb);
     if (y0 > 0.5) capInto(sink, f.o, f.i, y0, false, rr, rg, rb); // skyway underside
@@ -935,10 +1080,15 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   const facades = !!mats.facades;
   const hidden = mats.hidden;
   const bGeos = [], bSink = new TriSink(facades);
+  // door dressing lives in its own two batches: the surround/canopy carry no
+  // atlas uv, and the sign board needs an emissive material main.js can turn up
+  // at dusk. Two extra draw calls per chunk buys a city where you can see which
+  // buildings you can walk into.
+  const trim = new TriSink(), sign = new TriSink();
   for (const f of cell.buildings) {
     if (f._home !== key) continue;
     if (hidden && hidden.has(f._id)) continue;   // now made of boxes instead
-    buildingInto(f, bGeos, bSink, facades, cell.roads);
+    buildingInto(f, bGeos, bSink, facades, cell, trim, sign);
   }
   const pg = bSink.geo();
   if (pg) bGeos.push(pg);
@@ -946,10 +1096,20 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   const mat = facades
     ? (mats._facadeMat ??= new THREE.MeshLambertMaterial({ vertexColors: true, map: facadeAtlas() }))
     : mats.building;
+  const group = new THREE.Group();
+  group.name = 'buildings';
   const m = new THREE.Mesh(mergeGeometries(bGeos, false), mat);
-  m.name = 'buildings';
   m.castShadow = m.receiveShadow = true;
-  return m;
+  group.add(m);
+  const tg = trim.geo();
+  if (tg) {
+    const t = new THREE.Mesh(tg, mats.doorTrim);
+    t.castShadow = t.receiveShadow = true;
+    group.add(t);
+  }
+  const sg2 = sign.geo();
+  if (sg2) group.add(new THREE.Mesh(sg2, mats.doorSign));
+  return group;
 }
 
 // ---- street lamps: the detail that makes a road read as a street ----

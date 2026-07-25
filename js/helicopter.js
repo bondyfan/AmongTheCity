@@ -298,6 +298,7 @@ function makeHeliMesh() {
 
 // ---- Helicopter ---------------------------------------------------------
 const _pt = { x: 0, z: 0 };            // scratch for world.collide, reused forever
+const _col = { aboveY: 0 };            // …and its options object
 
 export class Helicopter {
   constructor(scene, x, z, heading = 0) {
@@ -405,9 +406,14 @@ export class Helicopter {
     this.y += this.vy * dt;
 
     // ---- ground ----------------------------------------------------------
-    // One heightAt per step, after the move: the only relief in Pardubice is
-    // bridge decks, and landing on one has to work.
-    const gy = world.heightAt(this.x, this.z);
+    // One query per step, after the move. "Ground" is not the street: it is
+    // whatever is under the skids, which on a city flight is usually a ROOF.
+    // roofY only returns a building top the machine is already above, so
+    // descending onto a block of flats lands on it while flying past its
+    // fifteenth floor still leaves the wall in the way (see the collide call
+    // below, which now ignores anything shorter than we are).
+    const gy = world.roofY ? world.roofY(this.x, this.z, this.y)
+      : world.heightAt(this.x, this.z);
     if (this.y < gy) { this.y = gy; if (this.vy < 0) this.vy = 0; }
     const agl = this.y - gy;
     if (this.vy > 0.05 && agl > 0.02) {
@@ -430,7 +436,13 @@ export class Helicopter {
     // down on the Labe either, which is the right answer anyway).
     if (this.y < COLLIDE_Y) {
       _pt.x = this.x; _pt.z = this.z;
-      if (world.collide(_pt, BODY_R)) {
+      // aboveY: a rooftop we have already cleared is a landing pad, not a wall.
+      // The tolerance has to be POSITIVE, or the moment the skids touch down
+      // (y === roof height) the building becomes an obstacle again and shoves
+      // its own landing pad out from under the machine — which is exactly what
+      // "it throws me off the roofs" was.
+      _col.aboveY = this.y + 0.3;
+      if (world.collide(_pt, BODY_R, _col)) {
         const px = _pt.x - this.x, pz = _pt.z - this.z;
         this.x = _pt.x; this.z = _pt.z;
         const pl = Math.hypot(px, pz);
