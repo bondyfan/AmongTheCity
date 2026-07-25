@@ -211,13 +211,17 @@ async function boot() {
   placeParkedCars(city);
   input.rpgMode = true; // right-drag orbits the camera
 
-  // warm up: build the spawn's neighbourhood before revealing the city
+  // warm up: build the spawn's neighbourhood before revealing the city.
+  // Exceptions here used to vanish (setTimeout swallows them out of the
+  // promise chain) and left the overlay spinning forever — route them out.
   let warmFrames = 0;
-  await new Promise((resolve) => {
+  await new Promise((resolve, reject) => {
     const warm = () => {
-      for (let i = 0; i < 6; i++) world.update(1 / 60, player.pos);
-      if (world.ready(player.pos) || ++warmFrames > 200) resolve();
-      else setTimeout(warm, 0); // setTimeout, not rAF — hidden tabs still boot
+      try {
+        for (let i = 0; i < 6; i++) world.update(1 / 60, player.pos);
+        if (world.ready(player.pos) || ++warmFrames > 200) resolve();
+        else setTimeout(warm, 0); // setTimeout, not rAF — hidden tabs still boot
+      } catch (err) { reject(err); }
     };
     warm();
   });
@@ -237,23 +241,43 @@ async function boot() {
 // clock for hidden partners).
 const clock = new THREE.Clock();
 setInterval(() => { if (document.hidden) tick(true); }, 66);
+
+// A dead game must never be a silent black screen: the first exception the
+// loop throws goes ON the screen (and the console), so "nefunguje to" always
+// comes with the actual error text.
+let _fatalShown = false;
+function showFatal(err) {
+  console.error(err);
+  if (_fatalShown) return;
+  _fatalShown = true;
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99;background:#7a1f1f;'
+    + 'color:#ffe;padding:10px 16px;font:13px/1.5 monospace;white-space:pre-wrap';
+  d.textContent = '⚠ ' + (err?.stack?.split('\n').slice(0, 3).join('\n') ?? String(err));
+  document.body.appendChild(d);
+}
+
 function tick(fromInterval) {
   if (!fromInterval) requestAnimationFrame(tick);
-  let remaining = Math.min(clock.getDelta(), fromInterval ? 1.0 : 0.05);
-  while (remaining > 0) {
-    const dt = Math.min(remaining, 0.05);
-    remaining -= dt;
-    stepGame(dt);
-  }
-  // render ONCE per fire, after every sub-step — rendering inside the
-  // sub-step loop turned a throttled hidden tab into 20 draws per second of
-  // covered time and froze the main thread solid
-  const r0 = performance.now();
-  renderer.render(scene, camera);
-  if (window.__atc) {
-    const ms = performance.now() - r0;
-    window.__atc.frameMs += (ms - window.__atc.frameMs) * 0.1;
-    window.__atc.fps = Math.round(1000 / Math.max(1, ms));
+  try {
+    let remaining = Math.min(clock.getDelta(), fromInterval ? 1.0 : 0.05);
+    while (remaining > 0) {
+      const dt = Math.min(remaining, 0.05);
+      remaining -= dt;
+      stepGame(dt);
+    }
+    // render ONCE per fire, after every sub-step — rendering inside the
+    // sub-step loop turned a throttled hidden tab into 20 draws per second of
+    // covered time and froze the main thread solid
+    const r0 = performance.now();
+    renderer.render(scene, camera);
+    if (window.__atc) {
+      const ms = performance.now() - r0;
+      window.__atc.frameMs += (ms - window.__atc.frameMs) * 0.1;
+      window.__atc.fps = Math.round(1000 / Math.max(1, ms));
+    }
+  } catch (err) {
+    showFatal(err);
   }
 }
 
@@ -293,6 +317,7 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
+  build: 'v3-fatalbanner',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   get player() { return player; }, get world() { return world; },
