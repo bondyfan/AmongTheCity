@@ -240,7 +240,13 @@ async function boot() {
 // clock, traffic, automated tests; same reason the Woods co-op runs a worker
 // clock for hidden partners).
 const clock = new THREE.Clock();
-setInterval(() => { if (document.hidden) tick(true); }, 66);
+// the interval steps in whenever rAF is not running — hidden tab, or any
+// future stall of the rAF chain (belt and braces: a dead loop was once a
+// silent black screen)
+let _lastRaf = 0;
+setInterval(() => {
+  if (document.hidden || performance.now() - _lastRaf > 500) tick('interval');
+}, 66);
 
 // A dead game must never be a silent black screen: the first exception the
 // loop throws goes ON the screen (and the console), so "nefunguje to" always
@@ -257,8 +263,18 @@ function showFatal(err) {
   document.body.appendChild(d);
 }
 
-function tick(fromInterval) {
-  if (!fromInterval) requestAnimationFrame(tick);
+// CAREFUL: requestAnimationFrame passes a TIMESTAMP to its callback. The
+// interval marker must therefore be a sentinel string compared explicitly —
+// treating "truthy first argument" as "came from the interval" killed the
+// rAF chain after one frame (rAF's own timestamp is truthy), which showed
+// up as a single frozen frame on every visible tab while hidden-tab test
+// harnesses (living off the interval path) kept passing.
+function tick(src) {
+  const fromInterval = src === 'interval';
+  if (!fromInterval) {
+    _lastRaf = performance.now();
+    requestAnimationFrame(tick);
+  }
   try {
     let remaining = Math.min(clock.getDelta(), fromInterval ? 1.0 : 0.05);
     while (remaining > 0) {
@@ -317,7 +333,7 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v3-fatalbanner',   // bump on risky changes — tells us which code a tab runs
+  build: 'v4-raf-fix',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   get player() { return player; }, get world() { return world; },
