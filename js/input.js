@@ -51,10 +51,28 @@ class Input {
     document.addEventListener('pointerlockchange', () => {
       this.locked = !!document.pointerLockElement;
     });
+    // The wheel is the CAMERA's, not the browser's. This listener has to be
+    // NON-passive to say so: a passive one cannot preventDefault, which is why
+    // ctrl+wheel (and a trackpad pinch, which Chrome reports as exactly that)
+    // was zooming the whole page instead of the game. Anything inside a
+    // scrollable panel keeps its native scroll — the settings body scrolls,
+    // the world does not.
+    const SCROLLS = '.panel, .atc-set-body, #atc-set, [data-scroll]';
     window.addEventListener('wheel', (e) => {
-      if (e.target.closest?.('.panel')) return; // panels scroll normally
+      if (e.target.closest?.(SCROLLS)) return;  // real UI scrolling, hands off
+      e.preventDefault();                       // no page zoom, no rubber-band
+      if (e.ctrlKey) return;                    // a pinch is not a zoom command
       this.wheelSteps += Math.sign(e.deltaY);
-    }, { passive: true });
+    }, { passive: false });
+    // Safari's pinch arrives as gesture events rather than ctrl+wheel, and
+    // ctrl/⌘ with +/−/0 is the keyboard route to the same place. Both are the
+    // browser zooming a canvas that has its own camera — refuse all three.
+    for (const g of ['gesturestart', 'gesturechange', 'gestureend'])
+      window.addEventListener(g, (e) => e.preventDefault(), { passive: false });
+    window.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '0') e.preventDefault();
+    }, { passive: false });
     window.addEventListener('mousedown', (e) => {
       if (e.target.closest('button, .panel, .spell-slot, #minimap')) return; // don't attack through UI
       if (e.button === 0) { this.mouse.left = true; this.leftPressed = true; }

@@ -734,6 +734,9 @@ export function makeCarMesh(colorHex, kind = 'octavia') {
   };
   add(g.paint, paint, true);
   add(g.glass, glassMat, true);
+  // the crumple (dentCar) needs to find the sheet metal: paint hull first,
+  // glass second — they are always the first two children of `body`
+  group.userData.hulls = [body.children[0], body.children[1]];
   add(g.dark, grilleMat);
   add(g.chrome, chromeMat);
   add(g.white, liveryMat);
@@ -839,6 +842,32 @@ export class Vehicles {
         bumpR = Math.sin(t * 4.1 + 1.7) * 0.024 * a;
       }
       m.position.y = car.y + bumpY;
+      // ---- smoke ----
+      // Two plumes off the shared dust pool (main wires vehicles.dust):
+      //   · a totaled-ish car (damage > 0.75) pours dark engine smoke,
+      //   · every combustion car near the focus breathes faint exhaust
+      //     (teslas have no pipe and stay clean).
+      if (this.dust) {
+        car._smokeT = (car._smokeT ?? 0) - dt;
+        if (car._smokeT <= 0) {
+          const fx2 = -Math.sin(car.heading), fz2 = -Math.cos(car.heading);
+          const dmg2 = car.damage ?? 0;
+          const near = !this.focus
+            || Math.hypot(car.x - this.focus.x, car.z - this.focus.z) < 55;
+          if (dmg2 > 0.75 && near) {
+            car._smokeT = 0.14;
+            this.dust.puff(car.x + fx2 * car.len * 0.32, car.y + 0.75, car.z + fz2 * car.len * 0.32,
+              0.35, 2.4 + dmg2, 1.6, 0.5, dmg2 >= 1 ? 0x23221f : 0x4a4642,
+              (Math.random() - 0.5), 1.3, (Math.random() - 0.5));
+          } else if (near && car.kind !== 'tesla' && Math.abs(car.speed) > 0.4) {
+            car._smokeT = 0.5 + Math.random() * 0.3;
+            // out of the tailpipe: low, behind, drifting with the car's wake
+            this.dust.puff(car.x - fx2 * car.len * 0.48, car.y + 0.28, car.z - fz2 * car.len * 0.48,
+              0.14, 0.75, 1.0, 0.15, 0x9a9894,
+              -fx2 * 0.8, 0.35, -fz2 * 0.8);
+          } else car._smokeT = 0.3;
+        }
+      }
       const b = m.userData.body;
       // crash damage shows: the shell sags and takes a permanent list — cheap,
       // and it reads as "that car has had a day" from any distance
@@ -856,6 +885,56 @@ export class Vehicles {
 // omit it and the step degrades gracefully to walls-only, v2 behavior).
 const _pt = { x: 0, z: 0 };
 let _hitX = 0, _hitZ = 0;   // last building-contact point this step
+// ---- crumple: BeamNG-style permanent sheet-metal deformation ------------
+// The hulls are lofted BufferGeometries, so a crash can deform them the honest
+// way: push every vertex near the impact point INWARD along the impact normal,
+// with a smooth falloff and per-vertex noise so the dent has the crinkled read
+// of bent steel rather than a scooped dish. Geometry is SHARED per kind, so the
+// first dent on a car clones its hulls (that car pays ~1 ms once and owns its
+// shape forever); later dents accumulate in the same clone. Normals recompute
+// so the dent actually shades as a dent.
+const _lv = new THREE.Vector3();
+export function dentCar(car, wx, wy, wz, nx, nz, depth) {
+  const hulls = car.mesh?.userData.hulls;
+  if (!hulls || depth <= 0.01) return;
+  // world impact → the body group's local frame (undo yaw + position)
+  const h = car.heading, ch = Math.cos(h), sh = Math.sin(h);
+  const dx = wx - car.x, dz = wz - car.z;
+  const lx = ch * dx - sh * dz, lz = sh * dx + ch * dz;
+  const ly = Math.max(0.15, Math.min(1.4, wy - car.y));
+  const nL = Math.hypot(nx, nz) || 1;                        // callers pass unnormalized
+  nx /= nL; nz /= nL;
+  const lnx = ch * nx - sh * nz, lnz = sh * nx + ch * nz;   // push direction, local
+  const R = 0.65 + depth * 1.6;                              // dent radius grows with the hit
+  for (const mesh of hulls) {
+    if (!mesh?.geometry) continue;
+    if (!mesh.userData.owned) {                              // first dent: own the sheet metal
+      mesh.geometry = mesh.geometry.clone();
+      mesh.userData.owned = true;
+    }
+    const pos = mesh.geometry.attributes.position;
+    let touched = false;
+    for (let i = 0; i < pos.count; i++) {
+      const px = pos.getX(i), py = pos.getY(i), pz2 = pos.getZ(i);
+      const d = Math.hypot(px - lx, (py - ly) * 1.4, pz2 - lz);
+      if (d >= R) continue;
+      const t = 1 - d / R;
+      // smoothstep falloff × depth, plus crinkle noise off the vertex index
+      const k = t * t * (3 - 2 * t) * depth;
+      const n = (Math.sin(i * 12.9898 + px * 78.233) * 0.5 + 0.5) * 0.35 + 0.65;
+      pos.setXYZ(i,
+        px + lnx * k * n,
+        py - k * 0.22 * n,                                   // metal folds DOWN a little too
+        pz2 + lnz * k * n);
+      touched = true;
+    }
+    if (touched) {
+      pos.needsUpdate = true;
+      mesh.geometry.computeVertexNormals();
+    }
+  }
+}
+
 export function driveStep(car, ctl, dt, world, others) {
   // crash damage starves the drivetrain: a wreck at damage ≥ 1 no longer
   // pulls at all, and everything in between loses proportionate punch
@@ -884,9 +963,10 @@ export function driveStep(car, ctl, dt, world, others) {
     else {
       // max(0,…): a collision impulse can leave s a hair over vmax, and a
       // negative base under ^1.3 is NaN — clamp the headroom, not the speed
-      const hurt = 1 - 0.45 * dmg;               // a battered engine pulls less
-      const a = K.accel * hurt * Math.pow(Math.max(0, 1 - s / (K.vmax * hurt)), 1.3);
-      s = Math.min(K.vmax * hurt, s + a * gas * dt);
+      // damage does NOT sap the engine below totaled — a dented car drives
+      // exactly like a clean one until damage hits 1.0 and it dies outright
+      const a = K.accel * Math.pow(Math.max(0, 1 - s / K.vmax), 1.3);
+      s = Math.min(K.vmax, s + a * gas * dt);
     }
   } else if (gas < -0.01) {
     s = s > 0.05 ? Math.max(0, s + CAR.brake * gas * dt)      // gas is negative
@@ -971,6 +1051,9 @@ export function driveStep(car, ctl, dt, world, others) {
             car.damage = Math.min(1.2, (car.damage ?? 0) + sev * 0.45);
             o.damage = Math.min(1.2, (o.damage ?? 0) + sev * 0.45);
             crash(sev);
+            const mx = (car.x + o.x) / 2, mz = (car.z + o.z) / 2;
+            dentCar(car, mx, car.y + 0.55, mz, -nx, -nz, sev * 0.3);
+            dentCar(o, mx, o.y + 0.55, mz, nx, nz, sev * 0.3);
             if (closing > 6) world.crashDebris?.(
               (car.x + o.x) / 2, car.y, (car.z + o.z) / 2, car.color,
               Math.min(8, 2 + closing | 0), closing * 0.5);
@@ -1024,6 +1107,9 @@ export function driveStep(car, ctl, dt, world, others) {
       const sev = Math.min(1, impact / 20);
       car.damage = Math.min(1.2, (car.damage ?? 0) + sev * 0.55);
       crash(sev);
+      // the push normal points OUT of the wall = into the car: dent along it
+      dentCar(car, _hitX, car.y + 0.55, _hitZ,
+        car.x - _hitX, car.z - _hitZ, sev * 0.34);
       world.crashDebris?.(_hitX, car.y, _hitZ, car.color,
         Math.min(10, 2 + impact * 0.5 | 0), impact * 0.45);
       if (sev > 0.4) car._crushR = ((car._crushR ?? 0) + (Math.random() - 0.5) * 0.07);
@@ -1048,17 +1134,49 @@ export function driveStep(car, ctl, dt, world, others) {
     car.offroad += ((s.road ? 0 : 1) - (car.offroad ?? 0)) * Math.min(1, dt * 3.5);
     car.y = s.y;
     if (car.offroad > 0.05 && Math.abs(car.speed) > 0.5) {
-      // Rolling resistance of a field, not of glue: the first pass capped
-      // offroad at ~40 km/h and read as driving through mud. The quadratic is
-      // tuned so a typical engine (7 m/s² peak) balances near 25 m/s — you CAN
-      // do 90 across a meadow, the ground just never stops arguing (the body
-      // judder in update() grows with speed to sell it).
+      // Rolling resistance of a field, not of glue — solved, not guessed: an
+      // Octavia's curve gives a = 7·(1 − v/64)^1.3, which at 25 m/s (90 km/h)
+      // is 3.7 m/s². For the meadow to top out THERE, drag at 25 m/s must
+      // equal 3.7: 0.3 + 625·q = 3.7 → q = 0.0054. (0.055 was the mud everyone
+      // complained about; 0.0107 measured out at 60 km/h.) The ground still
+      // argues — through the body judder in update(), which grows with speed.
       const k = car.offroad;
       const v = Math.abs(car.speed);
-      const drag = (0.3 + v * v * 0.0107) * k;
+      const drag = (0.3 + v * v * 0.0054) * k;
       car.speed -= Math.sign(car.speed) * Math.min(v, drag * dt);
     }
   } else {
     car.y = world.heightAt(car.x, car.z);  // tests stub heightAt only
   }
+}
+
+// ---- seatAnchor(car, i) → LOCAL-space seat point { x, y, z } -------------
+// Purely additive boarding/passenger API — nothing inside this module calls
+// it; player.js walks people to it and the net layer places remote riders on
+// it. Coordinates are the car's LOCAL frame: origin on the ground under the
+// center, −z the nose, +x the RIGHT flank (world = rotate by car.heading).
+// The y returned is the SEAT CUSHION TOP; a sitting citizen group (hip pivot
+// 0.86·scale above its own origin) belongs ~0.78·scale below it.
+//   i = 0 → driver (LEFT, Czech cars: x = −0.35·wid)   i = 1 → passenger
+//   (right); i = 2/3 land on a rear bench one row (0.85 m) back.
+// Occupancy is NOT tracked here: whoever seats people lazily creates
+// `car.seats = [occupant0, occupant1, …]` on the car object and claims a
+// seat by writing itself into the slot — see player.boardVehicle() and the
+// registry comment beside main.js's E-handler.
+export function seatAnchor(car, i = 0) {
+  const K = kindOf(car.kind);
+  const wid = car.wid ?? K.wid;
+  const g = K.green, sts = K.hull.sts;
+  let top = 0;
+  for (const s of sts) if (s[2] > top) top = s[2];
+  // cushion height: a hand under the greenhouse base keeps every roofline
+  // clear of a seated head; the cab-over kinds (truck, bus — no greenhouse
+  // loft) perch the driver at ~62 % of their tall slab hull instead
+  const y = (g ? g.sts[0][1] : top * 0.62) - 0.42;
+  // fore/aft: halfway up the windscreen rake (the first two greenhouse
+  // stations) plus half a metre puts the front row right behind the glass;
+  // blind-cab kinds sit hard against the front face, cab-over style
+  const z = (g ? (g.sts[0][0] + g.sts[1][0]) / 2 + 0.5 : sts[0][0] + 1.15)
+    + (i >> 1) * 0.85;
+  return { x: (i % 2 ? 1 : -1) * wid * 0.35, y, z };
 }

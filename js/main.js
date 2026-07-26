@@ -10,7 +10,7 @@ import { SPAWN, CITY_DATA_URL, DAY_LENGTH, START_TOD, CAR_COLORS, CAR } from './
 import { loadCity, chunkKey } from './geo.js';
 import { CityWorld } from './city.js';
 import { input } from './input.js';
-import { Player } from './player.js';
+import { Player, worldSeatAnchor } from './player.js';
 import { Vehicles, driveStep, lampMats } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
@@ -26,7 +26,10 @@ import { Clouds } from './clouds.js';
 import { WorldMap } from './worldmap.js';
 import { Trains } from './trains.js';
 import { Weapons } from './weapons.js';
+import { SpeedStreaks } from './speedfx.js';
 import { MISSILE } from './config.js';
+import { showMenu } from './menu.js';
+import { connectCity, vehId as netVehId } from './netcity.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -66,6 +69,7 @@ let heli = null, clouds = null;   // the helipad's machine, and the sky to fly i
 let worldMap = null;   // the full-region map on M, and the waypoint it owns
 let trains = null;     // České dráhy on the real 532 km network
 let weapons = null;  // the rocket pod under that machine, and what it does to walls
+let streaks = null;  // the air, showing itself past 100 km/h
 let aimMark = null;  // the ring on the ground where the next rocket would land
 let _aimT = 0;
 const parked = [];      // cars placed by us, enterable
@@ -123,7 +127,11 @@ function updateCamera(dt) {
     wantYaw = player.heading;
     dist = camDist;
     height = 2.1;
-    tx = player.pos.x; ty = player.mesh.position.y + 1.5; tz = player.pos.z;
+    // player.y, NOT mesh.position.y: once boarding parents the mesh to a
+    // vehicle its position is SEAT-LOCAL, and a passenger riding over a bridge
+    // deck would drag the camera down to the riverbed. player.y is world space
+    // in every state — walking, on a staircase, falling, or sitting.
+    tx = player.pos.x; ty = player.y + 1.5; tz = player.pos.z;
     fov = BASE_FOV;
   }
   // auto-follow: yaw eases toward the travel heading only while moving and
@@ -213,57 +221,98 @@ input.onKey('KeyM', () => {
   if (open && input.locked) document.exitPointerLock();
 });
 
+// E is a STATE MACHINE now, not a teleport (player.js owns it): boarding
+// walks the figure to the door, slides it into the seat over ~0.55 s, and
+// only the onSeated callback flips game.car/game.heli — so the chase camera
+// stays in walk mode until the body is actually in the chair. Exiting hands
+// control back immediately and plays a ~0.35 s step-out.
+//
+// SEAT REGISTRY — the multiplayer seam. Every enterable vehicle lazily grows
+// `veh.seats = [occupant0, occupant1, …]` (created by player.boardVehicle or
+// by whoever claims first): slot 0 is the driver/pilot, slot 1 the front
+// passenger (a heli explicitly seats these two). Claiming a seat = writing
+// any truthy occupant into its slot; the net layer seats REMOTE players by
+// claiming a slot and placing their avatar at window.__atc.seatAnchor(veh, i)
+// — the world-space anchor exported below. Locally, E takes the lowest free
+// seat: the driver's if it's open, the passenger's if a remote player is
+// already driving.
+const freeSeat = (veh) => !veh.seats?.[0] ? 0 : !veh.seats?.[1] ? 1 : -1;
+
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
   if (trains?.riding) {
     // only with the doors open — stepping off at 140 km/h is not a feature
     if (!trains.alight()) { ui_hint('Vystoupit lze jen ve stanici'); return; }
     sfx('train_doors', 0.7);
-  } else if (!game.car && !game.heli
+  } else if (!game.car && !game.heli && !player.boarding && !player.exiting
       && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
     const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
     if (trains.board(t)) sfx('train_doors', 0.7);
+  } else if (player.boarding) {
+    player.cancelBoarding();             // second E aborts the walk-up
+  } else if (player.exiting) {
+    // mid step-out: let the animation land, it's a third of a second
   } else if (game.car) {
-    // step out: player.js places us at the car's side
-    game.car.ctl = null;
-    player.setInCar(null);
-    parked.includes(game.car) || parked.push(game.car);
+    // step out: control returns NOW, the body follows over EXIT_T
+    const c = game.car;
+    c.ctl = null;
     game.car = null;
+    parked.includes(c) || parked.push(c);
     $id('speedo').classList.add('hidden');
     engineStop();
     tireSet(0, 0);
-    sfx('door_close', 0.8);
+    sfx('door_open', 0.7);
+    player.beginExit({ onOut: () => sfx('door_close', 0.8) });
   } else if (game.heli) {
     // step out of the helicopter — only with the skids down
     if (game.heli.airborne) { ui_hint('Nejdřív přistaň'); return; }
-    player.setInCar(null);
-    player.pos.x = game.heli.x + 3; player.pos.z = game.heli.z + 3;
     game.heli = null;
     $id('speedo').classList.add('hidden');
     heliStop?.();
-    sfx('door_close', 0.8);
+    sfx('door_open', 0.7);
+    player.beginExit({ onOut: () => sfx('door_close', 0.8) });
   } else if (heli && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5
       && !heli.airborne) {
-    game.heli = heli;
-    player.setInCar(heli);              // rides along, hidden, like a car
-    $id('speedo').classList.remove('hidden');
-    sfx('door_open', 0.8);
-    sfx('heli_start', 0.75);
-    heliStart?.();
+    const seat = freeSeat(heli);
+    if (seat < 0) { ui_hint('Obsazeno'); return; }
+    player.boardVehicle(heli, seat, {
+      onDoor: () => sfx('door_open', 0.8),
+      onSeated: (s) => {
+        sfx('door_close', 0.6);
+        if (s !== 0) return;             // co-pilot seat: ride along, no controls
+        game.heli = heli;
+        $id('speedo').classList.remove('hidden');
+        sfx('heli_start', 0.75);
+        heliStart?.();
+      },
+    });
   } else {
     const car = nearestEnterableCar();
     if (!car) return;
+    const seat = freeSeat(car);
+    if (seat < 0) { ui_hint('Obsazeno'); return; }
     const inTraffic = traffic.cars instanceof Set ? traffic.cars.has(car) : traffic.cars.includes?.(car);
-    if (inTraffic) traffic.steal(car);
+    if (inTraffic) traffic.steal(car);   // stops driving while we walk up
     const pi = parked.indexOf(car);
     if (pi >= 0) parked.splice(pi, 1);
-    game.car = car;
-    player.setInCar(car);
-    $id('speedo').classList.remove('hidden');
-    sfx('door_open', 0.8);
-    setTimeout(() => { if (game.car) { sfx('engine_start', 0.7); engineStart(); } }, 350);
+    player.boardVehicle(car, seat, {
+      onDoor: () => sfx('door_open', 0.8),
+      onSeated: (s) => {
+        sfx('door_close', 0.6);
+        if (s !== 0) return;             // passenger seat: no engine, no speedo
+        game.car = car;
+        $id('speedo').classList.remove('hidden');
+        setTimeout(() => { if (game.car === car) { sfx('engine_start', 0.7); engineStart(); } }, 350);
+      },
+      // walked-up-and-it-vanished: a stolen car must stay enterable
+      onCancel: () => { parked.includes(car) || parked.push(car); },
+    });
   }
 });
+
+// world-space seat anchor for the net layer (window.__atc is built at the
+// bottom of this module, so hang the hook on the microtask after evaluation)
+queueMicrotask(() => { if (window.__atc) window.__atc.seatAnchor = worldSeatAnchor; });
 
 // ---------- V: the rocket pod ----------
 // Only from the cockpit, and only with the rotor actually turning — a rocket
@@ -793,11 +842,17 @@ async function boot() {
   // the pod shares the interior manager's dust pool: one set of sprites does
   // rocket smoke, blast plume and the dust off a collapsing floor alike
   weapons = new Weapons(scene, world, { dust: world.interiors.dust });
+  streaks = new SpeedStreaks(scene);
+  // vehicles borrow the shared dust pool for exhaust + wreck smoke, and the
+  // focus so only machines near the player breathe visible puffs
+  vehicles.dust = world.interiors.dust;
   placeParkedCars(city);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)
   orthoMgr = initOrtho();
-  initSettings(applySettings);
+  // initSettings moved to start(): the gear must exist while the MENU is up,
+  // before boot ever runs — boot only re-applies the loaded values to the
+  // freshly built world.
   applySettings(getSettings());
 
   // warm up: build the spawn's neighbourhood before revealing the city.
@@ -980,13 +1035,79 @@ function stepGame(dt) {
     nearbyTrafficHum?.(n, n ? sum / n : 999);
   }
 
+  vehicles.focus = focus;
+  // speed lines for whichever machine the player is actually in
+  if (game.car) {
+    const c = game.car, fx2 = -Math.sin(c.heading), fz2 = -Math.cos(c.heading);
+    streaks?.update(dt, c.x, (c.mesh?.position.y ?? 0) + 0.9, c.z,
+      fx2 * c.speed, 0, fz2 * c.speed);
+  } else if (game.heli) {
+    const h = game.heli;
+    streaks?.update(dt, h.x, h.y + 0.6, h.z, h.vx ?? 0, h.vy ?? 0, h.vz ?? 0);
+  } else {
+    streaks?.update(dt, 0, 0, 0, 0, 0, 0);
+  }
+
   updateCamera(dt);
   placeReticle();          // after the camera: a lagging sight reads as drift
   updateSky(sky, game.tod, camera, scene);
   updateHud(dt);
+
+  // ---- net: server co-op pump (menu → Multiplayer only; null in single) ----
+  // One call does everything network: our state out at ~10 Hz, remote citizens
+  // walked/interpolated, peers' rocket detonations replayed here. Seating of
+  // remotes in vehicles is NOT done here — netcity consumes the sibling's
+  // seat API via net.onRemoteVehicle / window.__atc.seatAnchor when it lands.
+  if (net) net.update(dt, { scene, player, game, weapons, world, cars: _crashList(), peds });
 }
 
-boot().catch(err => {
+// ---------- menu gate ----------
+// The game no longer boots straight into the city: the main menu (js/menu.js)
+// decides single player vs the shared dedicated server first. Settings come up
+// BEFORE the menu so the ⚙️ gear works on it; the multiplayer path connects the
+// transport before boot so the world never streams for a connection that then
+// fails — and if the server dies between the menu's health check and the click,
+// we fall back to single player rather than to a dead screen.
+let net = null;   // NetGame from netcity.js, or null — single player stays null
+
+// The seating hook netcity leaves open. A peer's state carries only
+// {k, id, seat} — a KIND and a colour hash, not an object reference — so this
+// resolves that id against the vehicles actually alive here (the same car
+// exists on both clients because traffic spawns are relayed, and the player's
+// own car is in `parked` or `traffic.cars`). Found: put the avatar on the real
+// seat anchor, so a passenger rides in the seat beside you and turns with the
+// car. Not found (their car hasn't streamed in on our side yet): return null
+// and netcity falls back to standing them at the reported position.
+function remoteSeatAnchor(uid, veh) {
+  if (!veh) return null;
+  if (veh.k === 'heli') return heli ? worldSeatAnchor(heli, veh.seat ?? 1) : null;
+  const want = veh.id;
+  const pools = [parked, traffic ? traffic.cars : null];
+  for (const pool of pools) {
+    if (!pool) continue;
+    for (const c of pool) {
+      if (netVehId(c) !== want) continue;
+      const a = worldSeatAnchor(c, veh.seat ?? 1);
+      a.heading = c.heading;              // ride facing the way the car faces
+      return a;
+    }
+  }
+  return null;
+}
+async function start() {
+  initSettings(applySettings);
+  const choice = await showMenu();
+  if (choice.mode === 'server') {
+    try {
+      net = await connectCity();
+      net.onRemoteVehicle = remoteSeatAnchor;
+    } catch (err) {
+      console.error('Multiplayer: připojení selhalo — spouštím jednohráčovku.', err);
+    }
+  }
+  await boot();
+}
+start().catch(err => {
   $id('enter-label').textContent = 'Chyba při načítání města: ' + err.message;
   console.error(err);
 });
@@ -1007,4 +1128,7 @@ window.__atc = {
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
   get parked() { return parked; }, get peds() { return peds; },
   get trains() { return trains; }, get worldMap() { return worldMap; },
+  // multiplayer session (null in single player) — the sibling seat work fills
+  // net.onRemoteVehicle here to sit remote players in their vehicles
+  get net() { return net; },
 };

@@ -158,7 +158,7 @@ export const INTERIOR_PALETTES = {
 // missile shoves it, and how much of the pile the frame budget can watch fall.
 export const DESTRUCTION = {
   debrisMax: 900,       // flying chunks alive at once (one InstancedMesh)
-  dustMax: 120,         // smoke/dust sprites
+  dustMax: 170,         // smoke/dust sprites
   gravity: 19,          // punchier than 9.81 — game debris must land, not float
   bounce: 0.24, friction: 0.6,
   debrisLife: 14,       // s before a chunk shrinks away

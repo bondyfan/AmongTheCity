@@ -472,3 +472,15 @@ export class Helicopter {
     this._disc.visible = blur;
   }
 }
+
+// ---- seatAnchor(heli, i) → LOCAL-space seat point { x, y, z } ------------
+// Additive boarding API, the mirror of vehicles.js's seatAnchor(): local
+// frame with the origin between the skids on the ground, −z the nose, +x the
+// right flank. y is the seat cushion, a hand above the cabin FLOOR. The
+// cabin explicitly seats TWO — i = 0 pilot (left, the one whose boarding
+// hands over the controls), i = 1 co-pilot/passenger (right). Occupancy
+// rides a lazily created `heli.seats = [pilot, passenger]` on the machine
+// itself (see player.boardVehicle / the registry note in main.js).
+export function seatAnchor(heli, i = 0) {
+  return { x: (i % 2 ? 1 : -1) * CAB_W * 0.26, y: FLOOR + 0.1, z: -0.38 };
+}

@@ -138,3 +138,12 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
 #fps-meter b { color: #8fe3a0; font-weight: 700; }
 #fps-meter b.mid { color: #ffd166; }
 #fps-meter b.low { color: #ff8a7a; }
+
+/* The canvas owns its own gestures: touch-action none stops a phone/trackpad
+   pinch from zooming the PAGE (the wheel/gesture handlers in js/input.js cover
+   the desktop routes), and overscroll-behavior kills the rubber-band that a
+   two-finger flick over a full-bleed canvas otherwise triggers. Scrollable UI
+   panels are exempt — they set their own touch-action back to auto. */
+html, body { overscroll-behavior: none; touch-action: none; }
+#game, #game canvas { touch-action: none; }
+.atc-set-body, .panel, [data-scroll] { touch-action: auto; }

@@ -102,6 +102,22 @@ export function makeCitizen(look = {}) {
     body.position.y = 0;
   };
 
+  // Seated in a vehicle: hips folded ~90° so the one-piece legs point into
+  // the footwell (knees-up read — the box people have no knee joint, so the
+  // whole leg rises), arms reaching a little forward toward a wheel that
+  // isn't modeled. k (0..1) blends the fold in from standing, which lets the
+  // boarding slide settle a rider over its half second instead of snapping —
+  // same pivot-rotation pattern as walk()/ragdollPose(), and standPose()
+  // undoes it the moment the passenger steps back out. The tiny z splay
+  // (outward, ragdoll sign convention) keeps sleeves out of the torso.
+  const sitPose = (k = 1) => {
+    legL.rotation.set(1.22 * k, 0, -0.06 * k);
+    legR.rotation.set(1.28 * k, 0, 0.06 * k);
+    armL.rotation.set(0.52 * k, 0, -0.10 * k);
+    armR.rotation.set(0.52 * k, 0, 0.10 * k);
+    body.position.y = 0;
+  };
+
   // Back on their feet: undo the splay so walk() fully owns the limbs again.
   const standPose = () => {
     armL.rotation.set(0, 0, 0);
@@ -111,6 +127,6 @@ export function makeCitizen(look = {}) {
     body.position.y = 0;
   };
 
-  return { group, walk, ragdollPose, standPose,
+  return { group, walk, sitPose, ragdollPose, standPose,
     parts: { body, torso, head, armL, armR, legL, legR } };
 }
