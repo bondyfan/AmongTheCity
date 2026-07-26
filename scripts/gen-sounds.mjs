@@ -1,6 +1,6 @@
 // Generate the city's handful of SFX via the ElevenLabs Sound Effects API.
 //   ELEVENLABS_API_KEY=sk_... node scripts/gen-sounds.mjs
-// Writes <name>.mp3 into assets/sounds/ (the folder js/audio.js streams
+// Writes <name>.mp3 into public/assets/sounds/ (the folder js/audio.js streams
 // from). Skips files that already exist unless FORCE=1, so re-running after
 // adding a sound only bills the new one. Same endpoint + conventions as
 // ../AmongTheWoods/scripts/gen-sounds.mjs — one API, two games.
@@ -19,7 +19,10 @@ if (!KEY) {
 }
 const FORCE = process.env.FORCE === '1';
 
-const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'sounds');
+// public/, not the repo root: vite copies ONLY publicDir into dist, so sounds
+// living outside it built fine and then 404'd in production (audio.js is
+// defensive enough that nobody heard a crash — just silence).
+const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'public', 'assets', 'sounds');
 
 // [filename, prompt, duration seconds, extraBody?] — names must match the
 // sfx()/ambientStart() calls in main.js + audio.js. Keep prompts dry/close/
