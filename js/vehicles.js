@@ -319,6 +319,37 @@ export const CAR_KINDS = ['octavia', 'fabia', 'bmw', 'mercedes', 'tesla', 'van',
 const ALIAS = { sedan: 'octavia', hatch: 'fabia', kombi: 'octavia', suv: 'bmw' };
 const kindOf = (k) => KIND[k] ?? KIND[ALIAS[k]] ?? KIND.octavia;
 
+// ---- carLabel / carSubtitle: what a Czech driver calls the thing ---------
+// The roster keys are silhouette names for the mesh builder; the HUD needs
+// the name on the boot lid. Kept beside KIND deliberately — whoever adds a
+// kind trips over the missing label within the same screenful.
+// Names describe what the GEOMETRY actually is, not how the key is spelled:
+// the `bmw` hull is a three-box G20 sedan, the `bus` is the SOR NS 12 whose
+// livery is already painted on. Subtitles stay on body style and drive
+// layout — the two things the mesh and the physics agree on — instead of an
+// engine trim the accel curve would immediately contradict (this Octavia
+// pulls 0–100 in 5.7 s, which no badge on a real one would justify).
+const CAR_LABELS = {
+  octavia:  ['Škoda Octavia', 'liftback · předokolka'],
+  fabia:    ['Škoda Fabia', 'hatchback · předokolka'],
+  bmw:      ['BMW řady 3', 'sedan G20 · zadokolka'],
+  mercedes: ['Mercedes-Benz třídy E', 'sedan W214 · zadokolka'],
+  tesla:    ['Tesla Model 3 Performance', 'elektro · pohon všech kol'],
+  van:      ['Dodávka', 'skříňová · do 3,5 t'],
+  truck:    ['Nákladní vůz', 'trambus · skříňová nástavba'],
+  bus:      ['SOR NS 12', 'nízkopodlažní · DPMP'],
+};
+// Accepts a kind string OR a whole car object: seatAnchor() next door takes
+// the car, and one confused argument would otherwise print "Vozidlo" forever
+// with nothing to debug. Unknown kinds fall back rather than throw — the HUD
+// flashing a generic name beats a boarding handler dying mid-animation.
+const _labelPair = (k) => {
+  const s = typeof k === 'string' ? k : k?.kind;
+  return CAR_LABELS[s] ?? CAR_LABELS[ALIAS[s]] ?? null;
+};
+export const carLabel = (kind) => _labelPair(kind)?.[0] ?? 'Vozidlo';
+export const carSubtitle = (kind) => _labelPair(kind)?.[1] ?? '';
+
 // Per-kind paint bias, weighted by repetition — teslas ship white/black/red
 // (the colors the order page makes cheap), German metal wears dark metallics,
 // škodas take anything from the config pool, vans and trucks run fleet white,
@@ -1179,4 +1210,66 @@ export function seatAnchor(car, i = 0) {
   const z = (g ? (g.sts[0][0] + g.sts[1][0]) / 2 + 0.5 : sts[0][0] + 1.15)
     + (i >> 1) * 0.85;
   return { x: (i % 2 ? 1 : -1) * wid * 0.35, y, z };
+}
+
+// Piecewise-linear read of a station column at an arbitrary z. Stations run
+// front→rear, so this asks the greenhouse how high its roof (col 2) or its
+// beltline (col 1) is exactly where the head is, instead of settling for a
+// whole-car maximum that belongs over the back seat.
+function stationAt(sts, z, col) {
+  if (z <= sts[0][0]) return sts[0][col];
+  for (let k = 1; k < sts.length; k++) {
+    if (z > sts[k][0]) continue;
+    const t = (z - sts[k - 1][0]) / (sts[k][0] - sts[k - 1][0]);
+    return sts[k - 1][col] + (sts[k][col] - sts[k - 1][col]) * t;
+  }
+  return sts[sts.length - 1][col];
+}
+
+const EYE_SIT = 0.62;    // a seated adult's eyes above the cushion they're on
+const EYE_ROOF = 0.13;   // rail: never closer than this to the headliner
+const EYE_BROW = 0.12;   // rail: never sink below the doorline into the trim
+
+// ---- eyeAnchor(car, i) → LOCAL-space EYE point { x, y, z } ---------------
+// The first-person camera anchor: the same frame and the same seat as
+// seatAnchor(), raised from the cushion to the rider's eyes. Callers rotate
+// it by car.heading exactly like the seat point.
+//
+// Not one constant here is per-kind, and that is the point: a seated adult's
+// eyes sit EYE_SIT above whatever they sit on, so the entire spread between a
+// Tesla and a bus falls out of seatAnchor's cushion, which each kind derives
+// from its OWN greenhouse base (or, for the cab-over kinds with no
+// greenhouse, 62 % of their slab hull). It also keeps the camera exactly
+// where the visible rider's head is, so a remote passenger looks out of the
+// face other players can see.
+//
+// The clamps are rails, not tuning — no kind reaches either today (tightest
+// headroom is the BMW's 0.35 m, smallest brow margin the Tesla's 0.17 m), but
+// a future roofline edit in KIND must shove the camera out of the headliner
+// rather than let it render from inside the roof.
+//
+// Checked against all eight rosters — eye Y / clearance under the roof at the
+// seat's own z / gap to the windscreen measured AT eye level:
+//   tesla   1.00 / 0.41 / 0.68     bmw    1.03 / 0.35 / 0.61
+//   fabia   1.03 / 0.39 / 0.62     merc   1.06 / 0.37 / 0.62
+//   octavia 1.07 / 0.37 / 0.63     van    1.22 / 0.72 / 0.73
+//   truck   1.76 / 0.75 /  —       bus    2.05 / 0.92 /  —
+// Truck and bus have no greenhouse loft; their screens are glass boxes over
+// in DETAIL, and both eye points land inside those bands (truck screen spans
+// 1.50–2.30, bus glazing 1.45–2.40) high up and a metre behind the glass, as
+// a cab-over should feel. Sideways the tightest case is the BMW at 0.08 m
+// from the door glass: the cabin is wider at eye height than at the roof
+// rail, which is where the tumblehome bites.
+export function eyeAnchor(car, i = 0) {
+  const a = seatAnchor(car, i);
+  const K = kindOf(car.kind), g = K.green;
+  let y = a.y + EYE_SIT;
+  if (g) {
+    y = Math.max(y, stationAt(g.sts, a.z, 1) + EYE_BROW);
+    y = Math.min(y, stationAt(g.sts, a.z, 2) - EYE_ROOF);
+  } else {
+    y = Math.min(y, stationAt(K.hull.sts, a.z, 2) - EYE_ROOF);
+  }
+  a.y = y;
+  return a;
 }

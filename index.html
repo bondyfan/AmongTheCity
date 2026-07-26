@@ -26,6 +26,9 @@
     <div id="fps-meter" class="hidden"></div>
     <div id="tod-clock" title="Time of day"></div>
     <div id="speedo" class="hidden"><span id="speed-num">0</span><small id="speed-unit">km/h</small></div>
+    <!-- the car you just got into, named over the speedo for 3 s. Never
+         display:none — main.js only adds/removes .show so the fade runs. -->
+    <div id="car-name"><span class="cn-name"></span><span class="cn-sub"></span></div>
     <div id="action-hint" class="hidden"></div>
     <!-- waypoint compass: an arrow that turns toward the map marker, with the
          distance under it. Rotation comes from a CSS var main.js writes. -->
@@ -35,7 +38,8 @@
     <canvas id="minimap" width="220" height="220"></canvas>
     <div id="controls-hint">
       <b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>Shift</b> sprint ·
-      <b>V</b> raketa (z vrtulníku) · <b>myš (drag)</b> kamera · <b>kolečko</b> zoom
+      <b>C</b> pohled řidiče · <b>V</b> raketa (z vrtulníku) ·
+      <b>myš (drag)</b> kamera · <b>kolečko</b> zoom
     </div>
   </div>
 

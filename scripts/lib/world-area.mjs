@@ -1,0 +1,135 @@
+// ---- What counts as "the world", in one place ----
+// v3's world was a rectangle: 30×38 km around Pardubice, 72 tiles, every one of
+// them fetched. v8 stretches to Prague, 110 km west — and a rectangle that wide
+// would be 252 tiles, most of them farmland nobody will ever drive through.
+//
+// So the world is now a UNION of shapes: the original agglomeration box, a
+// BAND along the D11 (the motorway the player actually drives, plus the
+// villages strung along it), and a box over Prague. A tile is built if it
+// touches any of them. Everything downstream — the splitter, the builder, the
+// manifest — asks this module, so the world's shape is one edit away and the
+// two scripts can never disagree about it.
+//
+// Coordinates: the origin is Pardubice hlavní nádraží and always will be. Every
+// data file ever produced is in metres from that node, so moving it would
+// invalidate the whole pipeline (and the ortho WMS registration in js/ortho.js,
+// which duplicates these constants on purpose).
+
+export const ORIGIN = { lat: 50.0317084, lon: 15.7560881 };
+export const M_PER_LAT = 111132.9 - 559.8 * Math.cos(2 * ORIGIN.lat * Math.PI / 180);
+export const M_PER_LON = 111412.8 * Math.cos(ORIGIN.lat * Math.PI / 180)
+  - 93.5 * Math.cos(3 * ORIGIN.lat * Math.PI / 180);
+export const TILE = 4800;
+
+export const xOf = (lon) => (lon - ORIGIN.lon) * M_PER_LON;
+export const zOf = (lat) => (ORIGIN.lat - lat) * M_PER_LAT;   // south positive
+export const lonOf = (x) => ORIGIN.lon + x / M_PER_LON;
+export const latOf = (z) => ORIGIN.lat - z / M_PER_LAT;
+
+// The envelope every node is tested against before it enters the index. Wider
+// than the shapes below by a comfortable margin so a way that leaves the world
+// and comes back still resolves all its nodes.
+export const ENVELOPE = { latS: 49.86, latN: 50.36, lonW: 14.12, lonE: 16.02 };
+
+// ---- the shapes ----------------------------------------------------------
+// The D11 centreline, sampled at its junctions from Prague's eastern edge to
+// Hradec Králové, then down the D35/I-37 spur that ties Hradec to Pardubice.
+// A band this wide (±8 km) holds every village that reads as "beside the
+// motorway" — Jirny, Sadská, Poděbrady, Libice, Žiželice, Chlumec, Dobřenice —
+// without dragging in the whole Polabí plain.
+const D11 = [
+  [50.1085, 14.5820],  // Praha, Černý Most / Chlumecká — the motorway's head
+  [50.1160, 14.6960],  // exit 8 Jirny
+  [50.1280, 14.8280],  // exit 18 Bříství
+  [50.1410, 14.9520],  // exit 25 Sadská
+  [50.1495, 15.0880],  // exit 35 Poděbrady
+  [50.1455, 15.1800],  // exit 42 Libice nad Cidlinou
+  [50.1500, 15.2900],  // exit 49 Žiželice
+  [50.1545, 15.4100],  // exit 56 Chlumec nad Cidlinou
+  [50.1720, 15.5600],  // exit 62 Dobřenice
+  [50.1930, 15.7100],  // exit 76 Hradec Králové-jih
+  [50.2130, 15.8000],  // Hradec Králové, the D11/D35 knot
+];
+const HK_PCE = [       // D35 + I/37: Hradec → Opatovice → Pardubice
+  [50.2130, 15.8000],
+  [50.1500, 15.7900],  // Opatovice nad Labem
+  [50.0700, 15.7700],  // Pardubice, Rosice
+  [50.0317, 15.7561],  // the origin itself
+];
+const CORRIDOR_HALF_W = 8000;   // m either side of the centreline
+
+// Prague: the administrative city plus a little of its ring, which is what
+// makes the approach along the D11 feel like arriving somewhere.
+const PRAHA = { latS: 49.9350, latN: 50.1900, lonW: 14.2150, lonE: 14.7350 };
+// The original v3 world, kept whole — Pardubice, Hradec, Chrudim and the
+// villages between them are the game's home ground.
+const HOME = { latS: 49.92, latN: 50.26, lonW: 15.55, lonE: 15.97 };
+
+// ---- tile selection ------------------------------------------------------
+// Everything below works in local metres: a tile is the rectangle
+// x ∈ [tx·TILE, (tx+1)·TILE), z ∈ [tz·TILE, (tz+1)·TILE).
+
+const boxToRect = (b) => ({
+  x0: xOf(b.lonW), x1: xOf(b.lonE), z0: zOf(b.latN), z1: zOf(b.latS),
+});
+const RECTS = [PRAHA, HOME].map(boxToRect);
+const LINE = [...D11.map(([la, lo]) => [xOf(lo), zOf(la)]),
+  null, ...HK_PCE.map(([la, lo]) => [xOf(lo), zOf(la)])];
+
+// squared distance from a point to a segment, the flat-2D staple
+function distSq(px, pz, ax, az, bx, bz) {
+  const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz;
+  const t = L2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / L2)) : 0;
+  const cx = ax + dx * t - px, cz = az + dz * t - pz;
+  return cx * cx + cz * cz;
+}
+
+// A tile is in the corridor if ANY of its rectangle comes within half-width of
+// the centreline. Sampling the rectangle (corners + edge midpoints + centre)
+// rather than solving segment-to-rectangle exactly is plenty at a 4.8 km tile
+// against an 8 km band — the error is a tile that joins the world one row too
+// early, never one that goes missing.
+function nearLine(tx, tz) {
+  const x0 = tx * TILE, x1 = x0 + TILE, z0 = tz * TILE, z1 = z0 + TILE;
+  const xm = x0 + TILE / 2, zm = z0 + TILE / 2;
+  const pts = [[x0, z0], [x1, z0], [x0, z1], [x1, z1], [xm, z0], [xm, z1], [x0, zm], [x1, zm], [xm, zm]];
+  const r2 = CORRIDOR_HALF_W * CORRIDOR_HALF_W;
+  for (let i = 0; i < LINE.length - 1; i++) {
+    const a = LINE[i], b = LINE[i + 1];
+    if (!a || !b) continue;                    // the null splits the two routes
+    for (const [px, pz] of pts) if (distSq(px, pz, a[0], a[1], b[0], b[1]) <= r2) return true;
+  }
+  return false;
+}
+
+export function tileWanted(tx, tz) {
+  const x0 = tx * TILE, x1 = x0 + TILE, z0 = tz * TILE, z1 = z0 + TILE;
+  for (const r of RECTS) if (x1 > r.x0 && x0 < r.x1 && z1 > r.z0 && z0 < r.z1) return true;
+  return nearLine(tx, tz);
+}
+
+// Every wanted tile, ordered by distance from the origin so a downloader or a
+// builder that is interrupted has already done the tiles nearest the spawn.
+export function wantedTiles() {
+  const txMin = Math.floor(xOf(ENVELOPE.lonW) / TILE), txMax = Math.floor(xOf(ENVELOPE.lonE) / TILE);
+  const tzMin = Math.floor(zOf(ENVELOPE.latN) / TILE), tzMax = Math.floor(zOf(ENVELOPE.latS) / TILE);
+  const out = [];
+  for (let tz = tzMin; tz <= tzMax; tz++)
+    for (let tx = txMin; tx <= txMax; tx++) if (tileWanted(tx, tz)) out.push([tx, tz]);
+  out.sort((a, b) => (a[0] ** 2 + a[1] ** 2) - (b[0] ** 2 + b[1] ** 2));
+  return out;
+}
+
+// The wanted tile nearest a point, for parking a feature whose own tile is
+// outside the world (a river arriving from beyond the envelope). Deterministic:
+// same feature, same tile, every run.
+export function nearestWanted(x, z) {
+  const tx = Math.floor(x / TILE), tz = Math.floor(z / TILE);
+  if (tileWanted(tx, tz)) return [tx, tz];
+  let best = null, bestD = Infinity;
+  for (const [wx, wz] of wantedTiles()) {
+    const d = (wx - tx) ** 2 + (wz - tz) ** 2;
+    if (d < bestD) { bestD = d; best = [wx, wz]; }
+  }
+  return best;
+}

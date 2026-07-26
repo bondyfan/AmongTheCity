@@ -41,8 +41,51 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
 }
 #speedo #speed-num { font-size: 44px; font-weight: 800; letter-spacing: 1px; }
 #speedo small { font-size: 13px; margin-left: 5px; opacity: 0.75; }
+/* Vehicle name card — the GTA move: sit it directly above the speed readout,
+   right-aligned on the same 22px rail, so getting in reads as one block of
+   information (what you are driving, then how fast). No panel behind it: a
+   box would fight the speedo, so legibility over a white wall or a night
+   street comes from the same double shadow the speedo uses.
+   Fades IN fast and OUT slowly — an arrival should feel prompt and a
+   departure should not be noticed. Never display:none, or the transition
+   would need a forced reflow to restart on the second car. */
+#car-name {
+  position: absolute; right: 22px; bottom: 152px; text-align: right;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 1px;
+  /* "Tesla Model 3 Performance" is 25 characters: unconstrained it runs two
+     thirds of the way across a phone and straight into the centred
+     #action-hint. Capped, it wraps UPWARD (the card is anchored by its
+     bottom edge), which is the one direction with nothing in it. The px
+     ceiling keeps desktop on one line — 58vw of a wide window would never
+     bite anyway, but min() says so instead of leaving it to luck. */
+  max-width: min(58vw, 380px);
+  opacity: 0; transform: translateY(7px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+#car-name.show {
+  opacity: 1; transform: translateY(0);
+  transition-duration: 0.18s;
+}
+#car-name .cn-name {
+  color: #f2f5fb; font-size: 21px; font-weight: 800; letter-spacing: 1.2px;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.9), 0 0 18px rgba(0,0,0,0.65);
+}
+#car-name .cn-sub {
+  color: #cfe0ff; font-size: 11.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; opacity: 0.85;
+  text-shadow: 0 1px 5px rgba(0,0,0,0.95);
+}
+/* empty subtitle (an unknown kind) must not leave a gap over the speedo */
+#car-name .cn-sub:empty { display: none; }
+/* 26vh reads well on a tall window, but it is a FRACTION and the name card
+   above the speedo is a fixed 152 px + ~40 px of type. Below ~850 px of
+   viewport the two bands cross, and because #action-hint comes later in the
+   HUD's DOM its opaque panel paints OVER the model name — on a phone, for the
+   whole three seconds the card is up ("E vystoupit" appears the same frame
+   game.car is set). The floor holds the hint clear of the card's top edge;
+   above ~850 px 26vh wins and nothing moves. */
 #action-hint {
-  position: absolute; left: 50%; bottom: 26vh; transform: translateX(-50%);
+  position: absolute; left: 50%; bottom: max(26vh, 220px); transform: translateX(-50%);
   background: rgba(12, 16, 24, 0.82); color: #e8ecf4; padding: 8px 16px;
   border-radius: 8px; font-size: 14px; border: 1px solid rgba(140,170,220,0.25);
 }
@@ -106,6 +149,10 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
 @media (max-width: 760px) {
   #controls-hint { display: none; }
   #minimap { width: 150px; height: 150px; }
+  /* a phone frame is half the width — a 21px name plus a tracked-out subtitle
+     would run into the middle of the screen */
+  #car-name .cn-name { font-size: 17px; }
+  #car-name .cn-sub { font-size: 10px; letter-spacing: 1.1px; }
 }
 
 

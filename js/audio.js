@@ -6,12 +6,11 @@
 // from assets/sounds and NEVER throws: a missing file is remembered as null
 // and the call turns into a silent no-op, so the game runs fine from a bare
 // checkout with an empty assets folder. The engine is pure synthesis — no
-// looped sample to pitch-stretch and mangle — because a small oscillator bank
-// through a throttle-driven lowpass tracks revs the way a small four-cylinder
-// does, at zero asset cost. v2 adds a virtual 5-speed box: speed01 no longer
-// maps straight to pitch, it picks a GEAR, and pitch follows in-gear revs —
-// so accelerating climbs-drops-climbs like a real drivetrain instead of one
-// long glissando.
+// looped sample to pitch-stretch and mangle — because only synthesis can
+// follow revs, gears and throttle continuously at zero asset cost. v2 adds a
+// virtual 5-speed box: speed01 no longer maps straight to pitch, it picks a
+// GEAR, and pitch follows in-gear revs — so accelerating climbs-drops-climbs
+// like a real drivetrain instead of one long glissando.
 //
 // v4 adds the CITY layer, and it is deliberately three things and not thirty:
 //   · one looping sample bed (city_ambience) that ducks when you drive fast,
@@ -322,37 +321,268 @@ function duckUpdate() {
 }
 
 // ---- procedural engine loop --------------------------------------------
-// Graph: sawtooth fundamental + triangle one OCTAVE DOWN (the block's low
-// thrum) + square one octave UP at −14 dB (exhaust rasp — squares carry only
-// odd harmonics, so doubling the fundamental slots them BETWEEN the saw's
-// partials instead of masking them), all three through one lowpass whose
-// cutoff opens with the throttle (the "roar" when you floor it), plus a
-// whisper of lowpassed noise for intake hiss. A 4 Hz sine LFO wobbles ONLY
-// oscA.detune, so at idle the saw drifts against both the sub-octave AND the
-// rasp — the uneven "lope" of a cold four-cylinder; the depth fades to zero
-// as revs climb because a spinning engine smooths itself out. Every parameter
-// change rides setTargetAtTime with a ~25 ms time constant (≈ 60–80 ms
-// perceived settle), so per-frame speed updates can never click or zipper.
+// v8 threw away the old three-oscillator bank (saw + sub triangle + square
+// rasp, wobbled by a 4 Hz sine). That bank was a synthesizer patch, and it
+// sounded like one, for three reasons worth writing down so nobody rebuilds
+// it: a sawtooth puts energy on EVERY harmonic of its fundamental, while a
+// real engine only has energy on multiples of the FIRING rate and silence in
+// between; a continuous waveform has no time envelope, while a real engine is
+// a sequence of explosions with a hard attack and an exponential tail; and a
+// periodic LFO is vibrato, while the unevenness of a real engine is random.
 //
-// VIRTUAL GEARBOX — speed01 is sliced into five bands (the "gears"); inside a
-// band the in-gear rev fraction runs 0→1 and rpm01 = 0.25 + 0.75·frac, so the
-// engine never sits at true zero revs while rolling. Pitch anchors rpm 0.25 →
-// fIdle and rpm 1 → fMax, meaning EVERY gear sweeps the full 55→190 Hz voice —
-// short sweeps in low gears, long hauls in high ones, exactly the accelerating
-// rhythm a real box produces. Crossing a band edge triggers a ~120 ms scripted
-// dip: freq+gain glide DOWN past the new gear's landing value, then recover —
-// scheduled entirely with setTargetAtTime (never setValueAtTime) so the curve
-// always departs from the current value and cannot click.
+// So the voice is now a FIRING PULSE TRAIN, built like this:
+//   · one oscillator running at rpm/120 — the frequency of the whole 720°
+//     four-stroke cycle, NOT the crank and NOT the firing rate. That choice is
+//     what makes the harmonic index k mean "engine order k/2": for an inline
+//     four the firing harmonics land on k = 4, 8, 12…, for an inline three on
+//     k = 3, 6, 9… (orders 1.5, 3, 4.5 — the half-orders that make a triple
+//     sound like it is limping). The gaps fall out of the maths, free.
+//   · its PeriodicWave is one four-stroke cycle of cylinder pulses, each
+//     shaped (1 − e^−αφ)·e^−βφ: α is the blowdown attack, β the decay. At
+//     idle the oscillator runs at ~6 Hz and you hear the individual bangs;
+//     by redline they fuse into a roar. That is the whole effect the user
+//     asked for, and it is one oscillator.
+//   · per-cylinder scatter (±3° of crank, ±6 % of amplitude) is baked into
+//     the wave from a deterministic hash of the kind name — one cylinder is
+//     always the lazy one, so an octavia is always the SAME octavia.
+//   · cycle-to-cycle scatter is a slow random-walk buffer driving detune and
+//     amplitude. Noise, not an LFO: a real engine is unsteady, not vibrato.
+//     It shrinks with revs because the flywheel filters torque ripple.
+//   · a feedback comb (delay = 2L/c, c ≈ 550 m/s in hot exhaust gas) IS the
+//     exhaust pipe, and two peaking biquads are the silencer. Those never
+//     move with revs — a real recording has a moving source inside FIXED
+//     resonances, and that contrast is most of what the ear reads as "real".
+//   · a tanh waveshaper whose input gain rides the throttle: more drive =
+//     more harmonics = a harder engine when you floor it.
+// Overrun (off the throttle, still spinning) is quieter and darker but with
+// MORE pipe — higher comb feedback — which is exactly why lifting sounds
+// hollow. On-throttle is louder, brighter and harder.
+//
+// VIRTUAL GEARBOX (unchanged from v2, it was always the good part) — speed01
+// is sliced into five bands (the "gears"); inside a band the in-gear rev
+// fraction runs 0→1 and rpm01 = 0.25 + 0.75·frac, so the engine never sits at
+// true zero revs while rolling. Crossing a band edge triggers a ~120 ms
+// scripted dip: freq+gain glide DOWN past the new gear's landing value, then
+// recover — scheduled entirely with setTargetAtTime (never setValueAtTime) so
+// the curve always departs from the current value and cannot click.
 const ENGINE = {
-  fIdle: 55, fMax: 190,               // voice span, bottom of gear → redline
-  loCut: 500, hiCut: 2800,            // lowpass span, closed → floored
   thCurve: 0.55,                      // pow(th, .55): filter opens HARD early —
                                       // half throttle already sounds urgent
-  gIdle: 0.12, gThrottle: 0.10, gRpm: 0.05,  // loudness: base + pedal + revs
-  rasp: 0.2,                          // square osc level ≈ −14 dB vs the saw
-  lopeCents: 25,                      // idle-lope LFO depth, fades out by redline
   tau: 0.025,
+  harmonics: 384,                     // partials baked into the wave. At a
+                                      // 6 Hz idle that reaches ~2.3 kHz, well
+                                      // past the idle lowpass; at redline the
+                                      // browser band-limits what it must.
+  jitterSec: 3,                       // length of the shared random-walk buffer
+  combC: 550,                         // m/s — speed of sound in 400–600 °C
+                                      // exhaust gas, NOT the 343 of cold air
+  fbMax: 0.82,                        // comb feedback ceiling: past this the
+                                      // loop rings instead of resonating
 };
+// Injection knock: a MUCH narrower pulse (alpha 200, beta 25) than combustion,
+// gating a noise band at 1.8 kHz. Shape is shared by every kind — only the
+// level differs, and that level is the petrol/diesel line.
+const KNOCK = { f: 1800, q: 2.5, alpha: 200, beta: 25, base: 0.05, depth: 0.55 };
+// main.js divides by CAR.vmax (config.js) before calling us, so speed01 is
+// |speed| / SPEED_REF and NOT |speed| / the kind's own vmax. For anything
+// slower than this the top gears were unreachable (a truck peaked at 0.69 and
+// never saw fifth); rescaling here fixes the gearbox without touching main.js.
+// Faster kinds are left alone — the caller already clamps at 1, so scaling
+// them DOWN would only throw away range that is genuinely there.
+const SPEED_REF = 38;
+// Per-kind engine identity. cyl → firing order and therefore which harmonics
+// exist at all; alpha/beta → pulse shape (bigger beta = shorter pulse =
+// brighter); exL → exhaust length in metres, i.e. where the comb peaks land;
+// drive → how hard the waveshaper is pushed at full throttle; knock → the
+// 1.8 kHz injection rattle that IS the diesel sound (petrol keeps a trace,
+// without it the voice is suspiciously clean).
+const ENG_KINDS = {
+  // the Czech default: neutral, mid-bright four. Every other voice is a
+  // deliberate departure from this one.
+  octavia: { cyl: 4, alpha: 70, beta: 10, rpmIdle: 780, rpmMax: 6200, vmax: 64,
+    exL: 3.6, combG: 0.55, knock: 0.012, turbo: 0, drive: 2.9, pops: 0,
+    peak1: 120, peak2: 560, cutLo: 430, cutHi: 4600, vol: 0.22, intake: 0.075 },
+  // Fabia IV 1.0 TSI really is a THREE — root order 1.5, so the odd
+  // half-orders carry real energy and it thrums unevenly on purpose
+  fabia: { cyl: 3, alpha: 75, beta: 11, rpmIdle: 800, rpmMax: 6000, vmax: 56,
+    exL: 3.0, combG: 0.52, knock: 0.015, turbo: 0, drive: 2.7, pops: 0,
+    peak1: 132, peak2: 600, cutLo: 440, cutHi: 4300, vol: 0.215, intake: 0.07 },
+  // straight six, revs to 7000, short pulse (beta 6) = hard and bright.
+  // The only kind that pops on the overrun.
+  bmw: { cyl: 6, alpha: 65, beta: 6, rpmIdle: 700, rpmMax: 7000, vmax: 69,
+    exL: 4.2, combG: 0.60, knock: 0.010, turbo: 0.02, drive: 3.6, pops: 1,
+    peak1: 112, peak2: 640, cutLo: 420, cutHi: 5400, vol: 0.225, intake: 0.085 },
+  // same six, opposite manners: long pulse, slack comb and a 3.2 kHz ceiling
+  // — expensive silence rather than noise
+  mercedes: { cyl: 6, alpha: 60, beta: 13, rpmIdle: 650, rpmMax: 6500, vmax: 67,
+    exL: 4.2, combG: 0.48, knock: 0.008, turbo: 0, drive: 2.3, pops: 0,
+    peak1: 108, peak2: 480, cutLo: 400, cutHi: 3200, vol: 0.21, intake: 0.055 },
+  van: { cyl: 4, alpha: 130, beta: 9, rpmIdle: 800, rpmMax: 4200, vmax: 36.11,
+    exL: 4.0, combG: 0.58, knock: 0.07, turbo: 0.025, drive: 2.6, pops: 0,
+    peak1: 126, peak2: 520, cutLo: 400, cutHi: 2600, vol: 0.235, intake: 0.05 },
+  // 2400 rpm redline: firing never leaves 30–120 Hz, so it is felt more than
+  // heard, and the vertical stack is the longest pipe in the game
+  truck: { cyl: 6, alpha: 145, beta: 8, rpmIdle: 600, rpmMax: 2400, vmax: 26.39,
+    exL: 5.0, combG: 0.65, knock: 0.10, turbo: 0.04, drive: 2.8, pops: 0,
+    peak1: 100, peak2: 450, cutLo: 380, cutHi: 2400, vol: 0.26, intake: 0.045 },
+  bus: { cyl: 6, alpha: 140, beta: 7, rpmIdle: 550, rpmMax: 2200, vmax: 29.17,
+    exL: 6.0, combG: 0.68, knock: 0.09, turbo: 0.035, drive: 2.6, pops: 0,
+    peak1: 96, peak2: 430, cutLo: 370, cutHi: 2200, vol: 0.255, intake: 0.04 },
+  // no pulse train, no pipe, no gearbox — see EV below and engineSet()
+  tesla: { ev: 1, vmax: 72 },
+};
+// pre-v4 saves and main.js's spawn list still say sedan/hatch/kombi/suv
+const ENG_ALIAS = { sedan: 'octavia', hatch: 'fabia', kombi: 'octavia', suv: 'bmw' };
+
+// A Tesla has ONE reduction gear (≈9:1), so nothing about it is periodic in
+// engine cycles — every tone is strictly proportional to ROAD SPEED and there
+// is no idle at all. Different code, not different parameters.
+const EV = {
+  whineK: 88,        // Hz per m/s: v/2.05 m wheel circumference × 9.0 reduction
+                     // × ~20 gear teeth ≈ 88·v — the gear mesh whine
+  whineMin: 90, whineMax: 5000,
+  stage2: 1.62,      // second reduction stage. NOT 2× — the slight dissonance
+                     // is what reads as "electric car" instead of "theremin"
+  humK: 13.2,        // n_motor × 3 pole pairs, also per m/s
+  pwmF: 2400,        // inverter switching tone, FIXED; ring-modulated by the
+                     // motor rate so you hear its sidebands, not a test tone
+  lp: 7000,
+  vol: 0.6,          // thinner than a combustion voice on purpose: above
+                     // ~50 km/h a Model 3 is mostly tyres, and tireSet()
+                     // already carries that weight
+  fadeV: 1.5,        // m/s over which the whole voice fades up from silence
+};
+// gear-whine timbre: a fundamental with a short, fast-falling harmonic tail
+const EV_REAL = new Float32Array([0, 1, 0.30, 0.14, 0.06]);
+const EV_IMAG = new Float32Array(EV_REAL.length);
+
+// tanh transfer curve for the drive stage — allocated once, shared by every
+// engine that ever starts. Input gain (not this table) is what varies.
+//
+// A WaveShaper always maps input −1…+1 across the whole table and CLAMPS
+// beyond it, so a drive gain of 3.6 fed straight in would hard-clip (buzz,
+// aliasing) instead of saturating. The table therefore covers ±SHAPE_SPAN of
+// pre-gain and the drive stage divides by it: shaper(D·x / SPAN) = tanh(D·x)
+// exactly, for any D up to SPAN.
+const SHAPE_SPAN = 4;
+const SHAPE_DRIVE_LO = 0.9;   // idle: barely bent. Floored: P.drive, near-square.
+const SHAPE_CURVE = new Float32Array(2048);
+for (let i = 0; i < 2048; i++) SHAPE_CURVE[i] = Math.tanh((i / 1023.5 - 1) * SHAPE_SPAN);
+
+// Deterministic 0..1 from a name + salt. audio.js deliberately imports
+// nothing, so this is a local FNV/mulberry mash rather than the world's
+// rnd(id, salt) — same contract: the same kind always gets the same scatter,
+// so every octavia in every session has the same lazy cylinder.
+function hash01(name, salt) {
+  let h = (2166136261 ^ salt) >>> 0;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  h ^= h >>> 15; h = Math.imul(h, 2246822507); h ^= h >>> 13;
+  return (h >>> 0) / 4294967296;
+}
+
+// One four-stroke cycle of cylinder pulses, as PeriodicWave coefficients.
+//
+// The obvious way is to draw the cycle into a 2048-point buffer and DFT it —
+// a million multiply-adds per kind. Unnecessary: the pulse
+//     g(φ) = (1 − e^−αφ)·e^−βφ,  φ ∈ [0, 2π)
+// has a closed-form Fourier transform, and firing a cylinder at angle φᵢ is
+// just a phase rotation e^−ikφᵢ. So the whole spectrum is one analytic
+// coefficient times the sum of the cylinders' phasors — a few thousand ops
+// instead of a million, and EXACT rather than sampled.
+//     ∫₀²ᵖ e^−βφ e^−ikφ dφ = (1 − e^−2πβ)/(β + ik)
+// gives Cₖ, and for real g the WebAudio coefficients are a = 2·Re C,
+// b = −2·Im C. Cylinder scatter falls out of the phasor sum, so half-orders
+// and V-bank asymmetry appear on their own — nothing is tuned by hand.
+//
+// Pure function, no WebAudio, no globals: testable in node. Returns
+// { real, imag } for createPeriodicWave plus `rms`, the RMS the wave will
+// have AFTER the browser normalizes it to ±1 — a peaky diesel normalizes to a
+// much quieter signal than a smooth six, and the mix has to know.
+export function engineWave(cyl, alpha, beta, id, jitterDeg = 6, ampSpread = 0.12) {
+  const K = ENGINE.harmonics;
+  const real = new Float32Array(K + 1), imag = new Float32Array(K + 1);
+  const TAU = Math.PI * 2;
+  // phase (rad of the 720° cycle) and relative strength of each cylinder
+  const phase = new Float64Array(cyl), amp = new Float64Array(cyl);
+  for (let i = 0; i < cyl; i++) {
+    const deg = i * (720 / cyl) + (hash01(id, 300 + i) - 0.5) * jitterDeg;
+    phase[i] = (deg / 720) * TAU;
+    amp[i] = 1 + (hash01(id, 400 + i) - 0.5) * ampSpread;
+  }
+  const g = alpha + beta;
+  const A = 1 - Math.exp(-TAU * beta), B = 1 - Math.exp(-TAU * g);
+  for (let k = 1; k <= K; k++) {
+    const db = beta * beta + k * k, dg = g * g + k * k;
+    const cr = (A * beta / db - B * g / dg) / TAU;          // Re Cₖ
+    const ci = (-A * k / db + B * k / dg) / TAU;            // Im Cₖ
+    let pr = 0, pi = 0;                                     // Σ ampᵢ e^−ikφᵢ
+    for (let i = 0; i < cyl; i++) {
+      const w = k * phase[i];
+      pr += amp[i] * Math.cos(w);
+      pi -= amp[i] * Math.sin(w);
+    }
+    real[k] = 2 * (cr * pr - ci * pi);
+    imag[k] = -2 * (cr * pi + ci * pr);
+  }
+  // peak and RMS straight off the analytic pulse — 512 points is plenty for a
+  // level estimate and costs a few thousand exp() calls, once per kind ever
+  let peak = 1e-9, sum = 0;
+  for (let m = 0; m < 512; m++) {
+    const p = (m / 512) * TAU;
+    let y = 0;
+    for (let i = 0; i < cyl; i++) {
+      let d = p - phase[i];
+      if (d < 0) d += TAU;
+      y += amp[i] * (1 - Math.exp(-alpha * d)) * Math.exp(-beta * d);
+    }
+    if (y > peak) peak = y;
+    sum += y * y;
+  }
+  return { real, imag, rms: Math.sqrt(sum / 512) / peak };
+}
+
+// PeriodicWave objects are immutable and shareable, and building the
+// browser's per-octave band-limited tables is the expensive half — so cache
+// per (kind, role). Two entries per kind for the whole session.
+const _waves = new Map();
+// id (the kind name) seeds the cylinder scatter and is deliberately the SAME
+// for both roles: the knock rattle has to land on the same cylinders, at the
+// same slightly-off angles, as the combustion pulses it belongs to.
+function engineWaveFor(id, cyl, alpha, beta, role) {
+  const key = id + '|' + role;
+  let w = _waves.get(key);
+  if (!w) {
+    const c = engineWave(cyl, alpha, beta, id);
+    w = { wave: ctx.createPeriodicWave(c.real, c.imag), rms: c.rms };
+    _waves.set(key, w);
+  }
+  return w;
+}
+
+// Cycle-to-cycle unsteadiness, as a signal rather than an LFO. A lowpassed
+// random walk (~10 Hz of usable bandwidth) looped forever: no period the ear
+// can lock onto, which is the entire difference between "engine" and "synth".
+// One buffer for the session; every start reads in from a random offset.
+let _jitterBuf = null;
+function jitterBuffer() {
+  if (!_jitterBuf) {
+    const n = (ctx.sampleRate * ENGINE.jitterSec) | 0;
+    _jitterBuf = ctx.createBuffer(1, n, ctx.sampleRate);
+    const d = _jitterBuf.getChannelData(0);
+    let v = 0, peak = 1e-6;
+    for (let i = 0; i < n; i++) {
+      v += (Math.random() * 2 - 1 - v * 0.06) * 0.06;
+      d[i] = v;
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+    }
+    for (let i = 0; i < n; i++) d[i] /= peak;   // ±1, so depths read in units
+  }
+  return _jitterBuf;
+}
 // upper speed01 edge of each gear; last edge sits past 1 so flat-out stays in
 // 5th (hysteresis below can never push beyond it either)
 const GEAR_TOP = [0.12, 0.28, 0.48, 0.72, 1.001];
@@ -371,48 +601,184 @@ const SHIFT = {
 };
 let eng = null;   // node bundle + gear state while running, see engineStart()
 
-export function engineStart() {
+// kind is any key of ENG_KINDS (a car's runtime .kind) — omit it and you get
+// the Octavia four, so pre-v8 callers still work unchanged.
+export function engineStart(kind = 'octavia') {
   if (!ctx || ctx.state !== 'running' || eng) return;
+  const key = ENG_KINDS[kind] ? kind : (ENG_ALIAS[kind] ?? 'octavia');
+  const P = ENG_KINDS[key];
+  eng = P.ev ? buildEV(P) : buildPiston(P, key);
+}
+
+// Every node that must be stopped/disconnected lives in these two arrays, so
+// engineStop() never has to know which of the two graph shapes it is killing.
+function engNodes(e, ...n) { for (const x of n) e.nodes.push(x); return e; }
+
+function buildPiston(P, id) {
   const t = ctx.currentTime;
-  const oscA = ctx.createOscillator();
-  oscA.type = 'sawtooth';
-  oscA.frequency.value = ENGINE.fIdle;
-  const oscB = ctx.createOscillator();
-  oscB.type = 'triangle';
-  oscB.frequency.value = ENGINE.fIdle / 2;
-  oscB.detune.value = 9;               // ~9 cents flat → a slow cylinder beat
-  const oscC = ctx.createOscillator(); // exhaust rasp an octave up, kept low
-  oscC.type = 'square';
-  oscC.frequency.value = ENGINE.fIdle * 2;
-  const cGain = ctx.createGain();      // −14 dB pad — rasp seasons, never leads
-  cGain.gain.value = ENGINE.rasp;
-  const lfo = ctx.createOscillator();  // idle lope: slow wobble on A's detune
-  lfo.type = 'sine';
-  lfo.frequency.value = 4;
-  const lfoDepth = ctx.createGain();   // output is CENTS (detune's unit)
-  lfoDepth.gain.value = ENGINE.lopeCents;
-  const filter = ctx.createBiquadFilter();
-  filter.type = 'lowpass'; filter.frequency.value = ENGINE.loCut; filter.Q.value = 1.1;
+  const f0 = P.rpmIdle / 120;                 // Hz of the whole 720° cycle
+  const fire = engineWaveFor(id, P.cyl, P.alpha, P.beta, 'fire');
+  const knockW = engineWaveFor(id, P.cyl, KNOCK.alpha, KNOCK.beta, 'knock');
+
+  const osc = ctx.createOscillator();
+  osc.setPeriodicWave(fire.wave);
+  osc.frequency.value = f0;
+  // cycle-to-cycle wobble: one source, two destinations (pitch and level)
+  const jit = ctx.createBufferSource();
+  jit.buffer = jitterBuffer(); jit.loop = true;
+  const jCents = ctx.createGain(); jCents.gain.value = 0;   // output is CENTS
+  const jAM = ctx.createGain(); jAM.gain.value = 0;         // adds to out.gain
+
+  const drive = ctx.createGain(); drive.gain.value = SHAPE_DRIVE_LO / SHAPE_SPAN;
+  const shaper = ctx.createWaveShaper();
+  shaper.curve = SHAPE_CURVE;
+  shaper.oversample = '2x';            // the player's own car is worth 2×:
+                                       // tanh on a redlining pulse train
+                                       // aliases audibly at 1×
+  // --- the exhaust: a feedback comb IS a pipe. delay = 2L/c (half-wave, both
+  // ends open) puts the first peak at c/2L — 46 Hz for the bus's 6 m, 83 Hz
+  // for the Fabia's 3 m. The lowpass INSIDE the loop is not optional: without
+  // it every reflection comes back as bright as it left and the thing flanges
+  // instead of resonating.
+  const dly = 2 * P.exL / ENGINE.combC;
+  const dry = ctx.createGain(); dry.gain.value = 0.85;
+  const combIn = ctx.createGain(); combIn.gain.value = 1;
+  const delay = ctx.createDelay(0.08); delay.delayTime.value = dly;
+  const damp = ctx.createBiquadFilter();
+  damp.type = 'lowpass'; damp.frequency.value = 1200; damp.Q.value = 0.4;
+  const fb = ctx.createGain(); fb.gain.value = P.combG * 0.86;
+  // wet under dry: the pipe COLOURS the engine, it does not replace it, and a
+  // resonating comb can peak several times its input on its own
+  const combWet = ctx.createGain(); combWet.gain.value = 0.6;
+
+  // --- the silencer. These two peaks NEVER move: fixed resonances under a
+  // moving source is the contrast the ear hears as a recording rather than a
+  // patch. peak1 is the boom you feel in the chest and is what lets a laptop
+  // imply a 26 Hz firing fundamental it cannot actually reproduce.
+  const hp = ctx.createBiquadFilter();
+  hp.type = 'highpass'; hp.frequency.value = 45; hp.Q.value = 0.7;
+  const pk1 = ctx.createBiquadFilter();
+  pk1.type = 'peaking'; pk1.frequency.value = P.peak1; pk1.Q.value = 3.5; pk1.gain.value = 8;
+  const pk2 = ctx.createBiquadFilter();
+  pk2.type = 'peaking'; pk2.frequency.value = P.peak2; pk2.Q.value = 1.6; pk2.gain.value = 4;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = P.cutLo; lp.Q.value = 0.9;
+  const out = ctx.createGain(); out.gain.value = 0;   // born silent — no pop
+
+  // --- intake, on its own branch. The throttle plate is the th^1.5: shut, an
+  // engine barely breathes; open, it roars. The old linear map left hiss
+  // audible at all times, which is mush.
   const noise = ctx.createBufferSource();
   noise.buffer = noiseBuffer(); noise.loop = true;
-  const nFilter = ctx.createBiquadFilter();
-  nFilter.type = 'lowpass'; nFilter.frequency.value = 480;
-  const nGain = ctx.createGain(); nGain.gain.value = 0.015;
-  const gain = ctx.createGain();
-  gain.gain.value = 0;                 // born silent, fade in — no start pop
-  oscA.connect(filter); oscB.connect(filter);
-  oscC.connect(cGain); cGain.connect(filter);
-  lfo.connect(lfoDepth); lfoDepth.connect(oscA.detune);
-  filter.connect(gain);
-  noise.connect(nFilter); nFilter.connect(nGain); nGain.connect(gain);
-  gain.connect(master);
-  oscA.start(t); oscB.start(t); oscC.start(t); lfo.start(t);
+  const inBp = ctx.createBiquadFilter();
+  inBp.type = 'bandpass'; inBp.frequency.value = 520; inBp.Q.value = 0.7;
+  const inGain = ctx.createGain(); inGain.gain.value = 0;
+
+  // --- knock: a narrow pulse train GATES a 1.8 kHz noise band. This one
+  // detail is the whole difference between a petrol engine and a diesel;
+  // petrol keeps a trace of it because a completely clean voice sounds fake.
+  const kOsc = ctx.createOscillator();
+  kOsc.setPeriodicWave(knockW.wave);
+  kOsc.frequency.value = f0;
+  const kDepth = ctx.createGain(); kDepth.gain.value = KNOCK.depth;
+  const kBp = ctx.createBiquadFilter();
+  kBp.type = 'bandpass'; kBp.frequency.value = KNOCK.f; kBp.Q.value = KNOCK.q;
+  const kGate = ctx.createGain(); kGate.gain.value = KNOCK.base;
+  const kLevel = ctx.createGain(); kLevel.gain.value = 0;
+
+  osc.connect(drive); drive.connect(shaper);
+  jit.connect(jCents); jCents.connect(osc.detune);
+  jit.connect(jAM); jAM.connect(out.gain);
+  shaper.connect(dry); dry.connect(hp);
+  shaper.connect(combIn); combIn.connect(delay);
+  delay.connect(damp); damp.connect(fb); fb.connect(combIn);   // the loop
+  delay.connect(combWet); combWet.connect(hp);
+  hp.connect(pk1); pk1.connect(pk2); pk2.connect(lp); lp.connect(out);
+  noise.connect(inBp); inBp.connect(inGain); inGain.connect(out);
+  noise.connect(kBp); kBp.connect(kGate); kGate.connect(kLevel); kLevel.connect(out);
+  kOsc.connect(kDepth); kDepth.connect(kGate.gain);
+  out.connect(master);
+
+  const e = {
+    ev: 0, P, out, osc, kOsc, drive, fb, damp, lp, inBp, inGain, kLevel,
+    jCents, jAM,
+    // level compensation: WebAudio normalizes a PeriodicWave to ±1, so a
+    // spiky diesel pulse ends up far quieter in RMS than a smooth six. Undo
+    // that here or every kind would need its `vol` hand-tuned twice.
+    levelK: Math.min(2.4, Math.max(0.6, 0.20 / (fire.rms || 0.20))),
+    // speed01 arrives divided by SPEED_REF; slow kinds get their range back
+    sK: SPEED_REF / Math.min(P.vmax, SPEED_REF),
+    gear: 0, shiftT: -1e9, boost: 0, lastT: t, thPrev: 0, popT: -1e9,
+    srcs: [osc, kOsc, jit, noise], nodes: [],
+  };
+  engNodes(e, osc, jit, jCents, jAM, drive, shaper, dry, combIn, delay, damp,
+    fb, combWet, hp, pk1, pk2, lp, noise, inBp, inGain, kOsc, kDepth, kBp,
+    kGate, kLevel, out);
+
+  if (P.turbo > 0) {
+    const tOsc = ctx.createOscillator();
+    tOsc.type = 'triangle'; tOsc.frequency.value = 1600;
+    const tBp = ctx.createBiquadFilter();
+    tBp.type = 'bandpass'; tBp.frequency.value = 1600; tBp.Q.value = 3;
+    const tGain = ctx.createGain(); tGain.gain.value = 0;
+    tOsc.connect(tBp); tBp.connect(tGain); tGain.connect(master);
+    e.tOsc = tOsc; e.tBp = tBp; e.tGain = tGain;
+    e.srcs.push(tOsc); engNodes(e, tOsc, tBp, tGain);
+  }
+
+  osc.start(t); kOsc.start(t);
+  jit.start(t, Math.random() * ENGINE.jitterSec);   // no two cars in phase
   noise.start(t, Math.random());
-  gain.gain.setTargetAtTime(ENGINE.gIdle, t, 0.06);
-  // gear: current band index; shiftT: when the last shift fired — parked deep
-  // in the past so the very first engineSet() writes params immediately
-  eng = { oscA, oscB, oscC, cGain, lfo, lfoDepth, filter, gain, noise, nFilter,
-          nGain, gear: 0, shiftT: -1e9 };
+  if (e.tOsc) e.tOsc.start(t);
+  out.gain.setTargetAtTime(P.vol * e.levelK * 0.5, t, 0.06);
+  return e;
+}
+
+// Tesla: one reduction gear, so every tone is proportional to road speed and
+// nothing is proportional to "revs". No pulse train, no exhaust, no intake,
+// no gearbox, and no idle — standing still it is silent, and the graph just
+// sits at zero rather than being built and torn down.
+function buildEV(P) {
+  const t = ctx.currentTime;
+  const wave = ctx.createPeriodicWave(EV_REAL, EV_IMAG);
+  const whine = ctx.createOscillator();
+  whine.setPeriodicWave(wave); whine.frequency.value = EV.whineMin;
+  const wGain = ctx.createGain(); wGain.gain.value = 0;
+  const whine2 = ctx.createOscillator();     // second stage, deliberately not
+  whine2.setPeriodicWave(wave);              // an octave — 1.62× is the metallic
+  whine2.frequency.value = EV.whineMin * EV.stage2;   // beat that says "EV"
+  const w2Gain = ctx.createGain(); w2Gain.gain.value = 0;
+  const humOsc = ctx.createOscillator();
+  humOsc.type = 'triangle'; humOsc.frequency.value = 40;
+  const humGain = ctx.createGain(); humGain.gain.value = 0;
+  // inverter: a FIXED switching tone ring-modulated by the motor rate, so
+  // what you hear is its sidebands sliding, not the carrier itself
+  const pwm = ctx.createOscillator();
+  pwm.type = 'sine'; pwm.frequency.value = EV.pwmF;
+  const pwmLfo = ctx.createOscillator();
+  pwmLfo.type = 'sine'; pwmLfo.frequency.value = 40;
+  const pwmDepth = ctx.createGain(); pwmDepth.gain.value = 0;
+  const ring = ctx.createGain(); ring.gain.value = 0;   // 0 intrinsic → pure ring
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = EV.lp; lp.Q.value = 0.5;
+  const out = ctx.createGain(); out.gain.value = 0;
+
+  whine.connect(wGain); wGain.connect(lp);
+  whine2.connect(w2Gain); w2Gain.connect(lp);
+  humOsc.connect(humGain); humGain.connect(lp);
+  pwm.connect(ring); pwmLfo.connect(pwmDepth); pwmDepth.connect(ring.gain);
+  ring.connect(lp);
+  lp.connect(out); out.connect(master);
+  whine.start(t); whine2.start(t); humOsc.start(t); pwm.start(t); pwmLfo.start(t);
+
+  const e = {
+    ev: 1, P, out, whine, whine2, wGain, w2Gain, humOsc, humGain, pwmLfo, pwmDepth,
+    gear: 0, shiftT: -1e9, sK: 1, levelK: 1,
+    srcs: [whine, whine2, humOsc, pwm, pwmLfo], nodes: [],
+  };
+  engNodes(e, whine, wGain, whine2, w2Gain, humOsc, humGain, pwm, pwmLfo,
+    pwmDepth, ring, lp, out);
+  return e;
 }
 
 export function engineStop() {
@@ -421,25 +787,57 @@ export function engineStop() {
   eng = null;                          // engineSet() goes inert immediately
   duckDrive = 0; duckUpdate();         // out of the car → the street comes back
   const t = ctx.currentTime;
-  e.gain.gain.cancelScheduledValues(t);
-  e.gain.gain.setTargetAtTime(0, t, 0.05);
+  e.out.gain.cancelScheduledValues(t);
+  e.out.gain.setTargetAtTime(0, t, 0.05);
+  // the amplitude-jitter signal ADDS to out.gain, so fading the intrinsic
+  // value alone would leave a wobbling residue humming for the whole teardown
+  if (e.jAM) { e.jAM.gain.cancelScheduledValues(t); e.jAM.gain.setTargetAtTime(0, t, 0.05); }
+  // the turbo whistle is its own voice hung straight off master (it is not part
+  // of the engine's mix and must not be ducked by the shift dip), so out's fade
+  // never reaches it: without this it keeps spooling at full level for the whole
+  // teardown and is then cut mid-cycle by disconnect() — the exact click the
+  // delayed teardown exists to avoid, and audible on every bail-out of a rolling
+  // van/truck/bus, the kinds whose boost is actually up
+  if (e.tGain) { e.tGain.gain.cancelScheduledValues(t); e.tGain.gain.setTargetAtTime(0, t, 0.05); }
   // let the fade land (τ=50 ms → inaudible well before 350 ms) THEN tear the
   // graph down; a bare stop() mid-waveform is an audible click
   setTimeout(() => {
-    try { e.oscA.stop(); e.oscB.stop(); e.oscC.stop(); e.lfo.stop(); e.noise.stop(); } catch {}
-    e.oscA.disconnect(); e.oscB.disconnect(); e.oscC.disconnect(); e.cGain.disconnect();
-    e.lfo.disconnect(); e.lfoDepth.disconnect(); e.noise.disconnect();
-    e.filter.disconnect(); e.nFilter.disconnect(); e.nGain.disconnect(); e.gain.disconnect();
+    for (const s of e.srcs) { try { s.stop(); } catch {} }
+    for (const n of e.nodes) n.disconnect();
   }, 350);
+}
+
+// Overrun backfire — bmw only. Off a big throttle at revs, unburnt mixture
+// lights in the pipe: a few short cracks at irregular spacing. Allocated on
+// the spot because it fires maybe once a minute, never per frame.
+function exhaustPop(t0, level) {
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer(); src.loop = true;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass'; bp.frequency.value = 200 + Math.random() * 120; bp.Q.value = 1.2;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.linearRampToValueAtTime(level, t0 + 0.0015);   // a crack, not a swell
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.07);
+  src.connect(bp); bp.connect(g); g.connect(master);
+  src.start(t0, Math.random()); src.stop(t0 + 0.09);
+  src.onended = () => { src.disconnect(); bp.disconnect(); g.disconnect(); };
 }
 
 // Called every frame while driving — scalar math and AudioParam writes only,
 // zero allocations. speed01 = |speed|/vmax, throttle01 = |gas| from input.
 export function engineSet(speed01, throttle01) {
   if (!eng) return;
-  const s = speed01 < 0 ? 0 : speed01 > 1 ? 1 : speed01;
-  const th = throttle01 < 0 ? 0 : throttle01 > 1 ? 1 : throttle01;
+  // written ">0 ? … : 0" rather than "<0 ? 0 : …" so a NaN speed (one bad
+  // physics frame) clamps to zero instead of poisoning every AudioParam in
+  // the graph — a NaN reaching setTargetAtTime silences the node for good
+  const raw = speed01 > 0 ? (speed01 > 1 ? 1 : speed01) : 0;
+  const th = throttle01 > 0 ? (throttle01 > 1 ? 1 : throttle01) : 0;
   const t = ctx.currentTime, tau = ENGINE.tau;
+  // sK > 1 only for kinds slower than SPEED_REF — see the constant
+  let s = raw * eng.sK; if (s > 1) s = 1;
+
+  if (eng.ev) { evSet(s, th, t, tau); return; }
 
   // --- pick the gear: hop bands only once s clears the edge by GEAR_HYST;
   // the do/while lets hard braking drop several gears in one frame ---
@@ -451,16 +849,25 @@ export function engineSet(speed01, throttle01) {
   }
 
   // --- in-gear revs → voice targets (hysteresis can park s a hair outside
-  // the band, so clamp frac). rpm01 = 0.25 + 0.75·frac per the contract; the
-  // frequency map anchors rpm 0.25 → fIdle so a standing car still idles at
-  // 55 Hz, and every upshift audibly drops revs by the same rule ---
+  // the band, so clamp frac). rpm01 = 0.25 + 0.75·frac per the contract; a
+  // standing car sits at the kind's idle rpm, and every upshift audibly drops
+  // revs by the same rule. The oscillator runs at rpm/120 = the frequency of
+  // the whole four-stroke CYCLE, which is what puts the firing harmonics on
+  // k = m·cyl and gives an odd-cylinder engine its half-orders for free. ---
+  const P = eng.P;
   const lo = g > 0 ? GEAR_TOP[g - 1] : 0;
   let frac = (s - lo) / (GEAR_TOP[g] - lo);
   frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
-  const f = ENGINE.fIdle + (ENGINE.fMax - ENGINE.fIdle) * frac;
+  const rpm01 = 0.25 + 0.75 * frac;
+  const f = (P.rpmIdle + (P.rpmMax - P.rpmIdle) * frac) / 120;
+  // Off the throttle the engine is being turned BY the wheels with no fuel
+  // burning: quieter and darker than idle, but with more pipe (see fb below).
+  // That combination is the entire "hollow" character of lifting off.
+  const over = (1 - th) * rpm01;
   // loudness rides REVS (frac), not road speed — so the shift that drops the
   // pitch also ducks the volume a touch, which is half of what sells it
-  const vol = ENGINE.gIdle + ENGINE.gThrottle * th + ENGINE.gRpm * frac;
+  const vol = P.vol * eng.levelK
+    * (0.55 + 0.45 * th + 0.28 * frac * th - 0.12 * over);
 
   if (g !== eng.gear) {
     // --- the shift: glide freq+gain DOWN past the new landing values, then
@@ -471,42 +878,115 @@ export function engineSet(speed01, throttle01) {
     // the landing pitch is higher — one code path, both directions read right.
     eng.gear = g; eng.shiftT = t;
     const fD = f * SHIFT.fDipK, tUp = t + SHIFT.upAt;
-    eng.oscA.frequency.setTargetAtTime(fD, t, SHIFT.downTau);
-    eng.oscA.frequency.setTargetAtTime(f, tUp, SHIFT.upTau);
-    eng.oscB.frequency.setTargetAtTime(fD / 2, t, SHIFT.downTau);
-    eng.oscB.frequency.setTargetAtTime(f / 2, tUp, SHIFT.upTau);
-    eng.oscC.frequency.setTargetAtTime(fD * 2, t, SHIFT.downTau);
-    eng.oscC.frequency.setTargetAtTime(f * 2, tUp, SHIFT.upTau);
-    eng.gain.gain.setTargetAtTime(vol * SHIFT.gDipK, t, SHIFT.downTau);
-    eng.gain.gain.setTargetAtTime(vol, tUp, SHIFT.upTau);
+    eng.osc.frequency.setTargetAtTime(fD, t, SHIFT.downTau);
+    eng.osc.frequency.setTargetAtTime(f, tUp, SHIFT.upTau);
+    eng.kOsc.frequency.setTargetAtTime(fD, t, SHIFT.downTau);   // knock is the
+    eng.kOsc.frequency.setTargetAtTime(f, tUp, SHIFT.upTau);    // same cylinders
+    eng.out.gain.setTargetAtTime(vol * SHIFT.gDipK, t, SHIFT.downTau);
+    eng.out.gain.setTargetAtTime(vol, tUp, SHIFT.upTau);
   } else if (t - eng.shiftT > SHIFT.hold) {
     // normal running: track revs per frame. Skipped during the hold window —
     // a setTargetAtTime issued NOW would supersede the scheduled recovery leg
     // and flatten the dip into a plain fade.
-    eng.oscA.frequency.setTargetAtTime(f, t, tau);
-    eng.oscB.frequency.setTargetAtTime(f / 2, t, tau);
-    eng.oscC.frequency.setTargetAtTime(f * 2, t, tau);
-    eng.gain.gain.setTargetAtTime(vol, t, tau);
+    eng.osc.frequency.setTargetAtTime(f, t, tau);
+    eng.kOsc.frequency.setTargetAtTime(f, t, tau);
+    eng.out.gain.setTargetAtTime(vol, t, tau);
   }
 
   // --- always live, shift or not: these don't take part in the dip ---
-  // filter opens on a hard early curve — sharper throttle response than the
-  // linear v1 map, and the wider 500→2800 span buys real bite when floored
-  const cut = ENGINE.loCut + (ENGINE.hiCut - ENGINE.loCut) * Math.pow(th, ENGINE.thCurve);
-  eng.filter.frequency.setTargetAtTime(cut, t, tau);
-  eng.nGain.gain.setTargetAtTime(0.015 + 0.035 * th, t, tau);   // intake hiss
-  // idle lope dies off with revs — ±25 cents at the bottom of a gear, none at
-  // the top, so cruising in high gear stays clean and steady
-  eng.lfoDepth.gain.setTargetAtTime(ENGINE.lopeCents * (1 - frac), t, tau);
+  // Drive into the waveshaper is the "hardness" control: barely bent at idle,
+  // saturating when floored. This is what makes the throttle feel like a pedal
+  // rather than a volume knob. /SHAPE_SPAN puts it in the table's domain.
+  eng.drive.gain.setTargetAtTime(
+    (SHAPE_DRIVE_LO + (P.drive - SHAPE_DRIVE_LO) * Math.pow(th, 0.7)) / SHAPE_SPAN, t, tau);
+  // lowpass: opens hard and early with throttle; off the throttle it creeps up
+  // only a little with revs, so overrun stays dark
+  const cut = P.cutLo * (0.85 + 0.6 * rpm01)
+    + (P.cutHi - P.cutLo) * Math.pow(th, ENGINE.thCurve);
+  eng.lp.frequency.setTargetAtTime(cut, t, tau);
+  // pipe resonance: MORE feedback and MORE top in the loop off the throttle
+  let fbv = P.combG * (0.86 + 0.14 * th) + 0.16 * over;
+  if (fbv > ENGINE.fbMax) fbv = ENGINE.fbMax;
+  eng.fb.gain.setTargetAtTime(fbv, t, tau);
+  eng.damp.frequency.setTargetAtTime(1150 + 1350 * th + 900 * over, t, tau);
+  // intake: th^1.5 IS the throttle plate — shut, the engine barely breathes
+  eng.inBp.frequency.setTargetAtTime(300 + 900 * rpm01, t, tau);
+  eng.inGain.gain.setTargetAtTime(
+    P.intake * th * Math.sqrt(th) * (0.3 + 0.7 * rpm01), t, tau);
+  // knock is loudest unloaded — under full load combustion swamps it
+  eng.kLevel.gain.setTargetAtTime(P.knock * (1 - 0.4 * th), t, tau);
+  // cycle-to-cycle scatter shrinks with revs: the flywheel filters torque
+  // ripple as ω rises, so a busy engine is a steady one
+  eng.jCents.gain.setTargetAtTime(3 + 38 * (1 - rpm01), t, tau);
+  eng.jAM.gain.setTargetAtTime(vol * (0.02 + 0.13 * (1 - rpm01)), t, tau);
+
+  // turbo: the LAG is the sound. boost chases th·rpm01 with a slow rise and a
+  // faster fall, integrated per frame off the context clock (no dt available).
+  if (eng.tGain) {
+    const dt = Math.min(0.1, t - eng.lastT);
+    const want = th * rpm01;
+    const k = 1 - Math.exp(-dt / (want > eng.boost ? (P.turbo > 0.03 ? 0.8 : 0.6) : 0.3));
+    eng.boost += (want - eng.boost) * k;
+    const fT = 1600 + 6000 * eng.boost;
+    eng.tOsc.frequency.setTargetAtTime(fT, t, tau);
+    eng.tBp.frequency.setTargetAtTime(fT, t, tau);
+    eng.tGain.gain.setTargetAtTime(P.turbo * eng.boost * eng.boost, t, tau);
+  }
+  eng.lastT = t;
+
+  // lift off a big throttle at revs and the pipe cracks — bmw only
+  if (P.pops && th < 0.1 && eng.thPrev > 0.5 && rpm01 > 0.55 && t - eng.popT > 0.5) {
+    eng.popT = t;
+    const n = 2 + ((Math.random() * 4) | 0);
+    let at = t + 0.03;
+    for (let i = 0; i < n; i++) {
+      exhaustPop(at, 0.15 + Math.random() * 0.2);
+      at += 0.04 + Math.random() * 0.12;
+    }
+  }
+  eng.thPrev = th;
 
   // The city bed ducks with ROAD SPEED, not revs: coasting at 120 km/h with
   // your foot off is just as loud inside the cabin as pulling, and ducking off
   // the throttle instead would pump the whole mix on every gear change.
   // Nothing below ~25 km/h ducks at all — crawling through town, you can still
-  // hear the town. (s = speed01, so 0.2·vmax ≈ 27 km/h, 0.7·vmax ≈ 96 km/h.)
-  const dd = (s - 0.2) / 0.5;
+  // hear the town. (raw = speed01 as the caller sent it — absolute road speed,
+  // NOT the per-kind rescale, so 0.2·vmax ≈ 27 km/h in every vehicle.)
+  duckSpeed(raw);
+}
+
+function duckSpeed(raw) {
+  const dd = (raw - 0.2) / 0.5;
   duckDrive = dd < 0 ? 0 : dd > 1 ? 1 : dd;
   duckUpdate();
+}
+
+// Tesla, per frame. Everything here is a function of ROAD SPEED (v), because
+// a single reduction gear leaves nothing else to be a function of. th only
+// controls the inverter tone — that one is proportional to TORQUE, which is
+// why you hear it accelerating and not cruising.
+function evSet(s, th, t, tau) {
+  const v = s * SPEED_REF;                       // m/s, as the caller measures it
+  let fw = EV.whineK * v;
+  fw = fw < EV.whineMin ? EV.whineMin : fw > EV.whineMax ? EV.whineMax : fw;
+  const n3 = EV.humK * v;                        // motor rate × 3 pole pairs
+  // Regen: lifting off does NOT unload an EV, it loads it the other way — the
+  // whine stays. That is the exact opposite of a combustion overrun, and it
+  // is the cheapest way to make the car read as electric.
+  let reg = (1 - th) * ((v - 5) / 10);
+  reg = reg < 0 ? 0 : reg > 1 ? 1 : reg;
+  const lvl = 0.25 + 0.75 * s;
+  eng.whine.frequency.setTargetAtTime(fw, t, tau);
+  eng.whine2.frequency.setTargetAtTime(fw * EV.stage2, t, tau);
+  eng.humOsc.frequency.setTargetAtTime(n3 < 20 ? 20 : n3, t, tau);
+  eng.pwmLfo.frequency.setTargetAtTime(n3 < 20 ? 20 : n3, t, tau);
+  eng.wGain.gain.setTargetAtTime(0.05 * lvl * (1 + 0.20 * reg), t, tau);
+  eng.w2Gain.gain.setTargetAtTime(0.022 * lvl * (1 + 0.08 * reg), t, tau);
+  eng.humGain.gain.setTargetAtTime(0.05 * Math.min(1, v / 8), t, tau);
+  eng.pwmDepth.gain.setTargetAtTime(0.025 * th, t, tau);
+  // no idle: stopped, a Model 3 makes no sound at all
+  eng.out.gain.setTargetAtTime(EV.vol * Math.min(1, v / EV.fadeV), t, tau);
+  duckSpeed(s);
 }
 
 // ---- one rumble for ALL nearby traffic ----------------------------------

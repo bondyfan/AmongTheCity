@@ -11,7 +11,7 @@ import { loadCity, chunkKey } from './geo.js';
 import { CityWorld } from './city.js';
 import { input } from './input.js';
 import { Player, worldSeatAnchor } from './player.js';
-import { Vehicles, driveStep, lampMats } from './vehicles.js';
+import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
@@ -92,16 +92,153 @@ const camSmooth = new THREE.Vector3();
 let camInit = false;
 const BASE_FOV = 55;
 
+// ---------- first person (C) ----------
+// A head in a seat, not a boom. It only means anything from inside a car:
+// walking, the model IS the game, and in a helicopter the machine and the sky
+// around it are the whole point of the shot. The eye point comes from
+// vehicles.js eyeAnchor(), i.e. exactly where the visible rider's head is —
+// so what you look out of and what a peer sees you look out of are one place.
+let fpView = false;
+const FP_FOV = 74;         // wide enough that the dash and both mirrors stay in
+const FP_YAW = 1.75;       // ±100° of look-around: a neck, not a turret
+const FP_PITCH_UP = 0.55;  // roof lining
+const FP_PITCH_DN = 0.75;  // the pedals
+let fpPitch = 0;           // radians either side of the horizon — FP's own axis
+// Near plane belongs to the camera MODE, not to the horizon — updateHorizon()
+// owns `far` and defers to this. It was 0.14 on the reasoning that 0.5 m clips
+// away the A-pillar and the dash: NEITHER EXISTS. makeCarMesh() builds no
+// interior at all, and every vehicle material is FrontSide, so the shell is
+// pure backface from the inside and is culled whatever the near plane says.
+// 0.14 therefore bought nothing and cost 3.6× the depth-buffer resolution
+// (24-bit integer depth against far = 5200: ~12 cm of error at 1 km becomes
+// ~43 cm, i.e. z-fighting on distant façades). 0.3 keeps headroom for the one
+// thing that can genuinely be inside the old 0.5 m — a remote passenger's
+// shoulder, or another car's wing folded into the cabin by a crash — at a
+// fraction of the cost. If a cabin is ever modelled, revisit this WITH it.
+const CAM_NEAR = 0.5, FP_NEAR = 0.3;
+let camNear = CAM_NEAR;
+// Hiding our own model is done with a LAYER, not mesh.visible: layers filter
+// per camera, so the mesh stays in the graph, stays parented to the car, keeps
+// its transform, and every other consumer (and every peer, who rebuilds our
+// avatar from network state and never touches this object) sees it unchanged.
+const FP_HIDE_LAYER = 2;   // nothing else in the project uses layers at all
+let _selfHidden = false;
+
+// The car whose seat the local eye sits in. game.car is only ever set for the
+// driver, so a front passenger riding along with somebody else at the wheel
+// resolves through player.inCar instead — a heli seat is a different anchor
+// set and a different framing job, so it is refused here.
+function fpVehicle() {
+  if (game.car) return game.car;
+  const v = player?.inCar;
+  return v && v.rotorSpeed === undefined ? v : null;
+}
+
+// Re-derived from live state every frame rather than latched, so anything that
+// ends first person — E, a wreck, losing the seat to the net layer — hands the
+// model back on the next frame without needing its own cleanup path.
+function fpHideSelf(hide) {
+  if (hide === _selfHidden || !player) return;
+  _selfHidden = hide;
+  player.mesh.traverse((o) => o.layers.set(hide ? FP_HIDE_LAYER : 0));
+}
+
+// blast shake: high-frequency positional jitter, decayed by weapons.js. It
+// rides on the FINAL camera position rather than on the target, so a launch
+// nudges the frame and a detonation slams it without the follow cam fighting
+// back — and first person gets the same hit for free.
+function camShake() {
+  const sh = weapons?.shake ?? 0;
+  if (sh <= 0.001) return;
+  const t = performance.now() * 0.06;
+  camera.position.x += Math.sin(t * 1.7) * sh * 0.42;
+  camera.position.y += Math.sin(t * 2.3 + 1.1) * sh * 0.34;
+  camera.position.z += Math.cos(t * 1.9 + 0.4) * sh * 0.42;
+}
+
+// FOV eases (a hard cut on the C toggle is nauseating, and the speed kick has
+// always eased); near is a discrete projection property and snaps.
+function applyLens(dt, fov, near) {
+  camNear = near;
+  let dirty = false;
+  if (camera.near !== near) { camera.near = near; dirty = true; }
+  if (Math.abs(camera.fov - fov) > 0.2) {
+    camera.fov += (fov - camera.fov) * Math.min(1, dt * 4);
+    dirty = true;
+  }
+  if (dirty) camera.updateProjectionMatrix();
+}
+
 let _lastLookT = -9; // when the mouse last steered — pauses auto-follow
 function updateCamera(dt) {
   const drag = input.takeDrag();
   // pointer-locked mouse look uses a finer touch than right-drag
   const sens = input.locked ? 0.0026 : 0.004;
   if (drag.x || drag.y) _lastLookT = performance.now() * 0.001;
+  const fpCar = fpView ? fpVehicle() : null;
+  // A seat is lost without anybody pressing E often enough to matter: the car
+  // is wrecked, the net layer reclaims the slot, the vehicle streams out. The
+  // mode drops itself here instead of in each of those paths, so first person
+  // can never come back uninvited on the NEXT car the player gets into.
+  if (fpView && !fpCar) fpView = false;
   camYaw -= drag.x * sens;
-  camPitch = Math.max(0.06, Math.min(1.15, camPitch + drag.y * sens));
+  // Pitch has two homes. The boom's is an ELEVATION above the target that
+  // never points at the sky; the driver's is a look angle either side of the
+  // horizon. Sharing one variable made C flip you straight into the headliner.
+  if (fpCar) fpPitch = Math.max(-FP_PITCH_DN, Math.min(FP_PITCH_UP, fpPitch - drag.y * sens));
+  else camPitch = Math.max(0.06, Math.min(1.15, camPitch + drag.y * sens));
+  // consumed in BOTH modes even though first person has no boom: these are
+  // one-shot getters, and a notch left sitting in the accumulator would fire
+  // the chase cam across the street the moment C switched back.
   if (input.takeZoomHome()) camDist = CAM_DIST_0;
   camDist = Math.max(5, Math.min(26, camDist + input.takeWheel() * 1.4));
+  fpHideSelf(!!fpCar);
+
+  if (fpCar) {
+    const c = fpCar;
+    // Look is an OFFSET from the nose, not a free orbit: the head turns with
+    // the car, so through a roundabout you keep watching the same point ahead
+    // instead of the world sliding past a fixed compass bearing. camYaw stays
+    // the single source of truth in both modes — the minimap and the waypoint
+    // compass read it and neither knows first person exists.
+    let off = Math.atan2(Math.sin(camYaw - c.heading), Math.cos(camYaw - c.heading));
+    const lookIdle = performance.now() * 0.001 - _lastLookT > 1.6;
+    // same rule as the chase cam's auto-follow: the head drifts back to the
+    // road once the hand lets go, but only while actually driving somewhere
+    if (Math.abs(c.speed) > 1.5 && !input.mouse.right && lookIdle)
+      off -= off * Math.min(1, dt * 2.2);
+    camYaw = c.heading + Math.max(-FP_YAW, Math.min(FP_YAW, off));
+
+    // Same local→world transform worldSeatAnchor() uses, one seat higher up.
+    // The height is read off the MESH, not off car.y, so the offroad judder
+    // (±5 cm, written by vehicles.update a few calls earlier this frame) shakes
+    // the head too. The body group's roll and pitch are deliberately NOT
+    // applied: leaning the horizon into every corner is where car sims make
+    // people ill, and lookAt keeps the up vector world-vertical anyway.
+    const a = eyeAnchor(c, game.car === c ? 0 : (player.seat ?? 1));
+    const ch = Math.cos(c.heading), sh = Math.sin(c.heading);
+    const ex = c.x + a.x * ch + a.z * sh;
+    const ey = (c.mesh?.position.y ?? c.y ?? 0) + a.y;
+    const ez = c.z - a.x * sh + a.z * ch;
+    // No camSmooth, no wall marching, no ground clamp. A 9/s lerp is ~0.1 s of
+    // lag, which at 100 km/h parks the eye three metres behind the seat — on
+    // the back bench, or outside the car. The interior boxes are not a cabin,
+    // and heightAt() under a bridge deck would shove the head through the roof.
+    camera.position.set(ex, ey, ez);
+    // keep the boom's memory glued to the seat so switching back EASES out of
+    // the car instead of swooping in from wherever the chase cam last was
+    camSmooth.copy(camera.position); camInit = true;
+    camShake();
+    const cp = Math.cos(fpPitch);
+    camera.lookAt(ex - Math.sin(camYaw) * cp * 12,
+                  ey + Math.sin(fpPitch) * 12,
+                  ez - Math.cos(camYaw) * cp * 12);
+    // a much gentler speed kick than the chase cam's: at 74° the edges of the
+    // frame already move fast, and widening further from inside a cabin reads
+    // as the windscreen stretching rather than as speed
+    applyLens(dt, FP_FOV + Math.min(1, Math.abs(c.speed) / CAR.vmax) * 5, FP_NEAR);
+    return;
+  }
 
   let tx, ty, tz, wantYaw, dist, height, fov, pitchK = 1;
   if (game.car) {
@@ -181,21 +318,9 @@ function updateCamera(dt) {
   if (!camInit) { camSmooth.copy(want); camInit = true; }
   camSmooth.lerp(want, Math.min(1, dt * 9));
   camera.position.copy(camSmooth);
-  // blast shake: high-frequency positional jitter, decayed by weapons.js. It
-  // rides on the SMOOTHED position rather than the target, so a launch nudges
-  // the frame and a detonation slams it without the follow cam fighting back.
-  const sh = weapons?.shake ?? 0;
-  if (sh > 0.001) {
-    const t = performance.now() * 0.06;
-    camera.position.x += Math.sin(t * 1.7) * sh * 0.42;
-    camera.position.y += Math.sin(t * 2.3 + 1.1) * sh * 0.34;
-    camera.position.z += Math.cos(t * 1.9 + 0.4) * sh * 0.42;
-  }
+  camShake();
   camera.lookAt(tx, ty, tz);
-  if (Math.abs(camera.fov - fov) > 0.2) {
-    camera.fov += (fov - camera.fov) * Math.min(1, dt * 4);
-    camera.updateProjectionMatrix();
-  }
+  applyLens(dt, fov, CAM_NEAR);
 }
 
 // ---------- enter / exit cars ----------
@@ -245,9 +370,17 @@ input.onKey('KeyE', () => {
   if (trains?.riding) {
     // only with the doors open — stepping off at 140 km/h is not a feature
     if (!trains.alight()) { ui_hint('Vystoupit lze jen ve stanici'); return; }
+    // the train is the one ride that showed the speedo without ever hiding it
+    // again (updateHud only ever fills it), so stepping onto the platform left
+    // the carriage's last speed frozen in the corner until you found a car
+    $id('speedo').classList.add('hidden');
     sfx('train_doors', 0.7);
-  } else if (!game.car && !game.heli && !player.boarding && !player.exiting
+  } else if (!player.inCar && !game.car && !game.heli && !player.boarding && !player.exiting
       && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
+    // !player.inCar, not just !game.car: a PASSENGER has no game.car but his
+    // pos mirrors the vehicle's, so parking within 6 m of a halted train used
+    // to board it from the seat — riding a train and sitting in a car at once,
+    // with two updates fighting over player.pos.
     const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
     if (trains.board(t)) sfx('train_doors', 0.7);
   } else if (player.boarding) {
@@ -259,8 +392,10 @@ input.onKey('KeyE', () => {
     const c = game.car;
     c.ctl = null;
     game.car = null;
+    fpView = false;          // step out and you are looking at yourself again
     parked.includes(c) || parked.push(c);
     $id('speedo').classList.add('hidden');
+    hideCarName();
     engineStop();
     tireSet(0, 0);
     sfx('door_open', 0.7);
@@ -271,6 +406,20 @@ input.onKey('KeyE', () => {
     game.heli = null;
     $id('speedo').classList.add('hidden');
     heliStop?.();
+    sfx('door_open', 0.7);
+    player.beginExit({ onOut: () => sfx('door_close', 0.8) });
+  } else if (player.inCar) {
+    // same rule as the pilot's: nobody steps off a flying helicopter
+    if (player.inCar.airborne) { ui_hint('Nejdřív přistaň'); return; }
+    // The PASSENGER'S exit. Every branch above tests game.car/game.heli, which
+    // only the driver has, so a rider in seat 1 fell through to the last else,
+    // where boardVehicle() refuses because inCar is already set — E did
+    // nothing at all and the only way out was the console. First person is
+    // what made this reachable in practice: it finally gives a passenger a
+    // reason to sit there. No engineStop/speedo here — a passenger never
+    // started either. fpView drops itself once the seat is gone, but say so.
+    fpView = false;
+    hideCarName();
     sfx('door_open', 0.7);
     player.beginExit({ onOut: () => sfx('door_close', 0.8) });
   } else if (heli && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5
@@ -301,15 +450,47 @@ input.onKey('KeyE', () => {
       onDoor: () => sfx('door_open', 0.8),
       onSeated: (s) => {
         sfx('door_close', 0.6);
+        // the name card goes up for BOTH seats — a passenger knows perfectly
+        // well what he just climbed into — and only from here, never from
+        // onDoor: the walk-up is cancellable (a second E, the car driving off,
+        // the 6 s timeout), and naming a car nobody got into is a lie
+        showCarName(car);
         if (s !== 0) return;             // passenger seat: no engine, no speedo
         game.car = car;
         $id('speedo').classList.remove('hidden');
-        setTimeout(() => { if (game.car === car) { sfx('engine_start', 0.7); engineStart(); } }, 350);
+        // per-model engine voice: audio.js synthesises an I3 for the Fabia, a
+        // diesel for the bus, motor whine for the Tesla. Without the kind it
+        // would fall back to the Octavia four for everything.
+        setTimeout(() => {
+          if (game.car === car) { sfx('engine_start', 0.7); engineStart(car.kind); }
+        }, 350);
       },
       // walked-up-and-it-vanished: a stolen car must stay enterable
       onCancel: () => { parked.includes(car) || parked.push(car); },
     });
   }
+});
+
+// ---------- C: chase cam ⇄ driver's eyes ----------
+// C is the camera key everywhere in this genre, and it is free here (E, M and
+// V are the only other onKey bindings; input.js reads W/A/S/D, Shift, Space,
+// Ctrl and the arrows straight off input.keys). First person is a SEAT view,
+// so off a seat the key says so rather than doing nothing, which reads as a
+// dead key. The mode itself is not stored anywhere else: updateCamera
+// re-resolves the seat every frame, so a wreck or an exit drops it on its own.
+input.onKey('KeyC', () => {
+  if (game.mode !== 'play') return;
+  const v = fpVehicle();
+  if (!v) { ui_hint('Pohled řidiče jen ve voze'); return; }
+  fpView = !fpView;
+  // Come up looking down the ROAD on both axes. Pitch alone was not enough:
+  // camYaw carries whatever bearing the chase cam was orbiting at, and the FP
+  // branch only CLAMPS it to ±FP_YAW — so pressing C after dragging the boom
+  // round to the car's nose used to open first person staring out of the side
+  // window at a hard 100°, with the auto-recentre unable to help while parked
+  // (it only runs above 1.5 m/s). Snapping to the heading costs nothing: the
+  // head is an offset from the nose in this mode, and zero is its home.
+  if (fpView) { fpPitch = 0; camYaw = v.heading; }
 });
 
 // world-space seat anchor for the net layer (window.__atc is built at the
@@ -341,6 +522,30 @@ function ui_hint(text) {
   el.textContent = text;
   el.classList.remove('hidden');
   _hintHold = 1.6;
+}
+
+// ---------- the car's name, over the speedo, for three seconds ----------
+// Held on a frame countdown rather than a setTimeout, exactly like _hintHold:
+// re-entering a car simply rewrites the deadline, so there is one card and one
+// timer no matter how fast the player jumps between vehicles — no stacked
+// timeouts racing each other to hide an element that is visible again. The
+// element is never `display:none`, only faded, so the CSS transition runs on
+// every show without a forced reflow to restart it.
+let _carNameHold = 0;
+function showCarName(car) {
+  const el = $id('car-name');
+  if (!el) return;
+  el.querySelector('.cn-name').textContent = carLabel(car);
+  el.querySelector('.cn-sub').textContent = carSubtitle(car);
+  el.classList.add('show');
+  _carNameHold = 3;
+}
+// Stepping out inside the three seconds takes the card with it: it is a label
+// for the speedo block, and leaving it naming a car you are walking away from
+// (with the speedo already gone from under it) reads as a stuck HUD.
+function hideCarName() {
+  _carNameHold = 0;
+  $id('car-name')?.classList.remove('show');
 }
 
 // ---------- parked cars around the spawn ----------
@@ -451,13 +656,18 @@ function updateHorizon(dt) {
   // The far plane serves the SKY as well as the city. Tied to the city radius
   // it sat at 1632 m, while the cloud field spans ±2600 m — so 95 % of the
   // clouds were clipped away before they could be seen (measured: 16 of 319
-  // puffs alive). The floor here lets the whole field render; near moves out
-  // to 0.5 m to buy back the depth precision that costs (nothing in a chase
-  // camera is closer than a metre anyway).
+  // puffs alive). The floor here lets the whole field render.
+  //
+  // `near` used to be pinned to 0.5 right here, on the reasoning that nothing
+  // in a chase camera is closer than a metre. First person broke that: from
+  // the driver's seat the A-pillar and the dash are ~0.3 m away, and this ran
+  // every frame BEFORE updateCamera, so it clipped them back off as fast as
+  // the camera set 0.14. The near plane is now the camera mode's business
+  // (applyLens) and this only reads the value it chose.
   const wantFar = Math.max(radius * 1.7, 5200);
-  if (Math.abs(camera.far - wantFar) > 50 || camera.near < 0.4) {
+  if (Math.abs(camera.far - wantFar) > 50 || camera.near !== camNear) {
     camera.far = wantFar;
-    camera.near = 0.5;
+    camera.near = camNear;
     camera.updateProjectionMatrix();
   }
 }
@@ -582,6 +792,12 @@ function updateHud(dt) {
     $id('speed-num').textContent = `${kmh}`;
     $id('speed-unit').textContent = `km/h · ${Math.round(game.heli.y)} m`;
   }
+  // vehicle name card: counted down per frame, not on the 0.2 s hint tick, so
+  // three seconds is three seconds and not "three seconds rounded to a tick"
+  if (_carNameHold > 0) {
+    _carNameHold -= dt;
+    if (_carNameHold <= 0) $id('car-name')?.classList.remove('show');   // CSS fades it out
+  }
   // action hint, re-checked a few times a second
   hintT -= dt;
   if (hintT <= 0) {
@@ -595,7 +811,7 @@ function updateHud(dt) {
         : `Jedete do <b>${t.nextStopName ?? 'další stanice'}</b>`;
       hint.classList.remove('hidden');
     }
-    else if (trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
+    else if (!player.inCar && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
       hint.innerHTML = '<kbd>E</kbd> nastoupit do vlaku';
       hint.classList.remove('hidden');
     }
@@ -605,11 +821,15 @@ function updateHud(dt) {
         : '<kbd>E</kbd> vystoupit · <kbd>↑</kbd> vzlet · <kbd>V</kbd> raketa';
       hint.classList.remove('hidden');
     }
-    else if (heli && !game.car && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5) {
+    else if (heli && !game.car && !player.inCar
+        && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5) {
       hint.innerHTML = '<kbd>E</kbd> nastoupit do vrtulníku';
       hint.classList.remove('hidden');
     }
-    else if (game.car) {
+    // player.inCar, not game.car: the passenger is seated too, and E now takes
+    // him out. Every "nastoupit" hint above is guarded the same way — from a
+    // seat, the pos they measure against is the vehicle's, not a pedestrian's.
+    else if (game.car || player.inCar) {
       hint.innerHTML = '<kbd>E</kbd> vystoupit';
       hint.classList.remove('hidden');
     } else {
@@ -965,6 +1185,23 @@ function tick(src) {
   }
 }
 
+// What the ENGINE is doing, which is not what the pedal is doing — audio.js
+// asks for load, and |gas| is not it. driveStep reads gas<0 as the BRAKE while
+// rolling forward (reverse only once stopped) and gas>0 as the brake while
+// rolling backwards, and it starves a wreck outright (damage ≥ 1 → gas ≤ 0).
+// Passing |gas| meant standing on the brakes from 100 km/h sounded like being
+// floored — the overrun voice audio.js models (darker, quieter, more pipe) was
+// unreachable — and a totalled car sat motionless screaming at full throttle
+// for as long as W was held. The handbrake is deliberately NOT counted: the
+// engine really does pull against it, which is how the handbrake turn works.
+function engineLoad(car, gas) {
+  if ((car.damage ?? 0) >= 1) return 0;
+  const s = car.speed ?? 0;
+  if (gas > 0) return s < -0.05 ? 0 : Math.min(1, gas);
+  if (gas < 0) return s > 0.05 ? 0 : Math.min(1, -gas);
+  return 0;
+}
+
 function stepGame(dt) {
   if (game.mode !== 'play') return;
 
@@ -1002,7 +1239,7 @@ function stepGame(dt) {
       brake: input.keys.has('Space') ? 1 : 0,
     }, dt, world, _crashList());
     player.update(dt, { input, camYaw, world }); // keeps player glued to the car
-    engineSet(Math.min(1, Math.abs(game.car.speed) / CAR.vmax), Math.abs(gas));
+    engineSet(Math.min(1, Math.abs(game.car.speed) / CAR.vmax), engineLoad(game.car, gas));
     // tyre hiss under the engine — and gravel once the wheels leave the road
     tireSet(Math.min(1, Math.abs(game.car.speed) / 40), game.car.offroad ?? 0);
   } else {
@@ -1118,10 +1355,10 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v13-interiors',   // bump on risky changes — tells us which code a tab runs
+  build: 'v14-fp-engine',   // bump on risky changes — tells us which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
-  cam: () => ({ camDist, camPitch, camYaw }),
+  cam: () => ({ camDist, camPitch, camYaw, fpView, fpPitch, near: camera.near }),
   get weapons() { return weapons; },
   get interiors() { return world?.interiors; },
   get postfx() { return postfx; },

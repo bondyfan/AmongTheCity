@@ -35,7 +35,16 @@ class Input {
       // Space is the keyboard attack button — stop it scrolling the page
       if (e.code === 'Space' && !/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) e.preventDefault();
       if (e.repeat) return;
+      // ⌘-anything is a browser shortcut, never a game key — and macOS does
+      // not deliver keyup while ⌘ is held, so tracking the key at all would
+      // leave it stuck down (⌘A used to walk the player left forever).
+      if (e.metaKey) return;
       this.keys.add(e.code);
+      // Ctrl combos still TRACK (Ctrl alone is the block button — see
+      // blocking() — and blocking while walking has to keep working), but they
+      // must not fire the one-shot bindings: Ctrl+C is copy, and it was
+      // flipping the camera into the driver's seat.
+      if (e.ctrlKey && !e.code.startsWith('Control')) return;
       const h = this.keyHandlers.get(e.code);
       if (h) h();
     });

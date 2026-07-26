@@ -13,3 +13,7 @@ data/raw-region/
 # under Cloudflare's 25 MB per-file ceiling.
 
 .DS_Store
+
+# Geofabrik .osm.pbf extracts feeding scripts/build-region.mjs — 320 MB of
+# regenerable input, never served.
+data/raw-osm/

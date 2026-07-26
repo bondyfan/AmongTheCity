@@ -1,7 +1,9 @@
 // ---- OSM → game-format processor, region edition ----
-// build-city.mjs grew a bigger sibling: the playable world is the whole
-// Pardubice–Hradec–Chrudim agglomeration, fetched by fetch-region.mjs as ONE
-// combined Overpass response per 4.8 km tile (data/raw-region/<tx>_<tz>.json).
+// build-city.mjs grew a bigger sibling: the playable world is the D11 corridor
+// from Prague to Hradec Králové and down to Pardubice, split by
+// scripts/split-extracts.mjs into 4.8 km raw tiles (data/raw-region/<tx>_<tz>.json).
+// (Tiles downloaded by the older fetch-region.mjs, one Overpass response each,
+// are read exactly the same way — see FIRST-VERTEX TILE OWNERSHIP below.)
 // This script splits each response back into the layers build-city.mjs read
 // from separate raw files — the per-layer SELECT predicates below mirror the
 // fetch query clauses one-to-one, so a feature lands in exactly the layers it
@@ -30,31 +32,33 @@
 //
 // Usage: node scripts/build-region.mjs
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-
-// hlavní nádraží — the ONE world origin (identical in build-city/fetch-region)
-const ORIGIN = { lat: 50.0317084, lon: 15.7560881 };
-const M_PER_LAT = 111132.9 - 559.8 * Math.cos(2 * ORIGIN.lat * Math.PI / 180); // ~111258
-const M_PER_LON = 111412.8 * Math.cos(ORIGIN.lat * Math.PI / 180) - 93.5 * Math.cos(3 * ORIGIN.lat * Math.PI / 180); // ~71554
+import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { ORIGIN, M_PER_LAT, M_PER_LON, TILE, tileWanted, wantedTiles } from './lib/world-area.mjs';
 
 const px = (lon) => +((lon - ORIGIN.lon) * M_PER_LON).toFixed(1);
 const pz = (lat) => +((ORIGIN.lat - lat) * M_PER_LAT).toFixed(1); // south positive
 
-// tile grid — MUST mirror fetch-region.mjs so raw inputs and outputs line up
-const TILE = 4800;
-const REGION = { latS: 49.92, latN: 50.26, lonW: 15.55, lonE: 15.97 };
-const xOf = (lon) => (lon - ORIGIN.lon) * M_PER_LON;   // unrounded — grid math only
-const zOf = (lat) => (ORIGIN.lat - lat) * M_PER_LAT;
-const TX_MIN = Math.floor(xOf(REGION.lonW) / TILE), TX_MAX = Math.floor(xOf(REGION.lonE) / TILE);
-const TZ_MIN = Math.floor(zOf(REGION.latN) / TILE), TZ_MAX = Math.floor(zOf(REGION.latS) / TILE);
-
-const clampi = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+// The grid is no longer a rectangle (scripts/lib/world-area.mjs owns its shape),
+// so ownership clamps to the nearest WANTED tile rather than to a bounding box:
+// a way arriving from beyond the world would otherwise be claimed by a tile
+// that is never built, and vanish.
+const clampTile = (tx, tz) => {
+  if (tileWanted(tx, tz)) return [tx, tz];
+  let best = [tx, tz], bestD = Infinity;
+  for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+    if (!tileWanted(tx + dx, tz + dz)) continue;
+    const d = dx * dx + dz * dz;
+    if (d < bestD) { bestD = d; best = [tx + dx, tz + dz]; }
+  }
+  return best;
+};
 // ownership predicate for one tile: does this [x,z] first vertex belong here?
 // Uses the ROUNDED game-frame coords (px/pz output) — the same numbers geo.js
 // will floor for _home, so build-time ownership and runtime home always agree.
-const makeOwns = (tx, tz) => (pt) =>
-  clampi(Math.floor(pt[0] / TILE), TX_MIN, TX_MAX) === tx
-  && clampi(Math.floor(pt[1] / TILE), TZ_MIN, TZ_MAX) === tz;
+const makeOwns = (tx, tz) => (pt) => {
+  const [ox, oz] = clampTile(Math.floor(pt[0] / TILE), Math.floor(pt[1] / TILE));
+  return ox === tx && oz === tz;
+};
 
 // ---- geometry helpers (verbatim from build-city.mjs) ----
 // way geometry (from `out geom`) → [[x,z],...]
@@ -381,19 +385,33 @@ function processSignals(els, owns) {
   return out;
 }
 
-// ---------- run: every grid tile whose raw file exists ----------
-mkdirSync('public/data/tiles', { recursive: true });
+// ---------- run: every raw tile on disk ----------
+// Driven by the directory, not by a rectangle: the world's shape lives in
+// world-area.mjs and a partially-finished split is simply a smaller world.
+// Dry runs point RAW_DIR/OUT_DIR at a scratch directory; production uses both
+// defaults, which are the paths the game and the deploy actually read.
+const RAW_DIR = process.env.RAW_DIR || 'data/raw-region';
+const OUT_DIR = process.env.OUT_DIR || 'public/data';
+mkdirSync(`${OUT_DIR}/tiles`, { recursive: true });
 const manifestTiles = [];
 const totals = { buildings: 0, roads: 0, rails: 0, water: 0, waterways: 0,
   green: 0, paved: 0, trees: 0, pois: 0, signals: 0 };
-let emitted = 0, missing = 0, empty = 0, bytes = 0;
+let emitted = 0, empty = 0, bytes = 0;
 
-for (let tz = TZ_MIN; tz <= TZ_MAX; tz++) {
-  for (let tx = TX_MIN; tx <= TX_MAX; tx++) {
-    const rawFile = `data/raw-region/${tx}_${tz}.json`;
-    if (!existsSync(rawFile)) { missing++; continue; } // download still running — re-run later
-    const els = JSON.parse(readFileSync(rawFile, 'utf8')).elements ?? [];
-    const owns = makeOwns(tx, tz);
+const rawTiles = readdirSync(RAW_DIR)
+  .map(f => /^(-?\d+)_(-?\d+)\.json$/.exec(f))
+  .filter(Boolean)
+  .map(m => [+m[1], +m[2]])
+  .sort((a, b) => (a[1] - b[1]) || (a[0] - b[0]));
+
+{
+  for (const [tx, tz] of rawTiles) {
+    const rawFile = `${RAW_DIR}/${tx}_${tz}.json`;
+    const raw = JSON.parse(readFileSync(rawFile, 'utf8'));
+    const els = raw.elements ?? [];
+    // split-extracts.mjs already placed every element in exactly one tile;
+    // an Overpass download did not, and still needs the first-vertex test.
+    const owns = raw.owned ? () => true : makeOwns(tx, tz);
     const tile = {
       tx, tz,
       origin: ORIGIN, mPerLat: +M_PER_LAT.toFixed(1), mPerLon: +M_PER_LON.toFixed(1),
@@ -412,18 +430,19 @@ for (let tz = TZ_MIN; tz <= TZ_MAX; tz++) {
     for (const key of Object.keys(totals)) { n += tile[key].length; totals[key] += tile[key].length; }
     if (!n) { empty++; continue; } // bare corner — nothing to stream, keep it off the manifest
     const json = JSON.stringify(tile);
-    writeFileSync(`public/data/tiles/${tx}_${tz}.json`, json);
+    writeFileSync(`${OUT_DIR}/tiles/${tx}_${tz}.json`, json);
     manifestTiles.push({ tx, tz, f: `data/tiles/${tx}_${tz}.json`, n });
     bytes += json.length;
     emitted++;
   }
 }
 
-writeFileSync('public/data/manifest.json', JSON.stringify({
+writeFileSync(`${OUT_DIR}/manifest.json`, JSON.stringify({
   origin: ORIGIN, mPerLat: +M_PER_LAT.toFixed(1), mPerLon: +M_PER_LON.toFixed(1),
   tile: TILE, tiles: manifestTiles,
 }));
 
-console.log(`grid x ${TX_MIN}..${TX_MAX}, z ${TZ_MIN}..${TZ_MAX}`
-  + ` → ${emitted} tiles emitted, ${empty} empty, ${missing} raw missing (re-run after fetch)`);
+const wanted = wantedTiles().length;
+console.log(`${rawTiles.length} raw tiles read of ${wanted} the world wants`
+  + ` → ${emitted} emitted, ${empty} empty`);
 console.log({ ...totals, sizeMB: +(bytes / 1e6).toFixed(2) });
