@@ -1,12 +1,22 @@
 // ---- Keyboard + mouse input ----
 
+// One notch of a mouse wheel is ~100 px of deltaY, delivered as a single event.
+// A trackpad two-finger drag is a STREAM of much smaller ones — so counting
+// Math.sign() per event, as this used to, spent a whole zoom step on each tick
+// and slammed the boom into its clamp before the fingers had finished moving.
+// Normalising to notches makes one physical gesture mean one amount of zoom on
+// either device. deltaMode says what the numbers are: 0 px, 1 lines, 2 pages.
+const notches = (e) =>
+  (e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY) / 100;
+
 class Input {
   constructor() {
     this.keys = new Set();
     this.rpgMode = false;   // right button steers instead of attacking
     this.dragX = 0;         // accumulated right-drag, consumed per frame
     this.dragY = 0;
-    this.wheelSteps = 0;    // accumulated wheel, consumed per frame
+    this.wheelSteps = 0;    // accumulated wheel, in notches, consumed per frame
+    this.zoomHome = false;  // ⌘0 / ctrl+0 — put the boom back where it started
     this.mouse = { x: 0, y: 0, left: false, right: false }; // x,y = NDC; the
     this.leftPressed = false;
     this.leftReleased = false;
@@ -61,17 +71,32 @@ class Input {
     window.addEventListener('wheel', (e) => {
       if (e.target.closest?.(SCROLLS)) return;  // real UI scrolling, hands off
       e.preventDefault();                       // no page zoom, no rubber-band
-      if (e.ctrlKey) return;                    // a pinch is not a zoom command
-      this.wheelSteps += Math.sign(e.deltaY);
+      // A trackpad pinch arrives as ctrl+wheel. Refusing the PAGE zoom is the
+      // point; refusing the gesture is not — pinch is the most natural "bring
+      // the camera closer" there is, so it feeds the boom like everything else,
+      // just on its own scale (pinch deltas are ~10× finer than wheel notches).
+      this.wheelSteps += e.ctrlKey ? e.deltaY * 0.1 : notches(e);
     }, { passive: false });
-    // Safari's pinch arrives as gesture events rather than ctrl+wheel, and
-    // ctrl/⌘ with +/−/0 is the keyboard route to the same place. Both are the
-    // browser zooming a canvas that has its own camera — refuse all three.
-    for (const g of ['gesturestart', 'gesturechange', 'gestureend'])
-      window.addEventListener(g, (e) => e.preventDefault(), { passive: false });
+    // Safari sends pinches as gesture events instead of ctrl+wheel. Same deal:
+    // the page must not zoom, the camera must. e.scale is cumulative for the
+    // gesture, so the per-event ratio is what moves the boom.
+    let gScale = 1;
+    window.addEventListener('gesturestart', (e) => { e.preventDefault(); gScale = 1; },
+      { passive: false });
+    window.addEventListener('gesturechange', (e) => {
+      e.preventDefault();
+      if (e.scale > 0 && gScale > 0) this.wheelSteps += Math.log(gScale / e.scale) * 12;
+      gScale = e.scale;
+    }, { passive: false });
+    window.addEventListener('gestureend', (e) => e.preventDefault(), { passive: false });
+    // ctrl/⌘ with +/− is the keyboard route to the same intent, and ⌘0 the
+    // "put it back" — all three would zoom the browser, so they get refused and
+    // handed to the camera instead. Doing nothing at all reads as a dead key.
     window.addEventListener('keydown', (e) => {
       if (!(e.ctrlKey || e.metaKey)) return;
-      if (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '0') e.preventDefault();
+      if (e.key === '+' || e.key === '=') { e.preventDefault(); this.wheelSteps -= 1; }
+      else if (e.key === '-')             { e.preventDefault(); this.wheelSteps += 1; }
+      else if (e.key === '0')             { e.preventDefault(); this.zoomHome = true; }
     }, { passive: false });
     window.addEventListener('mousedown', (e) => {
       if (e.target.closest('button, .panel, .spell-slot, #minimap')) return; // don't attack through UI
@@ -143,6 +168,12 @@ class Input {
     const w = this.wheelSteps;
     this.wheelSteps = 0;
     return w;
+  }
+
+  takeZoomHome() {
+    const h = this.zoomHome;
+    this.zoomHome = false;
+    return h;
   }
 }
 

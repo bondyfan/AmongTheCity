@@ -86,7 +86,8 @@ let camPitch = 0.26;         // radians above horizontal
 // "the player looks huge" is FRAMING, not size: at 7.5 m with FOV 55 a person
 // filled 19 % of the screen height. Standing further back and higher halves
 // that and lets the street read as a street.
-let camDist = 14;
+const CAM_DIST_0 = 14;      // ⌘0 comes back here
+let camDist = CAM_DIST_0;
 const camSmooth = new THREE.Vector3();
 let camInit = false;
 const BASE_FOV = 55;
@@ -99,6 +100,7 @@ function updateCamera(dt) {
   if (drag.x || drag.y) _lastLookT = performance.now() * 0.001;
   camYaw -= drag.x * sens;
   camPitch = Math.max(0.06, Math.min(1.15, camPitch + drag.y * sens));
+  if (input.takeZoomHome()) camDist = CAM_DIST_0;
   camDist = Math.max(5, Math.min(26, camDist + input.takeWheel() * 1.4));
 
   let tx, ty, tz, wantYaw, dist, height, fov, pitchK = 1;
