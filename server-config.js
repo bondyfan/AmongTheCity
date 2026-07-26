@@ -16,4 +16,11 @@
 // Leave it EMPTY ('') to hide server play entirely.
 // ==========================================================================
 
-export const SERVER_URL = 'http://localhost:8081';
+// The live box, shared with Among The Woods (which sits on :8080 under
+// woods.*). sslip.io resolves <anything>.91-99-52-127.sslip.io to 91.99.52.127
+// with no DNS to own, and Caddy terminates TLS and proxies /ws to :8081.
+// NOTE: 'http://localhost:8081' above is correct ONLY while you run
+// server-city/ yourself. Shipping it is what made the deployed menu read
+// "server nedostupný" for everyone — every visitor's browser dutifully went
+// looking for a relay on their own machine, and of course found none.
+export const SERVER_URL = 'https://city.91-99-52-127.sslip.io';
