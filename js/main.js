@@ -107,13 +107,6 @@ function updateCamera(dt) {
     height = 2.4 + speedK * 1.1;
     tx = c.x; ty = (c.mesh?.position.y ?? 0) + 1.1; tz = c.z;
     fov = BASE_FOV + speedK * 13;   // the road starts to RUSH at speed
-  } else if (trains?.riding) {
-    // only with the doors open — jumping out at 140 km/h is not a feature
-    if (!trains.alight()) { ui_hint('Vystoupit lze jen ve stanici'); return; }
-    sfx('train_doors', 0.7);
-  } else if (trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
-    const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
-    if (trains.board(t)) sfx('train_doors', 0.7);
   } else if (game.heli) {
     // flight: hang back but stay close to the machine's own level — a chase
     // cam perched high enough to look down at the fuselage crops the whole sky
@@ -222,7 +215,15 @@ input.onKey('KeyM', () => {
 
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
-  if (game.car) {
+  if (trains?.riding) {
+    // only with the doors open — stepping off at 140 km/h is not a feature
+    if (!trains.alight()) { ui_hint('Vystoupit lze jen ve stanici'); return; }
+    sfx('train_doors', 0.7);
+  } else if (!game.car && !game.heli
+      && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
+    const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
+    if (trains.board(t)) sfx('train_doors', 0.7);
+  } else if (game.car) {
     // step out: player.js places us at the car's side
     game.car.ctl = null;
     player.setInCar(null);
@@ -407,6 +408,56 @@ function updateHorizon(dt) {
     camera.near = 0.5;
     camera.updateProjectionMatrix();
   }
+}
+
+// ---------- FPS meter (Settings → Hra → Zobrazit FPS) ----------
+// Measured on the WALL CLOCK between frames, not on how long render() took:
+// the two differ a lot here, because streaming a chunk or rebuilding the
+// canopy costs time outside the draw call and a render-only figure would
+// happily read 200 FPS through a visible stutter. The 1 % low is the number
+// that actually correlates with "it feels smooth", so it is shown too.
+let _fpsLast = 0, _fpsAvg = 60, _fpsAcc = 0, _fpsFrames = 0;
+const _fpsHist = new Float32Array(120);
+let _fpsHi = 0;
+function tickFpsMeter(now) {
+  const el = $id('fps-meter');
+  if (!el) return;
+  if (!getSettings().showFps) {
+    if (!el.classList.contains('hidden')) el.classList.add('hidden');
+    _fpsLast = 0;
+    return;
+  }
+  el.classList.remove('hidden');
+  if (_fpsLast) {
+    const dtMs = now - _fpsLast;
+    // 250 ms is already four frames at 15 FPS: anything longer is a tab
+    // switch, a boot stall or the OS, not gameplay — and letting one such
+    // frame into the ring pinned the "1 % low" at 1 for two seconds.
+    if (dtMs > 0 && dtMs < 250) {
+      _fpsAvg += (1000 / dtMs - _fpsAvg) * 0.08;   // smooth, no jitter
+      _fpsHist[_fpsHi] = dtMs;
+      _fpsHi = (_fpsHi + 1) % _fpsHist.length;
+    }
+  }
+  _fpsLast = now;
+  _fpsAcc += 1; _fpsFrames += 1;
+  // repaint the DOM ~5x a second: a per-frame textContent write is itself a
+  // measurable cost in a meter whose whole job is not to lie about the cost
+  if (_fpsFrames % 12) return;
+  // 1 % low = the 99th-percentile FRAME TIME over the last ~2 s
+  let worst = 0, filled = 0;
+  for (let i = 0; i < _fpsHist.length; i++) {
+    if (_fpsHist[i] <= 0) continue;
+    filled++;
+    if (_fpsHist[i] > worst) worst = _fpsHist[i];
+  }
+  // only claim a 1 % low once the ring actually holds a second of history —
+  // before that the "worst frame" is just the newest frame
+  const low = filled > 60 && worst > 0 ? Math.round(1000 / worst) : 0;
+  const cls = _fpsAvg >= 50 ? '' : _fpsAvg >= 30 ? 'mid' : 'low';
+  el.innerHTML = `<b class="${cls}">${Math.round(_fpsAvg)}</b> FPS`
+    + `  ·  ${(1000 / Math.max(1, _fpsAvg)).toFixed(1)} ms`
+    + (low ? `  ·  1% low ${low}` : '');
 }
 
 // ---------- night lights ----------
@@ -653,8 +704,13 @@ function applySettings(s, key) {
   if (traffic) traffic.maxCars = s.traffic;
   if (peds) peds.max = s.peds ?? 34;
   // interiors are a live toggle: switching them off sheds every un-shot
-  // building's rooms on the next scan, and keeps the wrecks
-  if (world?.interiors) world.interiors.enabled = s.interiors !== false;
+  // building's rooms on the next scan, and keeps the wrecks. buildingR is the
+  // "Dohlednost budov" knob — how far out the box shells (real windows, brand
+  // signage) exist; past it the flat chunk facade takes over.
+  if (world?.interiors) {
+    world.interiors.enabled = s.interiors !== false;
+    world.interiors.drawR = s.buildingR ?? 160;
+  }
   if (sky) {
     const sun = sky.sun;
     if (renderer.shadowMap.enabled !== !!s.shadows) {
@@ -838,6 +894,7 @@ function tick(src) {
       window.__atc.frameMs += (ms - window.__atc.frameMs) * 0.1;
       window.__atc.fps = Math.round(1000 / Math.max(1, ms));
     }
+    tickFpsMeter(r0);
   } catch (err) {
     showFatal(err);
   }
@@ -886,6 +943,11 @@ function stepGame(dt) {
   }
   vehicles.update(dt);
   traffic.update(dt, player.pos, game.car);
+  // ragdoll physics needs to know what can hit a pedestrian: every AI car
+  // plus whatever the player is driving, refreshed per frame because the
+  // player's car changes identity on every E
+  peds.cars = traffic ? traffic.cars : null;
+  peds.playerCar = game.car;
   peds.update(dt, focus);
   trains?.update(dt, focus);
   if (heli && !game.heli) heli.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);

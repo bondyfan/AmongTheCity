@@ -12,18 +12,19 @@ const LS_KEY = 'atc-settings';
 // The graphics keys a preset owns. mouseLook and volume are personal preferences, not
 // performance knobs — presets leave them alone and changing them never forks to custom.
 const PRESETS = {
-  low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 30,
+  low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 60,
             ortho: false, facades: false, trees: true, peds: 12, bloom: false, rays: false,
-            interiors: false },
-  medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 60,
+            interiors: false, buildingR: 80 },
+  medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 120,
             ortho: true,  facades: true,  trees: true, peds: 34, bloom: true,  rays: true,
-            interiors: true },
-  high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 120,
+            interiors: true, buildingR: 160 },
+  high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
             ortho: true,  facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
-            interiors: true },
+            interiors: true, buildingR: 280 },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
-const DEFAULTS = { preset: 'medium', ...PRESETS.medium, mouseLook: true, volume: 0.8 };
+const DEFAULTS = { preset: 'medium', ...PRESETS.medium, mouseLook: true, volume: 0.8,
+  showFps: false };
 
 // The live settings object — handed out by reference so main can keep one pointer to it.
 let S = { ...DEFAULTS };
@@ -37,6 +38,11 @@ function load() {
     for (const k of Object.keys(DEFAULTS))
       if (typeof saved[k] === typeof DEFAULTS[k]) S[k] = saved[k];
     if (!['low', 'medium', 'high', 'custom'].includes(S.preset)) S.preset = 'custom';
+    // A named preset is the SOURCE OF TRUTH, not a label over stale numbers:
+    // when the preset table itself changes between versions (traffic doubled,
+    // buildingR added), a profile saved as "medium" must get the new medium —
+    // only "custom" keeps hand-tuned values verbatim.
+    if (PRESETS[S.preset]) Object.assign(S, PRESETS[S.preset]);
   } catch { /* corrupt blob → keep defaults */ }
 }
 function save() {
@@ -186,8 +192,12 @@ export function initSettings(apply) {
       [4096, '4096 (ostré)']]),
     selectRow('viewChunks', 'Dohlednost', [[3, 'Krátká'], [4, 'Střední'],
       [5, 'Daleká'], [6, 'Nejdelší']]),
-    selectRow('traffic', 'Hustota provozu', [[0, 'Žádná'], [30, 'Řídká'],
-      [60, 'Běžná'], [120, 'Hustá']]),
+    // how far out the box shells (real window reveals, brand signage) exist —
+    // this is what keeps a Kaufland reading KAUFLAND from across the car park
+    selectRow('buildingR', 'Dohlednost budov (interiéry)', [[80, 'Krátká'],
+      [160, 'Střední'], [280, 'Daleká'], [450, 'Extrémní']]),
+    selectRow('traffic', 'Hustota provozu', [[0, 'Žádná'], [60, 'Řídká'],
+      [120, 'Běžná'], [240, 'Hustá']]),
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
     toggleRow('facades', 'Textury fasád'),
     toggleRow('bloom', 'Bloom (záře světel)'),
@@ -203,6 +213,7 @@ export function initSettings(apply) {
   body.appendChild(el('h3', 'atc-set-h3', 'Hra'));
   const hGrid = el('div', 'atc-set-grid');
   hGrid.append(
+    toggleRow('showFps', 'Zobrazit FPS'),
     toggleRow('mouseLook', 'Mouse look (kurzor v okně)'),
     sliderRow('volume', 'Hlasitost'),
   );
