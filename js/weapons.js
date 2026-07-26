@@ -21,7 +21,7 @@
 
 import * as THREE from 'three';
 import { MISSILE } from './config.js';
-import { missileLaunch, explosion } from './audio.js';
+import { missileLaunch, explosion, sfx } from './audio.js';
 
 const M = MISSILE;
 const STEP = 1.2;                 // m — collision sub-step along the path
@@ -164,6 +164,7 @@ export class Weapons {
     slot.grp.visible = true;
     this.live.push(m);
     missileLaunch?.();
+    sfx?.('rocket_launch', 0.85);   // sample layered over the synth whoosh; no-ops if absent
     this.shake = Math.max(this.shake, 0.18);
     return true;
   }
@@ -266,6 +267,7 @@ export class Weapons {
         z + (Math.random() - 0.5) * r, r * 0.4, r * 2.4, 2.6 + Math.random() * 2,
         0.42, 0x6e6660);
     explosion?.(1);
+    sfx?.('explosion_big', 0.95);   // sample layered over the synth blast; no-ops if absent
     this.shake = Math.min(1.6, this.shake + M.shake);
 
     // the demolition itself — city.js finds every building the sphere touches,

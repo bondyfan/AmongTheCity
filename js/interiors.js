@@ -146,7 +146,7 @@ const BRANDS = [
     wall: 0xe6e6e2, sign: 0x0a4ea2 },
   { re: /^billa/i, use: 'supermarket', label: 'Billa',
     tills: 5, aisles: 6, trolleys: true, bakery: true, backHouse: 0.2,
-    wall: 0xe9e6de, sign: 0xf2c200 },
+    wall: 0xe9e6de, sign: 0xf2c200, fg: 0x1c1c1c },    // dark wordmark on yellow
   { re: /^(coop|flop|norma)/i, use: 'supermarket', label: 'Supermarket',
     tills: 4, aisles: 6, trolleys: true, backHouse: 0.2, wall: 0xe4e2da, sign: 0xd0562a },
   { re: /(globus|interspar|makro|tesco)/i, use: 'supermarket', label: 'Hypermarket',
@@ -159,10 +159,18 @@ const BRANDS = [
   // OSM carries no building called "McDonald's" anywhere in the region (the
   // restaurants are amenity NODES, which the data pipeline does not keep), so
   // these are placed onto suitable host buildings by stampFranchises() below.
+  // A modern McDonald's is not a beige-plaster box: since the 2010s "Ray Kroc"
+  // refit the chain builds grey-brown clad pavilions with a full-glass frontage
+  // and an anthracite band over the glazing. `wall` is what the far LOD paints
+  // the whole box (buildingWallHex reads it), `clad` the dark band pieces.js
+  // hangs over the glass front. KFC builds the same pavilion in light grey with
+  // the band in its red.
   { re: /mcdonald/i, use: 'restaurant', label: "McDonald's",
-    tills: 4, seats: true, drive: true, wall: 0xe8e4d8, sign: 0xffc72c, trim: 0xda291c },
+    tills: 4, seats: true, drive: true,
+    wall: 0x8d8579, clad: 0x45423e, sign: 0xffc72c, trim: 0xda291c },
   { re: /\bkfc\b/i, use: 'restaurant', label: 'KFC',
-    tills: 3, seats: true, drive: true, wall: 0xeae6dc, sign: 0xe4002b, trim: 0xf5f5f0 },
+    tills: 3, seats: true, drive: true,
+    wall: 0xd9d5cc, clad: 0xa31c26, sign: 0xe4002b, trim: 0xf5f5f0 },
 ];
 
 // ---- franchises ----------------------------------------------------------
@@ -201,6 +209,22 @@ export function brandOf(f) {
   if (f.n) for (const b of BRANDS) if (b.re.test(f.n)) { hit = b; break; }
   return (f._brand = hit);
 }
+
+// ---- architectural identity (v7) -------------------------------------------
+// The complaint this answers: "the branding is right but every building is the
+// same Soviet box". classify() stamps two colour identities straight onto the
+// FEATURE (f.c, the "#rrggbb" the data format already carries), because
+// meshes.js's buildingWallHex honours f.c — so the far LOD and the near shell
+// agree on the new identity with zero meshes.js edits.
+//
+// NOVOSTAVBY are hash-scattered, NOT data-derived: OSM has no "year built"
+// here, so ~30 % of the low blocks of flats (3–5 storeys, not panel type) are
+// picked deterministically by id hash and rendered as new builds — white
+// plaster, tall windows, French balconies (pieces.js reads plan.nova).
+const NOVA_WALLS = ['#e9e7e1', '#e3e3e0', '#dcdad4', '#e7e1d8'];
+// offices go cool grey/blue-grey — the curtain-wall shell wears wallHex, so
+// the flat-colour far box has to be the same cool grey or the LODs disagree
+const OFFICE_WALLS = ['#9fa9b4', '#93a1af', '#a9b3bd', '#8d99a7'];
 
 // Uses whose ground floor is one big open volume — no corridor, no partitions,
 // just a hall with things standing in it.
@@ -251,11 +275,24 @@ export function classify(f) {
   // is somebody's cottage.
   if (use === 'shop') {
     if (area >= 3500 && lv >= 2) use = 'mall';
+    // a multi-storey `commercial` is an office building, not six floors of shop
+    else if (f.t === 'commercial' && lv >= 3) use = 'office';
     else if (area >= 900) use = 'supermarket';
   }
   if (use === 'flats' && (area < 130 || lv <= 2) && f.t !== 'apartments') use = 'house';
   if (use === 'house' && lv >= 4) use = 'flats';
   if (use === 'garage' && area > 400) use = 'industrial';
+
+  // identity stamps (see the NOVA_WALLS block above): mutate f.c only when the
+  // data gave none and the building is unnamed — named landmarks keep their own
+  // face, and a real OSM colour always wins over an invented one
+  if (use === 'flats' && !f.n && f.t !== 'panel' && lv >= 3 && lv <= 5
+      && rnd(f._id, 77) < 0.3) {
+    f._nova = true;
+    if (!f.c) f.c = NOVA_WALLS[Math.floor(rnd(f._id, 78) * NOVA_WALLS.length) % NOVA_WALLS.length];
+  }
+  if (use === 'office' && !f.n && !f.c)
+    f.c = OFFICE_WALLS[Math.floor(rnd(f._id, 79) * OFFICE_WALLS.length) % OFFICE_WALLS.length];
   return (f._use = use);
 }
 
@@ -303,16 +340,24 @@ export function planToWorld(fr, u, v, out) {
 // across the street. Cached on the feature — chunk rebuilds must not move a
 // door the player has already walked through.
 //
-// Three things decide the edge, in order of how much they matter:
+// Four things decide the edge, in order of how much they matter:
 //
 //  1. IS IT REACHABLE? A door on a party wall opens into the neighbour's
 //     living room, and Czech street blocks are terraced, so this is the common
-//     case rather than the exception. An outward probe 1.4 m off the edge
+//     case rather than the exception. An outward probe 2.5 m off the edge
 //     midpoint that lands inside ANOTHER building disqualifies that edge
-//     outright — the first version had no such test, and that is why some
-//     buildings genuinely had no way in.
-//  2. DOES IT FACE A STREET? Distance from the edge midpoint to the nearest
-//     drivable way. Corner buildings get their door on the main road.
+//     outright — an edge with no open ground in front of it LOSES, whatever
+//     its other virtues (the −400 dwarfs every positive term). The first
+//     version had no such test, and that is why some buildings genuinely had
+//     no way in; 1.4 m was the second version, and it still let doors open
+//     into half-metre slots between terraced houses.
+//  2. DOES IT FACE THE STREET, not merely stand near one? Distance to the
+//     nearest way matters, but so does DIRECTION: the winning edge's outward
+//     normal must point TOWARD the nearest drivable road, or a corner house
+//     30 m from two streets puts its door on the flank that happens to be a
+//     metre closer while facing the neighbour's fence. When a drivable way
+//     runs within 35 m, dot(normal, direction-to-road) earns up to ±14 —
+//     enough to overturn a few metres of raw distance.
 //  3. IS IT WIDE ENOUGH TO BE A FRONT? Frontage length, capped — a 60 m flank
 //     is not more of a front than a 26 m one.
 export function entranceOf(f, roads, neighbours) {
@@ -339,14 +384,14 @@ export function entranceOf(f, roads, neighbours) {
     // 1. blocked by a neighbour?
     let blocked = false;
     if (neighbours) {
-      const px = mx + nx * 1.4, pz = mz + nz * 1.4;
+      const px = mx + nx * 2.5, pz = mz + nz * 2.5;
       for (const o of neighbours) {
         if (o === f || !o.o || o.o.length < 3) continue;
         if (pointInPolygon(px, pz, o.o)) { blocked = true; break; }
       }
     }
-    // 2. how far to a street?
-    let road = 40;
+    // 2. how far to a street — and which way does the nearest DRIVABLE one lie?
+    let road = 40, drd = 1e9, drx = 0, drz = 0;
     if (roads) {
       for (const r of roads) {
         if (!r.p) continue;
@@ -355,11 +400,17 @@ export function entranceOf(f, roads, neighbours) {
           const d = distPointToSegment(mx, mz, r.p[k][0], r.p[k][1],
             r.p[k + 1][0], r.p[k + 1][1], probe);
           if (d < road) road = d;
+          if (r.d === 1 && d < drd) { drd = d; drx = probe.x; drz = probe.z; }
         }
-        if (road < 3) break;
+        if (road < 3 && drd < 3) break;
       }
     }
-    const score = Math.min(L, 26) * 1.4 - road * 1.9 - (blocked ? 400 : 0);
+    let score = Math.min(L, 26) * 1.4 - road * 1.9 - (blocked ? 400 : 0);
+    if (drd < 35) {
+      // reward an edge that FACES the carriageway, punish one turned away
+      const ddx = drx - mx, ddz = drz - mz, dl = Math.hypot(ddx, ddz);
+      score += 14 * (dl > 1e-6 ? (nx * ddx + nz * ddz) / dl : 1);
+    }
     if (score > bestScore) {
       bestScore = score;
       best = mk(i, ax, az, bx, bz, L, Math.min(I.entryW, L - 0.8));
@@ -459,9 +510,18 @@ function subdivide(r, seed, salt, minSide, minArea, depth, rooms, walls, h) {
 // what happened to the 305 m station hall: its OBB is far wider than the
 // building at the point the shaft was parked, so all 19 treads were rejected
 // and the first floor became unreachable.) So: candidate positions are tried
-// against the footprint until one fits, and a building where none does becomes
-// single-storey rather than a lie.
-function placeCore(fr, seed, sH, inside) {
+// against the footprint, and a building where none fits becomes single-storey
+// rather than a lie.
+//
+// Of the candidates that DO fit, the one closest to the front door wins —
+// nobody builds the staircase at the far end of the corridor from the
+// entrance — with two hard vetoes: the shaft may never contain the entrance
+// midpoint (the front door cannot open into the stairs; a candidate that
+// would is SHIFTED along u until it clears, or dies), and a block that needs
+// a lift strongly prefers a candidate with room for its shaft beside the
+// stair, landing side, so one lobby serves both doors.
+const LIFT_W = 1.9, LIFT_D = 2.1;         // výtah shaft, u × v
+function placeCore(fr, seed, sH, inside, ent, needLift) {
   const steps = Math.max(6, Math.round(sH / I.stepRise));
   const runL = steps * I.stepGo;
   const W = I.coreW;
@@ -482,19 +542,59 @@ function placeCore(fr, seed, sH, inside) {
        vSide > 0 ? -fr.hv + 0.5 : fr.hv - 0.5 - W,
        -W / 2];
 
-  for (const u0 of uCand) {
-    if (u0 < uLo - 1e-6 || u0 > uHi + 1e-6) continue;
+  const M = 1.5;      // u clearance around the door: a vestibule's half-width
+  const MV = 0.8;     // v slack for "the shaft sits on the door"
+  let best = null, bestScore = -1e9;
+  for (const uc of uCand) {
+    if (uc < uLo - 1e-6 || uc > uHi + 1e-6) continue;
     for (const v0 of vCand) {
+      let u0 = uc;
+      if (ent && ent.v > v0 - MV && ent.v < v0 + W + MV
+          && ent.u > u0 - M && ent.u < u0 + runL + M) {
+        // the front door would open into the shaft: slide along u, the
+        // shorter way first, and drop the candidate if neither end has room
+        const right = ent.u + M, left = ent.u - M - runL;
+        const opts = Math.abs(right - u0) < Math.abs(left - u0)
+          ? [right, left] : [left, right];
+        u0 = null;
+        for (const o of opts) if (o >= uLo - 1e-6 && o <= uHi + 1e-6) { u0 = o; break; }
+        if (u0 === null) continue;
+      }
       const s = rect(u0, v0, u0 + runL, v0 + W);
       if (!rectInside(s, inside, 0.3)) continue;
       // The LANDING must be the half nearer the building's middle, or the door
       // out of the shaft would open into the outside wall and the corridor
       // could never reach it. coreHalves(): runSide 1 → run is the far half.
       const centreV = (s.v0 + s.v1) / 2;
-      return { shaft: s, runSide: centreV >= 0 ? 1 : 0, steps, runL, mid };
+      const runSide = centreV >= 0 ? 1 : 0;
+      // the lift leans against the stair at either end, its door flush with
+      // the face the landing door is on — try the entrance side first
+      let lift = null;
+      if (needLift) {
+        const landV1 = runSide ? s.v0 + W / 2 : s.v1;
+        const doorOnV1 = landV1 >= s.v1 - 1e-6;
+        const lv0 = doorOnV1 ? s.v1 - LIFT_D : s.v0;
+        const sides = ent && ent.u < (s.u0 + s.u1) / 2 ? [-1, 1] : [1, -1];
+        for (const sd of sides) {
+          const lr = sd > 0 ? rect(s.u1, lv0, s.u1 + LIFT_W, lv0 + LIFT_D)
+                            : rect(s.u0 - LIFT_W, lv0, s.u0, lv0 + LIFT_D);
+          if (!rectInside(lr, inside, 0.25)) continue;
+          if (ent && ent.u > lr.u0 - 0.6 && ent.u < lr.u1 + 0.6
+              && ent.v > lr.v0 - MV && ent.v < lr.v1 + MV) continue; // door into the lift: no
+          lift = { shaft: lr, doorOnV1, side: sd };
+          break;
+        }
+      }
+      let score = 0;
+      if (ent) score -= Math.hypot(u0 + runL / 2 - ent.u, centreV - ent.v);
+      if (needLift && !lift) score -= 1000;   // a walk-up tower is the last resort
+      if (score > bestScore) {
+        bestScore = score;
+        best = { shaft: s, runSide, steps, runL, mid, lift };
+      }
     }
   }
-  return null;
+  return best;
 }
 
 // A rectangle counts as inside when nine probes — corners, edge midpoints and
@@ -555,11 +655,13 @@ function corridorLayout(f, plan, fi, use) {
   for (const band of bands) {
     const side = rd(band) > 0 && band.v1 <= cv - cw + 1e-6 ? -1 : 1; // which side of the corridor
     const doorV = side < 0 ? band.v1 : band.v0;                      // the corridor face
-    // the core eats its slice out of whichever band it overlaps
+    // the core — stair AND lift shaft, when there is one — eats its slice out
+    // of whichever band it overlaps
+    const carve = core ? coreSpanOf(plan) : null;
     const segs = [];
-    if (core && rectOverlaps(core.shaft, band)) {
-      if (core.shaft.u0 - band.u0 > unitW * 0.6) segs.push(rect(band.u0, band.v0, core.shaft.u0, band.v1));
-      if (band.u1 - core.shaft.u1 > unitW * 0.6) segs.push(rect(core.shaft.u1, band.v0, band.u1, band.v1));
+    if (carve && rectOverlaps(carve, band)) {
+      if (carve.u0 - band.u0 > unitW * 0.6) segs.push(rect(band.u0, band.v0, carve.u0, band.v1));
+      if (band.u1 - carve.u1 > unitW * 0.6) segs.push(rect(carve.u1, band.v0, band.u1, band.v1));
       if (!segs.length) continue;                        // core fills this band
     } else segs.push(band);
 
@@ -599,6 +701,137 @@ function corridorLayout(f, plan, fi, use) {
 
 function rectOverlaps(a, b) {
   return a.u0 < b.u1 - 1e-6 && a.u1 > b.u0 + 1e-6 && a.v0 < b.v1 - 1e-6 && a.v1 > b.v0 + 1e-6;
+}
+
+// the footprint the whole core occupies in plan space: the stair shaft plus,
+// when the building has one, the lift shaft leaning against it
+function coreSpanOf(plan) {
+  const s = plan.core.shaft, l = plan.lift?.shaft;
+  return l ? rect(Math.min(s.u0, l.u0), Math.min(s.v0, l.v0),
+    Math.max(s.u1, l.u1), Math.max(s.v1, l.v1)) : s;
+}
+
+// ---- the panelák ground floor ---------------------------------------------
+// Nobody in a Czech block of flats lives on the ground floor of the stair
+// core's own building the way the corridor layout pretended: you come in
+// through the zádveří (a ~2.6 m vestibule), past the bank of mailboxes, onto
+// the landing where the stairs and the výtah wait — and the rest of the level
+// is sklepy, the run of storage cells every resident owns one of, plus the
+// kočárkárna for the prams and bikes. Flats start on floor 1. This layout
+// draws exactly that, reusing the corridor line the upper floors already
+// share so the staircase lands on a corridor on every level.
+function flatsGroundLayout(f, plan) {
+  const fr = plan.fr, wallH = plan.sH - I.slabT;
+  const walls = [], rooms = [];
+  const cw = I.corridorW / 2;
+  const core = plan.core, s = core.shaft;
+  const { land } = coreHalves(core);
+  const doorOnV1 = land.v1 >= s.v1 - 1e-6;
+  const cv = clamp(doorOnV1 ? s.v1 + cw : s.v0 - cw, -fr.hv + cw, fr.hv - cw);
+
+  // the entrance, in plan space
+  const e = plan.entrance;
+  let eu = 0, ev = -fr.hv, nu = 0, nv = -1;
+  if (e) {
+    eu = (e.x - fr.cx) * fr.ux + (e.z - fr.cz) * fr.uz;
+    ev = (e.x - fr.cx) * fr.vx + (e.z - fr.cz) * fr.vz;
+    nu = e.nx * fr.ux + e.nz * fr.uz;
+    nv = e.nx * fr.vx + e.nz * fr.vz;
+  }
+  const gable = Math.abs(nu) > Math.abs(nv);   // front door on a short end
+
+  rooms.push({ ...rect(-fr.hu, cv - cw, fr.hu, cv + cw), kind: 'corridor' });
+
+  // zádveří: front door to the landing corridor, walls either side. A door on
+  // a gable, or one the corridor already runs along, skips the walls — the
+  // lobby is then just the mouth of the corridor, widened.
+  const vw = 1.3;
+  let lobby;
+  if (gable) {
+    const u0 = nu > 0 ? fr.hu - 3.2 : -fr.hu;
+    lobby = rect(u0, Math.max(-fr.hv, Math.min(ev, cv) - vw),
+      u0 + 3.2, Math.min(fr.hv, Math.max(ev, cv) + vw));
+  } else {
+    const ue = clamp(eu, -fr.hu + vw + 0.1, fr.hu - vw - 0.1);
+    lobby = ev <= cv ? rect(ue - vw, -fr.hv, ue + vw, cv - cw)
+                     : rect(ue - vw, cv + cw, ue + vw, fr.hv);
+    if (rd(lobby) > 0.6) {
+      walls.push(wall(lobby.u0, lobby.v0, lobby.u0, lobby.v1, wallH, []));
+      walls.push(wall(lobby.u1, lobby.v0, lobby.u1, lobby.v1, wallH, []));
+    } else {
+      // the corridor hugs the front wall: the door opens straight onto it
+      lobby = rect(ue - 1.6, cv - vw, ue + 1.6, cv + vw);
+    }
+  }
+  rooms.push({ ...lobby, kind: 'lobby' });
+
+  // the rest of the level: sklepy off a back corridor, plus the kočárkárna
+  const span = coreSpanOf(plan);
+  const bands = [];
+  if (cv - cw > -fr.hv + 1.9) bands.push(rect(-fr.hu, -fr.hv, fr.hu, cv - cw));
+  if (cv + cw < fr.hv - 1.9) bands.push(rect(-fr.hu, cv + cw, fr.hu, fr.hv));
+  let pramDone = false;
+  for (const band of bands) {
+    const low = band.v1 <= cv - cw + 1e-6;     // below the corridor?
+    const doorV = low ? band.v1 : band.v0;     // its corridor face
+    // carve the core span and the lobby out of the run of u
+    const cuts = [];
+    if (rectOverlaps(span, band)) cuts.push([span.u0, span.u1]);
+    if (rectOverlaps(lobby, band)) cuts.push([lobby.u0, lobby.u1]);
+    cuts.sort((a, b) => a[0] - b[0]);
+    const segs = [];
+    let u = band.u0;
+    for (const [a, b] of cuts) { if (a - u > 2.3) segs.push([u, a]); u = Math.max(u, b); }
+    if (band.u1 - u > 2.3) segs.push([u, band.u1]);
+
+    // a run of cells: dividers + one door each onto their own back corridor,
+    // which takes a single door off the landing corridor
+    const cells = (u0, u1) => {
+      const segL = u1 - u0, depth = rd(band);
+      if (depth >= 3.4) {
+        const cellFace = low ? band.v1 - 1.35 : band.v0 + 1.35;
+        const c0 = low ? band.v0 : cellFace, c1 = low ? cellFace : band.v1;
+        const n = Math.max(2, Math.round(segL / 2.3));
+        const uw = segL / n;
+        const gaps = [];
+        for (let k = 0; k < n; k++) gaps.push(gapAt(segL, (k + 0.5) / n, 0.85));
+        walls.push(wall(u0, doorV, u1, doorV, wallH,
+          [gapAt(segL, clamp((eu - u0) / segL, 0.12, 0.88), I.doorW)]));
+        walls.push(wall(u0, cellFace, u1, cellFace, wallH, gaps));
+        for (let k = 1; k < n; k++)
+          walls.push(wall(u0 + k * uw, c0, u0 + k * uw, c1, wallH, []));
+        for (let k = 0; k < n; k++)
+          rooms.push({ ...rect(u0 + k * uw, c0, u0 + (k + 1) * uw, c1), kind: 'cellar' });
+        rooms.push({ ...rect(u0, low ? cellFace : band.v0, u1, low ? band.v1 : cellFace),
+          kind: 'corridor' });
+      } else {
+        // too shallow for a cell run: one store room straight off the corridor
+        walls.push(wall(u0, doorV, u1, doorV, wallH, [gapAt(segL, 0.5, I.doorW)]));
+        rooms.push({ ...rect(u0, band.v0, u1, band.v1), kind: 'cellar' });
+      }
+    };
+
+    for (let [u0, u1] of segs) {
+      // end walls where the seg stops short of the shell
+      if (u0 > -fr.hu + 0.6) walls.push(wall(u0, band.v0, u0, band.v1, wallH, []));
+      if (u1 < fr.hu - 0.6) walls.push(wall(u1, band.v0, u1, band.v1, wallH, []));
+      if (!pramDone) {
+        // kočárkárna: carved off the end of the first seg, nearest the door
+        const pl = Math.min(u1 - u0, 4.6);
+        const atLo = Math.abs(u0 - eu) <= Math.abs(u1 - eu);
+        const p0 = atLo ? u0 : u1 - pl, p1 = atLo ? u0 + pl : u1;
+        walls.push(wall(p0, doorV, p1, doorV, wallH, [gapAt(pl, 0.5, I.doorW)]));
+        if (u1 - u0 - pl > 0.4)
+          walls.push(wall(atLo ? p1 : p0, band.v0, atLo ? p1 : p0, band.v1, wallH, []));
+        rooms.push({ ...rect(p0, band.v0, p1, band.v1), kind: 'pram' });
+        pramDone = true;
+        if (atLo) u0 = p1; else u1 = p0;
+        if (u1 - u0 < 2.3) continue;
+      }
+      cells(u0, u1);
+    }
+  }
+  return { walls, rooms, corridorV: cv };
 }
 
 // Shopping centre. The plan is the one everybody has walked: a rectangular
@@ -773,11 +1006,18 @@ export function buildingPlan(f, roads, neighbours) {
     y0, sH, storeys, top: y0 + total, usable,
     pal: INTERIOR_PALETTES[use] ?? INTERIOR_PALETTES.civic,
     entrance: entranceOf(f, roads, neighbours),
-    core: null, floors: [], occupants: 0,
+    core: null, lift: null, floors: [], occupants: 0,
     // Huge footprints coarsen their slab tiles instead of blowing the budget:
     // a 13 000 m² mall on 1.9 m tiles would be 3600 pieces of FLOOR alone.
     tile: I.tile * clamp(Math.sqrt(area / 420), 1, 2.9),
     panel: I.panel * clamp(Math.sqrt(area / 900), 1, 2.2),
+    // v7 architectural identity — pieces.js keys its facade grammar off these:
+    // the OSM type (panelák balconies), the novostavba stamp (tall windows,
+    // French balconies, no atlas), and a hash-picked curtain-wall variant for
+    // offices (continuous glass bands vs a grid of dark-framed windows).
+    osmT: f.t ?? null,
+    nova: !!f._nova,
+    officeVar: use === 'office' ? (rnd(f._id, 80) < 0.5 ? 'bands' : 'grid') : null,
   };
 
   // Multi-storey buildings need a way up or their upper floors are a lie.
@@ -792,8 +1032,16 @@ export function buildingPlan(f, roads, neighbours) {
       for (const h of f.i ?? []) if (h.length >= 3 && pointInPolygon(probe.x, probe.z, h)) return false;
       return true;
     };
-    plan.core = placeCore(fr, f._id, sH, inside);
-    if (!plan.core) { plan.storeys = storeys = 1; plan.sH = sH = Math.min(usable, I.maxStorey); }
+    // the entrance in plan space, so the core can court it — and dodge it
+    const e = plan.entrance;
+    const entUV = e ? {
+      u: (e.x - fr.cx) * fr.ux + (e.z - fr.cz) * fr.uz,
+      v: (e.x - fr.cx) * fr.vx + (e.z - fr.cz) * fr.vz,
+    } : null;
+    plan.core = placeCore(fr, f._id, sH, inside, entUV,
+      use === 'flats' && storeys >= 4);       // ≥4 storeys of flats want a výtah
+    if (plan.core) plan.lift = plan.core.lift ?? null;
+    else { plan.storeys = storeys = 1; plan.sH = sH = Math.min(usable, I.maxStorey); }
   }
 
   const openUse = OPEN_USES.has(use) && use !== 'mall';
@@ -808,6 +1056,8 @@ export function buildingPlan(f, roads, neighbours) {
     else if (openUse || (use === 'shop' && fi === 0 && storeys === 1)) L = openLayout(f, plan, fi, use);
     else if (use === 'house') L = houseLayout(f, plan, fi);
     else if (use === 'hotel' && fi === 0) L = openLayout(f, plan, fi, 'shop');   // lobby
+    else if (use === 'flats' && fi === 0 && storeys >= 3 && plan.core)
+      L = flatsGroundLayout(f, plan);        // zádveří + sklepy, flats from floor 1
     else L = corridorLayout(f, plan, fi, use);
     floor.walls = L.walls; floor.rooms = L.rooms;
     floor.open = L.open ?? []; floor.rails = L.rails ?? [];
@@ -840,6 +1090,26 @@ export function buildingPlan(f, roads, neighbours) {
         floor.stair = { rect: run, steps: plan.core.steps, dir: fi % 2 === 0 ? 1 : -1,
           axis: 'u', y0: floor.y, y1: floor.y + sH };
       }
+    }
+  }
+
+  // the výtah: shaft walls on every level (structural — the shaft is what a
+  // panelák's slabs actually hang off), a slab hole through every floor above
+  // ground so the shaft is one continuous void, and a door face toward the
+  // landing. pieces.js adds the metal door panel per floor and parks the cab
+  // at ground level.
+  if (plan.lift) {
+    const ls = plan.lift.shaft, dOnV1 = plan.lift.doorOnV1, wallH = sH - I.slabT;
+    for (let fi = 0; fi < storeys; fi++) {
+      const floor = plan.floors[fi];
+      if (fi > 0) floor.open.push(ls);
+      floor.walls.push(wall(ls.u0, ls.v0, ls.u1, ls.v0, wallH,
+        dOnV1 ? [] : [gapAt(rw(ls), 0.5, 1.1)], 'core'));
+      floor.walls.push(wall(ls.u0, ls.v1, ls.u1, ls.v1, wallH,
+        dOnV1 ? [gapAt(rw(ls), 0.5, 1.1)] : [], 'core'));
+      // the face shared with the stair shaft is already the stair's own wall
+      if (plan.lift.side < 0) floor.walls.push(wall(ls.u0, ls.v0, ls.u0, ls.v1, wallH, [], 'core'));
+      else floor.walls.push(wall(ls.u1, ls.v0, ls.u1, ls.v1, wallH, [], 'core'));
     }
   }
 

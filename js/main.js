@@ -15,7 +15,7 @@ import { Vehicles, driveStep, lampMats } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
-import { initAudio, sfx, engineStart, engineStop, engineSet, setVolume,
+import { initAudio, sfx, sfxAt, engineStart, engineStop, engineSet, setVolume,
   heliStart, heliStop, heliSet, ambientStart, nearbyTrafficHum } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
@@ -762,6 +762,13 @@ async function boot() {
   trains = new Trains(scene, city);
   worldMap = new WorldMap(city, minimap);
   peds = new Pedestrians(scene, city);
+  // hit sounds ride the ragdoll callbacks: a scream at the point of impact
+  // (gender rolled per victim), attenuated by distance like the debris audio
+  peds.onPedHit = (p, v) => {
+    if (v > 3) sfxAt(Math.random() < 0.5 ? 'scream_female' : 'scream_male',
+      Math.min(1, 0.5 + v * 0.05), p.x, p.z, 180, 0.25);
+  };
+  peds.onPedKilled = (p) => sfxAt('crowd_panic', 0.7, p.x, p.z, 200, 4);
   clouds = new Clouds(scene);
   // The world beyond the streamed chunks used to be bare sky, so from the air
   // the built area showed as a hard-edged square floating in blue. This apron

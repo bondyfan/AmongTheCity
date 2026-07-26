@@ -892,45 +892,202 @@ export function facadeCells(f) {
   };
 }
 
-// The band of brand colour that runs along the top of a retail shed's street
-// frontage — the parapet fascia every Kaufland, Lidl and Penny in the country
-// wears, and the reason you know which one it is from three hundred metres.
-// Only the two LONGEST edges get it (a supermarket signs its front and its
-// flank, never its bin store), and it is drawn 8 cm proud of the wall.
-function brandBand(sign, ring, P) {
-  const [sr, sg, sb] = P.signRGB;
+// ---- brand signage, far tier ---------------------------------------------
+// The chunk-mesh twin of pieces.js brandSigns(). The near LOD builds a chain's
+// fascia and totem out of boxes on the destructible shell; this is the SAME
+// geometry for the merged far mesh, and the numbers are copied digit for digit
+// — fascia H = 0.22·height clamped 0.7–1.6 m, hung 0.4 m below the parapet on
+// the two LONGEST edges (a supermarket signs its front and its flank, never
+// its bin store), run inset 6 % from each corner, front face 0.24 m proud
+// (the near box: centre +0.12, half-depth 0.12); totem 5.5 m out from the
+// entrance, 4.6 × 2.6 m panel centred at max(y0+5.4, top+1.5) on a 0.44 m
+// steel pole. pieces.js is a pure-data module the headless tests import, so
+// the agreement is a contract like WIN_BAND, not a shared function: change
+// one side and every Kaufland morphs the instant its near-LOD boxes take over.
+//
+// On top of the flat colour the far tier adds the one thing boxes cannot do:
+// WORDMARK quads (brandMarkMat below) centred on each fascia run and on the
+// totem face, so the chain is legible from 300 m, long before the facade
+// atlas resolves. They vanish into plain brand colour at the LOD swap — by
+// which point you are standing at the door and the building says its name
+// on the canopy sign anyway.
+
+// One 1024×256 CanvasTexture + full-bright material per chain, module-cached
+// (chunk unload disposes geometries only, so these live for the session and
+// every chunk shares them — a cell with three brands costs three draw calls).
+const _brandMats = new Map();
+function brandMarkMat(brand) {
+  const label = brand.label ?? 'Obchod';
+  let m = _brandMats.get(label);
+  if (m) return m;
+  const cv = document.createElement('canvas');
+  cv.width = 1024; cv.height = 256;
+  const g = cv.getContext('2d');
+  const css = (hex) => '#' + hex.toString(16).padStart(6, '0');
+  g.fillStyle = css(brand.sign);
+  g.fillRect(0, 0, 1024, 256);
+  // Ink: the chain's trim colour when it defines one (McDonald's writes red on
+  // its yellow, KFC near-white on its red), else white — except on a LIGHT
+  // fascia, where white would vanish: Billa is dark type on yellow, exactly
+  // like the real shopfront. Perceived luminance off the sRGB bytes is enough
+  // to make that call deterministically.
+  const lum = 0.299 * (brand.sign >> 16 & 255) + 0.587 * (brand.sign >> 8 & 255)
+    + 0.114 * (brand.sign & 255);
+  g.fillStyle = css(brand.trim ?? (lum > 150 ? 0x23201a : 0xffffff));
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  let size = 168;
+  g.font = `bold ${size}px Arial, sans-serif`;
+  const w = g.measureText(label).width;
+  if (w > 920) {                       // "Penny Market" must fit the same panel
+    size = Math.floor(size * 920 / w);
+    g.font = `bold ${size}px Arial, sans-serif`;
+  }
+  g.fillText(label, 512, 132);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;                  // fascias are read at grazing angles
+  m = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
+  _brandMats.set(label, m);
+  return m;
+}
+
+// per-chunk wordmark quad stream, one per brand so the chunk batches per label
+function markStream(marks, brand) {
+  const label = brand.label ?? 'Obchod';
+  let mk = marks.get(label);
+  if (!mk) marks.set(label, mk = { brand, pos: [], uv: [] });
+  return mk;
+}
+
+// A textured vertical quad a→b facing (fx,fz), full 0..1 uv window. Mind the
+// u DIRECTION: for the winding whose derived normal is (dz,−dx), the viewer's
+// screen-right is up × n = −(a→b), so u must DESCEND along the run or every
+// wordmark comes out mirrored (the window atlas gets away with this in
+// wallUV because windows are symmetric; text is not).
+function markWall(mk, ax, az, bx, bz, yB, yT, fx, fz) {
+  const dx = bx - ax, dz = bz - az;
+  let Ax = ax, Az = az, Bx = bx, Bz = bz;
+  if (dz * fx - dx * fz < 0) { Ax = bx; Az = bz; Bx = ax; Bz = az; }
+  mk.pos.push(Ax, yT, Az, Bx, yT, Bz, Bx, yB, Bz, Ax, yT, Az, Bx, yB, Bz, Ax, yB, Az);
+  mk.uv.push(1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0);
+}
+
+// OBB centre by interiors.frameOf's own rule (axis = longest edge) — the totem
+// skip test below must agree with the near model's `fr.cx/cz` or the two LODs
+// could disagree about whether a degenerate totem exists at all.
+const _ct = { x: 0, z: 0 };
+function obbCentre(ring, out) {
+  let best = 0, ux = 1, uz = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
+    const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz;
+    if (L2 > best) { best = L2; const L = Math.sqrt(L2); ux = dx / L; uz = dz / L; }
+  }
+  const vx = uz, vz = -ux;
+  let u0 = 1e9, u1 = -1e9, v0 = 1e9, v1 = -1e9;
+  for (const [x, z] of ring) {
+    const pu = x * ux + z * uz, pv = x * vx + z * vz;
+    if (pu < u0) u0 = pu; if (pu > u1) u1 = pu;
+    if (pv < v0) v0 = pv; if (pv > v1) v1 = pv;
+  }
+  out.x = ux * (u0 + u1) / 2 + vx * (v0 + v1) / 2;
+  out.z = uz * (u0 + u1) / 2 + vz * (v0 + v1) / 2;
+}
+
+function brandSignage(f, y0, top, brand, cell, trim, sign, marks) {
+  const ring = f.o;
+  _c.setHex(brand.sign);
+  const sr = _c.r, sg = _c.g, sb = _c.b;
+  const sgn = polygonArea(ring) > 0 ? 1 : -1;
+  const mk = markStream(marks, brand);
+
+  // ---- fascia band: the ENTRANCE edge first, then the longest flank ----
+  // The sign belongs over the doors, facing the car park — two-longest alone
+  // put both bands on the service side of a deep box. Same rule as the near
+  // LOD in pieces.js brandSigns; change one, change both.
   const edges = [];
   for (let i = 0; i < ring.length; i++) {
     const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
     edges.push({ i, L: Math.hypot(bx - ax, bz - az) });
   }
   edges.sort((a, b) => b.L - a.L);
-  // Under the parapet, not down at first-floor level: a retail fascia is the
-  // highest thing on the building, which is exactly why you can read it from
-  // the far side of the car park.
-  const H = Math.min(1.5, (P.top - P.y0) * 0.22), O = 0.1;
-  const top = P.top - H - 0.35;
+  const entI = f._ent?.i;
+  if (entI !== undefined) {
+    const k = edges.findIndex((e) => e.i === entI);
+    if (k > 0 && edges[k].L >= 8) edges.unshift(edges.splice(k, 1)[0]);
+  }
+  const H = Math.min(1.6, Math.max(0.7, (top - y0) * 0.22));
+  const yT = top - 0.4, yB = yT - H;
   for (const e of edges.slice(0, 2)) {
     if (e.L < 8) continue;
     const [ax, az] = ring[e.i], [bx, bz] = ring[(e.i + 1) % ring.length];
     const ux = (bx - ax) / e.L, uz = (bz - az) / e.L;
-    // outward normal of this edge, same convention as entranceOf
-    const s = (polygonArea(ring) > 0 ? 1 : -1);
-    const nx = s * uz, nz = -s * ux;
-    const inset = e.L * 0.06;
-    const p0 = [ax + ux * inset + nx * O, az + uz * inset + nz * O];
-    const p1 = [bx - ux * inset + nx * O, bz - uz * inset + nz * O];
-    sign.quad(p0[0], top + H, p0[1], p1[0], top + H, p1[1],
-      p1[0], top, p1[1], p0[0], top, p0[1], sr, sg, sb);
-    sign.quad(p1[0], top + H, p1[1], p0[0], top + H, p0[1],
-      p0[0], top, p0[1], p1[0], top, p1[1], sr * 0.5, sg * 0.5, sb * 0.5);
+    const nx = sgn * uz, nz = -sgn * ux;   // outward, entranceOf's convention
+    const at = (s, o) => [ax + ux * s + nx * o, az + uz * s + nz * o];
+    const F0 = at(e.L * 0.06, 0.24), F1 = at(e.L * 0.94, 0.24);
+    const K0 = at(e.L * 0.06, 0.02), K1 = at(e.L * 0.94, 0.02);
+    wallQuad(sign, F0[0], F0[1], F1[0], F1[1], yT, yB, nx, nz, sr, sg, sb);
+    wallQuad(sign, K0[0], K0[1], K1[0], K1[1], yT, yB, -nx, -nz, sr * 0.5, sg * 0.5, sb * 0.5);
+    // a lid, so the band reads as the near model's solid box from a helicopter
+    sign.triFacing(K0[0], yT, K0[1], K1[0], yT, K1[1], F1[0], yT, F1[1], 0, 1, 0, sr, sg, sb);
+    sign.triFacing(K0[0], yT, K0[1], F1[0], yT, F1[1], F0[0], yT, F0[1], 0, 1, 0, sr, sg, sb);
+    // the wordmark, ONCE, centred: a Czech retail shed signs its frontage with
+    // one logo, not a repeating banner. Aspect-true (canvas is 4:1), a whisker
+    // inside the band and 1 cm proud of its face.
+    const hm = H * 0.94, wm = hm * 4;
+    if (e.L * 0.88 > wm + 1) {
+      const W0 = at(e.L / 2 - wm / 2, 0.25), W1 = at(e.L / 2 + wm / 2, 0.25);
+      const mid = (yB + yT) / 2;
+      markWall(mk, W0[0], W0[1], W1[0], W1[1], mid - hm / 2, mid + hm / 2, nx, nz);
+    }
   }
+
+  // ---- the totem by the entrance ----
+  const ent = entranceOf(f, cell?.roads, cell?.buildings);
+  if (!ent) return;
+  const px = ent.x + ent.nx * 5.5, pz = ent.z + ent.nz * 5.5;
+  obbCentre(ring, _ct);
+  if (Math.hypot(px - _ct.x, pz - _ct.z) < 2) return;   // stands inside the shed
+  const yaw = Math.atan2(ent.nz, -ent.nx) + Math.PI / 2; // face the street
+  const aX = Math.cos(yaw), aZ = -Math.sin(yaw);         // panel's long axis
+  const fx = -Math.sin(yaw), fz = -Math.cos(yaw);        // panel's face normal
+  const P4 = (da, df) => [px + aX * da + fx * df, pz + aZ * da + fz * df];
+  const PW = 2.3, PH = 2.6;
+  const panelY = Math.max(y0 + 5.4, top + 1.5);
+  const pT = panelY + PH / 2, pB = panelY - PH / 2;
+  // the pole wears the near model's own dark steel, and it is LIT (the near
+  // piece is kind 'ext'), so it goes into the trim batch, not the sign one
+  _c.setHex(0x4a4d52);
+  const pr = _c.r, pg = _c.g, pbl = _c.b;
+  const c00 = P4(-0.22, -0.22), c10 = P4(0.22, -0.22);
+  const c11 = P4(0.22, 0.22), c01 = P4(-0.22, 0.22);
+  wallQuad(trim, c01[0], c01[1], c11[0], c11[1], pB, y0, fx, fz, pr, pg, pbl);
+  wallQuad(trim, c00[0], c00[1], c10[0], c10[1], pB, y0, -fx, -fz, pr, pg, pbl);
+  wallQuad(trim, c10[0], c10[1], c11[0], c11[1], pB, y0, aX, aZ, pr, pg, pbl);
+  wallQuad(trim, c00[0], c00[1], c01[0], c01[1], pB, y0, -aX, -aZ, pr, pg, pbl);
+  // the panel: brand colour on every face, backlit-bright like the fascia
+  const e0 = P4(-PW, -0.16), e1 = P4(PW, -0.16), e2 = P4(PW, 0.16), e3 = P4(-PW, 0.16);
+  wallQuad(sign, e3[0], e3[1], e2[0], e2[1], pT, pB, fx, fz, sr, sg, sb);
+  wallQuad(sign, e0[0], e0[1], e1[0], e1[1], pT, pB, -fx, -fz, sr, sg, sb);
+  wallQuad(sign, e1[0], e1[1], e2[0], e2[1], pT, pB, aX, aZ, sr, sg, sb);
+  wallQuad(sign, e0[0], e0[1], e3[0], e3[1], pT, pB, -aX, -aZ, sr, sg, sb);
+  sign.triFacing(e0[0], pT, e0[1], e1[0], pT, e1[1], e2[0], pT, e2[1], 0, 1, 0, sr, sg, sb);
+  sign.triFacing(e0[0], pT, e0[1], e2[0], pT, e2[1], e3[0], pT, e3[1], 0, 1, 0, sr, sg, sb);
+  // the wordmark strip across the face — one-sided at +0.18, matching the near
+  // model's glyphs, which stand only on the street side of the panel
+  const hm = 4.3 / 4;                                    // aspect-true on 4.3 m
+  const W0 = P4(-2.15, 0.18), W1 = P4(2.15, 0.18);
+  markWall(mk, W0[0], W0[1], W1[0], W1[1], panelY - hm / 2, panelY + hm / 2, fx, fz);
 }
 
-function buildingInto(f, geos, sink, facades, cell, trim, sign) {
+function buildingInto(f, geos, sink, facades, cell, trim, sign, marks) {
   if (!f.o || f.o.length < 3) return;
   const y0 = f.y ?? 0;
   const depth = Math.max(1, Math.max(2.2, f.h ?? 6) - y0); // h is total height; skyways start at y0
+  // read the brand fresh at build time: stampFranchises() renames its hosts at
+  // tile load, before chunks build, so a McDonald's is branded on the very
+  // first mesh — and the chunk is re-meshed on interiors activation anyway
+  const brand = brandOf(f);
   _c.setHex(buildingWallHex(f));
   const wr = _c.r, wg = _c.g, wb = _c.b;
   const rr = wr * ROOF_DARKEN, rg = wg * ROOF_DARKEN, rb = wb * ROOF_DARKEN;
@@ -954,16 +1111,14 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign) {
       door: y0 < 0.5 && Math.abs(polygonArea(f.o)) >= 14
         ? entranceOf(f, cell?.roads, cell?.buildings) : null,
     };
-    // a chain's fascia colour rides on the plan, so the canopy sign and the
-    // brand band come out Kaufland red / Lidl blue rather than generic amber
-    const brand = brandOf(f);
+    // a chain's fascia colour rides on the plan, so the canopy sign comes out
+    // Kaufland red / Lidl blue rather than generic amber
     if (brand?.sign !== undefined) {
       _c.setHex(brand.sign);
       P.signRGB = [_c.r, _c.g, _c.b];
     }
     ringFacade(sink, f.o, false, P);
     if (P.door && P.sH > INTERIOR.entryH + 0.35) doorInto(sink, trim, sign, f.o, P);
-    if (brand?.sign !== undefined && sign) brandBand(sign, f.o, P);
     for (const h of f.i ?? []) if (h.length >= 3) ringFacade(sink, h, true, P);
     capInto(sink, f.o, f.i, y0 + depth, true, rr, rg, rb);
     if (y0 > 0.5) capInto(sink, f.o, f.i, y0, false, rr, rg, rb); // skyway underside
@@ -988,6 +1143,10 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign) {
     g.setAttribute('color', new THREE.BufferAttribute(col, 3));
     geos.push(g);
   }
+  // chain signage in BOTH wall modes — a Lidl is a Lidl with facades toggled
+  // off, and the fascia/totem must match pieces.js regardless of the atlas
+  if (brand?.sign !== undefined && sign && trim && marks)
+    brandSignage(f, y0, y0 + depth, brand, cell, trim, sign, marks);
   // small gabled houses get a ridge prism — in facade mode its tris pin to
   // the plain plaster cell, so it reads as flat color either way
   if (f.r === 'gabled' && Math.abs(polygonArea(f.o)) < 300)
@@ -1083,12 +1242,14 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   // door dressing lives in its own two batches: the surround/canopy carry no
   // atlas uv, and the sign board needs an emissive material main.js can turn up
   // at dusk. Two extra draw calls per chunk buys a city where you can see which
-  // buildings you can walk into.
+  // buildings you can walk into. Brand WORDMARKS batch per chain on top —
+  // a cell holding a Lidl and two Kauflands adds two meshes, not six.
   const trim = new TriSink(), sign = new TriSink();
+  const marks = new Map();
   for (const f of cell.buildings) {
     if (f._home !== key) continue;
     if (hidden && hidden.has(f._id)) continue;   // now made of boxes instead
-    buildingInto(f, bGeos, bSink, facades, cell, trim, sign);
+    buildingInto(f, bGeos, bSink, facades, cell, trim, sign, marks);
   }
   const pg = bSink.geo();
   if (pg) bGeos.push(pg);
@@ -1109,6 +1270,17 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   }
   const sg2 = sign.geo();
   if (sg2) group.add(new THREE.Mesh(sg2, mats.doorSign));
+  // the wordmark quads, one Mesh per chain present in the cell. No normals —
+  // brandMarkMat is a MeshBasicMaterial and never shades. Geometry is owned by
+  // the group (disposed on rebuild/unload); the material and its texture are
+  // module-cached and shared city-wide.
+  for (const mk of marks.values()) {
+    if (!mk.pos.length) continue;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(mk.pos), 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(mk.uv), 2));
+    group.add(new THREE.Mesh(g, brandMarkMat(mk.brand)));
+  }
   return group;
 }
 

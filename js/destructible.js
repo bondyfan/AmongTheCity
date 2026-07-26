@@ -32,6 +32,7 @@
 import * as THREE from 'three';
 import { DESTRUCTION, INTERIOR } from './config.js';
 import { interiorPieces, shellPieces } from './pieces.js';
+import { sfxAt } from './audio.js';   // safe headless — no-ops without an AudioContext
 
 const D = DESTRUCTION;
 const CELL = 4;                                  // spatial-hash cell, meters
@@ -91,6 +92,70 @@ function shellMat(atlas, pinU, pinV) {
 let _signMat = null;
 function signMat() {
   return (_signMat ??= new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false }));
+}
+
+// ---- wordmark signage ----------------------------------------------------
+// A flat-colour fascia says "supermarket"; only LETTERS say "KAUFLAND". Sign
+// pieces may arrive stamped with signText/signBg/signFg (pieces.js decides
+// which), and every distinct (text|bg|fg) triple gets one cached canvas — a
+// 4:1 board with the wordmark set in a bold geometric sans, the way Czech
+// retail fascias actually are — shared by every instance in the city that
+// wears it. MeshBasicMaterial + toneMapped:false keeps it the same brightness
+// at noon and at midnight: backlit plastic does not take the sun.
+const _wordmarks = new Map();          // "text|bg|fg" → MeshBasicMaterial
+function wordmarkMat(text, bg = 0xffffff, fg = 0x1c1c1c) {
+  const key = text + '|' + bg + '|' + fg;
+  let mat = _wordmarks.get(key);
+  if (mat) return mat;
+  const cv = document.createElement('canvas');
+  cv.width = 1024; cv.height = 256;
+  const g = cv.getContext('2d');
+  const css = (hex) => typeof hex === 'string'    // defensive: the stamping agent
+    ? hex : '#' + (hex & 0xffffff).toString(16).padStart(6, '0');  // may hand either
+  g.fillStyle = css(bg);
+  g.fillRect(0, 0, 1024, 256);
+  // a slightly darker frame reads as the sign's aluminium return from an angle
+  _c.set(css(bg)).multiplyScalar(0.68);
+  g.strokeStyle = _c.getStyle();
+  g.lineWidth = 8;
+  g.strokeRect(4, 4, 1016, 248);
+  const word = String(text).toUpperCase();
+  g.fillStyle = css(fg);
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  const font = (px) =>
+    `bold ${px}px 'Futura','Century Gothic','Avenir Next','Trebuchet MS',sans-serif`;
+  let size = 168;
+  g.font = font(size);
+  const w = g.measureText(word).width;
+  if (w > 920) { size = Math.max(40, Math.floor(size * 920 / w)); g.font = font(size); }
+  g.fillText(word, 512, 136);
+  // The 2×2 px corner is the swatch every NON-display face samples (the box's
+  // thin edges must be plain sign colour, not a sliver of lettering) — painted
+  // last so the border stroke cannot bleed into it.
+  g.fillStyle = css(bg);
+  g.fillRect(0, 0, 2, 2);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
+  _wordmarks.set(key, mat);
+  return mat;
+}
+
+// The box the wordmark instances draw with: the two LARGE faces (local ±z, the
+// board's front and back) map the full 0..1 canvas, every other face pins to
+// the bg-colour corner swatch. Face selection goes by the baked normals rather
+// than vertex order, so a three version reshuffling BoxGeometry cannot break it.
+let _wordBox = null;
+function wordBox() {
+  if (_wordBox) return _wordBox;
+  const g = new THREE.BoxGeometry(1, 1, 1).toNonIndexed();
+  const nrm = g.attributes.normal, uv = g.attributes.uv;
+  const cu = 1 / 1024, cvv = 1 - 1 / 256;      // centre of the 2×2 corner px
+  for (let i = 0; i < nrm.count; i++)
+    if (Math.abs(nrm.getZ(i)) < 0.5) uv.setXY(i, cu, cvv);
+  return (_wordBox = g);
 }
 
 let _solidMat = null, _glassMat = null;
@@ -290,8 +355,12 @@ export class BuildingModel {
    * @param f      the building feature (needs _id, o, h)
    * @param plan   buildingPlan(f)
    * @param fx     { debris, dust } — shared pools
+   * @param opts   { shellOnly } — skip the rooms; the caller builds the shell
+   *               and ensureInterior() fills the inside in later (or a rocket
+   *               does). This is the cheap tier a building far down the street
+   *               lives in: a few hundred outer-wall boxes, nothing else.
    */
-  constructor(scene, f, plan, fx) {
+  constructor(scene, f, plan, fx, opts) {
     this.scene = scene;
     this.f = f;
     this.plan = plan;
@@ -300,21 +369,40 @@ export class BuildingModel {
     this.grid = new Map();
     this.alive = 0;
     this.shelled = false;      // outer wall built as boxes, facade stood down
+    this.interiorBuilt = false; // rooms exist (full tier / after a hit)
     this.damaged = false;      // something has actually hit it
     this.hits = 0;
     this.settle = 0;           // seconds of progressive collapse still to run
     this._settleT = 0;
     this.shellPieces = 0;
-    this.lastTouch = 0;        // seconds-since-boot stamp for the LRU    this._dirty = true;
+    this.lastTouch = 0;        // seconds-since-boot stamp for the LRU
+    this._dirty = true;
     this._solid = null;
     this._glass = null;
     this._shell = null;      // the atlas-textured outer leaf
-    this._sign = null;       // unlit brand signage
+    this._sign = null;       // unlit flat-colour signage
+    this._words = null;      // wordmark InstancedMeshes, one per (text|bg|fg)
+    this._wordIdx = null;    // wordmark key → index into _words
+    this._wCursor = null;    // per-word instance cursors, reused by sync
     this._uvRect = null;
     this.group = new THREE.Group();
     this.group.matrixAutoUpdate = false;
     scene.add(this.group);
-    this._add(interiorPieces(plan));
+    if (!opts?.shellOnly) this.ensureInterior();
+  }
+
+  // Lazily grow the rooms under the shell. A shell-tier building carries only
+  // its outer wall and roof; walking close — or a rocket, which must always
+  // have rooms to reveal — adds the floors, partitions, stairs and furniture
+  // WITHOUT touching the shell pieces, so nothing changes seen from outside.
+  // Once the shell exists its inner lining is redundant (addShell would only
+  // kill it again), so it is filtered out rather than added dead.
+  ensureInterior() {
+    if (this.interiorBuilt) return;
+    this.interiorBuilt = true;
+    let list = interiorPieces(this.plan);
+    if (this.shelled) list = list.filter((p) => p.leaf !== 'lin');
+    this._add(list);
   }
 
   // ---- piece bookkeeping -------------------------------------------------
@@ -342,27 +430,52 @@ export class BuildingModel {
     }
   }
 
-  // three cannot grow an InstancedMesh, so adding the shell means new meshes.
-  // That happens at most once per building, on the frame it is first hit.
+  // three cannot grow an InstancedMesh, so adding pieces means new meshes.
+  // That happens at most twice per building (shell tier, then the rooms).
   _rebuildMeshes() {
     let nS = 0, nG = 0, nF = 0, nB = 0;
-    for (const p of this.pieces)
-      (p.uv ? nF++ : p.kind === 'glass' ? nG++ : p.kind === 'sign' ? nB++ : nS++);
+    let wq = null;                       // wordmark key → { text, bg, fg, n }
+    for (const p of this.pieces) {
+      if (p.uv) nF++;
+      else if (p.kind === 'glass') nG++;
+      else if (p.kind === 'sign' && p.signText) {
+        // one bucket per distinct wordmark; the key is cached on the piece so
+        // sync() never rebuilds the string
+        const k = p._wkey ??= p.signText + '|' + (p.signBg ?? '') + '|' + (p.signFg ?? '');
+        let e = (wq ??= new Map()).get(k);
+        if (!e) wq.set(k, e = { text: p.signText, bg: p.signBg, fg: p.signFg, n: 0 });
+        e.n++;
+      } else if (p.kind === 'sign') nB++;
+      else nS++;
+    }
     const [solidMat, glassMat] = mats();
-    const mk = (n, mat, shadow) => {
+    const mk = (n, mat, shadow, geo) => {
       if (!n) return null;
-      const m = new THREE.InstancedMesh(unitBox(), mat, n);
+      const m = new THREE.InstancedMesh(geo ?? unitBox(), mat, n);
       m.frustumCulled = false;
       m.castShadow = shadow; m.receiveShadow = shadow;
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       return m;
     };
-    for (const old of [this._solid, this._glass, this._shell, this._sign]) {
-      if (old) { this.group.remove(old); old.dispose(); }
+    for (const old of [this._solid, this._glass, this._shell, this._sign,
+      ...(this._words ?? [])]) {
+      if (!old) continue;
+      this.group.remove(old);
+      old.dispose();
+      if (old === this._shell) old.geometry.dispose();  // the per-model aUvRect clone
     }
     this._solid = mk(nS, solidMat, true);
     this._glass = mk(nG, glassMat, false);
     this._sign = mk(nB, signMat(), false);
+    this._words = this._wordIdx = this._wCursor = null;
+    if (wq) {
+      this._words = []; this._wordIdx = new Map();
+      for (const [key, e] of wq) {
+        this._wordIdx.set(key, this._words.length);
+        this._words.push(mk(e.n, wordmarkMat(e.text, e.bg, e.fg), false, wordBox()));
+      }
+      this._wCursor = new Array(this._words.length).fill(0);
+    }
     this._shell = null;
     if (nF) {
       const c = this.plan.cells;
@@ -375,6 +488,7 @@ export class BuildingModel {
     if (this._solid) this.group.add(this._solid);
     if (this._shell) this.group.add(this._shell);
     if (this._sign) this.group.add(this._sign);
+    if (this._words) for (const m of this._words) this.group.add(m);
     if (this._glass) this.group.add(this._glass);
     this._dirty = true;
     this.sync();
@@ -386,6 +500,7 @@ export class BuildingModel {
     if (!this._dirty) return;
     this._dirty = false;
     let iS = 0, iG = 0, iF = 0, iB = 0;
+    if (this._wCursor) this._wCursor.fill(0);
     for (const p of this.pieces) {
       if (p.dead) continue;
       _v.set(p.x, p.y, p.z);
@@ -402,7 +517,11 @@ export class BuildingModel {
       } else if (p.kind === 'glass') {
         if (this._glass) { this._glass.setMatrixAt(iG, _m4); this._glass.setColorAt(iG, _c); iG++; }
       } else if (p.kind === 'sign') {
-        if (this._sign) { this._sign.setMatrixAt(iB, _m4); this._sign.setColorAt(iB, _c); iB++; }
+        // wordmark boards carry their colours in the texture — no instance tint
+        const wi = p._wkey !== undefined && this._wordIdx
+          ? this._wordIdx.get(p._wkey) : undefined;
+        if (wi !== undefined) this._words[wi].setMatrixAt(this._wCursor[wi]++, _m4);
+        else if (this._sign) { this._sign.setMatrixAt(iB, _m4); this._sign.setColorAt(iB, _c); iB++; }
       } else if (this._solid) {
         this._solid.setMatrixAt(iS, _m4); this._solid.setColorAt(iS, _c); iS++;
       }
@@ -414,13 +533,17 @@ export class BuildingModel {
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
+    if (this._words) for (let i = 0; i < this._words.length; i++) {
+      this._words[i].count = this._wCursor[i];
+      this._words[i].instanceMatrix.needsUpdate = true;
+    }
     if (this._uvRect) this._uvRect.needsUpdate = true;
   }
 
-  // The outer wall + roof, built the first time this building is damaged. The
-  // thin interior lining is retired in the same breath: both leaves put their
-  // inner face at the same depth, so the swap moves no surface the player can
-  // see or stand against.
+  // The outer wall + roof, built the moment the building is activated at any
+  // tier. The thin interior lining (if the rooms exist yet) is retired in the
+  // same breath: both leaves put their inner face at the same depth, so the
+  // swap moves no surface the player can see or stand against.
   addShell() {
     if (this.shelled) return;
     // NOTE: shelled ≠ damaged. Every activated building gets its outer wall as
@@ -670,6 +793,9 @@ export class BuildingModel {
    * no longer connected to the ground. Returns the number of pieces lost.
    */
   blast(x, y, z, r, power = 1) {
+    // a rocket must always reveal rooms — a shell-tier building grows its
+    // inside on the same frame the hole is made, never a hollow box
+    this.ensureInterior();
     this.addShell();
     this.damaged = true;
     this.hits++;
@@ -677,6 +803,7 @@ export class BuildingModel {
     const touched = new Set();
     this._cellsAround(x, z, outer + 2, (arr) => { for (const i of arr) touched.add(i); });
     const killed = [];
+    let nGlass = 0;                              // shattered panes → glass_break cue
     for (const i of touched) {
       const p = this.pieces[i];
       if (p.dead) continue;
@@ -686,7 +813,7 @@ export class BuildingModel {
       const dy = Math.max(0, Math.abs(y - p.y) - p.hy);
       const d = Math.hypot(dx, dy, dz);
       const reach = r * (p.weak ? 1.45 : 1);
-      if (d <= reach) killed.push(i);
+      if (d <= reach) { killed.push(i); if (p.kind === 'glass') nGlass++; }
       else if (d <= outer) {
         p.k *= D.crackDarken;                    // scorched but standing
         this._dirty = true;
@@ -694,6 +821,13 @@ export class BuildingModel {
     }
     for (const i of killed) this._destroy(i, x, y, z, r, power, true);
     const fell = this._collapse();
+    // the SOUND of it (distance-attenuated one-shots, no-ops without files):
+    // a real debris load crashes, a shower of panes shatters, and a big first
+    // wave means the whole structure is going — the sustained rumble. The
+    // cooldowns live in sfxAt, so a double rocket is not a double rumble.
+    if (killed.length + fell > 30) sfxAt?.('debris_crash', 0.9, x, z, 340, 0.7);
+    if (nGlass > 8) sfxAt?.('glass_break', 0.8, x, z, 280, 0.3);
+    if (fell > 60) sfxAt?.('collapse_rumble', 1, x, z, 460, 6);
     // A building does not finish falling down in the frame it was hit. Arm the
     // settling timer: update() re-runs the support solver a few times a second
     // for the next few seconds, and every round that drops something buys more
@@ -782,6 +916,11 @@ export class BuildingModel {
       this.settle = Math.max(this.settle, 1.3);   // it is still coming down
       this._dirty = true;
       this.sync();
+      // a wave that is really a collapse sounds like one — sfxAt's per-name
+      // cooldowns make the rumble "once per settle episode" with no state here
+      const cx = (this.bb.minX + this.bb.maxX) / 2, cz = (this.bb.minZ + this.bb.maxZ) / 2;
+      if (fell > 30) sfxAt?.('debris_crash', 0.7, cx, cz, 340, 0.7);
+      if (fell > 20) sfxAt?.('collapse_rumble', 0.85, cx, cz, 460, 6);
     }
   }
 
@@ -794,12 +933,14 @@ export class BuildingModel {
 
   dispose() {
     this.scene.remove(this.group);
-    for (const m of [this._solid, this._glass, this._shell, this._sign]) {
+    for (const m of [this._solid, this._glass, this._shell, this._sign,
+      ...(this._words ?? [])]) {
       if (!m) continue;
-      m.dispose();
+      m.dispose();               // wordmark geometry + materials are shared caches
       if (m === this._shell) m.geometry.dispose();   // the per-model aUvRect clone
     }
     this._solid = this._glass = this._shell = this._sign = null;
+    this._words = this._wordIdx = this._wCursor = null;
     this.pieces.length = 0;
     this.grid.clear();
   }

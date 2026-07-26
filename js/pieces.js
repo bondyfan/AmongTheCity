@@ -37,6 +37,9 @@
 //   kind   'floor'|'ceil'|'wall'|'ext'|'glass'|'stair'|'rail'|'prop'|'roof'
 //   weak   true = glass/furniture/railings: shatters early, never holds a
 //          building up (the support solver treats it as cargo, not structure)
+// Optional stamps some pieces carry: uv (facade-atlas sub-rect), signText/
+// signBg/signFg (the wordmark contract), goods (shelf stock), balcony
+// (panelák balcony pieces) and french (novostavba window rails).
 
 import { pointInPolygon, polygonArea, distPointToSegment } from './geo.js';
 import { INTERIOR, ROOF_DARKEN, WALL_AO } from './config.js';
@@ -69,6 +72,17 @@ function rnd(id, salt) {
 // module scratch — build-time only, but a mall runs this loop 20 000 times
 const _w = { x: 0, z: 0 };
 const _probe = { x: 0, z: 0, t: 0 };
+
+// ---- v7 facade grammar palette --------------------------------------------
+// What makes a curtain wall read as a curtain wall is not the glass, it is the
+// THIN DARK LINES between the panes — so mullions and window frames get their
+// own near-black metals rather than the building's plaster hue.
+const MULLION_C = 0x2b2e33;     // storefront/pavilion mullions
+const FRAME_C = 0x33373d;       // office curtain-wall frames and spandrel joints
+const GLASS_C = 0x9fb4c4;       // same pane hex the ext path already uses
+const FRENCH_C = 0x3f444a;      // novostavba French-balcony rails
+// panelák balcony rail panels — the pastel infill boards every sídliště wears
+const RAIL_CS = [0xc9cdd1, 0xbcc6cc, 0xcfc8ba, 0xb8c2b4];
 
 // ---- footprint tests -----------------------------------------------------
 // Plans are rectangles in the OBB; the real building is a polygon. Every piece
@@ -243,7 +257,15 @@ function emitPerimeter(out, plan, fi, leaf) {
   const ring = plan.ring, fr = plan.fr;
   const sgn = polygonArea(ring) > 0 ? 1 : -1;
   const fy = plan.floors[fi].y;
-  const wallH = plan.storeys === 1 ? plan.usable : plan.sH - I.slabT;
+  // The INNER lining spans the room height (sH − slab). The OUTER leaf must
+  // clad the FULL storey — slab edge included — or every floor line becomes a
+  // 26 cm horizontal slit and the storeys read as levitating plates. The
+  // facade atlas maps one cell per full storey anyway, so ext panels spanning
+  // sH also line the paint up better with the flat-facade LOD.
+  const roomH = plan.storeys === 1 ? plan.usable : plan.sH - I.slabT;
+  const wallH = leaf === 'ext'
+    ? (plan.storeys === 1 ? plan.usable + I.slabT : plan.sH)
+    : roomH;
   const thick = leaf === 'ext' ? I.extT + I.linT : I.linT;
   const pal = plan.pal;
   // The OUTER leaf wears the facade's own colour and the facade's own window
@@ -263,6 +285,17 @@ function emitPerimeter(out, plan, fi, leaf) {
     : plan.use === 'mall' || plan.use === 'supermarket' ? (fi === 0 ? 0.8 : 0.5)
     : 0.72;
   const sill = 0.85, winH = Math.min(1.55, wallH - sill - 0.35);
+  // ---- v7 facade grammar flags (outer leaf only) ----
+  // offices drop the atlas for a curtain wall (two hash-picked variants);
+  // novostavby drop it for white plaster with tall windows; restaurants and
+  // mall entrances get glazed runs handled per edge below
+  const officeVar = leaf === 'ext' && plan.use === 'office' ? (plan.officeVar ?? 'bands') : null;
+  const novaExt = leaf === 'ext' && plan.nova && plan.use === 'flats';
+  // hash-picked window-surround contrast for the generic housing stock — the
+  // jambs read a shade lighter, which is a painted šambrána at zero pieces
+  const surK = leaf === 'ext' && (plan.use === 'house' || plan.use === 'flats')
+    && !plan.nova && rnd(plan.id, 83) < 0.4 ? 1.13 : 1;
+  const N = ring.length;
 
   for (let ei = 0; ei < ring.length; ei++) {
     const a = ring[ei], b = ring[(ei + 1) % ring.length];
@@ -286,6 +319,15 @@ function emitPerimeter(out, plan, fi, leaf) {
     // fake AO to match the facade's own ground-edge darkening, so the two
     // representations agree in VALUE as well as in hue
     const ao = (y) => WALL_AO + (1 - WALL_AO) * Math.min(1, (y - plan.y0) / 4);
+    // A fast-food pavilion is glass on the whole entrance side AND around both
+    // its corners (the two adjacent edges) — that wrap is what sells "modern
+    // drive-through" over "shed with a sign". A mall glazes a tall PORTAL: the
+    // entrance bay run only, but through the first TWO storeys.
+    const glassRun = leaf === 'ext' && plan.use === 'restaurant' && ent
+      && (ei === ent.i || ei === (ent.i + 1) % N || ei === (ent.i + N - 1) % N);
+    const portalC = leaf === 'ext' && plan.use === 'mall' && ent
+      && ei === ent.i && fi <= 1 ? L * ent.t : null;
+    const portalHalf = portalC === null ? 0 : clamp(L * 0.22, 3.5, 8);
 
     for (let i = 0; i < n; i++) {
       const s = (i + 0.5) * pw;
@@ -299,6 +341,110 @@ function emitPerimeter(out, plan, fi, leaf) {
       }
 
       if (leaf === 'ext') {
+        const yTw = fy + wallH;
+        // flat-colour bay piece (no atlas) — the special facade grammars below
+        // are exactly the buildings whose real counterparts DON'T wear Czech
+        // plaster-and-sill paint, so they emit plain boxes and let colour and
+        // proportion do the talking. Same placement math as put() underneath.
+        const flat = (y0, y1, u0f, u1f, c2, lo, hi) => {
+          if (y1 - y0 < 0.02 || u1f - u0f < 0.01) return null;
+          const cx2 = px + ux * (u0f + u1f - 1) * pw * 0.5;
+          const cz2 = pz + uz * (u0f + u1f - 1) * pw * 0.5;
+          const p = push(out, cx2, (y0 + y1) / 2, cz2, (u1f - u0f) * pw / 2,
+            (y1 - y0) / 2, thick / 2, yaw, c2, 'ext', false, lo, hi);
+          p.leaf = 'ext';
+          return p;
+        };
+
+        // ---- GLAZED FRONTAGE: fast-food pavilion / mall entrance portal ----
+        // Big panes between thin dark mullions; the restaurant hangs its
+        // cladding band (brand `clad` — McDonald's anthracite, KFC red) over
+        // the glass, the mall just keeps a floor-line strip between storeys.
+        if (glassRun || (portalC !== null && Math.abs(s - portalC) < portalHalf)) {
+          const isRest = plan.use === 'restaurant';
+          const clad = isRest ? (plan.brand?.clad ?? 0x45423e) : col;
+          const bandH = isRest ? clamp(wallH * 0.2, 0.6, 1.0) : Math.min(0.35, wallH * 0.1);
+          const gB = fy + (fi === 0 ? 0.12 : 0.05);
+          const gT = yTw - bandH;
+          const mull = (sm) => {         // a mullion on the bay boundary
+            if (sm < 0.03 || sm > L - 0.03) return;
+            push(out, a[0] + ux * sm + inx * off, (gB + gT) / 2,
+              a[1] + uz * sm + inz * off, 0.055, (gT - gB) / 2, thick * 0.4,
+              yaw, MULLION_C, 'ext', false, 0.95, 1.0).leaf = 'ext';
+          };
+          mull(s - pw / 2);
+          if (i === n - 1) mull(s + pw / 2);
+          // the pane — a door bay keeps its opening and gets a glass header
+          const pB = isDoor ? fy + I.entryH + 0.05 : gB;
+          if (gT - pB > 0.3)
+            push(out, px + inx * thick * 0.22, (pB + gT) / 2,
+              pz + inz * thick * 0.22, pw / 2 - 0.08, (gT - pB) / 2, 0.028,
+              yaw, GLASS_C, 'glass', true, 0.9, 1.05).leaf = 'ext';
+          // base strip under the glass, cladding band above it
+          if (!isDoor && gB - fy > 0.04)
+            flat(fy, gB, 0, 1, clad, 0.9, 0.98);
+          if (yTw - gT > 0.05) flat(gT, yTw, 0, 1, clad, 0.95, 1.03);
+          continue;
+        }
+
+        // ---- CURTAIN-WALL OFFICE: two hash-picked variants ----
+        // 'bands' = continuous horizontal glass with slim spandrels (the glass
+        // fraction lands ~0.8); 'grid' = a grid of tall windows in dark frames.
+        // Both wear wallHex — classify() stamped the cool grey onto f.c, so
+        // the far LOD's flat box is already the same colour.
+        if (officeVar && !(fi === 0 && cells.storeC)) {
+          if (isDoor) { flat(yB, yTw, 0, 1, col, 0.94, 1.0); continue; }
+          const kA = ao(fy + wallH * 0.5);
+          if (officeVar === 'bands') {
+            const gB = fy + wallH * 0.30, gT = fy + wallH * 0.88;
+            flat(fy, gB, 0, 1, col, kA * 0.92, kA * 1.0);       // spandrel
+            flat(gT, yTw, 0, 1, col, kA * 0.94, kA * 1.02);     // floor strip
+            flat(gB, gT, 0, 0.045, FRAME_C, 0.96, 1.0);         // band joint
+            if (i === n - 1) flat(gB, gT, 0.955, 1, FRAME_C, 0.96, 1.0);
+            push(out, px + inx * thick * 0.22, (gB + gT) / 2,
+              pz + inz * thick * 0.22, pw / 2 - 0.09, (gT - gB) / 2, 0.028,
+              yaw, GLASS_C, 'glass', true, 0.9, 1.05).leaf = 'ext';
+          } else {
+            const wy0 = fy + wallH * 0.20, wy1 = fy + wallH * 0.84;
+            const gFrac = 0.64, gj = (1 - gFrac) / 2;
+            flat(fy, wy0, 0, 1, col, kA * 0.9, kA * 0.98);
+            flat(wy1, yTw, 0, 1, col, kA * 0.94, kA * 1.02);
+            flat(wy0, wy1, 0, gj, FRAME_C, 0.94, 1.0);          // dark frame
+            flat(wy0, wy1, 1 - gj, 1, FRAME_C, 0.94, 1.0);
+            push(out, px + inx * thick * 0.22, (wy0 + wy1) / 2,
+              pz + inz * thick * 0.22, gFrac * pw / 2 - 0.02, (wy1 - wy0) / 2,
+              0.028, yaw, GLASS_C, 'glass', true, 0.9, 1.05).leaf = 'ext';
+          }
+          continue;
+        }
+
+        // ---- NOVOSTAVBA: white plaster, tall windows, French balconies ----
+        if (novaExt && !(fi === 0 && cells.storeC)) {
+          if (isDoor) { flat(yB, yTw, 0, 1, col, 0.94, 1.02); continue; }
+          const kA = ao(fy + wallH / 2);
+          if (wallH < 2.2 || rnd(plan.id, 8100 + fi * 89 + ei * 11 + i) < 0.15) {
+            flat(fy, yTw, 0, 1, col, kA * 0.95, kA * 1.03);
+            continue;
+          }
+          const wy0 = fy + wallH * 0.24, wy1 = fy + wallH * 0.88;
+          const gFrac = 0.6, gj = (1 - gFrac) / 2;
+          flat(fy, wy0, 0, 1, col, kA * 0.93, kA * 1.0);
+          flat(wy1, yTw, 0, 1, col, kA * 0.96, kA * 1.04);
+          flat(wy0, wy1, 0, gj, col, kA * 0.9, kA * 0.97);
+          flat(wy0, wy1, 1 - gj, 1, col, kA * 0.9, kA * 0.97);
+          push(out, px + inx * thick * 0.22, (wy0 + wy1) / 2,
+            pz + inz * thick * 0.22, gFrac * pw / 2 - 0.05, (wy1 - wy0) / 2,
+            0.028, yaw, GLASS_C, 'glass', true, 0.9, 1.05).leaf = 'ext';
+          // the French balcony: a flush dark rail across the pane's lower half
+          // — floor-to-ceiling glass on an upper storey NEEDS one to read as a
+          // dwelling rather than an office
+          if (fi > 0 && rnd(plan.id, 8200 + fi * 131 + ei * 17 + i) < 0.6)
+            push(out, px - inx * (off + 0.05), wy0 + 0.55, pz - inz * (off + 0.05),
+              pw * gFrac / 2 - 0.02, 0.5, 0.03, yaw, FRENCH_C, 'rail', true,
+              0.9, 1.0).french = true;
+          continue;
+        }
+
         // ---- the OUTER leaf is the facade, as boxes, WITH REAL WINDOWS ----
         // Each atlas BAY becomes five pieces: plaster below the sill, plaster
         // above the lintel, a jamb either side, and a translucent PANE in the
@@ -316,23 +462,29 @@ function emitPerimeter(out, plan, fi, leaf) {
         const cv0 = cell[1], cvH = cell[3] - cell[1];
         const uvOf = (fu0, fu1, fv0, fv1) =>
           [cu + cw * fu0, cv0 + cvH * fv0, cu + cw * fu1, cv0 + cvH * fv1];
-        const put = (y0, y1, u0f, u1f, uv) => {
+        // corrugated-look striping: an industrial hall alternates panel-column
+        // brightness, which reads as profiled sheet cladding at zero cost
+        const stripeK = plan.use === 'industrial' ? (i % 2 ? 0.85 : 1.03) : 1;
+        const put = (y0, y1, u0f, u1f, uv, kM) => {
           if (y1 - y0 < 0.02 || u1f - u0f < 0.01) return;
           const cx2 = px + ux * (u0f + u1f - 1) * pw * 0.5;
           const cz2 = pz + uz * (u0f + u1f - 1) * pw * 0.5;
-          const k = ao((y0 + y1) / 2);
+          const k = ao((y0 + y1) / 2) * stripeK * (kM ?? 1);
           const p = push(out, cx2, (y0 + y1) / 2, cz2, (u1f - u0f) * pw / 2,
             (y1 - y0) / 2, thick / 2, yaw, col, 'ext', false, k * 0.95, k * 1.02);
           p.leaf = 'ext';
           p.uv = uv;
           return p;
         };
-        const b0 = cells.band?.[0] ?? 0.29, b1 = cells.band?.[1] ?? 0.74;
-        const frac = cells.frac ?? 0.54;
+        const storefront = fi === 0 && cells.storeC && !isDoor;
+        // a storefront is GLASS nearly wall to wall — a shop you cannot see
+        // into is a painted shop, which is exactly the complaint this fixes
+        const b0 = storefront ? 0.055 : (cells.band?.[0] ?? 0.29);
+        const b1 = storefront ? 0.80 : (cells.band?.[1] ?? 0.74);
+        const frac = storefront ? 0.86 : (cells.frac ?? 0.54);
         const wy0 = yB + (yT - yB) * b0, wy1 = yB + (yT - yB) * b1;
-        // a door bay, a storefront storey or a windowless use stays solid
-        const solid = isDoor || (fi === 0 && cells.storeC)
-          || winChance < 0.35 || (yT - yB) < 2.2;
+        // a door bay or a windowless use stays solid
+        const solid = isDoor || (!storefront && winChance < 0.35) || (yT - yB) < 2.2;
         if (solid) {
           const fv0 = (yB - fy) / wallH, fv1 = (yT - fy) / wallH;
           put(yB, yT, 0, 1, uvOf(0, 1, fv0, fv1));
@@ -343,8 +495,8 @@ function emitPerimeter(out, plan, fi, leaf) {
         const fw0 = (wy0 - fy) / wallH, fw1 = (wy1 - fy) / wallH;
         put(yB, wy0, 0, 1, uvOf(0, 1, fvB, fw0));            // under the sill
         put(wy1, yT, 0, 1, uvOf(0, 1, fw1, fvT));            // over the lintel
-        put(wy0, wy1, 0, j0, uvOf(0, j0, fw0, fw1));         // left jamb
-        put(wy0, wy1, j1, 1, uvOf(j1, 1, fw0, fw1));         // right jamb
+        put(wy0, wy1, 0, j0, uvOf(0, j0, fw0, fw1), surK);   // left jamb
+        put(wy0, wy1, j1, 1, uvOf(j1, 1, fw0, fw1), surK);   // right jamb
         // the pane: thin, set into the reveal, and see-through in both
         // directions — this is what lets you look into a lit room from the
         // street without anybody having to fire a rocket at it first
@@ -504,6 +656,11 @@ const P = {
   reception: [3.4, 0.9, 1.1, 0x7a5c3c],
   plant: [0.7, 0.7, 1.3, 0x4d7a3e],
   fireext: [0.22, 0.22, 0.6, 0xb01e1e],
+  // the panelák ground floor: the mailbox bank in the zádveří, and what
+  // actually stands in every kočárkárna in the country
+  mailbox: [0.42, 0.3, 1.35, 0xb9b39f],
+  pram: [0.95, 0.5, 1.0, 0x4f5a6e],
+  bike: [1.75, 0.45, 1.05, 0x8a4a3f],
 };
 // props that sit ON something else rather than on the floor (desk height)
 const ON_DESK = { monitor: 0.74, keyboard: 0.74, printer: 0.74 };
@@ -538,6 +695,66 @@ function workstation(out, plan, room, fy, uf, vf, yawQ, seed) {
   prop(out, plan, room, fy, 'keyboard', uf + 0.012, vf + 0.012, yawQ, seed + 2);
   prop(out, plan, room, fy, 'pctower', uf - 0.02, vf - 0.02, yawQ, seed + 3);
   prop(out, plan, room, fy, 'chair', uf, vf + 0.05, yawQ, seed + 4);
+}
+
+// ---- grocery shelving ------------------------------------------------------
+// A supermarket aisle used to be one grey monolith per side, which read as a
+// warehouse that had already been looted. A real shelf unit is a base, three
+// boards, and STOCK: runs of packaging in the colours every Czech shopper
+// knows without reading a label — cans in reds and silver, cereal boxes in
+// yellows and blues, bottles in greens and browns, the white block of dairy.
+// Each run is its own weak box, so a rocket through the wall throws groceries.
+const GOODS_HEX = [
+  0xc0392f, 0xa93a30, 0xc7cdd1, 0x9ba2a8,           // cans — reds and silver
+  0xd9b23c, 0xe3c85a, 0x3f66a8, 0x577fc0, 0x2f4f8a, // boxes — yellows and blues
+  0x4c7a42, 0x5f9350, 0x6e4f30, 0x8a6a3e,           // bottles — greens, browns
+  0xefede6, 0xf4f2ea,                               // dairy — white
+];
+// goods density coarsens with building size exactly the way slab tiles do:
+// a corner shop stacks 4–7 runs per board, a hypermarket half that, which is
+// what keeps a Kaufland interior inside the piece budget.
+const goodsKOf = (plan) => clamp(Math.sqrt(plan.area / 900), 1, 2.6);
+function shelfUnit(out, plan, room, fy, uf, vf, alongU, seed, runLen) {
+  const fr = plan.fr;
+  const u = room.u0 + (room.u1 - room.u0) * uf;
+  const v = room.v0 + (room.v1 - room.v0) * vf;
+  planToWorld(fr, u, v, _w);
+  const hl = runLen / 2;
+  if (!plan._foot(_w.x, _w.z, Math.hypot(hl, 0.5) + 0.1)) return;
+  const cx = _w.x, cz = _w.z;
+  const yaw = fr.yaw + (alongU ? 0 : Math.PI / 2);
+  const ax = alongU ? fr.ux : fr.vx, az = alongU ? fr.uz : fr.vz;
+  // the unit: a plinth and three boards (the stock hides the missing uprights)
+  push(out, cx, fy + PROP_LIFT + 0.16, cz, hl, 0.16, 0.45, yaw, 0x8f9296, 'prop', true, 0.9, 1.02);
+  const gk = goodsKOf(plan);
+  for (let b = 0; b < 3; b++) {
+    const by = fy + 0.62 + b * 0.5;                  // board tops at 0.62/1.12/1.62
+    push(out, cx, by - 0.025, cz, hl, 0.025, 0.42, yaw, 0xa5a8ab, 'prop', true, 0.9, 1.02);
+    const nRuns = clamp(Math.round((4 + rnd(seed, 900 + b) * 3.99) / gk), 2, 7);
+    const slot = runLen / nRuns;
+    for (let g = 0; g < nRuns; g++) {
+      const gl = clamp(slot * (0.62 + rnd(seed, 910 + b * 17 + g) * 0.33), 0.6, 1.4);
+      const gc = -hl + (g + 0.5) * slot;
+      const col = GOODS_HEX[(rnd(seed, 950 + b * 29 + g) * GOODS_HEX.length) | 0];
+      push(out, cx + ax * gc, by + 0.15, cz + az * gc,
+        Math.min(gl, slot * 0.95) / 2, 0.15, 0.36, yaw, col, 'prop', true, 0.9, 1.06)
+        .goods = true;
+    }
+  }
+}
+// a produce bin: a crate on legs with a lid of fruit — green, red, orange or
+// yellow — parked where every Czech supermarket parks them, just inside the door
+const FRUIT_HEX = [0x5d9a3f, 0xc03a2e, 0xe07b26, 0xd9c32f];
+function produceBin(out, plan, room, fy, uf, vf, seed) {
+  const u = room.u0 + (room.u1 - room.u0) * uf;
+  const v = room.v0 + (room.v1 - room.v0) * vf;
+  planToWorld(plan.fr, u, v, _w);
+  if (!plan._foot(_w.x, _w.z, 0.85)) return;
+  push(out, _w.x, fy + PROP_LIFT + 0.42, _w.z, 0.55, 0.42, 0.45,
+    plan.fr.yaw, 0x9a917e, 'prop', true, 0.88, 1.0);
+  const col = FRUIT_HEX[(rnd(seed, 7) * FRUIT_HEX.length) | 0];
+  push(out, _w.x, fy + PROP_LIFT + 0.93, _w.z, 0.5, 0.09, 0.4,
+    plan.fr.yaw, col, 'prop', true, 0.95, 1.08).goods = true;
 }
 
 // a row of identical props along the room's long axis (aisles, pews, racking)
@@ -615,6 +832,12 @@ function furnish(out, plan, floor, room, fi) {
           1 + R(510 + i) * 0.5);
       if (plan.brand?.bakery) prop(out, plan, room, fy, 'bakery', 0.3, 0.25, 0, seed + 520);
       prop(out, plan, room, fy, 'vending', 0.15, 0.9, 0, seed + 521);
+      // the promo island and the first produce bins — the shop starts here
+      if (d > 10)
+        shelfUnit(out, plan, room, fy, 0.5, 0.5, false, seed + 522, Math.min(6, d * 0.3));
+      const nb = clamp(Math.floor(d / 5), 1, 4);
+      for (let i = 0; i < nb; i++)
+        produceBin(out, plan, room, fy, 0.38, 0.42 + ((i + 0.5) / nb) * 0.45, seed + 525 + i);
       break;
     }
     case 'cinema': {                     // Cinema City under the roof of AFI Palác
@@ -652,10 +875,12 @@ function furnish(out, plan, floor, room, fi) {
         const vf = 0.16 + ((i + 0.5) / n) * 0.66;
         const segs = clamp(Math.floor(w / 7), 1, 6);
         const mid = br?.middleAisle && i === (n >> 1);
-        for (let j = 0; j < segs; j++)
-          prop(out, plan, room, fy, mid ? 'crate' : 'shelfrow',
-            0.1 + ((j + 0.5) / segs) * 0.8, vf, 1, seed + 60 + i * 9 + j,
-            mid ? 1.6 : Math.min(1.4, w / (segs * 7)));
+        for (let j = 0; j < segs; j++) {
+          const uf = 0.1 + ((j + 0.5) / segs) * 0.8;
+          if (mid) prop(out, plan, room, fy, 'crate', uf, vf, 1, seed + 60 + i * 9 + j, 1.6);
+          else shelfUnit(out, plan, room, fy, uf, vf, true, seed + 60 + i * 9 + j,
+            6 * Math.min(1.4, w / (segs * 7)));
+        }
       }
       const tills = clamp(br?.tills ?? Math.floor(w / 4.5), 1, 12);
       for (let i = 0; i < tills; i++)
@@ -667,8 +892,11 @@ function furnish(out, plan, floor, room, fi) {
       const froz = clamp(Math.floor(w / 6), 1, 5);
       for (let i = 0; i < froz; i++)
         prop(out, plan, room, fy, 'freezer', 0.12 + ((i + 0.5) / froz) * 0.76, 0.9 - 0.06, 0, seed + 140 + i);
-      if (br?.bakery || br === undefined)
-        prop(out, plan, room, fy, 'produce', 0.16, 0.24, 0, seed + 160);
+      // produce greets you at the door: crates with fruit-coloured tops
+      const bins = clamp(Math.floor(d / 2.6), 2, 8);
+      for (let i = 0; i < bins; i++)
+        produceBin(out, plan, room, fy, 0.05 + (i % 2) * 0.06,
+          0.12 + ((i + 0.5) / bins) * 0.62, seed + 160 + i);
       if (br?.racking) {                 // a hobbymarket is racking, not shelving
         const rr = clamp(Math.floor(d / 5), 1, 5);
         for (let i = 0; i < rr; i++)
@@ -764,6 +992,33 @@ function furnish(out, plan, floor, room, fi) {
       prop(out, plan, room, fy, 'fireext', 0.02, 0.5, 0, seed + 460);
       break;
     }
+    case 'lobby': {
+      // the zádveří: a bank of mailboxes along one wall — the first thing
+      // every resident sees — and the house noticeboard beside the door
+      const alongU2 = w >= d;
+      const nm = clamp(Math.floor(Math.max(w, d) / 0.55), 3, 8);
+      for (let i = 0; i < nm; i++) {
+        const t = 0.16 + ((i + 0.5) / nm) * 0.68;
+        if (alongU2) prop(out, plan, room, fy, 'mailbox', t, 0.13, 0, seed + 470 + i);
+        else prop(out, plan, room, fy, 'mailbox', 0.13, t, 1, seed + 470 + i);
+      }
+      prop(out, plan, room, fy, 'whiteboard', alongU2 ? 0.5 : 0.88,
+        alongU2 ? 0.88 : 0.5, alongU2 ? 0 : 1, seed + 480, 0.55);   // nástěnka
+      break;
+    }
+    case 'cellar': {                     // one koje of somebody's hoarded life
+      prop(out, plan, room, fy, 'shelf', 0.5, 0.82, 0, seed + 490, 0.7);
+      if (R(495) < 0.7) prop(out, plan, room, fy, 'crate', 0.32, 0.3, 0, seed + 491, 0.55);
+      if (R(496) < 0.4) prop(out, plan, room, fy, 'crate', 0.7, 0.42, 0, seed + 492, 0.45);
+      break;
+    }
+    case 'pram': {                       // kočárkárna: prams and bikes, always
+      prop(out, plan, room, fy, 'pram', 0.25, 0.2, 0, seed + 500);
+      prop(out, plan, room, fy, 'pram', 0.58, 0.2, 0, seed + 501);
+      prop(out, plan, room, fy, 'bike', 0.4, 0.82, 0, seed + 502);
+      prop(out, plan, room, fy, 'bike', 0.78, 0.82, 0, seed + 503);
+      break;
+    }
     default: break;
   }
 }
@@ -815,6 +1070,25 @@ export function interiorPieces(plan) {
     }
     if (floor.stair) emitStair(out, plan, floor.stair, pal.trim);
     for (const r of floor.rails) emitRail(out, plan, r, floor.y, pal.trim);
+    // the výtah: the plan already carries the shaft walls and the slab holes;
+    // what pieces adds is the closed METAL DOOR facing the landing on every
+    // floor — thin, trim-coloured, and NOT weak: a lift door is the one thing
+    // in a burning panelák that famously refuses to open — plus the cab,
+    // parked at ground level behind the ground-floor door.
+    if (plan.lift) {
+      const ls = plan.lift.shaft;
+      const dv = plan.lift.doorOnV1 ? ls.v1 : ls.v0;
+      planToWorld(plan.fr, (ls.u0 + ls.u1) / 2, dv, _w);
+      if (plan._foot(_w.x, _w.z, 0.3))
+        push(out, _w.x, floor.y + I.doorH / 2, _w.z, 0.58, I.doorH / 2, 0.03,
+          plan.fr.yaw, pal.trim, 'wall', false, 0.88, 0.96);
+      if (fi === 0) {
+        planToWorld(plan.fr, (ls.u0 + ls.u1) / 2, (ls.v0 + ls.v1) / 2, _w);
+        if (plan._foot(_w.x, _w.z, 0.6))
+          push(out, _w.x, floor.y + PROP_LIFT + 1.1, _w.z, 0.75, 1.1, 0.85,
+            plan.fr.yaw, 0xb4b8bc, 'prop', true, 0.94, 1.02);
+      }
+    }
     for (const room of floor.rooms) furnish(out, plan, floor, room, fi);
   }
   // the top floor needs a ceiling of its own — the facade's roof cap is
@@ -832,6 +1106,157 @@ export function interiorPieces(plan) {
  * roof and the parapet). Built the first time a building takes damage, at
  * which point city.js stops drawing that building in the chunk mesh.
  */
+// ---- v7 use-class facade extras -------------------------------------------
+// The pieces that hang OFF the shell rather than being part of its wall grid:
+// canopies, the restaurant's roof-edge overhang, the industrial sectional door
+// and its dock bumpers, panelák balconies, and the cheap trims (cornice,
+// plinth) that keep two identical footprints from wearing an identical face.
+// All deterministic from plan.id; all clear of the LAYER_Y ladder (the lowest
+// horizontal face here is a plinth bottom at groundLift = 0.30, four
+// centimetres above the 0.26 marking plane the coplanarity test guards).
+
+// an edge of the footprint ring with its outward frame, shared by everything
+function edgeFrame(ring, sgn, i) {
+  const a = ring[i], b = ring[(i + 1) % ring.length];
+  const dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz);
+  const ux = dx / L, uz = dz / L;
+  return { a, L, ux, uz, ox: sgn * uz, oz: -sgn * ux, yaw: Math.atan2(-uz, ux) };
+}
+
+// Panelák balconies: a grid of protruding slabs + side cheeks + a weak rail
+// panel on the two longest facades, every storey above the first, 2–3 bays
+// apart. The slab top sits 2 cm under the room floor so the two never share a
+// plane; the rail is `weak` — the first thing a blast throws off, exactly
+// like the atrium railings.
+function emitBalconies(out, plan) {
+  const ring = plan.ring, sgn = polygonArea(ring) > 0 ? 1 : -1;
+  const wall = wallHexOf(plan), id = plan.id;
+  const railC = RAIL_CS[Math.floor(rnd(id, 87) * RAIL_CS.length) % RAIL_CS.length];
+  const D = 1.35, W = 2.4;                       // balcony depth and width
+  const byLen = [];
+  for (let i = 0; i < ring.length; i++) {
+    const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
+    byLen.push({ i, L: Math.hypot(bx - ax, bz - az) });
+  }
+  byLen.sort((p, q) => q.L - p.L);
+  for (const ed of byLen.slice(0, 2)) {          // the long facades only
+    if (ed.L < 9) continue;
+    const e = edgeFrame(ring, sgn, ed.i);
+    const step = 2.7 * (rnd(id, 88 + ed.i) < 0.5 ? 2 : 3);   // 2–3 atlas bays
+    const cnt = Math.floor((ed.L - 2.2) / step);
+    if (cnt < 1) continue;
+    const margin = (ed.L - (cnt - 1) * step) / 2;
+    for (let fi = 1; fi < plan.storeys; fi++) {
+      const by = plan.floors[fi].y;
+      for (let k = 0; k < cnt; k++) {
+        const s = margin + k * step;
+        const bx = e.a[0] + e.ux * s, bz = e.a[1] + e.uz * s;
+        push(out, bx + e.ox * (D / 2 + 0.03), by - 0.11, bz + e.oz * (D / 2 + 0.03),
+          W / 2, 0.09, D / 2, e.yaw, wall, 'ext', false, 0.88, 0.98).balcony = true;
+        for (const sd of [-1, 1])                // side cheeks
+          push(out, bx + e.ux * sd * (W / 2 - 0.06) + e.ox * (D / 2 + 0.03),
+            by + 0.5, bz + e.uz * sd * (W / 2 - 0.06) + e.oz * (D / 2 + 0.03),
+            0.06, 0.52, D / 2 - 0.03, e.yaw, wall, 'ext', false, 0.86, 0.95)
+            .balcony = true;
+        push(out, bx + e.ox * (D - 0.05), by + 0.53, bz + e.oz * (D - 0.05),
+          W / 2, 0.5, 0.035, e.yaw, railC, 'rail', true, 0.92, 1.04).balcony = true;
+      }
+    }
+  }
+}
+
+function emitFacadeExtras(out, plan) {
+  const use = plan.use, ent = plan.entrance, ring = plan.ring, id = plan.id;
+  const sgn = polygonArea(ring) > 0 ? 1 : -1;
+  const wall = wallHexOf(plan);
+  const fy = plan.floors[0].y;
+
+  if (use === 'restaurant' && ent) {
+    const clad = plan.brand?.clad ?? 0x45423e;
+    const e = edgeFrame(ring, sgn, ent.i);
+    // the low canopy over the entrance run — the pavilion's brow
+    push(out, ent.x + ent.nx * 0.95, fy + 2.75, ent.z + ent.nz * 0.95,
+      Math.min(ent.w / 2 + 1.6, e.L * 0.45), 0.07, 0.95, e.yaw, clad,
+      'ext', false, 0.96, 1.03);
+    // and a slight flat-roof overhang along the three glazed edges
+    for (const i of [ent.i, (ent.i + 1) % ring.length,
+      (ent.i + ring.length - 1) % ring.length]) {
+      const g = edgeFrame(ring, sgn, i);
+      if (g.L < 2.5) continue;
+      const n = Math.max(1, Math.ceil((g.L * 0.92) / 6));
+      const pw = (g.L * 0.92) / n;
+      for (let k = 0; k < n; k++) {
+        const s = g.L * 0.04 + (k + 0.5) * pw;
+        push(out, g.a[0] + g.ux * s + g.ox * 0.18, plan.top + 0.08,
+          g.a[1] + g.uz * s + g.oz * 0.18, pw / 2, 0.11, 0.34, g.yaw, clad,
+          'ext', false, 0.94, 1.0);
+      }
+    }
+  }
+
+  if (use === 'mall' && ent) {
+    // the wide canopy over the glazed portal, kept above the door head even
+    // when a squat mall runs minimum-height storeys
+    const e = edgeFrame(ring, sgn, ent.i);
+    const cy = fy + Math.max(2.62, Math.min(plan.sH - 0.15, 3.9));
+    push(out, ent.x + ent.nx * 1.25, cy, ent.z + ent.nz * 1.25,
+      clamp(e.L * 0.24, 2.5, 7), 0.09, 1.3, e.yaw, wall, 'ext', false, 0.8, 0.88);
+  }
+
+  if (use === 'industrial' && ent) {
+    // a 4 × 4 m sectional door beside the person door, plus dock bumpers —
+    // the two things that say "trucks back up to this wall"
+    const e = edgeFrame(ring, sgn, ent.i);
+    const doorW = 4, doorH = Math.min(4, plan.usable - 0.5);
+    if (doorH > 2.2 && e.L > doorW + ent.w + 4) {
+      let s = clamp(e.L * (ent.t <= 0.5 ? 0.75 : 0.25),
+        doorW / 2 + 1, e.L - doorW / 2 - 1);
+      if (Math.abs(s - e.L * ent.t) < (doorW + ent.w) / 2 + 0.5)
+        s = clamp(e.L * ent.t + (s > e.L * ent.t ? 1 : -1) * ((doorW + ent.w) / 2 + 1),
+          doorW / 2 + 1, e.L - doorW / 2 - 1);
+      const dx2 = e.a[0] + e.ux * s, dz2 = e.a[1] + e.uz * s;
+      push(out, dx2 + e.ox * 0.06, fy + doorH / 2, dz2 + e.oz * 0.06,
+        doorW / 2, doorH / 2, 0.1, e.yaw, 0x55595e, 'ext', false, 0.92, 1.0);
+      for (const c of [-1.55, 1.55])
+        push(out, dx2 + e.ux * c + e.ox * 0.14, fy + 0.5, dz2 + e.uz * c + e.oz * 0.14,
+          0.28, 0.18, 0.1, e.yaw, 0x2e2f33, 'prop', true, 0.9, 1.0);
+    }
+  }
+
+  // panelák balconies: the prefab type, or anything six storeys and up
+  if (use === 'flats' && !plan.nova && plan.storeys >= 2
+      && (plan.osmT === 'panel' || plan.storeys >= 6)) emitBalconies(out, plan);
+
+  // hash-picked trims for the generic housing stock: a cornice strip under the
+  // parapet and a darker plinth band at the ground — small, cheap, and enough
+  // that two identical footprints stop wearing an identical face. Novostavby
+  // always take the cornice (their flat-roof trim line).
+  if (use === 'house' || use === 'flats') {
+    const cornice = plan.nova || rnd(id, 81) < 0.45;
+    const plinth = !plan.nova && rnd(id, 82) < 0.5;
+    if (!cornice && !plinth) return;
+    for (let i = 0; i < ring.length; i++) {
+      const g = edgeFrame(ring, sgn, i);
+      if (g.L < 2) continue;
+      const n = Math.max(1, Math.ceil(g.L / 6));
+      const pw = g.L / n;
+      for (let k = 0; k < n; k++) {
+        const s = (k + 0.5) * pw;
+        const x = g.a[0] + g.ux * s, z = g.a[1] + g.uz * s;
+        if (cornice)
+          push(out, x + g.ox * 0.10, plan.top - 0.16, z + g.oz * 0.10,
+            pw / 2, 0.11, 0.09, g.yaw, wall, 'ext', false, 1.05, 1.12);
+        // the plinth may not bar the front door: an 0.8 m band across the
+        // opening would out-climb the walk controller's 0.55 m step-up
+        if (plinth && !(ent && i === ent.i
+            && Math.abs(s - g.L * ent.t) < ent.w / 2 + pw / 2))
+          push(out, x + g.ox * 0.045, fy + 0.42, z + g.oz * 0.045,
+            pw / 2, 0.40, 0.05, g.yaw, wall, 'ext', false, 0.7, 0.78);
+      }
+    }
+  }
+}
+
 // ---- branding -------------------------------------------------------------
 // The chain's colours have to live on the SHELL, not on the chunk facade: the
 // facade stands down the moment a building is activated, so a fascia painted
@@ -845,18 +1270,44 @@ export function interiorPieces(plan) {
 //     you actually navigate by. The logo is built from axis-aligned boxes, so
 //     the golden arches are two rounded humps (leg-top-leg × 2), which is what
 //     they read as from a car anyway.
+// Every fascia piece and the totem panel carry the WORDMARK CONTRACT:
+// `signText` (the brand label), `signBg` (the fascia colour) and `signFg`
+// (white, except the brands that print dark on a light ground — Billa).
+// destructible.js renders those faces with a generated wordmark texture, so
+// the pieces here stay long boxes — one word reads better on one box than on
+// four — split only at 12 m so a rocket can still take the sign apart.
 const SIGN = 'sign';
 function brandSigns(out, plan) {
   const brand = plan.brand;
   if (!brand?.sign) return;
   const ring = plan.ring, fr = plan.fr;
   const sgn = polygonArea(ring) > 0 ? 1 : -1;
+  const label = brand.label ?? '';
+  // Ink rule COPIED from meshes.js's far-LOD wordmark — trim colour when the
+  // chain defines one, else white, except dark type on a light fascia. The two
+  // tiers computing this differently is exactly how a McDonald's ended up
+  // red-on-yellow from the road and white-on-yellow up close.
+  const lum = 0.299 * (brand.sign >> 16 & 255) + 0.587 * (brand.sign >> 8 & 255)
+    + 0.114 * (brand.sign & 255);
+  const fg = brand.fg ?? brand.trim ?? (lum > 150 ? 0x23201a : 0xffffff);
+  const stamp = (p) => { p.signText = label; p.signBg = brand.sign; p.signFg = fg; return p; };
+  // Which edges wear the fascia: the ENTRANCE edge first — the sign belongs
+  // over the doors, facing the car park, which is where a shopper actually
+  // looks — then the longest remaining edge for the flank. Two longest alone
+  // put both Kaufland bands on the service side when the footprint ran
+  // deeper than it was wide. (meshes.js's far LOD uses this same rule —
+  // change one, change both.)
   const edges = [];
   for (let i = 0; i < ring.length; i++) {
     const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
     edges.push({ i, L: Math.hypot(bx - ax, bz - az) });
   }
   edges.sort((a, b) => b.L - a.L);
+  const entI = plan.entrance?.i;
+  if (entI !== undefined) {
+    const k = edges.findIndex((e) => e.i === entI);
+    if (k > 0 && edges[k].L >= 8) edges.unshift(edges.splice(k, 1)[0]);
+  }
 
   // ---- fascia band ----
   const H = clamp((plan.top - plan.y0) * 0.22, 0.7, 1.6);
@@ -867,12 +1318,18 @@ function brandSigns(out, plan) {
     const ux = (bx - ax) / e.L, uz = (bz - az) / e.L;
     const nx = sgn * uz, nz = -sgn * ux;
     const yaw = Math.atan2(-uz, ux);
-    const run = e.L * 0.88, n = Math.max(1, Math.round(run / 3));
+    const run = e.L * 0.88, n = Math.max(1, Math.ceil(run / 12));
     const pw = run / n;
+    // The wordmark goes on ONE piece — the one at the middle of the run — and
+    // the rest of the band stays plain fascia colour. The far LOD paints the
+    // name once, centred; a name repeated and stretched on every 12 m segment
+    // is what made a long Kaufland front morph at the tier swap.
+    const mid = (n - 1) >> 1;
     for (let k = 0; k < n; k++) {
       const s = e.L * 0.06 + (k + 0.5) * pw;
-      push(out, ax + ux * s + nx * 0.12, bandY, az + uz * s + nz * 0.12,
+      const p = push(out, ax + ux * s + nx * 0.12, bandY, az + uz * s + nz * 0.12,
         pw / 2, H / 2, 0.12, yaw, brand.sign, SIGN, false, 1, 1);
+      if (k === mid) stamp(p);
     }
   }
 
@@ -890,9 +1347,10 @@ function brandSigns(out, plan) {
   const PW = 2.3, PH = 2.6;
   push(out, px, base + (panelY - PH / 2 - base) / 2, pz, 0.22,
     (panelY - PH / 2 - base) / 2, 0.22, yaw, 0x4a4d52, 'ext', false, 0.9, 1);
-  push(out, px, panelY, pz, PW, PH / 2, 0.16, yaw, brand.sign, SIGN, false, 1, 1);
-  // the logo, in the brand's second colour, standing 4 cm proud of the panel
-  const lx = -Math.sin(yaw) * 0, lz = 0;                 // panel faces its own +z
+  stamp(push(out, px, panelY, pz, PW, PH / 2, 0.16, yaw, brand.sign, SIGN, false, 1, 1));
+  // the fast-food glyphs, in the brand's second colour, 4 cm proud of the
+  // panel — a wordmark can't draw the golden arches. Everyone else's panel is
+  // left flat: the stamped signText already puts the name on it.
   const fx = Math.cos(yaw + Math.PI / 2), fz = -Math.sin(yaw + Math.PI / 2);
   const glyph = brand.trim ?? 0xffffff;
   const put = (offU, offY, hu, hy) =>
@@ -909,8 +1367,6 @@ function brandSigns(out, plan) {
   } else if (/kfc/i.test(brand.label ?? '')) {
     put(0, 0.75, 1.7, 0.2);                              // the white stripe…
     for (const c of [-0.85, 0, 0.85]) put(c, -0.25, 0.32, 0.72);   // …and K F C
-  } else {
-    put(0, 0, 1.7, 0.55);                                // a plain wordmark bar
   }
 }
 
@@ -923,6 +1379,7 @@ export function shellPieces(plan) {
   // a single-storey hall's wall stops at usable height; anything above that
   // (a tall gable, a parapet) is roof work
   emitRoof(out, plan);
+  emitFacadeExtras(out, plan);
   brandSigns(out, plan);
   return out;
 }

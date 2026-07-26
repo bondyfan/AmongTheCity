@@ -15,11 +15,24 @@
 // highway=traffic_signals points into 2-phase junction controllers with real
 // pole meshes, and cars the player rams (vehicles.js sets _rammedT) go limp,
 // slide out on friction, then re-snap onto their rail and drive on.
+//
+// v7: the city stops crawling. Missing maxspeed falls back to the CZECH
+// defaults per road class (the old flat `|| 30` made every untagged street a
+// školní zóna), every driver carries a personal speed factor so a 50 street
+// holds 36–59 km/h of honest disagreement, blocked drivers HONK (audio.js
+// horn(), personal cooldown, global budget), and junctions where main roads
+// demonstrably cross get SYNTHESIZED signal controllers — OSM's signal
+// coverage out in the region is far too sparse for how the roads are built.
 
 import * as THREE from 'three';
 import { TRAFFIC, CAR_COLORS } from './config.js';
 import { bridgeElevation, distPointToSegment } from './geo.js';
-import { CAR_KINDS } from './vehicles.js';
+import { LAYER_Y } from './config.js';
+// namespace import on purpose: pickCarColor is a newer export and a named
+// import of something a stale vehicles.js doesn't have is a hard link error —
+// the typeof check below degrades to CAR_COLORS instead
+import * as VEH from './vehicles.js';
+import { horn } from './audio.js';   // safe headless — no-ops without an AudioContext
 
 // AI-local tuning (config.js owns the player-facing numbers)
 const ACCEL = 4.0;            // gentle m/s² — commuters, not street racers
@@ -33,17 +46,31 @@ const LAT_GATE = 2.0;         // half-width of the follow corridor (m) — an
 const HEAD_GATE = 0.61;       // ±35° same-direction test for AI-AI following
 const STRAIGHT = Math.PI / 6; // ±30° reads as "carrying straight on"
 const SPAWN_MIN = 60;         // don't pop a car into existence at arm's length
-const SPAWN_R = 460;          // v3 contract widens the ring past config's 400 —
-                              // config.js is not ours to edit, so the override lives here
 const RAM_FRICTION = 4.0;     // m/s² a rammed (AI-suspended) car scrubs while sliding out
 const FAST_EDGE = 50 / 3.6;   // commercial traffic only bothers with ≥50 km/h roads
 
-// kind pools as indices into vehicles' CAR_KINDS = [sedan,hatch,kombi,suv,van,truck,bus]:
-// everyday metal dominates everywhere; vans/trucks/buses exist but ONLY roll on fast
-// edges — a bus threading a 30 km/h residential loop looks wrong and corners terribly
-const COMMON = [0, 0, 0, 1, 1, 1, 2, 2, 3, 3];
-const BIG = [4, 4, 5, 6];
+// kind pools BY NAME (vehicles.js owns the roster — indexing into it broke the
+// day the roster was renamed, names don't): škody dominate Czech roads, so the
+// everyday pool is mostly octavia/fabia with the odd German sedan and a tesla;
+// commercial metal exists but ONLY rolls on fast edges — a bus threading a
+// 30 km/h residential loop looks wrong and corners terribly
+const COMMON = ['octavia', 'octavia', 'fabia', 'fabia', 'octavia', 'bmw', 'mercedes', 'tesla'];
+const BIG = ['van', 'van', 'truck', 'bus'];
 const BIG_CHANCE = 0.22;      // roughly every 5th spawn on a main road is commercial
+
+// per-driver speed factor: desire = edge limit × vK. 0.72 is the pensioner in
+// the fabia, 1.18 the sales rep late for Hradec — on a 50 street that spread
+// is a genuine 36..59 km/h, on a rural 90 it's 65..106
+const VK_MIN = 0.72, VK_VAR = 0.46;
+
+// ---- horn tuning ----
+const HONK_FRAC = 0.30;       // "held" = pinned under this fraction of desire…
+const HONK_HELD = 2.5;        // …for this many seconds by whoever is ahead
+const HONK_CD_MIN = 6, HONK_CD_VAR = 10;  // personal cooldown 6–16 s
+const HONK_RATE = 2, HONK_POOL = 2;       // global budget ~2 honks/s (burst of 2) —
+                                          // a jam grumbles, it doesn't become a horn wall
+const HONK_R = 150;           // m — horn() is an unpanned global one-shot, so only
+                              // cars close enough to be plausibly audible get to use it
 
 // ---- traffic-light tuning ----
 const SIG_CLUSTER = 30;       // signal points within 30 m share one junction controller
@@ -56,6 +83,37 @@ const SIG_STOP = 5;           // cars hold this many meters short of the junctio
 const SIG_VIS2 = 800 * 800;   // pole meshes render within 800 m of the player (frustum
                               // culling handles the rest; a region's worth of poles never
                               // all draw at once)
+// ---- synthesized signals: where lights OUGHT to stand but OSM is silent ----
+// Which crossings EARN synthesized lights. Both buckets track main-class arms
+// (tertiary included — a primary × tertiary junction is signalized in any real
+// town), but at least ONE of the crossing roads must be primary/secondary:
+// tertiary × tertiary lit up 80 junctions in view at the spawn alone, which
+// both gridlocked the traffic on permanent red waves and put ~1200 pole meshes
+// into the scene (measured: 12 fps). Pardubice signalizes its arterials, not
+// every pair of sběrné komunikace.
+const SIG_CLASS = /^(primary|secondary|tertiary)$/;
+const SIG_MAJOR = /^(primary|secondary)$/;           // one of these must be present
+const SYNTH_CLEAR = 45;       // an existing controller this close owns the crossing already
+const SYNTH_BACK = 12;        // fabricated stop-line points stand this far up each approach
+
+// Czech speed defaults where the data carries no maxspeed, by road class: 130
+// is motorway law but 110 reads right at this fidelity, the rural 90 kicks in
+// on primaries/secondaries once out of the built-up area, secondary/tertiary
+// default to the between-towns 70, town streets to the blanket 50, obytná
+// zóna to 20. THE bug this table replaces: a flat `|| 30` that made every
+// untagged street — i.e. most of the region — crawl at 30 km/h.
+const SPEED_DFLT = {
+  motorway: 110, trunk: 110, tertiary: 70,
+  residential: 50, unclassified: 50, living_street: 20, service: 30,
+  motorway_link: 60, trunk_link: 60, primary_link: 60, secondary_link: 60, tertiary_link: 60,
+};
+const BUILT_UP_R = 1800;      // m from the origin ≈ the edge of Pardubice proper — the
+                              // Polabí is flat and the town roughly round, so a radius works
+function defaultV(t, x, z) {
+  if (t === 'primary' || t === 'secondary')
+    return Math.hypot(x, z) > BUILT_UP_R ? 90 : (t === 'primary' ? 50 : 70);
+  return SPEED_DFLT[t] ?? 50;
+}
 
 // 10 cm snapping welds shared OSM nodes without gluing near-misses — ways that
 // meet at a junction repeat the exact same coordinate, so toFixed(1) is safe.
@@ -77,6 +135,7 @@ const hash01 = (x, z) => { const h = Math.sin(x * 12.9898 + z * 78.233) * 43758.
 const _pose = { x: 0, z: 0, dx: 0, dz: 0, seg: 0 };
 const _cand = [], _straight = [];
 const _snap = { x: 0, z: 0, t: 0 };
+const _pts = [];              // fabricated signal points, reused per synth junction
 
 // point + direction at arc-length s along an edge. `seg` is the caller's
 // cached segment index — s only ever grows within an edge, so the while loop
@@ -133,6 +192,7 @@ export class Traffic {
     this._nearX = 1e9; this._nearZ = 1e9; this._nearT = 0;
     this._spawnT = 0;
     this._t = 0;                    // the shared signal clock (junction offsets desync it)
+    this._hornPool = HONK_POOL;     // global honk budget, refilled at HONK_RATE/s
     // ingest whatever is already loaded (legacy whole-city file, or region tiles
     // that landed before we were constructed), then subscribe for the rest —
     // optional chaining because bare test fixtures pass {roads:[…]} without it
@@ -149,7 +209,11 @@ export class Traffic {
   addTile({ roads, signals }) {
     const e0 = this.edges.length;
     this._growGraph(roads ?? []);
-    const grown = this._growSignals(signals ?? []);
+    let grown = this._growSignals(signals ?? []);
+    // real OSM clusters first, THEN synthesis — an actual signal within
+    // SYNTH_CLEAR of a crossing suppresses the fabricated one, never vice versa
+    const synth = this._synthSignals();
+    if (synth) { if (grown) for (const j of synth) grown.add(j); else grown = synth; }
     // bind: every NEW edge scans all junctions; every new/updated junction
     // scans the OLD edges (new ones were just covered). _tryBind keeps the
     // nearest junction, so double visits are harmless. Cost is (edges ×
@@ -208,7 +272,9 @@ export class Traffic {
   _node(x, z) {
     const k = keyOf(x, z);
     let n = this._nodes.get(k);
-    if (!n) this._nodes.set(k, n = { x, z, out: [] });
+    // deg counts incident ARMS (edge segments, direction-agnostic) and inn the
+    // incoming directed edges — both feed the synthetic-signal junction scan
+    if (!n) this._nodes.set(k, n = { x, z, out: [], inn: [], deg: 0 });
     return n;
   }
 
@@ -219,8 +285,29 @@ export class Traffic {
       cum[i] = cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
     const len = cum[n - 1];
     if (len < 0.5) return;                       // degenerate/duplicate points
-    const speed = (road.v || 30) / 3.6;          // km/h → m/s
+    // km/h → m/s, with the Czech class defaults standing in for missing data —
+    // rural-vs-town judged at the EDGE's midpoint, not the whole way's.
+    // CAVEAT about the data: build-city.mjs never reads the real maxspeed tag —
+    // it stamps a CLASS-TABLE speed on every way, and its residential=30 is
+    // what made the whole town crawl. Czech law is 50 in a built-up area unless
+    // signed, so the two table values that misstate it are corrected here;
+    // living_street (obytná zóna, genuinely 20) and service stay.
+    const mid = pts[n >> 1];
+    let kmh = road.v || defaultV(road.t, mid[0], mid[1]);
+    if (road.t === 'residential' && kmh === 30) kmh = 50;
+    else if (road.t === 'unclassified' && kmh === 40) kmh = 50;
+    const speed = kmh / 3.6;
     const fwd = this._makeEdge(road, pts, cum, len, speed, off, 1);
+    // junction bookkeeping for the synthetic-signal scan: this edge is one arm
+    // at each end node; arms of main-class roads also register which bearing
+    // BUCKET they leave the node in (N-S-ish vs E-W-ish — the same split the
+    // 2-phase controller uses), so the scan can later ask "do mains genuinely
+    // CROSS here, or does one road merely continue through a way split?"
+    fwd.a.deg++; fwd.b.deg++;
+    if (SIG_CLASS.test(road.t)) {
+      (Math.abs(fwd.fdz) >= Math.abs(fwd.fdx) ? (fwd.a.ns ??= new Set()) : (fwd.a.ew ??= new Set())).add(road);
+      (Math.abs(fwd.ldz) >= Math.abs(fwd.ldx) ? (fwd.b.ns ??= new Set()) : (fwd.b.ew ??= new Set())).add(road);
+    }
     if (!road.ow) {
       // two-way street: a mirrored twin walks it the other way. off0 is the
       // way-offset of THIS direction's start, offSign walks it backwards, so
@@ -257,6 +344,7 @@ export class Traffic {
       sig: null, sigD: 1e9, sigPh: 0, sigStop: 0,
     };
     e.a.out.push(e);
+    e.b.inn.push(e);   // incoming list: where a synthetic junction plants its poles
     this.edges.push(e);
     return e;
   }
@@ -295,6 +383,52 @@ export class Traffic {
       jn.st0 = jn.st1 = -1;         // force a lamp refresh — new poles start unlit
       (grown ??= new Set()).add(jn);
     }
+    return grown;
+  }
+
+  // OSM maps maybe a tenth of the region's real signals, so we synthesize the
+  // rest from the road graph itself: a node where ≥3 arms meet AND at least
+  // two DISTINCT main-class roads leave in both bearing buckets (i.e. mains
+  // cross, not merely continue through a way split) gets a fabricated signal
+  // cluster — one stop-line point per approach, fed through the exact same
+  // _growSignals/_makePole path as real OSM points, so poles, phases and the
+  // car-braking logic cannot drift apart. Runs per addTile over ALL nodes:
+  // a node that fails today may qualify when the next tile adds its fourth
+  // arm, so only nodes that RESOLVED (built, or owned by a controller that
+  // will never go away) are stamped done. Fully deterministic — geometry and
+  // hash01 only, no Math.random — so every session grows the same city.
+  _synthSignals() {
+    let grown = null, made = 0;
+    for (const n of this._nodes.values()) {
+      if (n._sg || n.deg < 3 || !n.ns || !n.ew) continue;
+      let distinct = n.ns.size;                 // union of the two bucket sets —
+      for (const r of n.ew) if (!n.ns.has(r)) distinct++;  // one road bent 90° isn't a crossing
+      if (distinct < 2) continue;
+      // …and the crossing must involve an ARTERIAL — see SIG_MAJOR above
+      let major = false;
+      for (const r of n.ns) if (SIG_MAJOR.test(r.t)) { major = true; break; }
+      if (!major) for (const r of n.ew) if (SIG_MAJOR.test(r.t)) { major = true; break; }
+      if (!major) { n._sg = 1; continue; }
+      let owned = false;                        // a real cluster (or an earlier synthetic
+      for (const j of this._junctions)          // one) within SYNTH_CLEAR owns this crossing
+        if (Math.hypot(j.x - n.x, j.z - n.z) < SYNTH_CLEAR) { owned = true; break; }
+      if (owned) { n._sg = 1; continue; }
+      // one stop-line point per approach, planted a few meters back up the
+      // incoming edge. Capping at 45 % of the edge keeps the point past the
+      // halfway mark, so _makePole's "which direction does this pole serve"
+      // test can never flip it onto the departing lane of a short edge.
+      _pts.length = 0;
+      for (const e of n.inn) {
+        if (e.len < SIG_MIN_EDGE) continue;     // junction-box stub — ungoverned anyway
+        const pose = poseAt(e, e.len - Math.min(SYNTH_BACK, e.len * 0.45), 0);
+        _pts.push([pose.x, pose.z]);
+      }
+      if (_pts.length < 2) continue;            // stub-only today; retry as tiles grow arms
+      n._sg = 1; made++;
+      const g = this._growSignals(_pts);
+      if (g) { grown ??= new Set(); for (const j of g) grown.add(j); }
+    }
+    if (made) console.log(`semafory: +${made} syntetických`);
     return grown;
   }
 
@@ -397,6 +531,7 @@ export class Traffic {
     if (!this.edges.length || !playerPos) return;
     this._t += dt;
     if (this._junctions.length) this._tickSignals();
+    this._hornPool = Math.min(HONK_POOL, this._hornPool + HONK_RATE * dt);
     const px = playerPos.x, pz = playerPos.z;
     // refresh the spawn-candidate list when the player wanders — a linear
     // scan over all edges, but at 0.5 Hz, never per frame. Piggy-back the
@@ -405,8 +540,15 @@ export class Traffic {
     if (this._nearT <= 0 || Math.hypot(px - this._nearX, pz - this._nearZ) > 80) {
       this._nearT = 2.0; this._nearX = px; this._nearZ = pz;
       this._near.length = 0;
-      const r2 = (SPAWN_R - 10) ** 2;
+      const r2 = (TRAFFIC.spawnR - 10) ** 2;
       for (const e of this.edges) {
+        // Traffic MATERIALIZES on streets, not in courtyards: service ways and
+        // obytné zóny are 60 % of the graph around the station (parking aisles,
+        // forecourts), and spawning uniformly put most of the fleet in car
+        // parks doing their 20 km/h limit — measured as a 19 km/h city median.
+        // Cars still ROUTE through them; they just don't appear there.
+        const t = e.road.t;
+        if (t === 'service' || t === 'living_street') continue;
         const dx = e.mx - px, dz = e.mz - pz;
         if (dx * dx + dz * dz < r2) this._near.push(e);
       }
@@ -462,7 +604,7 @@ export class Traffic {
     const s = 2 + Math.random() * (e.len - 4);
     const pose = poseAt(e, s, 0);
     const d = Math.hypot(pose.x - px, pose.z - pz);
-    if (d < SPAWN_MIN || d > SPAWN_R) return;
+    if (d < SPAWN_MIN || d > TRAFFIC.spawnR) return;
     for (const o of this.cars)                    // don't materialize inside a car
       if (Math.hypot(o.x - pose.x, o.z - pose.z) < 10) return;
     const heading = Math.atan2(-pose.dx, -pose.dz); // dir = (-sin h, -cos h)
@@ -470,16 +612,22 @@ export class Traffic {
     // vans/trucks/buses stay on the arterials — the FAST_EDGE gate keys off the
     // edge's speed limit, which is the cheapest "is this a real road" signal
     const pool = (e.speed >= FAST_EDGE && Math.random() < BIG_CHANCE) ? BIG : COMMON;
-    const kind = CAR_KINDS[pool[(Math.random() * pool.length) | 0]];
-    const color = CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0];
+    let kind = pool[(Math.random() * pool.length) | 0];
+    if (!VEH.CAR_KINDS.includes(kind)) kind = VEH.CAR_KINDS[0]; // roster drift guard
+    // per-kind color bias when vehicles.js offers it (white vans, red buses…)
+    const color = typeof VEH.pickCarColor === 'function' ? VEH.pickCarColor(kind)
+      : CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0];
     // right of travel = (-dz, dx): facing north (0,-1) that's east — correct
     // side for right-hand traffic. Offset applied at birth so frame 1 doesn't
     // slide the car sideways into its lane.
     const car = this.vehicles.add(kind,
       pose.x - pose.dz * laneOff, pose.z + pose.dx * laneOff, heading, color);
-    car.speed = e.speed * (0.4 + Math.random() * 0.4); // rolling, not parked
-    car.ai = { edge: e, s, seg: pose.seg, next: this._pickNext(e), laneOff };
-    const y = e.road.br ? bridgeElevation(e.off0 + e.offSign * s, e.road._len) : 0;
+    car.vK = VK_MIN + Math.random() * VK_VAR;     // this driver's personality
+    car.speed = e.speed * car.vK * (0.4 + Math.random() * 0.4); // rolling, not parked
+    car.ai = { edge: e, s, seg: pose.seg, next: this._pickNext(e), laneOff, heldT: 0 };
+    // + LAYER_Y.road: the deck RENDERS that far above the ground plane, and a
+    // car set to the bare bridge elevation drove with its tyres inside it
+    const y = LAYER_Y.road + (e.road.br ? bridgeElevation(e.off0 + e.offSign * s, e.road._len) : 0);
     car.y = y;
     car.mesh.position.set(car.x, y, car.z);
     car.mesh.rotation.y = heading;
@@ -509,6 +657,17 @@ export class Traffic {
   // just let it slide along wherever it now points, scrubbing RAM_FRICTION of
   // speed per second, until the timer runs out — then snap back to the rail.
   _rammedStep(car, dt) {
+    // getting rammed is the one honk that doesn't wait 2.5 s — but it still
+    // draws the global budget, so a pile-up gets a couple of blasts, not a
+    // brass section, and the ram spends the personal cooldown too
+    if (!car._hornRam) {
+      car._hornRam = 1;
+      if (this._hornPool >= 1) {
+        this._hornPool -= 1;
+        car._hornCd = HONK_CD_MIN + Math.random() * HONK_CD_VAR;
+        horn();
+      }
+    }
     car._rammedT -= dt;
     const s = car.speed;
     car.speed = s > 0 ? Math.max(0, s - RAM_FRICTION * dt) : Math.min(0, s + RAM_FRICTION * dt);
@@ -531,6 +690,7 @@ export class Traffic {
     car.ai.s = bestS;
     car.ai.seg = bestSeg;
     car.speed = Math.max(0, car.speed);           // rails only run forward
+    car._hornRam = 0;                             // next ram may honk again
   }
 
   _drive(car, dt, playerPos, playerCar) {
@@ -539,19 +699,28 @@ export class Traffic {
     if (car._rammedT > 0) { this._rammedStep(car, dt); return; } // AI suspended
     let e = ai.edge;
 
-    // ---- target speed: limit, curves ahead, the junction, the car in front.
-    // Curve/turn limits use the braking envelope v² = vc² + 2·b·d, so speed
-    // bleeds off smoothly on approach instead of at the apex.
-    let tgt = e.speed;
-    for (let k = ai.seg + 1; k <= ai.seg + 3 && k < e.pts.length - 1; k++) {
+    // ---- target speed: this DRIVER's desire (limit × vK), curves ahead, the
+    // junction, the car in front. Curve/turn limits use the braking envelope
+    // v² = vc² + 2·b·d, so speed bleeds off smoothly on approach instead of at
+    // the apex. On a straight edge nothing here fires — vertAng sits under the
+    // 0.06 rad noise floor — so steady speed genuinely reaches desire; the old
+    // build effectively pinned everyone to 30 via the missing-v default, not
+    // via this cap, and it must stay that way.
+    const desire = e.speed * (car.vK || 1);
+    let tgt = desire;
+    // the envelope's reach must scale with speed: 16 m of lookahead is a city
+    // number, a 90 km/h driver needs v²/2b (~62 m) of warning or every rural
+    // bend becomes an emergency stop
+    const look = Math.max(CORNER_LOOK, car.speed * car.speed / (2 * BRAKE) + 6);
+    for (let k = ai.seg + 1; k <= ai.seg + 8 && k < e.pts.length - 1; k++) {
       const d = e.cum[k] - ai.s;
-      if (d > CORNER_LOOK) break;
+      if (d > look) break;
       if (d < 0) continue;
       const a = e.vertAng[k];
       if (a > 0.06) tgt = Math.min(tgt, Math.sqrt(cornerSpeed(a) ** 2 + 2 * BRAKE * d));
     }
     const dEnd = e.len - ai.s;
-    if (dEnd < CORNER_LOOK + 10) {
+    if (dEnd < look + 10) {
       let ang = Math.PI;                          // dead end → crawl into the U-turn
       if (ai.next) {
         const dot = e.ldx * ai.next.fdx + e.ldz * ai.next.fdz;
@@ -560,6 +729,10 @@ export class Traffic {
       }
       if (ang > 0.06)
         tgt = Math.min(tgt, Math.sqrt(cornerSpeed(ang) ** 2 + 2 * BRAKE * Math.max(dEnd, 0)));
+      // slower road ahead: aim at ITS desire by the handoff, so nobody blasts
+      // into a village at 110 and stands on the brakes between the houses
+      if (ai.next && ai.next.speed < e.speed)
+        tgt = Math.min(tgt, Math.sqrt((ai.next.speed * (car.vK || 1)) ** 2 + 2 * BRAKE * Math.max(dEnd, 0)));
     }
 
     // ---- traffic light on this edge: red or amber → the same braking-envelope
@@ -569,17 +742,22 @@ export class Traffic {
     // which also means a green→amber flip at speed gets run exactly like a
     // real driver in the dilemma zone would. Green just erases the constraint
     // and ACCEL pulls the queue away.
+    let sigHeld = false;                          // a red is a reason to sit, not to honk
     if (e.sig && this._phase(e.sig, e.sigPh) > 0) {
       const gap = e.sigStop - ai.s;
-      if (gap >= 0)
+      if (gap >= 0) {
         tgt = gap < 0.6 ? 0 : Math.min(tgt, Math.sqrt(2 * BRAKE * gap), gap * 0.9);
+        sigHeld = true;
+      }
     }
 
     // ---- follow whatever is ahead in our corridor. AI-AI additionally wants
     // similar heading (±35°) so the opposite lane doesn't gridlock us; the
     // player blocks at ANY orientation — parked across the road IS a wall.
+    // `held` marks the frames where a LEADER is the binding constraint — the
+    // honk logic keys off it, so corners and lights never get honked at.
     const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
-    let hard = false;
+    let hard = false, held = false;
     for (const o of this.cars) {
       if (o === car) continue;
       const rx = o.x - car.x, rz = o.z - car.z;
@@ -588,8 +766,9 @@ export class Traffic {
       if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
       if (Math.abs(angWrap(o.heading - car.heading)) > HEAD_GATE) continue;
       const gap = fwd - 3.9;                      // center distance → bumpers
-      if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; }
-      else tgt = Math.min(tgt, (gap - TRAFFIC.stopGap) / 2); // gap/2s rule
+      if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; }
+      else { const fv = (gap - TRAFFIC.stopGap) / 2;         // gap/2s rule
+             if (fv < tgt) { tgt = fv; held = true; } }
     }
     const ox = playerCar ? playerCar.x : playerPos.x;
     const oz = playerCar ? playerCar.z : playerPos.z;
@@ -597,8 +776,27 @@ export class Traffic {
     const fwd = rx * fx + rz * fz;
     if (fwd > 0 && fwd < TRAFFIC.lookAhead && Math.abs(fx * rz - fz * rx) < LAT_GATE) {
       const gap = fwd - (playerCar ? 3.9 : 2.3);  // on foot the player is thin
-      if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; }
-      else tgt = Math.min(tgt, (gap - TRAFFIC.stopGap) / 2);
+      if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; }
+      else { const fv = (gap - TRAFFIC.stopGap) / 2;
+             if (fv < tgt) { tgt = fv; held = true; } }
+    }
+
+    // ---- the horn. A driver pinned under 30 % of what they WANT to do, for
+    // long enough that it's clearly not just flow (2.5 s), by whoever is ahead
+    // — the player, mostly — leans on it. Personal 6–16 s cooldown so no one
+    // machine-guns, the global pool caps the whole city at ~2/s, red lights
+    // are exempt (sigHeld — you honk at the idiot ignoring a green, not at the
+    // light), and horn() being an unpanned one-shot, only cars near enough to
+    // be plausibly audible fire it.
+    car._hornCd = (car._hornCd || 0) - dt;
+    if (held && !sigHeld && car.speed < desire * HONK_FRAC) ai.heldT += dt;
+    else ai.heldT = 0;
+    if (ai.heldT > HONK_HELD && car._hornCd <= 0 && this._hornPool >= 1 &&
+        Math.hypot(car.x - playerPos.x, car.z - playerPos.z) < HONK_R) {
+      this._hornPool -= 1;
+      car._hornCd = HONK_CD_MIN + Math.random() * HONK_CD_VAR;
+      ai.heldT = 0;                               // re-arm: the next honk waits its 2.5 s again
+      horn();
     }
 
     // ---- integrate speed, advance along the rail
@@ -634,7 +832,7 @@ export class Traffic {
     // what the shared ramp math wants — decks rise only near the way's ends.
     // car.y is kept in sync so vehicles.update() writing position from it
     // agrees with us regardless of update order in main.
-    const y = e.road.br ? bridgeElevation(e.off0 + e.offSign * ai.s, e.road._len) : 0;
+    const y = LAYER_Y.road + (e.road.br ? bridgeElevation(e.off0 + e.offSign * ai.s, e.road._len) : 0);
     car.y = y;
     car.mesh.position.set(car.x, y, car.z);
     car.mesh.rotation.y = car.heading;

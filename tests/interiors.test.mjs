@@ -12,8 +12,9 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
-import { buildingPlan, classify, hasInterior, entranceOf } from '../js/interiors.js';
+import { buildingPlan, classify, hasInterior, entranceOf, stampFranchises } from '../js/interiors.js';
 import { interiorPieces, shellPieces } from '../js/pieces.js';
+import { distPointToSegment } from '../js/geo.js';
 
 const city = JSON.parse(readFileSync(new URL('../public/data/pardubice.json', import.meta.url), 'utf8'));
 let _id = 1;
@@ -56,10 +57,12 @@ test('every multi-storey building has a staircase that is actually built', () =>
   assert.equal(stairless, 0, `${stairless} buildings have upper floors you cannot reach`);
 });
 
-test('the slab leaves the stair well open on every floor above the ground', () => {
+test('the slab leaves the stair well and lift shaft open above the ground', () => {
   // A tile whose CENTRE misses the void but whose body covers it seals the
-  // shaft. Sample the middle of the run on each upper floor and assert no
-  // floor piece is sitting over it.
+  // shaft. Sample the middle of the stair run — and of the lift shaft, where
+  // there is one — on each upper floor and assert no floor piece covers it.
+  // (Floor tiles all share the OBB yaw, so the overlap test runs in plan
+  // space: piece centre mapped back onto (u, v), extents straight off hx/hz.)
   const tall = city.buildings
     .filter(b => hasInterior(b) && (b.lv ?? 0) >= 4)
     .sort((a, b) => b.h - a.h).slice(0, 40);
@@ -68,17 +71,22 @@ test('the slab leaves the stair well open on every floor above the ground', () =
     const plan = buildingPlan(b, null);
     if (!plan.core) continue;
     const { fr, core } = plan;
-    const run = core.run;
-    const u = (run.u0 + run.u1) / 2, v = (run.v0 + run.v1) / 2;
-    const x = fr.cx + fr.ux * u + fr.vx * v, z = fr.cz + fr.uz * u + fr.vz * v;
-    const pieces = interiorPieces(plan);
-    for (let fi = 1; fi < plan.storeys; fi++) {
-      const y = plan.floors[fi].y;
-      const blocking = pieces.filter(p => p.kind === 'floor'
-        && Math.abs(p.top - y) < 0.01
-        && Math.abs(p.x - x) <= p.ax + 0.01 && Math.abs(p.z - z) <= p.az + 0.01);
-      assert.equal(blocking.length, 0,
-        `floor ${fi} of a ${plan.storeys}-storey ${plan.use} roofs over its own staircase`);
+    const spots = [core.run];
+    if (plan.lift) spots.push(plan.lift.shaft);
+    const pieces = interiorPieces(plan).filter(p => p.kind === 'floor');
+    for (const r of spots) {
+      const u = (r.u0 + r.u1) / 2, v = (r.v0 + r.v1) / 2;
+      for (let fi = 1; fi < plan.storeys; fi++) {
+        const y = plan.floors[fi].y;
+        const blocking = pieces.filter(p => {
+          if (Math.abs(p.y + p.hy - y) > 0.01) return false;
+          const pu = (p.x - fr.cx) * fr.ux + (p.z - fr.cz) * fr.uz;
+          const pv = (p.x - fr.cx) * fr.vx + (p.z - fr.cz) * fr.vz;
+          return Math.abs(pu - u) <= p.hx + 0.01 && Math.abs(pv - v) <= p.hz + 0.01;
+        });
+        assert.equal(blocking.length, 0,
+          `floor ${fi} of a ${plan.storeys}-storey ${plan.use} roofs over its own shaft`);
+      }
     }
   }
 });
@@ -155,4 +163,195 @@ test('no interior surface is coplanar with the ground layers or with itself', ()
       }
     }
   }
+});
+
+test('a block of flats keeps its ground floor for the house, not for flats', () => {
+  // The v5.1 reality pass: you enter a panelák through a zádveří into the
+  // stair-core landing, the ground floor is sklepy and the kočárkárna, flats
+  // start on floor 1 — and four storeys and up ride a výtah. No flat-unit
+  // room may appear on floor 0 of any ≥3-storey block.
+  const FLAT_ROOMS = new Set(['living', 'bedroom', 'kitchen', 'bath']);
+  let three = 0, four = 0;
+  for (const b of city.buildings) {
+    if (!hasInterior(b)) continue;
+    const plan = buildingPlan(b, null);
+    if (plan.use !== 'flats' || plan.storeys < 3 || !plan.core) continue;
+    three++;
+    const g = plan.floors[0];
+    assert.ok(g.rooms.some(r => r.kind === 'lobby'),
+      `a ${plan.storeys}-storey block with no lobby`);
+    assert.ok(!g.rooms.some(r => FLAT_ROOMS.has(r.kind)),
+      `a flat-unit room on the ground floor of a ${plan.storeys}-storey block`);
+    if (plan.storeys >= 4) {
+      four++;
+      assert.ok(plan.lift, `a ${plan.storeys}-storey block of flats has no výtah`);
+      // the shaft is a real void: open slabs on every floor above the ground
+      for (let fi = 1; fi < plan.storeys; fi++)
+        assert.ok(plan.floors[fi].open.includes(plan.lift.shaft),
+          'the lift shaft is slabbed over');
+    }
+  }
+  assert.ok(three > 800, `3+-storey blocks checked: ${three}`);
+  assert.ok(four > 200, `4+-storey blocks checked: ${four}`);
+});
+
+test('the front door never opens into the stair core', () => {
+  // placeCore scores candidates toward the entrance but must SHIFT any shaft
+  // that would swallow the door — the entrance edge midpoint may never fall
+  // inside the stair shaft (nor the lift's).
+  for (const b of city.buildings) {
+    if (!hasInterior(b)) continue;
+    const plan = buildingPlan(b, null);
+    if (!plan.core || !plan.entrance) continue;
+    const fr = plan.fr, e = plan.entrance;
+    const u = (e.x - fr.cx) * fr.ux + (e.z - fr.cz) * fr.uz;
+    const v = (e.x - fr.cx) * fr.vx + (e.z - fr.cz) * fr.vz;
+    for (const s of plan.lift ? [plan.core.shaft, plan.lift.shaft] : [plan.core.shaft])
+      assert.ok(!(u > s.u0 && u < s.u1 && v > s.v0 && v < s.v1),
+        `the entrance midpoint sits inside the core shaft of a ${plan.use}`);
+  }
+});
+
+test('a supermarket is stocked, and stays inside the piece budget', () => {
+  for (const re of [/^Kaufland$/, /^Lidl$/]) {
+    const b = named(re).sort((p, q) => q.o.length - p.o.length)[0];
+    assert.ok(b, `no building matching ${re}`);
+    const plan = buildingPlan(b, null);
+    const interior = interiorPieces(plan);
+    const goods = interior.filter(p => p.goods).length;
+    assert.ok(goods >= 40, `${b.n}: only ${goods} goods runs on the shelving`);
+    const total = interior.length + shellPieces(plan).length;
+    assert.ok(total <= 5000, `${b.n}: ${total} pieces blows the interior budget`);
+  }
+});
+
+test('brand signage carries the wordmark contract', () => {
+  // Fascia band pieces and the totem panel all carry signText/signBg/signFg —
+  // destructible.js paints the actual wordmark from those three fields.
+  const expect = [
+    [/^Kaufland$/, 'Kaufland', 0xe10915, 0xffffff],
+    [/^Lidl$/, 'Lidl', 0x0050aa, 0xffffff],
+  ];
+  for (const [re, label, bg, fg] of expect) {
+    const b = named(re).sort((p, q) => q.o.length - p.o.length)[0];
+    assert.ok(b, `no building matching ${re}`);
+    const signs = shellPieces(buildingPlan(b, null)).filter(p => p.kind === 'sign');
+    assert.ok(signs.length >= 2, `${label}: expected a fascia and a totem`);
+    // The wordmark sits on SOME sign pieces (one per fascia run + the totem),
+    // never stretched across every 12 m segment — the rest stay plain fascia.
+    const marked = signs.filter(p => p.signText !== undefined);
+    assert.ok(marked.length >= 2, `${label}: no wordmark-carrying pieces`);
+    assert.ok(marked.length < signs.length || signs.length <= 3,
+      `${label}: every fascia segment carries the wordmark (it would tile stretched)`);
+    for (const p of marked) {
+      assert.equal(p.signText, label, `${label}: a sign piece with the wrong wordmark`);
+      assert.equal(p.signBg, bg, `${label}: wrong sign background`);
+      assert.equal(p.signFg, fg, `${label}: wrong sign foreground`);
+    }
+  }
+  // Billa is the one chain that prints dark on its yellow
+  const billa = named(/^Billa/i)[0];
+  if (billa) {
+    const signs = shellPieces(buildingPlan(billa, null))
+      .filter(p => p.kind === 'sign' && p.signText !== undefined);
+    for (const p of signs) assert.equal(p.signFg, 0x1c1c1c, 'Billa reads dark-on-yellow');
+  }
+  // McDonald's has no explicit fg — BOTH LOD tiers must fall back the same way
+  // (trim red on the yellow fascia), or the sign changes ink at the tier swap.
+  // The franchises are stamped at runtime, so stamp them here the same way
+  // city.js does before looking one up.
+  stampFranchises(city.buildings);
+  const mcd = city.buildings.find(b => /mcdonald/i.test(b.n ?? ''));
+  // Earlier tests built plans for every building BEFORE the stamp — in the
+  // game the stamp runs at tile load, before any plan exists, so drop the
+  // stale cache rather than weaken the assertion.
+  if (mcd) { delete mcd._plan; delete mcd._use; mcd._brand = undefined; }
+  if (mcd) {
+    const signs = shellPieces(buildingPlan(mcd, null))
+      .filter(p => p.kind === 'sign' && p.signText !== undefined);
+    assert.ok(signs.length >= 1, "McDonald's grew no wordmark");
+    for (const p of signs) assert.equal(p.signFg, 0xda291c, "McDonald's ink is its trim red");
+  }
+});
+
+// ---- v7 architectural identity ---------------------------------------------
+
+test('a fast-food pavilion is glass where it faces the car park', () => {
+  // The v7 complaint: "McDonald's má branding, ale budova vypadá jak sovětská
+  // krabice". The fix is a real pavilion shell — the entrance run must be
+  // mostly GLASS (by facade area, panes vs solid pieces), under a cladding
+  // band, with the mullions thin enough not to eat the frontage.
+  stampFranchises(city.buildings);
+  const mcd = city.buildings.find(b => /mcdonald/i.test(b.n ?? ''));
+  assert.ok(mcd, "the franchise stamp produced no McDonald's");
+  delete mcd._plan; delete mcd._use; mcd._brand = undefined;   // stale caches
+  const plan = buildingPlan(mcd, null);
+  assert.equal(plan.use, 'restaurant');
+  const e = plan.entrance;
+  const a = mcd.o[e.i], b2 = mcd.o[(e.i + 1) % mcd.o.length];
+  const probe = { x: 0, z: 0, t: 0 };
+  let glass = 0, solid = 0;
+  for (const p of shellPieces(plan)) {
+    if (p.kind !== 'glass' && p.kind !== 'ext') continue;
+    if (p.y + p.hy > plan.top - 0.1) continue;   // parapet / roof overhang
+    if (distPointToSegment(p.x, p.z, a[0], a[1], b2[0], b2[1], probe) > 1.6) continue;
+    if (p.kind === 'glass') glass += p.hx * p.hy; else solid += p.hx * p.hy;
+  }
+  assert.ok(glass > 0, 'no glazing on the entrance run');
+  assert.ok(glass / (glass + solid) >= 0.6,
+    `entrance frontage is only ${(100 * glass / (glass + solid)).toFixed(0)} % glass`);
+});
+
+test('a panelák hangs balconies off its long facades', () => {
+  // prefab type, or six storeys and up: a grid of balcony slabs with weak
+  // rail panels, every storey above the first
+  let checked = 0;
+  for (const b of city.buildings) {
+    if (!hasInterior(b)) continue;
+    if (classify(b) !== 'flats') continue;
+    const plan = buildingPlan(b, null);
+    if (plan.nova || plan.storeys < 3) continue;
+    if (!(plan.osmT === 'panel' || plan.storeys >= 6)) continue;
+    let maxL = 0;
+    for (let i = 0; i < b.o.length; i++) {
+      const [ax, az] = b.o[i], [bx, bz] = b.o[(i + 1) % b.o.length];
+      maxL = Math.max(maxL, Math.hypot(bx - ax, bz - az));
+    }
+    if (maxL < 12) continue;         // nowhere to hang a run of balconies
+    checked++;
+    const balc = shellPieces(plan).filter(p => p.balcony);
+    assert.ok(balc.length >= 4, `a ${plan.storeys}-storey panelák with no balconies`);
+    assert.ok(balc.some(p => p.kind === 'rail' && p.weak), 'balcony rails must be weak');
+    assert.ok(balc.every(p => p.y > plan.y0 + plan.sH - 0.5),
+      'balconies start above the ground floor');
+    if (checked >= 50) break;
+  }
+  assert.ok(checked >= 15, `paneláky checked: ${checked}`);
+});
+
+test('novostavby exist, carry their own colour, and dropped the atlas', () => {
+  // Hash-scattered (no OSM "year built" signal): ~30 % of the 3–5 storey
+  // non-panel flats become new builds. Each must stamp f.c — that is the one
+  // channel meshes.js's far LOD already reads, so near and far agree — and
+  // their shell is flat plaster with tall windows and French balcony rails.
+  let nova = 0, sampled = 0, withRail = 0;
+  for (const b of city.buildings) {
+    if (!hasInterior(b)) continue;
+    if (classify(b) !== 'flats') continue;
+    const plan = buildingPlan(b, null);
+    if (!plan.nova) continue;
+    nova++;
+    assert.ok(typeof b.c === 'string' && b.c.startsWith('#'),
+      'a novostavba must stamp f.c so the far LOD agrees');
+    if (sampled < 10) {
+      sampled++;
+      const shell = shellPieces(plan);
+      if (shell.some(p => p.french)) withRail++;
+      assert.ok(!shell.some(p => p.uv),
+        'a novostavba shell still samples the facade atlas');
+    }
+  }
+  assert.ok(nova >= 20, `novostavby found: ${nova}`);
+  assert.ok(withRail >= sampled * 0.5,
+    `French balconies on only ${withRail}/${sampled} sampled novostavby`);
 });

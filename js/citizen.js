@@ -89,5 +89,28 @@ export function makeCitizen(look = {}) {
     body.position.y = Math.abs(Math.cos(walkT)) * 0.045 * Math.min(1, speedK);
   };
 
-  return { group, walk, parts: { body, torso, head, armL, armR, legL, legR } };
+  // Thrown by a car: splay the limbs ONCE at launch — arms flung out sideways,
+  // legs bent unevenly — and hold that shape while the owner tumbles the whole
+  // group. Randomized per call so no two victims fold the same way. walk()
+  // only drives rotation.x, so the z-splay set here survives until standPose.
+  const ragdollPose = () => {
+    const r = Math.random;
+    armL.rotation.set(-0.4 - r() * 0.9, 0, -(0.9 + r() * 1.0));
+    armR.rotation.set(-0.4 - r() * 0.9, 0, 0.9 + r() * 1.0);
+    legL.rotation.set(0.35 + r() * 0.7, 0, -0.1 - r() * 0.25);
+    legR.rotation.set(0.1 + r() * 0.5, 0, 0.1 + r() * 0.25);
+    body.position.y = 0;
+  };
+
+  // Back on their feet: undo the splay so walk() fully owns the limbs again.
+  const standPose = () => {
+    armL.rotation.set(0, 0, 0);
+    armR.rotation.set(0, 0, 0);
+    legL.rotation.set(0, 0, 0);
+    legR.rotation.set(0, 0, 0);
+    body.position.y = 0;
+  };
+
+  return { group, walk, ragdollPose, standPose,
+    parts: { body, torso, head, armL, armR, legL, legR } };
 }

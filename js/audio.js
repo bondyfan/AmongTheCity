@@ -21,6 +21,12 @@
 //   · one procedural helicopter rotor (LFO-gated noise) — a rotor is a gate
 //     rate and a filter, i.e. exactly the two things a sample can't follow
 //     while the machine spools up and flies away.
+//
+// v7 is a MIX pass plus the events: the city bed and traffic hum come up (they
+// were tuned into inaudibility), the rotor becomes the loudest continuous
+// element at flight revs and now grows with speed, honks are real generated
+// samples with the old synth as fallback, and sfxAt()/setListener() add a
+// zero-cost distance falloff for the world's one-shots (debris, screams).
 
 let ctx = null;      // the one AudioContext (created on first gesture)
 let master = null;   // master gain — setVolume() scales everything at once
@@ -52,14 +58,24 @@ export function setVolume(v) {
 }
 
 // ---- one-shot samples --------------------------------------------------
-export function sfx(name, vol = 1) {
+export function sfx(name, vol = 1, rate = 1) {
   if (!ctx || ctx.state !== 'running') return;  // pre-gesture: sources would
   const buf = buffers.get(name);                // queue up and burst on resume
-  if (buf) { playBuffer(buf, vol); return; }
+  if (buf) { playSample(name, buf, vol, rate); return; }
   if (buf === null) { fallback(name, vol); return; }   // known missing
   // first request: fetch+decode exactly once and play on arrival — ~100 ms of
   // first-play latency beats dropping the cue; every later call is instant
-  loadBuffer(name).then(b => { if (b) playBuffer(b, vol); else fallback(name, vol); });
+  loadBuffer(name).then(b => { if (b) playSample(name, b, vol, rate); else fallback(name, vol); });
+}
+
+// One indirection over playBuffer so a cue other code must SYNC TO is noted at
+// the moment it actually starts: heliSet() crossfades the procedural rotor in
+// under the tail of the heli_start sample, so it needs to know when that
+// sample ends — including the case where the first play arrives late off the
+// network. Everything else passes straight through.
+function playSample(name, buf, vol, rate) {
+  if (name === 'heli_start') heliXfEnd = ctx.currentTime + buf.duration / (rate || 1);
+  playBuffer(buf, vol, rate);
 }
 
 // One fetch+decode per name for the whole session, shared by sfx() and the
@@ -82,18 +98,69 @@ function loadBuffer(name) {
   return p;
 }
 
-// Two horns, picked at random per honk so a jam doesn't sound like one car
-// with a stutter: horn_far is the polite "the light is green" beep, horn_angry
-// is somebody actually furious. Volume jitters ±12 % for the same reason.
+// Sample-backed since v7: gen-sounds.mjs renders four real honks
+// (car_horn_short/long/double + a rare truck_horn), and every honk picks one
+// at random with ±6 % playbackRate — a pitch jitter at play time is cheaper
+// than shipping ten variants and sounds like more, so a jam never sounds like
+// one car with a stutter. Volume jitters too. On a bare checkout the old path
+// takes over: the horn_far/horn_angry samples if those exist, else the
+// synthesized dyad in hornBeep() — a honk always sounds, whatever is on disk.
 // Callers (traffic AI, the player's key) never choose — the mix decides.
+const CAR_HORNS = ['car_horn_short', 'car_horn_long', 'car_horn_double'];
 export function horn() {
+  if (!ctx || ctx.state !== 'running') return;
+  const name = Math.random() < 0.08 ? 'truck_horn'
+    : CAR_HORNS[(Math.random() * CAR_HORNS.length) | 0];
+  const rate = 0.94 + Math.random() * 0.12;        // ±6 % — a different car each time
+  const vol = (name === 'truck_horn' ? 0.8 : 0.65) * (0.85 + Math.random() * 0.3);
+  const buf = buffers.get(name);
+  if (buf) { playBuffer(buf, vol, rate); return; }
+  if (buf === null) { hornLegacy(); return; }      // known missing → old mix
+  loadBuffer(name).then(b => b ? playBuffer(b, vol, rate) : hornLegacy());
+}
+
+// The pre-v7 horn: two generated horns picked per honk, themselves falling
+// back to the synthesized dyad via fallback() when those files are missing too.
+function hornLegacy() {
   const angry = Math.random() < 0.4;   // most honks are the mild one
   sfx(angry ? 'horn_angry' : 'horn_far', (angry ? 0.75 : 0.6) * (0.88 + Math.random() * 0.24));
 }
 
-function playBuffer(buf, vol) {
+// ---- positioned one-shots ------------------------------------------------
+// The cheap spatializer for debris, screams and other world events: a plain
+// linear falloff against the last known listener position — no PannerNode, no
+// per-source graph, just a volume. main.js is NOT a caller we own, so nothing
+// pushes the camera in from the top of the frame; instead interiorsim.update()
+// — which receives the focus point every frame anyway — forwards it through
+// setListener(). Until the first call, sfxAt plays unattenuated: better a loud
+// cue than a silently swallowed one. `cooldown` (seconds, per name) is for the
+// cues that fire in bursts — one collapse must not become eight rumbles.
+let lisX = 0, lisZ = 0, lisSet = false;
+const sfxLast = new Map();     // name → ctx.currentTime of last cooldown play
+
+export function setListener(x, z) { lisX = x; lisZ = z; lisSet = true; }
+
+export function sfxAt(name, vol, x, z, maxDist = 260, cooldown = 0) {
+  if (!ctx || ctx.state !== 'running') return;
+  let g = vol;
+  if (lisSet) {
+    const d = Math.hypot(x - lisX, z - lisZ);
+    if (d >= maxDist) return;
+    g = vol * (1 - d / maxDist);
+  }
+  if (g < 0.015) return;                     // inaudible — don't burn the cooldown
+  if (cooldown > 0) {
+    const last = sfxLast.get(name);
+    if (last !== undefined && ctx.currentTime - last < cooldown) return;
+    sfxLast.set(name, ctx.currentTime);
+  }
+  sfx(name, g);
+}
+
+function playBuffer(buf, vol, rate = 1) {
   const src = ctx.createBufferSource();
   src.buffer = buf;
+  if (rate !== 1) src.playbackRate.value = rate;
   const g = ctx.createGain();
   g.gain.value = vol;
   src.connect(g); g.connect(master);
@@ -174,8 +241,11 @@ function noiseBuffer() {
 // desk move and a place. The duck factor is a single scalar shared by every
 // source that can claim the mix, so two claims never stack into silence.
 const AMB = {
-  vol: 0.42,          // sits under engine + SFX; it is the floor, not a track
-  duckMin: 0.34,      // full duck leaves a third — never a hard mute, that reads as a bug
+  vol: 0.55,          // the floor of the mix, but a floor you HEAR — v7 raised
+                      // it from 0.42 after "neslyším hluk dopravy": on foot the
+                      // city must be unmistakably there, not a rumor
+  duckMin: 0.5,       // full duck leaves HALF (was a third) — driving fast dims
+                      // the street, it no longer erases it
   lpOpen: 16000,      // undisturbed street: no filtering worth the name...
   lpShut: 900,        // ...fully ducked: the world outside the windscreen
   fadeIn: 1.4, fadeOut: 0.5,
@@ -448,7 +518,9 @@ export function engineSet(speed01, throttle01) {
 // traffic is a formless low drone. Zero traffic leaves the graph silent but
 // alive; building/tearing it down as cars come and go would click.
 const HUM = {
-  vol: 0.09,          // ceiling, only reached when you're stood in a jam
+  vol: 0.2,           // ceiling, reached stood in a jam — v7 raised it from
+                      // 0.09, which was tuned so carefully into the bed that
+                      // nobody could tell it was playing at all
   cutLo: 110, cutHi: 520,
   ref: 38,            // meters where one car counts as one "unit" of presence
   nK: 4.2,            // √n / nK — the 12th car adds far less than the 2nd;
@@ -516,8 +588,16 @@ const HELI = {
   cutSpeedK: 4.5,             // ...× up to 4.5 as speed01 → 1 (≈ 3.4 kHz)
   chopBase: 0.5, chopDepth: 0.5,   // gate: base ± depth·wave, so peaks reach 1
   depthIdle: 0.55,            // slap depth at rest — softer, less "attack"
-  oscLevel: 0.55, whineLevel: 0.05,
-  vol: 0.2, volSpeed: 0.035,
+  oscLevel: 0.85,             // the disc's mass — raised in v7, this is the THUMP
+  whineLevel: 0.05,
+  vol: 0.62,                  // full-rotor HOVER level. v7 tripled it: at flight
+                              // revs the rotor is the loudest continuous element
+                              // in the mix, ~2× the (unducked) city bed
+  speedLift: 0.75,            // ...and speed GROWS it, ×1.75 at vmax. The old
+                              // additive +0.035 was why the machine "sounded
+                              // like a drone" and then vanished in flight — the
+                              // brighter lowpass spread the same energy thinner
+  xfade: 1.6,                 // s of heli_start sample tail the loop swells over
   tau: 0.09,                  // ~250 ms settle: a rotor has inertia, so should its sound
 };
 // Cosine partials, all in phase → a tall narrow peak and a long shallow
@@ -526,6 +606,7 @@ const HELI = {
 const CHOP_REAL = new Float32Array([0, 1, 0.82, 0.58, 0.34, 0.16]);
 const CHOP_IMAG = new Float32Array(CHOP_REAL.length);
 let heli = null;
+let heliXfEnd = 0;   // ctx time the heli_start sample runs out (0 = no sample)
 
 export function heliStart() {
   if (!ctx || ctx.state !== 'running' || heli) return;
@@ -567,6 +648,7 @@ export function heliStop() {
   if (!heli) return;
   const h = heli;
   heli = null;                       // heliSet() goes inert immediately
+  heliXfEnd = 0;                     // a fresh start gets a fresh crossfade
   duckHeli = 0; duckUpdate();        // the sky quietens, the street returns
   const t = ctx.currentTime;
   h.gain.gain.cancelScheduledValues(t);
@@ -600,8 +682,18 @@ export function heliSet(rotor01, speed01) {
   heli.lp.frequency.setTargetAtTime(
     (HELI.cutBase + HELI.cutRotor * r) * Math.pow(HELI.cutSpeedK, sp), t, tau);
   // pow(r, 0.7): audible early in the spin-up (you hear it before you can fly
-  // it), then the last stretch adds little — matches how lift feels
-  heli.gain.gain.setTargetAtTime(HELI.vol * Math.pow(r, 0.7) + HELI.volSpeed * sp, t, tau);
+  // it), then the last stretch adds little — matches how lift feels. Speed
+  // MULTIPLIES the level: a flyby has to get louder, not thinner. And while
+  // the heli_start sample is still playing (main fires sfx('heli_start') and
+  // heliStart() together), the loop hides under it at 18 % and swells across
+  // the sample's last `xfade` seconds — a crossfade, not two rotors fighting.
+  let xf = 1;
+  if (heliXfEnd > t) {
+    const remain = heliXfEnd - t;
+    xf = remain > HELI.xfade ? 0.18 : 0.18 + 0.82 * (1 - remain / HELI.xfade);
+  }
+  heli.gain.gain.setTargetAtTime(
+    HELI.vol * Math.pow(r, 0.7) * (1 + HELI.speedLift * sp) * xf, t, tau);
   // rotor noise beats the street flat once it's really turning
   duckHeli = r;
   duckUpdate();

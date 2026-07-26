@@ -7,13 +7,14 @@
 // hit.
 
 import * as THREE from 'three';
-import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME } from './config.js';
+import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y } from './config.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeElevation } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { stampFranchises } from './interiors.js';
 
 const _closest = { x: 0, z: 0, t: 0 };
+const _surf = { y: 0, road: false };   // surfaceY's reusable answer
 
 export class CityWorld {
   constructor(scene, city) {
@@ -154,6 +155,43 @@ export class CityWorld {
     this.built.clear();
     this.queue.length = 0;
     this._queued.clear();
+  }
+
+  // What a WHEEL is standing on. heightAt() answers "how high is the world
+  // here" for feet and skids; a car needs more — the road DECK renders at
+  // LAYER_Y.road above the ground plane (and bridge decks that much above
+  // their elevation), so a car placed at heightAt() rides with its tyres 20 cm
+  // inside the asphalt, which on a bridge (parapet right beside the wheel)
+  // finally became visible. Returns { y, road } and never allocates.
+  surfaceY(x, z) {
+    _surf.road = false;
+    const cell = this.city.chunkIndex.get(chunkKey(x, z));
+    if (!cell) { _surf.y = 0; return _surf; }
+    let best = -1;
+    for (const r of cell.roads) {
+      if (!r.d) continue;
+      const half = r.w / 2 + 0.35;               // a wheel just off the kerb still rides the kerb
+      let along = 0;
+      for (let i = 0; i < r.p.length - 1; i++) {
+        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+        const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
+        if (d < half) {
+          const s = along + Math.hypot(_closest.x - ax, _closest.z - az);
+          const y = LAYER_Y.road + (r.br ? bridgeElevation(s, r._len) : 0);
+          if (y > best) best = y;
+        }
+        along += Math.hypot(bx - ax, bz - az);
+      }
+    }
+    if (best >= 0) { _surf.y = best; _surf.road = true; return _surf; }
+    // car parks and plazas are paved and flat — driveable, not offroad
+    for (const p of cell.paved) {
+      if (pointInPolygon(x, z, p.o) && !(p.i ?? []).some((h) => pointInPolygon(x, z, h))) {
+        _surf.y = LAYER_Y.paved; _surf.road = true; return _surf;
+      }
+    }
+    _surf.y = 0.05;                              // grass, dirt, everything else
+    return _surf;
   }
 
   // Ground height. Pardubice is flat (y=0) — the only relief is bridge decks:

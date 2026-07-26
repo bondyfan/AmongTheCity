@@ -81,7 +81,10 @@ export const CAR = {
   len: 4.2, wid: 1.8,
 };
 export const TRAFFIC = {
-  maxCars: 45, spawnR: 400, despawnR: 520,
+  // v7 density pass: 45 cars read as a Sunday morning — 90 is a Tuesday. The
+  // spawn/despawn ring grows +30 % with it so the deeper pool has streets to
+  // materialize on without popping into view.
+  maxCars: 90, spawnR: 520, despawnR: 676,
   laneOffsetK: 0.27, laneOffsetMax: 2.1,
   lookAhead: 22, stopGap: 2.5,
 };
@@ -100,11 +103,14 @@ export const WALK = { jog: 4.2, sprint: 7.0, accel: 14, turn: 12, radius: 0.38 }
 // 2.3 m corridor), because a plan laid out from real dimensions needs no art
 // direction to read as a building — it just IS one.
 export const INTERIOR = {
-  activateR: 34,        // m — an interior is built this close on foot…
-  deactivateR: 74,      // …and thrown away past here (damaged ones never are)
-  maxActive: 8,         // undamaged interiors alive at once
+  activateR: 40,        // m — rooms + occupants are built this close ON FOOT…
+  deactivateR: 74,      // …and the people go home past here (wrecks never drop)
+  drawR: 160,           // m — the box SHELL (real windows, roof, signage) exists
+                        // this far out in EVERY mode; settings drive it 80–450
+  maxActive: 8,         // undamaged FULL interiors alive at once
   maxDamaged: 10,       // wrecks kept; the oldest is restored past this
   buildPerSec: 8,       // activations per second — spreads the cost over frames
+  shellPerScan: 6,      // shell builds per scan — a car at 130 km/h must not hitch
 
   tile: 1.9,            // floor-slab tile (m); coarsened for huge footprints
   panel: 1.55,          // wall-panel width

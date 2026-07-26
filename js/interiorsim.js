@@ -1,9 +1,17 @@
 // ---- interiorsim.js: which insides exist right now, and who is in them ----
 // 9860 buildings cannot all have geometry. This module is the policy layer that
-// decides which ones do: it watches the player, builds interiors for the
-// handful within reach, throws them away behind him, and keeps the ones a
-// missile has touched forever (a wrecked building that heals itself when you
-// look away is worse than no destruction at all).
+// decides which ones do, in TWO TIERS, and throws them away behind the player —
+// keeping the ones a missile has touched forever (a wrecked building that heals
+// itself when you look away is worse than no destruction at all):
+//
+//   SHELL — within `drawR` (a settings knob, default 160 m), in EVERY mode:
+//     just the outer wall with its real window openings, the roof and the brand
+//     signage. A few hundred boxes, no rooms, no people. This is what stops a
+//     Kaufland visibly changing the moment you walk (or fly) close enough — the
+//     box representation is already there from down the street.
+//   FULL — within `activateR` on foot: the rooms, stairs, furniture and the
+//     occupants, added UNDER the shell by ensureInterior() so the upgrade moves
+//     nothing a viewer outside could see.
 //
 // It also owns the three things that have to be shared across every model:
 //   · the debris and dust pools (one InstancedMesh + 120 sprites for the whole
@@ -26,6 +34,7 @@ import { buildingPlan, hasInterior, entranceOf, planToWorld } from './interiors.
 import { BuildingModel, Debris, Dust } from './destructible.js';
 import { buildingWallHex, facadeCells } from './meshes.js';
 import { makeCitizen } from './citizen.js';
+import { sfxAt, setListener } from './audio.js';   // safe headless — no-op without an AudioContext
 
 const I = INTERIOR;
 const MAX_OCCUPANTS = 90;       // citizens indoors across the whole city
@@ -34,6 +43,8 @@ const LEDGE_R = 1.5;            // how far a falling person reaches for an edge
 const LEDGE_T = [3.5, 7];       // seconds they can hang before their grip goes
 const _w = { x: 0, z: 0 };
 const TWO_PI = Math.PI * 2;
+
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
 // distance from a point to an axis-aligned box (0 when inside)
 function bbDist(bb, x, z) {
@@ -48,6 +59,8 @@ export class Interiors {
     this.city = city;
     this.world = world;
     this.enabled = true;                  // settings: "Interiéry budov"
+    this.drawR = I.drawR;                 // settings: "Dohlednost budov" — main
+                                          // assigns it straight from applySettings
     this.models = new Map();              // building _id → BuildingModel
     this.hidden = new Set();              // _ids the chunk mesh must skip
     this.debris = new Debris(scene, (x, z) => world.heightAt(x, z));
@@ -61,6 +74,10 @@ export class Interiors {
   // ---- streaming ---------------------------------------------------------
   update(dt, focus, onFoot) {
     this._clock += dt;
+    // audio's positioned one-shots (sfxAt: debris, screams) attenuate against
+    // the last listener position. main.js is not ours to edit, so THIS is the
+    // per-frame hook that owns the player position — feed it from here.
+    setListener?.(focus.x, focus.z);
     this.debris.update(dt);
     this.dust.update(dt);
     // wrecks keep coming down for a few seconds after the hit
@@ -72,21 +89,30 @@ export class Interiors {
 
     // interiors switched off: keep the wrecks (they are the player's own doing)
     // and shed everything else
-    if (!this.enabled || !onFoot) {
-      for (const [id, m] of this.models) {
-        if (m.damaged) continue;
-        if (!onFoot && bbDist(m.bb, focus.x, focus.z) < I.deactivateR) continue;
-        this._drop(id);
-      }
+    if (!this.enabled) {
+      for (const [id, m] of this.models) if (!m.damaged) this._drop(id);
       this._flushChunks();
-      if (!this.enabled) return;
+      return;
     }
 
-    // candidates: every mapped building in the cells around the focus
+    // candidates: every mapped building whose bbox comes inside the shell
+    // radius. The chunk index lists a feature in every cell its bbox touches,
+    // so scanning ceil(shellR/CHUNK) cells each way cannot miss one. The shell
+    // cap scales with the area the radius covers — a "Daleká" player buys more
+    // draw calls, not more per-building cost — and is clamped so the low end
+    // still dresses a street and the high end cannot eat the frame.
+    const shellR = Math.max(this.drawR, I.activateR);
+    // The cap was the reason "Extrémní" felt no farther than "Střední": at 450 m
+    // the radius holds ~300+ buildings and the old ceiling of 170 truncated the
+    // ring around 250 m. The knob promises a distance, so the cap must scale to
+    // what that distance actually contains — the render cost is the player's
+    // own choice, made in the settings panel.
+    const maxShell = clamp(Math.round((shellR / 40) ** 2 * 2.5), 24, 420);
     const cands = [];
     const seen = new Set();
     const cx = Math.floor(focus.x / CHUNK), cz = Math.floor(focus.z / CHUNK);
-    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const cr = Math.ceil(shellR / CHUNK);
+    for (let dx = -cr; dx <= cr; dx++) for (let dz = -cr; dz <= cr; dz++) {
       const cell = this.city.chunkIndex.get((cx + dx) + ',' + (cz + dz));
       if (!cell) continue;
       for (const f of cell.buildings) {
@@ -95,44 +121,93 @@ export class Interiors {
         if (!hasInterior(f)) continue;
         const bb = f._bb ??= bboxOf(f.o);
         const d = bbDist(bb, focus.x, focus.z);
-        if (d < I.activateR) cands.push([d, f]);
+        if (d < shellR) cands.push([d, f]);
       }
     }
     cands.sort((a, b) => a[0] - b[0]);
 
     const keep = new Set();
-    let built = 0;
-    // The building whose DOOR you are standing at always wins a slot, cap or
-    // no cap, and is built this instant rather than queued: walking up to an
+    const full = new Set();
+    // The building whose DOOR you are standing at always wins a FULL slot, cap
+    // or no cap, and is built this instant rather than queued: walking up to an
     // entrance and finding it still solid because eight other houses got there
     // first is the one failure the player would read as "you cannot go in".
-    for (const [, f] of cands) {
+    // (bbDist to a footprint whose door is within reach is ≤ 7, so the sorted
+    // list can stop early instead of probing every candidate on the horizon.)
+    if (onFoot) for (const [d, f] of cands) {
+      if (d > 8) break;
       const e = entranceOf(f, null, null);
       if (!e || Math.hypot(e.x - focus.x, e.z - focus.z) > 7) continue;
-      keep.add(f._id);
-      if (!this.models.has(f._id)) this.activate(f);
-      else this.models.get(f._id).lastTouch = this._clock;
+      keep.add(f._id); full.add(f._id);
+      this.activate(f);
     }
-    for (const [, f] of cands) {
-      if (keep.size >= I.maxActive) break;
+    // Nearest first through both tiers in one pass: the closest few (on foot)
+    // get rooms and people, everything else out to shellR gets the shell. Two
+    // interior builds and I.shellPerScan shell builds per scan is the hitch
+    // budget — a building over budget keeps its slot and builds next scan.
+    let builtFull = 0, builtShell = 0;
+    for (const [d, f] of cands) {
+      if (keep.size >= maxShell) break;
       if (keep.has(f._id)) continue;
       keep.add(f._id);
-      if (this.models.has(f._id)) { this.models.get(f._id).lastTouch = this._clock; continue; }
-      if (built >= 2) continue;             // at most two plans per scan — the
-      this.activate(f);                     // hitch budget, not the frame's
-      built++;
+      const m = this.models.get(f._id);
+      if (m) m.lastTouch = this._clock;
+      if (onFoot && d < I.activateR && full.size < I.maxActive) {
+        full.add(f._id);
+        if (!m || !m.interiorBuilt) {
+          if (builtFull >= 2) continue;
+          if (!m) builtShell++;             // a fresh full build carries a shell too
+          this.activate(f);
+          builtFull++;
+        } else if (!m.populated) this._populate(m);
+      } else if (!m) {
+        if (builtShell >= I.shellPerScan) continue;
+        // Chunk affinity: a chunk's building batch is re-meshed once per scan
+        // however many buildings it lost, so the budget should FINISH one
+        // chunk before starting the next — six buildings from six different
+        // chunks re-mesh six batches this scan and six more next scan, while
+        // six from one chunk cost a single rebuild. Prefer candidates whose
+        // home chunk is already dirty this scan.
+        if (builtShell > 0 && this._dirty?.size && !this._dirty.has(f._home)) {
+          let pending = false;
+          for (const [, g] of cands)
+            if (!keep.has(g._id) && !this.models.has(g._id) && this._dirty.has(g._home)) { pending = true; break; }
+          if (pending) { keep.delete(f._id); continue; }
+        }
+        this._model(f);
+        builtShell++;
+      }
     }
-    // shed anything undamaged that has drifted out of reach
+    // Occupants exist only in the full tier: boarding a car empties the rooms
+    // behind you, and a building sliding out past deactivateR sends its people
+    // home. The rooms themselves stay — tearing geometry out of a standing
+    // building would be visible through its own windows. Wrecks keep their
+    // people so a rocket fired from the helicopter still empties the building.
+    for (const m of this.models.values()) {
+      if (!m.populated || m.damaged || full.has(m.f._id)) continue;
+      if (onFoot && bbDist(m.bb, focus.x, focus.z) < I.deactivateR) continue;
+      for (let i = this.occupants.length - 1; i >= 0; i--)
+        if (this.occupants[i].model === m) this._despawn(i);
+      m.populated = false;
+    }
+    // Shed anything undamaged that has drifted out of reach — the +40 m of
+    // hysteresis keeps the boundary from flickering as the player oscillates.
+    // Drops are CAPPED per scan like builds: stepping off a train after 3 km
+    // used to drop forty models in one scan and re-mesh every chunk they
+    // touched in a single frame. Farthest first, so the cap never starves.
+    const doomed = [];
     for (const [id, m] of this.models) {
       if (m.damaged || keep.has(id)) continue;
-      if (bbDist(m.bb, focus.x, focus.z) > I.deactivateR) this._drop(id);
+      const d = bbDist(m.bb, focus.x, focus.z);
+      if (d > shellR + 40) doomed.push([d, id]);
     }
+    doomed.sort((a, b) => b[0] - a[0]);
+    for (const [, id] of doomed.slice(0, I.shellPerScan * 2)) this._drop(id);
     this._flushChunks();
   }
 
-  /** Build (or fetch) the interior of one building. Ignores the enable flag —
-   *  a missile hit must always produce an inside to look into. */
-  activate(f) {
+  /** Build (or fetch) the SHELL model of one building — the cheap tier. */
+  _model(f) {
     let m = this.models.get(f._id);
     if (m) { m.lastTouch = this._clock; return m; }
     // the plan wants the local roads (so the front door faces the street) and
@@ -140,14 +215,15 @@ export class Interiors {
     const cell = this.city.chunkIndex.get(chunkKey(f.o[0][0], f.o[0][1]));
     const plan = buildingPlan(f, cell?.roads, cell?.buildings);
     // Hand the plan the facade's own wall colour. This is what stops a building
-    // visibly changing identity the instant a rocket promotes it from painted
-    // quads to solid boxes: the boxes come out the colour the facade already
-    // was, with the same window rhythm and the same ground-edge shading.
+    // visibly changing identity the instant it is promoted from painted quads
+    // to solid boxes: the boxes come out the colour the facade already was,
+    // with the same window rhythm and the same ground-edge shading.
     plan.wallHex = buildingWallHex(f);
     plan.cells = facadeCells(f);      // the atlas cells its facade is painted from
-    m = new BuildingModel(this.scene, f, plan, this._fx);
+    m = new BuildingModel(this.scene, f, plan, this._fx, { shellOnly: true });
     m.bb = f._bb ??= bboxOf(f.o);
     m.lastTouch = this._clock;
+    m.populated = false;
     this.models.set(f._id, m);
     // The outer wall is built NOW, not when something hits it. Two things fall
     // out of that, and both were asked for: the windows become real openings
@@ -158,7 +234,17 @@ export class Interiors {
     m.addShell();
     this.hidden.add(f._id);
     this._dirtyChunk(f);
-    this._populate(m);
+    return m;
+  }
+
+  /** Build (or upgrade to) the FULL interior of one building. Ignores the
+   *  enable flag — a missile hit must always produce an inside to look into.
+   *  The upgrade only ADDS pieces under the standing shell, so from the street
+   *  nothing appears to happen. */
+  activate(f) {
+    const m = this._model(f);
+    m.ensureInterior();
+    if (!m.populated) this._populate(m);
     return m;
   }
 
@@ -287,6 +373,7 @@ export class Interiors {
   // own floor. They are the same box people who walk the pavements, so the
   // scale, palette and stride all match for free.
   _populate(m) {
+    m.populated = true;      // set even for the empty cases — never retried
     const plan = m.plan;
     let n = Math.min(plan.occupants, MAX_OCCUPANTS - this.occupants.length);
     if (n <= 0 || plan.use === 'garage' || plan.use === 'parking') return;
@@ -322,6 +409,12 @@ export class Interiors {
   // for the stairs. They evacuate rather than die — this is a demolition
   // sandbox, not a body count.
   _panic(x, z, r) {
+    // the crowd, then one or two individual voices out of it a beat later —
+    // simultaneous screams read as one sample, staggered ones read as people
+    sfxAt?.('crowd_panic', 0.8, x, z, 320, 2.5);
+    for (let n = 1 + ((Math.random() * 2) | 0), i = 0; i < n; i++)
+      setTimeout(() => sfxAt?.(Math.random() < 0.5 ? 'scream_female' : 'scream_male',
+        0.75, x, z, 260, 0.25), Math.random() * 600);
     for (const o of this.occupants) {
       const d = Math.hypot(o.x - x, o.z - z);
       if (d > r) continue;
@@ -376,6 +469,7 @@ export class Interiors {
             o.flee = Math.max(o.flee, 5);
           } else {                                 // grip gone
             o.hang = null; o.vy = -1;
+            sfxAt?.(Math.random() < 0.5 ? 'scream_female' : 'scream_male', 0.9, o.x, o.z, 240, 0.35);
           }
         }
         continue;
@@ -415,6 +509,7 @@ export class Interiors {
           // the frame they lose the floor: grab for whatever is still there
           const ledge = this._findLedge(o);
           if (ledge) { o.hang = ledge; continue; }
+          sfxAt?.(Math.random() < 0.5 ? 'scream_female' : 'scream_male', 0.85, o.x, o.z, 240, 0.35);
         }
         o.vy -= 16 * dt;
         o.y += o.vy * dt;

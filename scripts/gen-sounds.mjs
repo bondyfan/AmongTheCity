@@ -10,7 +10,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const KEY = process.env.ELEVENLABS_API_KEY;
-if (!KEY) { console.error('Set ELEVENLABS_API_KEY'); process.exit(1); }
+if (!KEY) {
+  console.error('ELEVENLABS_API_KEY is not set — nothing generated.');
+  console.error('Run:   ELEVENLABS_API_KEY=sk_... node scripts/gen-sounds.mjs');
+  console.error('Only missing files are billed (FORCE=1 regenerates everything);');
+  console.error('the game falls back to procedural stand-ins for absent files.');
+  process.exit(1);
+}
 const FORCE = process.env.FORCE === '1';
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'sounds');
@@ -101,6 +107,54 @@ const SOUNDS = [
     'A modern passenger train sliding door closing: a short repeating electronic warning beep, '
     + 'then a smooth pneumatic hiss as the leaf slides shut and a soft rubber-sealed thud as it '
     + 'seats home. Single dry event, no music, no voice', 2.2],
+
+  // ---- v7: real horns, and the sound of things (and people) coming down ----
+  // Horns first: the synthesized dyad in audio.js reads as "beep", never as
+  // "car" ("není vůbec reálné"), so honks are real renders now — three car
+  // horns and a truck, picked at random per honk by audio.js horn() with a
+  // ±6 % playbackRate jitter at play time, which is cheaper than shipping ten
+  // variants and sounds like more.
+  ['car_horn_short',
+    'single short car horn honk, city street, close, realistic. Single dry event, no music, '
+    + 'no voice', 1.0],
+  ['car_horn_long',
+    'one long sustained car horn blast held for two seconds, impatient driver, close, city '
+    + 'street, realistic. Single dry event, no music, no voice', 2.2],
+  ['car_horn_double',
+    'car horn honking twice in quick succession, two short impatient beeps, close, city '
+    + 'street, realistic. Single dry event, no music, no voice', 1.4],
+  ['truck_horn',
+    'loud deep truck air horn blast, powerful low dual-tone, close, city street, realistic. '
+    + 'Single dry event, no music, no voice', 2.0],
+  // Destruction: the procedural explosion/rubble in audio.js stays as the bed
+  // (it is a DIFFERENT explosion every shot); these are layered on top for the
+  // texture a synth cannot fake — real concrete, real glass, real air.
+  ['debris_crash',
+    'rubble and concrete debris crashing to the ground, chunks falling, heavy chunks of '
+    + 'masonry landing and tumbling, dust, exterior. Single dry event, no music, no voice', 2.8],
+  ['glass_break',
+    'large window pane shattering, glass breaking and shards falling onto concrete, exterior. '
+    + 'Single dry event, no music, no voice', 1.5],
+  ['rocket_launch',
+    'military rocket launcher whoosh launch, sharp igniter crack then a fast rocket motor '
+    + 'whoosh receding, exterior. Single dry event, no music, no voice', 1.4],
+  ['explosion_big',
+    'massive building explosion with debris, deep concussive blast, rumbling low tail and '
+    + 'falling rubble, exterior. Single event, no music, no voice', 3.5],
+  ['collapse_rumble',
+    'building collapse, sustained concrete rumble, continuous low roar of masonry falling '
+    + 'with cracking and grinding, exterior. No music, no voice', 5.0],
+  // People. The occupants evacuate rather than die, and these are the sound of
+  // exactly that — alarm, not gore.
+  ['scream_female',
+    'a woman screaming in sudden terror, one single short frightened scream, exterior city '
+    + 'street. Single dry event, no music', 1.6],
+  ['scream_male',
+    'a man shouting out in sudden fear, one single short alarmed yell, exterior city street. '
+    + 'Single dry event, no music', 1.6],
+  ['crowd_panic',
+    'panicked crowd screaming and running, exterior: many people shouting in alarm, fleeing '
+    + 'footsteps, chaotic and urgent. No music, no clear speech or words', 5.0],
 ];
 
 const exists = async (p) => { try { await access(p); return true; } catch { return false; } };
