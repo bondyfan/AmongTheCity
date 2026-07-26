@@ -1,6 +1,15 @@
 node_modules/
+
+# Raw OSM extracts: 200 MB of input that build-city.mjs chews into public/data/.
+# Regenerable from Geofabrik, never served, never worth a git object.
 data/raw/
 data/raw-region/
-public/data/tiles/
-public/data/manifest.json
+
+# public/data/tiles/ and manifest.json are NOT ignored, on purpose. They are the
+# deployed world — Cloudflare clones this repo and serves it verbatim, so a tile
+# missing here is a tile missing in production, and the game silently falls back
+# to the single pardubice.json with no region streaming at all. ~49 MB of
+# minified JSON that zlib packs to ~14 MB; the largest tile is 3.2 MB, well
+# under Cloudflare's 25 MB per-file ceiling.
+
 .DS_Store
