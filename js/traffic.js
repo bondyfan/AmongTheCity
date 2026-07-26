@@ -64,12 +64,12 @@ const BIG_CHANCE = 0.22;      // roughly every 5th spawn on a main road is comme
 const VK_MIN = 0.72, VK_VAR = 0.46;
 
 // ---- horn tuning ----
-const HONK_FRAC = 0.30;       // "held" = pinned under this fraction of desire…
-const HONK_HELD = 2.5;        // …for this many seconds by whoever is ahead
-const HONK_CD_MIN = 6, HONK_CD_VAR = 10;  // personal cooldown 6–16 s
-const HONK_RATE = 2, HONK_POOL = 2;       // global budget ~2 honks/s (burst of 2) —
-                                          // a jam grumbles, it doesn't become a horn wall
-const HONK_R = 150;           // m — horn() is an unpanned global one-shot, so only
+const HONK_FRAC = 0.25;       // "held" = pinned under this fraction of desire…
+const HONK_HELD = 6;          // …for this long. 2.5 s honked at ordinary flow.
+const HONK_CD_MIN = 25, HONK_CD_VAR = 30; // personal cooldown 25–55 s
+const HONK_RATE = 0.35, HONK_POOL = 1;    // global budget ≈ one honk every ~3 s max —
+                                          // a horn is an EVENT, not a soundtrack
+const HONK_R = 110;           // m — horn() is an unpanned global one-shot, so only
                               // cars close enough to be plausibly audible get to use it
 
 // ---- traffic-light tuning ----
@@ -757,7 +757,7 @@ export class Traffic {
     // `held` marks the frames where a LEADER is the binding constraint — the
     // honk logic keys off it, so corners and lights never get honked at.
     const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
-    let hard = false, held = false;
+    let hard = false, held = false, leader = null, leadD = 1e9;
     for (const o of this.cars) {
       if (o === car) continue;
       const rx = o.x - car.x, rz = o.z - car.z;
@@ -766,6 +766,7 @@ export class Traffic {
       if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
       if (Math.abs(angWrap(o.heading - car.heading)) > HEAD_GATE) continue;
       const gap = fwd - 3.9;                      // center distance → bumpers
+      if (fwd < leadD) { leadD = fwd; leader = o; }
       if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; }
       else { const fv = (gap - TRAFFIC.stopGap) / 2;         // gap/2s rule
              if (fv < tgt) { tgt = fv; held = true; } }
@@ -789,7 +790,13 @@ export class Traffic {
     // light), and horn() being an unpanned one-shot, only cars near enough to
     // be plausibly audible fire it.
     car._hornCd = (car._hornCd || 0) - dt;
-    if (held && !sigHeld && car.speed < desire * HONK_FRAC) ai.heldT += dt;
+    // Patience propagates down a queue: the first car at a red is sigHeld, and
+    // everyone pinned behind a car that is itself waiting for a reason inherits
+    // that reason (_sigQ, one frame late — good enough). Without this only the
+    // FRONT car was exempt and the rest of the queue honked at every light,
+    // which was the "auta pořád bezdůvodně troubej" bug.
+    car._sigQ = sigHeld || (leader ? !!leader._sigQ : false);
+    if (held && !car._sigQ && car.speed < desire * HONK_FRAC) ai.heldT += dt;
     else ai.heldT = 0;
     if (ai.heldT > HONK_HELD && car._hornCd <= 0 && this._hornPool >= 1 &&
         Math.hypot(car.x - playerPos.x, car.z - playerPos.z) < HONK_R) {

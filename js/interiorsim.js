@@ -469,7 +469,11 @@ export class Interiors {
             o.flee = Math.max(o.flee, 5);
           } else {                                 // grip gone
             o.hang = null; o.vy = -1;
-            sfxAt?.(Math.random() < 0.5 ? 'scream_female' : 'scream_male', 0.9, o.x, o.z, 240, 0.35);
+            // scream only when something DID this to them — a slip in an
+            // intact building screaming every few seconds was the "chodci
+            // pořád ječej" bug
+            if (o.model.damaged)
+              sfxAt?.(Math.random() < 0.5 ? 'scream_female' : 'scream_male', 0.9, o.x, o.z, 240, 1.2);
           }
         }
         continue;
@@ -490,7 +494,19 @@ export class Interiors {
         }
       } else {
         const sp = (o.flee > 0 ? OCC_FLEE * o.speed : o.speed) * dt;
-        o.x += (dx / d) * sp; o.z += (dz / d) * sp;
+        const nx2 = o.x + (dx / d) * sp, nz2 = o.z + (dz / d) * sp;
+        // an intact building's lift shaft and stair well are HOLES — nobody
+        // strolls into one. A step whose floor is >0.6 m down is refused and
+        // the walker re-targets; panicked people are allowed to be careless.
+        if (o.flee <= 0 && !o.model.damaged) {
+          const ns = o.model.supportY(nx2, nz2, o.y + 0.4);
+          if (ns < o.y - 0.6) {
+            const room = pickRoom(o.model.plan, o.fi);
+            if (room) { const spot = roomPoint(o.model.plan, room); o.tx = spot.x; o.tz = spot.z; }
+            continue;
+          }
+        }
+        o.x = nx2; o.z = nz2;
         o.walkT += sp * 1.6;
         const want = Math.atan2(-dx / d, -dz / d);
         let td = want - o.heading;
@@ -509,7 +525,8 @@ export class Interiors {
           // the frame they lose the floor: grab for whatever is still there
           const ledge = this._findLedge(o);
           if (ledge) { o.hang = ledge; continue; }
-          sfxAt?.(Math.random() < 0.5 ? 'scream_female' : 'scream_male', 0.85, o.x, o.z, 240, 0.35);
+          if (o.model.damaged)
+            sfxAt?.(Math.random() < 0.5 ? 'scream_female' : 'scream_male', 0.85, o.x, o.z, 240, 1.2);
         }
         o.vy -= 16 * dt;
         o.y += o.vy * dt;

@@ -15,7 +15,7 @@ import { Vehicles, driveStep, lampMats } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
-import { initAudio, sfx, sfxAt, engineStart, engineStop, engineSet, setVolume,
+import { initAudio, sfx, sfxAt, engineStart, engineStop, engineSet, tireSet, setVolume,
   heliStart, heliStop, heliSet, ambientStart, nearbyTrafficHum } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
@@ -231,6 +231,7 @@ input.onKey('KeyE', () => {
     game.car = null;
     $id('speedo').classList.add('hidden');
     engineStop();
+    tireSet(0, 0);
     sfx('door_close', 0.8);
   } else if (game.heli) {
     // step out of the helicopter — only with the skids down
@@ -945,6 +946,8 @@ function stepGame(dt) {
     }, dt, world, _crashList());
     player.update(dt, { input, camYaw, world }); // keeps player glued to the car
     engineSet(Math.min(1, Math.abs(game.car.speed) / CAR.vmax), Math.abs(gas));
+    // tyre hiss under the engine — and gravel once the wheels leave the road
+    tireSet(Math.min(1, Math.abs(game.car.speed) / 40), game.car.offroad ?? 0);
   } else {
     player.update(dt, { input, camYaw, world });
   }

@@ -30,6 +30,7 @@
 
 import * as THREE from 'three';
 import { CAR, CAR_COLORS } from './config.js';
+import { crash } from './audio.js';   // no-ops headless — safe for node --check/tests
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 
@@ -839,7 +840,11 @@ export class Vehicles {
       }
       m.position.y = car.y + bumpY;
       const b = m.userData.body;
-      b.rotation.z = car._roll + bumpR;  // +z roll lifts the right flank = lean left
+      // crash damage shows: the shell sags and takes a permanent list — cheap,
+      // and it reads as "that car has had a day" from any distance
+      const dmgK = Math.min(1, car.damage ?? 0);
+      b.position.y = -0.055 * dmgK;
+      b.rotation.z = car._roll + bumpR + (car._crushR ?? 0);  // +z roll lifts the right flank
       b.rotation.x = car._pitch;         // +x pitch lifts the nose
     }
   }
@@ -850,7 +855,12 @@ export class Vehicles {
 // iterable of other cars for car-car collision (may contain `car` — skipped;
 // omit it and the step degrades gracefully to walls-only, v2 behavior).
 const _pt = { x: 0, z: 0 };
+let _hitX = 0, _hitZ = 0;   // last building-contact point this step
 export function driveStep(car, ctl, dt, world, others) {
+  // crash damage starves the drivetrain: a wreck at damage ≥ 1 no longer
+  // pulls at all, and everything in between loses proportionate punch
+  const dmg = Math.min(1, car.damage ?? 0);
+  if (dmg >= 1) ctl = { ...ctl, gas: Math.min(0, ctl.gas ?? 0) };
   dt = Math.min(dt, 1 / 20);             // tab-return dt spikes must not teleport us
   const K = kindOf(car.kind);            // alias-safe: an old save may still say 'sedan'
 
@@ -874,8 +884,9 @@ export function driveStep(car, ctl, dt, world, others) {
     else {
       // max(0,…): a collision impulse can leave s a hair over vmax, and a
       // negative base under ^1.3 is NaN — clamp the headroom, not the speed
-      const a = K.accel * Math.pow(Math.max(0, 1 - s / K.vmax), 1.3);
-      s = Math.min(K.vmax, s + a * gas * dt);
+      const hurt = 1 - 0.45 * dmg;               // a battered engine pulls less
+      const a = K.accel * hurt * Math.pow(Math.max(0, 1 - s / (K.vmax * hurt)), 1.3);
+      s = Math.min(K.vmax * hurt, s + a * gas * dt);
     }
   } else if (gas < -0.01) {
     s = s > 0.05 ? Math.max(0, s + CAR.brake * gas * dt)      // gas is negative
@@ -953,6 +964,18 @@ export function driveStep(car, ctl, dt, world, others) {
         const closing = -(vRx * nx + vRz * nz);           // >0 when approaching
         if (closing > 0) {
           const imp = closing * HIT_SCRUB;
+          // BeamNG-lite bookkeeping: both parties take damage by closing
+          // speed, the hit crunches audibly, and a hard one sheds trim
+          if (closing > 2) {
+            const sev = Math.min(1, closing / 18);
+            car.damage = Math.min(1.2, (car.damage ?? 0) + sev * 0.45);
+            o.damage = Math.min(1.2, (o.damage ?? 0) + sev * 0.45);
+            crash(sev);
+            if (closing > 6) world.crashDebris?.(
+              (car.x + o.x) / 2, car.y, (car.z + o.z) / 2, car.color,
+              Math.min(8, 2 + closing | 0), closing * 0.5);
+            if (sev > 0.4) car._crushR = ((car._crushR ?? 0) + (Math.random() - 0.5) * 0.05);
+          }
           // our delta-v decomposed back into the scalar speed + lateral slide
           car.speed += (nx * fx + nz * fz) * imp * wA;
           car._lat += (nx * rx + nz * rz) * imp * wA;
@@ -987,9 +1010,31 @@ export function driveStep(car, ctl, dt, world, others) {
       car.x += px; car.z += pz;
       car.heading += clamp((woz * px - wox * pz) * 0.03, -0.05, 0.05);
       hit = true;
+      _hitX = ox; _hitZ = oz;                    // where metal met masonry
     }
   }
-  if (hit) { car.speed *= 0.4; car._lat *= 0.3; }
+  if (hit) {
+    const impact = Math.abs(car.speed);
+    car.speed *= 0.4; car._lat *= 0.3;
+    if (impact > 2) {
+      // the wall wins, the car pays: severity by impact speed. CRASH sound,
+      // permanent damage, a spray of body-colour trim — and above ~50 km/h
+      // the BUILDING pays too: a small localized blast (a fraction of a
+      // rocket) knocks a few pieces off the facade where the nose went in.
+      const sev = Math.min(1, impact / 20);
+      car.damage = Math.min(1.2, (car.damage ?? 0) + sev * 0.55);
+      crash(sev);
+      world.crashDebris?.(_hitX, car.y, _hitZ, car.color,
+        Math.min(10, 2 + impact * 0.5 | 0), impact * 0.45);
+      if (sev > 0.4) car._crushR = ((car._crushR ?? 0) + (Math.random() - 0.5) * 0.07);
+      car._chipCd = Math.max(0, (car._chipCd ?? 0));
+      if (impact > 14 && car._chipCd <= 0 && world.damageBuilding) {
+        car._chipCd = 1.5;
+        world.damageBuilding(null, _hitX, car.y + 1.0, _hitZ, 2.0 + sev * 1.2);
+      }
+    }
+  }
+  if ((car._chipCd ?? 0) > 0) car._chipCd -= dt;
 
   // ---- what the tyres are touching ----
   // surfaceY puts the wheels ON the rendered deck (LAYER_Y.road above the
@@ -1003,11 +1048,14 @@ export function driveStep(car, ctl, dt, world, others) {
     car.offroad += ((s.road ? 0 : 1) - (car.offroad ?? 0)) * Math.min(1, dt * 3.5);
     car.y = s.y;
     if (car.offroad > 0.05 && Math.abs(car.speed) > 0.5) {
-      // rolling resistance of soft ground: quadratic past ~11 m/s so 40 km/h
-      // is where drag eats all of a typical engine's push
+      // Rolling resistance of a field, not of glue: the first pass capped
+      // offroad at ~40 km/h and read as driving through mud. The quadratic is
+      // tuned so a typical engine (7 m/s² peak) balances near 25 m/s — you CAN
+      // do 90 across a meadow, the ground just never stops arguing (the body
+      // judder in update() grows with speed to sell it).
       const k = car.offroad;
       const v = Math.abs(car.speed);
-      const drag = (1.2 + v * v * 0.055) * k;
+      const drag = (0.3 + v * v * 0.0107) * k;
       car.speed -= Math.sign(car.speed) * Math.min(v, drag * dt);
     }
   } else {

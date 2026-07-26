@@ -914,3 +914,86 @@ function rubble(t, v) {
   src.stop(t + 2.5);
   src.onended = () => { src.disconnect(); bp.disconnect(); g.disconnect(); };
 }
+
+// ---- tyre / road noise ----------------------------------------------------
+// The one loop a driving game cannot go without: broadband tyre hiss that
+// rises and brightens with speed, plus a low gravel rumble that fades in as
+// the wheels leave the tarmac. One noise source, two filter paths, all moves
+// on setTargetAtTime — silent at rest, self-starting on the first call.
+const TIRE = {
+  vol: 0.16,            // ceiling at full speed on asphalt
+  hissLo: 420, hissHi: 2600,   // bandpass sweep across speed01
+  gravel: 0.22,         // extra rumble ceiling when fully offroad
+  gravelF: 140,
+  tau: 0.12,
+};
+let tire = null, tireAt = -1, tireOff = -1;
+
+export function tireSet(speed01, offroad01 = 0) {
+  if (!ctx || ctx.state !== 'running') return;
+  const s = speed01 < 0 ? 0 : speed01 > 1 ? 1 : speed01;
+  const o = offroad01 < 0 ? 0 : offroad01 > 1 ? 1 : offroad01;
+  if (!tire) {
+    if (s < 0.02) return;                        // parked: build nothing
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer(); src.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = TIRE.hissLo; bp.Q.value = 0.5;
+    const hg = ctx.createGain(); hg.gain.value = 0;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = TIRE.gravelF; lp.Q.value = 0.8;
+    const gg = ctx.createGain(); gg.gain.value = 0;
+    src.connect(bp); bp.connect(hg); hg.connect(master);
+    src.connect(lp); lp.connect(gg); gg.connect(master);
+    src.start(ctx.currentTime, Math.random());
+    tire = { src, bp, hg, lp, gg };
+  }
+  if (Math.abs(s - tireAt) < 0.01 && Math.abs(o - tireOff) < 0.02) return;
+  tireAt = s; tireOff = o;
+  const t = ctx.currentTime;
+  // hiss grows ~s^1.6 (quiet in town, loud at speed) and brightens with it
+  tire.hg.gain.setTargetAtTime(TIRE.vol * Math.pow(s, 1.6), t, TIRE.tau);
+  tire.bp.frequency.setTargetAtTime(TIRE.hissLo + (TIRE.hissHi - TIRE.hissLo) * s, t, TIRE.tau);
+  // gravel rumble scales with BOTH how offroad and how fast
+  tire.gg.gain.setTargetAtTime(TIRE.gravel * o * Math.min(1, s * 2.2), t, TIRE.tau);
+}
+
+// ---- crash -----------------------------------------------------------------
+// A collision is three sounds stacked: a metallic CRUNCH (noise burst whose
+// lowpass slams shut), a body THUMP (short low sine), and — for the big ones —
+// the debris_crash sample of parts hitting the road. k is 0..1 severity.
+let _crashCd = 0;
+export function crash(k = 0.5) {
+  if (!ctx || ctx.state !== 'running') return;
+  const now = ctx.currentTime;
+  if (now < _crashCd) return;                    // two crunches a frame is one crash
+  _crashCd = now + 0.12;
+  const v = k < 0.05 ? 0.05 : k > 1 ? 1 : k;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer();
+  src.playbackRate.value = 0.9 + Math.random() * 0.4;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.Q.value = 1.4;
+  lp.frequency.setValueAtTime(2600 + v * 2200, now);
+  lp.frequency.exponentialRampToValueAtTime(240, now + 0.28 + v * 0.2);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.exponentialRampToValueAtTime(0.5 * v + 0.1, now + 0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + 0.4 + v * 0.3);
+  src.connect(lp); lp.connect(g); g.connect(master);
+  src.start(now, Math.random() * 0.5, 0.8);
+  src.stop(now + 0.8);
+  src.onended = () => { src.disconnect(); lp.disconnect(); g.disconnect(); };
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(110, now);
+  osc.frequency.exponentialRampToValueAtTime(38, now + 0.16);
+  const og = ctx.createGain();
+  og.gain.setValueAtTime(0.0001, now);
+  og.gain.exponentialRampToValueAtTime(0.45 * v, now + 0.012);
+  og.gain.exponentialRampToValueAtTime(0.0001, now + 0.3);
+  osc.connect(og); og.connect(master);
+  osc.start(now); osc.stop(now + 0.35);
+  osc.onended = () => { osc.disconnect(); og.disconnect(); };
+  if (v > 0.55) sfx('debris_crash', v * 0.8);    // parts on the tarmac
+}

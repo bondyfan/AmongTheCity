@@ -249,6 +249,19 @@ export class CityWorld {
     return best;
   }
 
+  /** A handful of body-colour chunks off a crashing car — the debris pool is
+   *  the interiors', so wrecks and crashes share one budget and one mesh. */
+  crashDebris(x, y, z, color, n, energy) {
+    const d = this.interiors?.debris;
+    if (!d) return;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, e = energy * (0.5 + Math.random() * 0.8);
+      d.spawn({ x, y: y + 0.4, z, hx: 0.1 + Math.random() * 0.18, hy: 0.04 + Math.random() * 0.08,
+        hz: 0.1 + Math.random() * 0.16, yaw: a, col: color ?? 0x888a8e, k: 0.9 },
+        Math.cos(a) * e, 2 + Math.random() * 3, Math.sin(a) * e, 9);
+    }
+  }
+
   /** Is there destructible-model geometry at this point? (rocket impacts) */
   solidAt(x, y, z) { return this.interiors.occupied(x, y, z, 0.12); }
 
@@ -282,8 +295,11 @@ export class CityWorld {
     }
     // Water only exists at ground level — ON A BRIDGE the point stands x,z
     // inside the Labe polygon yet 0.85 m above it, and pushing it to the bank
-    // was exactly the "cars jam on every bridge" bug. Deck height wins.
-    if (this.heightAt(pos.x, pos.z) < 0.3) {
+    // was exactly the "cars jam on every bridge" bug. Deck height wins — and
+    // so does ANY drivable surface: OSM leaves plenty of river crossings
+    // untagged as bridges, and a car on tarmac is on tarmac whatever the
+    // polygon under it says (the second, subtler "nemůžu přes most" bug).
+    if (this.heightAt(pos.x, pos.z) < 0.3 && !this.surfaceY(pos.x, pos.z).road) {
       for (const w of cell.water) {
         // inside water (and not on an island hole) → push back to the bank
         pushed = this._pushOutOfPoly(pos, radius, w.o, w.i, false) || pushed;
