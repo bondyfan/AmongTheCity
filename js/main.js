@@ -11,7 +11,8 @@ import { loadCity, chunkKey } from './geo.js';
 import { CityWorld } from './city.js';
 import { input } from './input.js';
 import { Player, worldSeatAnchor } from './player.js';
-import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor } from './vehicles.js';
+import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
+  attachCabin, detachCabin } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
@@ -105,16 +106,14 @@ const FP_PITCH_UP = 0.55;  // roof lining
 const FP_PITCH_DN = 0.75;  // the pedals
 let fpPitch = 0;           // radians either side of the horizon — FP's own axis
 // Near plane belongs to the camera MODE, not to the horizon — updateHorizon()
-// owns `far` and defers to this. It was 0.14 on the reasoning that 0.5 m clips
-// away the A-pillar and the dash: NEITHER EXISTS. makeCarMesh() builds no
-// interior at all, and every vehicle material is FrontSide, so the shell is
-// pure backface from the inside and is culled whatever the near plane says.
-// 0.14 therefore bought nothing and cost 3.6× the depth-buffer resolution
+// owns `far` and defers to this. 0.14 was 3.6× the depth-buffer cost of 0.3
 // (24-bit integer depth against far = 5200: ~12 cm of error at 1 km becomes
-// ~43 cm, i.e. z-fighting on distant façades). 0.3 keeps headroom for the one
-// thing that can genuinely be inside the old 0.5 m — a remote passenger's
-// shoulder, or another car's wing folded into the cabin by a crash — at a
-// fraction of the cost. If a cabin is ever modelled, revisit this WITH it.
+// ~43 cm, i.e. z-fighting on distant façades) and 0.5 clipped things that are
+// genuinely that close — a remote passenger's shoulder, another car's wing
+// folded into the cabin by a crash. 0.3 is now also a CONTRACT with the cabin
+// vehicles.js builds: cabinSpec() sizes the door cards against exactly this
+// number (the panel proper stops at the doorline ~0.39 m out, only a thin
+// sill strip goes nearer). Moving it means re-reading that comment first.
 const CAM_NEAR = 0.5, FP_NEAR = 0.3;
 let camNear = CAM_NEAR;
 // Hiding our own model is done with a LAYER, not mesh.visible: layers filter
@@ -141,6 +140,39 @@ function fpHideSelf(hide) {
   if (hide === _selfHidden || !player) return;
   _selfHidden = hide;
   player.mesh.traverse((o) => o.layers.set(hide ? FP_HIDE_LAYER : 0));
+}
+
+// ---- the interior, grafted onto exactly the car being looked out of ----
+// WHEN, not whether: on the C toggle, not on boarding. Three reasons, in
+// order of weight. (1) The cabin is not culled away when you are outside the
+// car — the glass is transparent and the trim is FrontSide facing IN, so a
+// dashboard left attached shows through the windscreen from the chase cam as
+// a hollow shell. (2) Most drives never press C, and the parked/traffic pool
+// runs to ~500 cars: attaching on boarding would be a dozen draw calls bought
+// for nothing on every single E. (3) It is nearly free to do it late anyway —
+// vehicles.js caches the interior GEOMETRY per kind beside the exterior set,
+// so the first C in an Octavia builds it once and every C after that is just
+// `new THREE.Mesh` a dozen times over geometry that already exists.
+//
+// Like fpHideSelf this is re-derived from live state every frame rather than
+// latched at the event, which is what makes the teardown total: stepping out
+// at 100 km/h, the car exploding, the net layer taking the seat, the vehicle
+// streaming out from under the player — every one of those makes fpVehicle()
+// return null on the next frame and the graft comes off there. No exit path
+// has to remember to clean up, so none of them can forget. The one thing that
+// WOULD escape it is the frame loop stopping with a car still under the eye:
+// game.mode is written exactly once today (boot → 'play', never back), so the
+// only exit from the session is a reload that takes the whole scene with it —
+// but a future pause screen or "back to menu" must call fpCabin(null) itself.
+let _cabinCar = null;
+function fpCabin(car) {
+  if (car === _cabinCar) return;
+  // detachCabin only touches car.mesh.userData, so a car that has already
+  // been removed from the scene (despawn, wreck cleanup) is still safe to
+  // hand back here — it just drops a reference that was about to die anyway.
+  if (_cabinCar) detachCabin(_cabinCar);
+  _cabinCar = car;
+  if (car) attachCabin(car);
 }
 
 // blast shake: high-frequency positional jitter, decayed by weapons.js. It
@@ -193,6 +225,7 @@ function updateCamera(dt) {
   if (input.takeZoomHome()) camDist = CAM_DIST_0;
   camDist = Math.max(5, Math.min(26, camDist + input.takeWheel() * 1.4));
   fpHideSelf(!!fpCar);
+  fpCabin(fpCar);
 
   if (fpCar) {
     const c = fpCar;
@@ -233,9 +266,14 @@ function updateCamera(dt) {
     camera.lookAt(ex - Math.sin(camYaw) * cp * 12,
                   ey + Math.sin(fpPitch) * 12,
                   ez - Math.cos(camYaw) * cp * 12);
-    // a much gentler speed kick than the chase cam's: at 74° the edges of the
+    // A much gentler speed kick than the chase cam's: at 74° the edges of the
     // frame already move fast, and widening further from inside a cabin reads
-    // as the windscreen stretching rather than as speed
+    // as the windscreen stretching rather than as speed. CAR.vmax stays the
+    // yardstick here even though engineSet() no longer uses it — the lens is
+    // tuned to a SPEED (137 km/h is where the rush is fully sold), not to a
+    // fraction of whatever the current car happens to be capable of. Judging
+    // it per kind would mean a Fabia flat out looked slower than a BMW at the
+    // same 200 km/h, which is exactly backwards.
     applyLens(dt, FP_FOV + Math.min(1, Math.abs(c.speed) / CAR.vmax) * 5, FP_NEAR);
     return;
   }
@@ -245,6 +283,8 @@ function updateCamera(dt) {
     const c = game.car;
     // ease behind the car unless the player is dragging the camera around
     wantYaw = c.heading;
+    // same reasoning as the FP lens above: an absolute speed yardstick, not
+    // the kind's own top speed
     const speedK = Math.min(1, Math.abs(c.speed) / CAR.vmax);
     dist = camDist + 1.6 + speedK * 3.2;
     height = 2.4 + speedK * 1.1;
@@ -1239,8 +1279,23 @@ function stepGame(dt) {
       brake: input.keys.has('Space') ? 1 : 0,
     }, dt, world, _crashList());
     player.update(dt, { input, camYaw, world }); // keeps player glued to the car
-    engineSet(Math.min(1, Math.abs(game.car.speed) / CAR.vmax), engineLoad(game.car, gas));
-    // tyre hiss under the engine — and gravel once the wheels leave the road
+    // ABSOLUTE m/s, not a 0..1 — the fix for the engine hanging at redline.
+    // CAR.vmax is the generic 38 m/s (137 km/h) from config.js, but the KINDS
+    // that vehicles.js actually drives run to 64 (Octavia), 69 (BMW), 72
+    // (Tesla), so |speed|/CAR.vmax saturated at 137 km/h and every tone above
+    // that froze — the last 90 km/h of an Octavia was one held note. main.js
+    // cannot divide by the right number either (car objects carry no vmax and
+    // vehicles.js exports none), but audio.js was told the KIND at
+    // engineStart() and has the top speed in its own table, so the caller now
+    // hands over metres per second and audio.js normalizes per kind. Shift
+    // points and the ducking thresholds live there in m/s and are unchanged.
+    engineSet(Math.abs(game.car.speed), engineLoad(game.car, gas));
+    // Tyre hiss under the engine — and gravel once the wheels leave the road.
+    // Deliberately NOT rescaled per kind: this one is not a rev counter, it is
+    // road roar, which is a function of the road and the rubber and not of
+    // which car is on top of them. 40 m/s (144 km/h) is where it is already
+    // as loud as it should get in the mix; a Tesla at 250 km/h does not need
+    // to be 1.8× louder than a van at 130, it needs the same wall of noise.
     tireSet(Math.min(1, Math.abs(game.car.speed) / 40), game.car.offroad ?? 0);
   } else {
     player.update(dt, { input, camYaw, world });
@@ -1294,10 +1349,15 @@ function stepGame(dt) {
 
   // ---- net: server co-op pump (menu → Multiplayer only; null in single) ----
   // One call does everything network: our state out at ~10 Hz, remote citizens
-  // walked/interpolated, peers' rocket detonations replayed here. Seating of
-  // remotes in vehicles is NOT done here — netcity consumes the sibling's
-  // seat API via net.onRemoteVehicle / window.__atc.seatAnchor when it lands.
-  if (net) net.update(dt, { scene, player, game, weapons, world, cars: _crashList(), peds });
+  // walked/interpolated, peers' rocket detonations replayed here, and the name
+  // tags over their heads (netcity owns the NameTags instance and pumps it at
+  // the end of its own update, so the tag can never trail its owner by a
+  // frame). `camera` is in the context for the tags: they are sprites scaled
+  // off view distance, and passing it explicitly beats netcity's
+  // window.__atc.camera fallback. In single player `net` is null and no
+  // NameTags is ever constructed — nobody to label, nothing to draw.
+  if (net) net.update(dt, { scene, player, game, weapons, world, camera,
+    cars: _crashList(), peds });
 }
 
 // ---------- menu gate ----------
@@ -1338,7 +1398,15 @@ async function start() {
   const choice = await showMenu();
   if (choice.mode === 'server') {
     try {
-      net = await connectCity();
+      // The nickname goes in BEFORE the socket, not after: connectCity arms it
+      // module-side so it rides in the very first state packet. Peers who are
+      // already in the room learn our name from that packet (≤100 ms) because
+      // WELCOME carries uids only — a beat of "Hráč 4f2a" is the price of not
+      // having to redeploy the relay, which never looks inside `state`.
+      // menu.js has already sanitized it and netcity sanitizes it again on the
+      // way out and a third time on every packet in; none of those trusts the
+      // one before it, and none of them is the one that matters.
+      net = await connectCity(choice.name);
       net.onRemoteVehicle = remoteSeatAnchor;
     } catch (err) {
       console.error('Multiplayer: připojení selhalo — spouštím jednohráčovku.', err);
@@ -1346,6 +1414,19 @@ async function start() {
   }
   await boot();
 }
+// Leaving the tab is the ordinary way a session ends here, so say goodbye
+// properly: net.dispose() drops every remote avatar (and with it every name
+// tag sprite, material and canvas texture), then sends BYE so the relay tells
+// the others we left instead of making them wait out the 30 s reap. 'pagehide'
+// rather than 'beforeunload' because Safari and every mobile browser fire it
+// on the bfcache path too, where beforeunload simply never runs. Guarded and
+// nulled: single player has no `net`, and a second pagehide must not resend.
+window.addEventListener('pagehide', () => {
+  if (!net) return;
+  const n = net; net = null;
+  try { n.dispose(); } catch {}
+});
+
 start().catch(err => {
   $id('enter-label').textContent = 'Chyba při načítání města: ' + err.message;
   console.error(err);
@@ -1355,10 +1436,13 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v14-fp-engine',   // bump on risky changes — tells us which code a tab runs
+  build: 'v15-cabin-names-gears',   // bump on risky changes — which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
-  cam: () => ({ camDist, camPitch, camYaw, fpView, fpPitch, near: camera.near }),
+  // `cabin` is the graft's live truth, not a copy of fpView: a harness can
+  // assert the interior really came off after a wreck or an exit at speed
+  cam: () => ({ camDist, camPitch, camYaw, fpView, fpPitch, near: camera.near,
+    cabin: !!_cabinCar }),
   get weapons() { return weapons; },
   get interiors() { return world?.interiors; },
   get postfx() { return postfx; },

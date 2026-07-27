@@ -23,6 +23,7 @@
 import { SERVER_URL } from '../server-config.js';
 import { makeCitizen } from './citizen.js';
 import { PLAYER_SCALE, WALK } from './config.js';
+import { NameTags } from './nametags.js';
 
 const MSG = {
   HELLO: 'hello', STATE: 'state', EVENT: 'event', SNAP: 'snap', META: 'meta',
@@ -184,6 +185,44 @@ export function queueEvent(type, data) {
   _outbox.push({ type, ...(data || {}) });
 }
 
+// ---- nickname ----
+// Same rule as AmongTheWoods: strip anything that could become markup, trim,
+// 14 characters. Applied TWICE — once here on the way out, once again on every
+// packet that comes back in — because the wire is not a trusted source and the
+// string ends up in a canvas (and, one day, maybe a DOM chat line).
+//
+// The class also drops every character that renders as NOTHING (U+200B,
+// U+3164, U+2800, the C0/C1 controls …) or reverses the text after it (U+202E).
+// String.trim() knows none of those, so a hand-rolled client could otherwise
+// wear a blank or a text-reversing nameplate no matter what the menu accepted —
+// which is exactly why the filter runs again HERE and not only there. Keep this
+// body identical to menu.sanitizeName and nametags.clean.
+const STRIP = /[<>&"'`\u0000-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180E\u200B\u200C\u200E\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\u2800\u3164\uFEFF\uFFA0\uFFF9-\uFFFC\u{1D173}-\u{1D17A}\u{E0000}-\u{E007F}]/gu;
+// …and the backstop for every blank NOBODY has enumerated yet. Naming the
+// characters one at a time is whack-a-mole: the first version of this list
+// caught U+200B and U+3164 and still waved through U+034F (combining grapheme
+// joiner), U+17B5 (Khmer inherent vowel), U+FE0F (variation selector) and the
+// whole U+E00xx tag block — every one of them a perfectly empty nameplate,
+// verified against the shipped function. So the rule is also stated
+// positively: a nickname must contain at least one character that puts INK on
+// the canvas — not whitespace, not a combining mark, not a format control, not
+// a surrogate, not private-use, not unassigned. U+200D (ZWJ) and the variation
+// selectors deliberately survive the strip above, so a family emoji stays one
+// glyph and a thumbs-up keeps its colour; both are format/mark characters, so
+// a name made of nothing but them is still refused right here.
+const INK = /[^\s\p{Mn}\p{Me}\p{Cf}\p{Cc}\p{Cs}\p{Cn}\p{Co}]/u;
+export function sanitizeName(s) {
+  const n = String(s ?? '').replace(STRIP, '').trim().slice(0, 14).trim();
+  return INK.test(n) ? n : '';
+}
+
+// Module-level, not a NetGame field: main.js knows the nickname the moment the
+// menu resolves, which is BEFORE the socket (and therefore the NetGame) exists.
+let _myName = '';
+function setMyName(name) { return (_myName = sanitizeName(name)); }
+export { setMyName as setPlayerName };
+export function getPlayerName() { return _myName; }
+
 const SEND_S = 0.1;         // own state at ~10 Hz
 const REAP_MS = 30000;      // a peer silent this long crashed — reap the avatar
                             // (30 s, not less: a backgrounded tab also goes quiet)
@@ -192,6 +231,13 @@ const REAP_MS = 30000;      // a peer silent this long crashed — reap the avat
 // by uid hash — bounded, so the citizen material cache stays shared.
 const REMOTE_JACKETS = [0xc0392b, 0x27ae60, 0xd9a13a, 0x8e44ad,
   0x2e9ac4, 0xd35490, 0x7fb069, 0xb96b3c];
+
+// Where the nickname floats, in metres above the avatar's feet (or above the
+// seat anchor when they are riding). A citizen's hair tops out at 1.75 m in
+// model space and netcity scales the whole figure by PLAYER_SCALE, so this
+// clears the head by a hand's width no matter what PLAYER_SCALE becomes.
+const TAG_HEAD_H = 1.75 * PLAYER_SCALE + 0.22;
+const TAG_VEH_H = 2.1;   // fallback when we never found their real seat
 
 function strHash(s) {
   let h = 0;
@@ -215,6 +261,8 @@ class NetGame {
     // park the avatar at) — until then window.__atc.seatAnchor is tried, and
     // failing both the avatar simply stands at the vehicle's position.
     this.onRemoteVehicle = null;
+    this.tags = new NameTags(null);   // scene arrives with the first update()
+    this.showNames = true;
     this._scene = null;
     this._sendT = 0;
     this._missiles = new Map();   // live missile object -> last seen {x,y,z}
@@ -231,18 +279,34 @@ class NetGame {
     if (s === null) { this._drop(uid); return; }
     let r = this.remotes.get(uid);
     if (!r) {
+      // WELCOME carries uids only, never nicknames, so a player who joins a
+      // busy room knows nobody until each of them sends a STATE (≤100 ms).
+      // Until then wear a scrap of the uid rather than a blank tag.
       r = { uid, cit: null, state: null, lastSeen: 0,
-        x: s.x ?? 0, y: s.y ?? 0, z: s.z ?? 0, h: s.h ?? 0, speed: 0, walkT: 0 };
+        name: 'Hráč ' + sanitizeName(uid).slice(-4),
+        x: s.x ?? 0, y: s.y ?? 0, z: s.z ?? 0, h: s.h ?? 0,
+        tagY: (s.y ?? 0) + TAG_HEAD_H,   // sane until the first _updateRemotes
+        speed: 0, walkT: 0 };
       this.remotes.set(uid, r);
+    }
+    // re-sanitize: this string came off the wire and is headed for a texture
+    if (typeof s.nm === 'string') {
+      const nm = sanitizeName(s.nm);
+      if (nm) r.name = nm;
     }
     r.state = s;
     r.lastSeen = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   }
 
+  // the nickname of a connected peer, or '' — for HUD/kill-feed callers that
+  // want a name without walking `remotes` themselves
+  peerName(uid) { return this.remotes.get(uid)?.name ?? ''; }
+
   _drop(uid) {
     const r = this.remotes.get(uid);
     if (!r) return;
     if (r.cit && this._scene) this._scene.remove(r.cit.group);
+    this.tags.remove(uid);      // sprite + material + its share of the texture
     this.remotes.delete(uid);
   }
 
@@ -278,9 +342,15 @@ class NetGame {
   }
 
   // ---- own state, ~10 Hz ----
-  // { x,y,z, h(eading), s(peed), wt(walkT), veh:{k,id,seat}|null } — the whole
-  // v1 protocol. player.pos mirrors the car/heli while inside, so position is
-  // always just player state and veh only adds "and I'm sitting in this".
+  // { x,y,z, h(eading), s(peed), wt(walkT), veh:{k,id,seat}|null, nm } — the
+  // whole v1 protocol. player.pos mirrors the car/heli while inside, so
+  // position is always just player state and veh only adds "and I'm sitting in
+  // this". `nm` rides INSIDE state on purpose: the relay treats state as an
+  // opaque blob it re-broadcasts untouched (server-city/room.js onState), so
+  // the nickname needs no server change — whereas HELLO is parsed field by
+  // field and would have needed a redeploy. It goes out on every packet rather
+  // than once at join, so a player who joins later learns the names of everyone
+  // already in the room within 100 ms; 14 bytes at 10 Hz is ~140 B/s.
   _sendState(ctx) {
     const p = ctx.player, g = ctx.game;
     const veh = g.heli ? { k: 'heli', id: 0, seat: 0 }
@@ -290,8 +360,12 @@ class NetGame {
       h: +p.heading.toFixed(3),
       s: +p.speed.toFixed(2), wt: +(p.walkT % (Math.PI * 2)).toFixed(2),
       veh,
+      ...(_myName ? { nm: _myName } : {}),
     }, 0);   // our own 10 Hz gate already throttled; don't double-gate
   }
+
+  // main.js may also set the nickname through the session it already holds
+  setPlayerName(name) { return setMyName(name); }
 
   // ---- remote avatars: lerp toward the last state, ease the heading ----
   _updateRemotes(dt) {
@@ -328,9 +402,13 @@ class NetGame {
         if (a) {
           r.cit.group.position.set(a.x, a.y ?? r.y, a.z);
           r.cit.group.rotation.y = a.heading ?? r.h;
+          // the seat anchor sits at cushion height inside the cabin — a metre
+          // over it clears the roofline of every kind including the bus
+          r.tagY = (a.y ?? r.y) + 1.0;
         } else {
           r.cit.group.position.set(r.x, r.y, r.z);
           r.cit.group.rotation.y = r.h;
+          r.tagY = r.y + TAG_VEH_H;
         }
         r.speed = 0;
         r.cit.walk(0, 0);   // limbs still — no running man on a car roof
@@ -341,13 +419,14 @@ class NetGame {
         r.walkT += r.speed * dt * 1.6;
         r.cit.group.position.set(r.x, r.y, r.z);
         r.cit.group.rotation.y = r.h;
+        r.tagY = r.y + TAG_HEAD_H;
         r.cit.walk(r.walkT, Math.min(1.25, r.speed / WALK.jog));
       }
     }
   }
 
   // ---- the one per-frame call main.js makes ----
-  // ctx = { scene, player, game, weapons, world, cars, peds }
+  // ctx = { scene, player, game, weapons, world, cars, peds, camera? }
   update(dt, ctx) {
     this._scene = ctx.scene;
     this._watchWeapons(ctx.weapons);
@@ -356,10 +435,19 @@ class NetGame {
     this._sendT -= dt;
     if (this._sendT <= 0 && ctx.player) { this._sendT = SEND_S; this._sendState(ctx); }
     this._updateRemotes(dt);
+    // Name tags after the avatars moved, so a tag never trails its owner by a
+    // frame. The camera is not in ctx today; __atc.camera is the same fallback
+    // the seat anchor already uses, and ctx.camera wins the day main.js passes
+    // one. No camera at all (a headless pump) simply draws no tags.
+    this.tags.enabled = this.showNames;
+    this.tags.scene = ctx.scene ?? this.tags.scene;
+    this.tags.update(this.remotes,
+      ctx.camera ?? (typeof window !== 'undefined' ? window.__atc?.camera : null));
   }
 
   dispose() {
     for (const uid of [...this.remotes.keys()]) this._drop(uid);
+    this.tags.dispose();
     this.net.leave();
   }
 }
@@ -367,7 +455,11 @@ class NetGame {
 // what main.js awaits after the menu picked "Multiplayer (server)": join the
 // shared room, hand back the per-frame session. Throws if the server is gone
 // between the menu's health check and now — main falls back to single player.
-export async function connectCity() {
+// name is optional: pass the nickname the menu collected and it is sanitized
+// and armed before the first state packet leaves, so peers never see a frame
+// of the uid fallback. setPlayerName() beforehand does the same thing.
+export async function connectCity(name) {
+  if (name !== undefined) setMyName(name);
   await CityNetWS.joinShared();
   return new NetGame(CityNetWS);
 }

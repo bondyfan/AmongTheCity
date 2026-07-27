@@ -379,14 +379,96 @@ const HIT_RANGE2 = 144;   // 12 m center-distance gate — covers even bus vs bu
 
 // ---- geometry builders ----
 
+// How far aft of the windscreen base the hull deck survives as a SCUTTLE
+// strip. greenHull() emits no front cap, so at the windscreen base there is an
+// open slot the height of the first greenhouse ring (3 cm on an Octavia)
+// running the full width of the screen. It has always been there and never
+// showed, because a ray through it landed on the deck behind. Open the deck
+// flush with the screen base and that slot becomes a hairline view into the
+// cabin from outside — measured, every single one of the 355 leaking rays on
+// an Octavia entered exactly there. 0.12 m of surviving deck catches all of
+// them, and from the driver's seat it reads as the cowl vent panel a real car
+// has in precisely that spot.
+const CAB_SCUTTLE = 0.12;
+
+// THE one definition of the cabin opening. Both the hull (which must not lid
+// it over) and cabinSpec() (which furnishes it) read it from here, so the hole
+// and the interior can never drift apart. null for the cab-over kinds, which
+// have no greenhouse loft — their eye already sits inside the hull volume.
+//   z0/z1   the cabin in z: windscreen base to the last station before the
+//           backlight, i.e. the greenhouse minus its two raked ends
+//   deckZ0  where the deck actually stops (see CAB_SCUTTLE)
+//   xIn     the beltline trim line. Outboard of it the deck SURVIVES as the
+//           door top, which is what keeps the door cavity — crease bars,
+//           handle stubs, the unlined inside of the door skin — sealed off.
+//   xOut    the greenhouse's base half width, which the door top runs out to
+//           MEET. The glasshouse is lofted a few centimetres wider and lower
+//           than the deck it stands on (0.80 vs 0.76 m on an Octavia), so
+//           there is a beltline seam the deck never reached under. Well inside
+//           K.wid, so the silhouette does not move.
+function cabinCut(K) {
+  const g = K.green;
+  if (!g) return null;
+  const z0 = g.sts[0][0], z1 = g.sts[g.sts.length - 2][0];
+  return {
+    z0, z1, deckZ0: Math.min(z0 + CAB_SCUTTLE, (z0 + z1) / 2),
+    xIn: spanMin(z0, z1, (z) => hullHalfAt(K, z, g.sts[0][1])) - 0.04,
+    xOut: g.baseW * K.wid / 2,
+  };
+}
+
+// Split a station list at the given z values, interpolating a new station
+// linearly in every column. The loft is piecewise-linear between stations, so
+// an inserted station is EXACTLY on the surface it splits — the silhouette,
+// the widths and (because a coplanar quad split into two keeps the same
+// area-weighted normal sum) the shading are all unchanged. It exists purely so
+// bodyHull() can drop the deck on one side of a z that no station happened to
+// sit on.
+function cutStations(sts, cut) {
+  if (!cut) return sts;
+  const out = sts.slice();
+  for (const z of [cut.deckZ0, cut.z1]) {
+    if (!(z > out[0][0] && z < out[out.length - 1][0])) continue;
+    let i = 1;
+    while (out[i][0] < z) i++;
+    if (out[i][0] === z || out[i - 1][0] === z) continue;   // a station is already here
+    const a = out[i - 1], b = out[i], t = (z - a[0]) / (b[0] - a[0]);
+    out.splice(i, 0, [z, a[1] + (b[1] - a[1]) * t,
+      a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]);
+  }
+  return out;
+}
+
 // The lower-body loft. Each station ring is 8 points — rocker, arch line,
 // doorline, shoulder, mirrored — lofted with SHARED vertices so
 // computeVertexNormals rounds the paint over the shoulders and along the
 // bonnet, which under Lambert is what makes sheet metal read as sheet metal.
 // The end caps duplicate their ring so the grille face and tail panel keep
 // crisp flat normals instead of smearing around the bumper corners.
-function bodyHull(spec, wid) {
-  const half = wid / 2, sts = spec.sts, n = sts.length;
+//
+// `cut` = [z0, z1, x] is THE CABIN OPENING and it is not cosmetic. The loft's
+// top run (ring points 3→4, at yHi) is a full-width horizontal deck: bonnet
+// ahead of the screen, boot lid behind the backlight — and, between them, a
+// LID sealed straight across the passenger compartment at roughly window-sill
+// height. Its normal is +y, so from outside it is invisible under the
+// greenhouse, but from the driver's seat (eye ~19 cm above it) it is a
+// front-facing sheet of body colour covering everything below: dash, wheel,
+// instrument cluster, floor, the lot. Measured before this cut, a third of
+// the first-person frame was that lid and the cluster drew ZERO pixels.
+//
+// So the deck loses its MIDDLE over [z0, z1] and keeps a ledge outboard of
+// ±x — the door top. Two reasons the ledge is not optional. Outside: nothing
+// changes, because the greenhouse encloses the deck there anyway (its base
+// ring is both wider than the deck, 0.80 vs 0.76 m on an Octavia, and lower
+// than it). Inside: the cavity between the door trim and the door skin is
+// full of body-colour furniture — the doorline crease and the handle bars are
+// modelled as beams spanning the whole car, with only their ends protruding —
+// and the door skin itself is a backface, i.e. a hole to the sky. The ledge
+// is the lid over exactly that cavity and nothing else. Passed only for kinds
+// that HAVE a greenhouse; the cab-over pair (truck, bus) seat the eye inside
+// the hull volume, where the deck is already a backface.
+function bodyHull(spec, wid, cut = null) {
+  const half = wid / 2, sts = cutStations(spec.sts, cut), n = sts.length;
   const pos = [], idx = [];
   const ring = (st) => {
     const w = st[3] * half, yLo = st[1], yHi = st[2];
@@ -401,10 +483,43 @@ function bodyHull(spec, wid) {
     for (const p of r) pos.push(p[0], p[1], z);
   }
   for (let i = 0; i < n - 1; i++) {
+    // j === 3 is the deck between the two shoulders; cutStations() has already
+    // split the loft exactly at deckZ0/z1, so a whole segment is either inside
+    // the cabin opening or outside it — never half of each.
+    const zMid = (sts[i][0] + sts[i + 1][0]) / 2;
+    const open = cut && zMid > cut.deckZ0 && zMid < cut.z1;
     for (let j = 0; j < 8; j++) {
+      if (j === 3 && open) continue;
       const j2 = (j + 1) % 8;
       const a = i * 8 + j, b = (i + 1) * 8 + j, c = (i + 1) * 8 + j2, d = i * 8 + j2;
       idx.push(a, b, c, a, c, d);
+    }
+  }
+  if (cut) {
+    // The two door-top ledges, replacing the deck quad we just skipped. Their
+    // OUTER edge reuses ring points 3 and 4, so those vertices keep collecting
+    // a +y face normal and the shoulder goes on shading exactly as it did —
+    // only the inner edge is new geometry, and a hard crease there is right:
+    // it is the lip of an opening. Clamped 2 cm inside the shoulder so a
+    // narrow station can never invert the quad.
+    const edge = new Map();
+    for (let i = 0; i < n; i++) {
+      const st = sts[i], z = st[0], sh = st[3] * half * spec.sh;
+      if (z < cut.deckZ0 - 1e-9 || z > cut.z1 + 1e-9) continue;
+      const xi = Math.min(cut.xIn, sh - 0.02), xo = Math.max(cut.xOut, sh);
+      edge.set(i, pos.length / 3);
+      pos.push(-xi, st[2], z, xi, st[2], z, -xo, st[2], z, xo, st[2], z);
+    }
+    for (let i = 0; i < n - 1; i++) {
+      const zMid = (sts[i][0] + sts[i + 1][0]) / 2;
+      if (!(zMid > cut.deckZ0 && zMid < cut.z1)) continue;
+      const e0 = edge.get(i), e1 = edge.get(i + 1);
+      if (e0 === undefined || e1 === undefined) continue;
+      const s0 = i * 8 + 3, s1 = (i + 1) * 8 + 3, t0 = i * 8 + 4, t1 = (i + 1) * 8 + 4;
+      idx.push(s0, s1, e1, s0, e1, e0);                             // ledge, left
+      idx.push(e0 + 1, e1 + 1, t1, e0 + 1, t1, t0);                 // ledge, right
+      idx.push(e0 + 2, e1 + 2, s1, e0 + 2, s1, s0);                 // seam skirt, left
+      idx.push(t0, t1, e1 + 3, t0, e1 + 3, e0 + 3);                 // seam skirt, right
     }
   }
   const cap = (i, flip) => {
@@ -547,8 +662,19 @@ function mirrors(arr, W, y, z, hw = 0.13, hh = 0.09) {
 }
 // doorhandle nubs: one full-width sliver per door line pokes 1 cm out of
 // both flanks at once — two boxes dress four doors
+// A PAIR of stubs, not one bar through the car. Same outer edge (wid/2 + 0.01)
+// and therefore the same silhouette it always had, but the 1.6 m of it that
+// used to cross the passenger compartment is gone: since bodyHull() opened the
+// deck over the cabin, anything spanning the centreline is furniture in the
+// driver's footwell, in body colour, at knee height.
 function handles(arr, wid, y, zs) {
-  for (const z of zs) B(arr, wid + 0.02, 0.028, 0.16, 0, y, z);
+  for (const z of zs) pairB(arr, 0.14, 0.028, 0.16, wid / 2 - 0.06, y, z);
+}
+// Same story for the doorline crease every kind wears: a flank strip, kept
+// buried in the hull at its inboard end (≥ 8 cm at the narrowest station of
+// every kind) so the exterior read is unchanged.
+function crease(arr, wid, h, len, y, z) {
+  pairB(arr, 0.16, h, len, wid / 2 - 0.068, y, z);
 }
 
 // ---- per-kind dressing ----
@@ -562,7 +688,7 @@ const DETAIL = {
     arches(d.dark, K);
     mirrors(d.paint, c.W, 0.90, -0.50);
     handles(d.paint, K.wid, 0.76, [-0.15, 0.85]);
-    B(d.paint, K.wid + 0.024, 0.05, 2.6, 0, 0.60, 0.35);            // doorline crease
+    crease(d.paint, K.wid, 0.05, 2.6, 0.60, 0.35);            // doorline crease
     B(d.paint, 0.05, 0.07, 0.20, 0, 1.43, 1.28);                    // shark-fin antenna
     pairB(d.head, 0.46, 0.07, 0.12, 0.55, 0.60, c.zN + 0.07, 0.35); // slim swept LED wedges
     B(d.dark, 1.02, 0.09, 0.12, 0, 0.50, c.zN + 0.05);              // the one wide grille slit
@@ -575,7 +701,7 @@ const DETAIL = {
     arches(d.dark, K);
     mirrors(d.paint, c.W, 0.86, -0.36);
     handles(d.paint, K.wid, 0.72, [-0.05, 0.82]);
-    B(d.paint, K.wid + 0.024, 0.05, 2.2, 0, 0.56, 0.45);
+    crease(d.paint, K.wid, 0.05, 2.2, 0.56, 0.45);
     B(d.paint, 0.05, 0.07, 0.18, 0, 1.42, 1.25);
     pairB(d.head, 0.38, 0.08, 0.12, 0.52, 0.57, c.zN + 0.06, 0.30);
     B(d.dark, 0.92, 0.08, 0.12, 0, 0.49, c.zN + 0.05);
@@ -588,7 +714,7 @@ const DETAIL = {
     arches(d.dark, K);
     mirrors(d.paint, c.W, 0.86, -0.20);
     handles(d.paint, K.wid, 0.72, [0.05, 1.00]);
-    B(d.paint, K.wid + 0.024, 0.05, 2.7, 0, 0.55, 0.50);
+    crease(d.paint, K.wid, 0.05, 2.7, 0.55, 0.50);
     B(d.paint, 0.05, 0.06, 0.18, 0, 1.39, 1.18);
     pairB(d.dark, 0.36, 0.17, 0.10, 0.55, 0.58, c.zN + 0.05, 0.20); // dark lens housings…
     Cz(d.head, 0.055, 0.10, -0.46, 0.58, c.zN + 0.015);             // …with the twin round
@@ -609,7 +735,7 @@ const DETAIL = {
     arches(d.dark, K);
     mirrors(d.paint, c.W, 0.89, -0.32);
     handles(d.paint, K.wid, 0.75, [-0.05, 0.95]);
-    B(d.paint, K.wid + 0.024, 0.05, 2.8, 0, 0.58, 0.50);
+    crease(d.paint, K.wid, 0.05, 2.8, 0.58, 0.50);
     B(d.paint, 0.05, 0.07, 0.20, 0, 1.43, 1.30);
     pairB(d.head, 0.40, 0.10, 0.12, 0.54, 0.60, c.zN + 0.06, 0.40); // swept wedge lamps
     B(d.dark, 1.02, 0.22, 0.10, 0, 0.51, c.zN + 0.05);              // grille panel…
@@ -625,7 +751,7 @@ const DETAIL = {
     arches(d.dark, K);
     mirrors(d.paint, c.W, 0.85, -0.76);
     // no doorhandles — they sit flush on the real car, so their absence IS the detail
-    B(d.paint, K.wid + 0.024, 0.05, 2.7, 0, 0.55, 0.50);
+    crease(d.paint, K.wid, 0.05, 2.7, 0.55, 0.50);
     B(d.paint, 0.05, 0.06, 0.18, 0, 1.39, 1.22);
     pairB(d.head, 0.34, 0.05, 0.10, 0.55, 0.55, c.zN + 0.05, 0.35); // slim DRL strips only
     B(d.dark, 0.90, 0.10, 0.10, 0, 0.26, c.zN + 0.02);              // just a lower intake slit
@@ -636,7 +762,7 @@ const DETAIL = {
     arches(d.dark, K);
     mirrors(d.paint, c.W, 1.12, -1.58, 0.12, 0.15);
     handles(d.paint, K.wid, 0.92, [-1.00, 0.50]);                   // cab door + sliding door
-    B(d.paint, K.wid + 0.024, 0.06, 3.2, 0, 0.70, 0.40);
+    crease(d.paint, K.wid, 0.06, 3.2, 0.70, 0.40);
     pairB(d.head, 0.30, 0.16, 0.12, 0.60, 0.72, c.zN + 0.04, 0.10);
     B(d.dark, 1.15, 0.22, 0.12, 0, 0.60, c.zN + 0.03);
     B(d.dark, 1.25, 0.14, 0.10, 0, 0.30, c.zN + 0.02);
@@ -690,7 +816,7 @@ function geomFor(kind) {
   const sts = K.hull.sts;
   const c = { W: K.wid / 2, zN: sts[0][0], zT: sts[sts.length - 1][0] };
   const d = { paint: [], glass: [], dark: [], chrome: [], head: [], tail: [], white: [] };
-  d.paint.push(bodyHull(K.hull, K.wid));
+  d.paint.push(bodyHull(K.hull, K.wid, cabinCut(K)));
   if (K.green) {
     const gh = greenHull(K.green, K.wid);
     d.glass.push(gh.glass);
@@ -1273,3 +1399,386 @@ export function eyeAnchor(car, i = 0) {
   a.y = y;
   return a;
 }
+
+// ---- CABIN: the interior, built for ONE car at a time ---------------------
+// makeCarMesh() deliberately models no interior: up to ~520 cars are alive in
+// the city at peak and every one of them would pay for a dashboard nobody can
+// see through opaque glass. First person changed that for exactly one car —
+// the one the player is sitting in — so the cabin is a SEPARATE, opt-in graft:
+// main.js calls attachCabin() on boarding and detachCabin() on exit.
+//
+// Three decisions worth the ink:
+//
+// 1. EVERY PART IS A SOLID, so every material stays FrontSide. A dashboard,
+//    a seat and a steering wheel are objects the eye is OUTSIDE of, and the
+//    surfaces that genuinely enclose the head — headliner, door cards, floor,
+//    bulkhead — are modelled as thin SLABS rather than single planes, so their
+//    inward face is a front face like everything else. Nothing here needs
+//    BackSide or DoubleSide, which matters because flipping `side` on the
+//    shared glassMat/bodyMat would have doubled the overdraw of the whole
+//    fleet to fix one car.
+//
+// 2. IT PARENTS TO `group`, NOT TO `body`. Vehicles.update() leans `body` into
+//    corners and sags it with damage, while the first-person camera in main.js
+//    deliberately ignores roll and pitch (leaning the horizon is what makes
+//    people ill). A cabin under `body` would therefore slosh around a head
+//    that does not move with it. Under `group` the interior is welded to the
+//    eye, and group.position.y still carries the offroad judder the camera
+//    reads off the mesh — so the cabin shakes with the head, exactly once.
+//
+// 3. NOTHING IS DERIVED FROM A MAGIC NUMBER. The dash top IS the greenhouse
+//    base station (which is also where seatAnchor drops its cushion from), the
+//    A-pillar IS the windscreen's own rake between green.sts[0] and [1], the
+//    headliner is the LOWEST roof station the cabin spans, and the door cards
+//    ride the narrowest hull station between the cowl and the rear of the
+//    cabin. A bus gets a wide dash 1.83 m up because its slab hull says so; a
+//    BMW gets a low one at 0.83 m for the same reason.
+
+// The interior is unlit — the city has a sun and a hemisphere and no cabin
+// lamp — so a pure Lambert dash reads as a black hole under the roof. Each
+// material carries a small emissive floor instead: enough to keep the SHAPE
+// legible from inside, far too little to glow in a chase-cam shot. The
+// headliner is deliberately the lightest surface in here, the way real ones
+// are, so the ceiling never becomes the void the player is staring into.
+const trimMat = new THREE.MeshLambertMaterial({ color: 0x33373e, emissive: 0x15181c });
+const linerMat = new THREE.MeshLambertMaterial({ color: 0x767c84, emissive: 0x2b3037 });
+const seatMat = new THREE.MeshLambertMaterial({ color: 0x424650, emissive: 0x17191e });
+const rimMat = new THREE.MeshLambertMaterial({ color: 0x1a1c21, emissive: 0x0b0c0e });
+// the only bright thing in the cabin: cluster + centre screen, lit like a
+// screen rather than shaded like plastic, so night driving has a face to it
+const screenMat = new THREE.MeshLambertMaterial({ color: 0x0c1a26, emissive: 0x2f6b9e, emissiveIntensity: 0.75, toneMapped: false });
+// name → material, in the order the meshes get added (one draw call each)
+const CABIN_MATS = [['trim', trimMat], ['liner', linerMat], ['seat', seatMat],
+  ['rim', rimMat], ['screen', screenMat], ['chrome', chromeMat]];
+
+const CAB_TRIM = 0.05;     // how far a panel sits inside the shell it lines
+const CAB_BELT = 0.42;     // cushion → dash top; seatAnchor's own cushion drop
+const CAB_REACH = 0.50;    // eye → steering wheel: an adult's arms, seated
+const CAB_REACH_CO = 0.44; // cab-over: upright posture, big wheel held closer
+
+// A hull ring is a PROFILE, not a cylinder: tucked under at the rocker (bw),
+// full width between the arch line and the doorline, pulled back in over the
+// shoulder (sh). An interior panel has to clear that profile at its own
+// height — sizing anything to the ring's widest point is how a door card ends
+// up poking out through the tumblehome at the C-pillar.
+function hullHalfAt(K, z, y) {
+  const sts = K.hull.sts, w = widthAt(sts, z, K.wid / 2);
+  const yLo = stationAt(sts, z, 1), yHi = stationAt(sts, z, 2), h = yHi - yLo;
+  if (h <= 0) return w;
+  const yA = yLo + h * K.hull.yA, yB = yLo + h * K.hull.yB;
+  if (y <= yLo) return w * K.hull.bw;
+  if (y < yA) return w * (K.hull.bw + (1 - K.hull.bw) * (y - yLo) / (yA - yLo));
+  if (y <= yB) return w;
+  if (y >= yHi) return w * K.hull.sh;
+  return w * (1 - (1 - K.hull.sh) * (y - yB) / (yHi - yB));
+}
+// worst case of f over a z range — the shell tapers, the panels do not
+const spanMin = (z0, z1, f) => { let m = Infinity; for (let t = 0; t <= 10; t++) m = Math.min(m, f(z0 + (z1 - z0) * t / 10)); return m; };
+const spanMax = (z0, z1, f) => { let m = -Infinity; for (let t = 0; t <= 10; t++) m = Math.max(m, f(z0 + (z1 - z0) * t / 10)); return m; };
+
+// Everything the builder needs, as plain numbers and nothing from THREE — so
+// the whole dimension table can be checked without a WebGL context.
+function cabinSpec(kind) {
+  const K = KIND[kind] ?? KIND.octavia;
+  const g = K.green, sts = K.hull.sts, half = K.wid / 2;
+  const seat = seatAnchor({ kind }, 0), eye = eyeAnchor({ kind }, 0);
+  // dash top = the beltline. For a lofted greenhouse that is literally the
+  // first base station; the cab-over kinds have no greenhouse, so the same
+  // cushion→belt relationship seatAnchor used on the way down rebuilds it.
+  const beltY = g ? g.sts[0][1] : seat.y + CAB_BELT;
+  // the SAME z span the hull opened for us — never a second derivation
+  const cutZ = cabinCut(K);
+  const cowlZ = cutZ ? cutZ.z0 : sts[0][0] + 0.15;    // windscreen base
+  const hdrZ = g ? g.sts[1][0] : cowlZ + 0.14;        // windscreen top (rake!)
+  const scrY = g ? g.sts[0][2] : beltY + 0.03;        // where the glass starts
+  // Roof heights are read AT the station that needs them, never as a whole-car
+  // maximum: a truck's roof peaks a metre behind its header, and a header rail
+  // built to that peak would stand proud of the paint above the screen.
+  const roofSts = g ? g.sts : sts;
+  const roofY = g ? g.sts[1][2] : stationAt(sts, hdrZ, 2);
+  const backZ = cutZ ? cutZ.z1
+    : Math.min(cowlZ + 3.0, sts[sts.length - 1][0] - 0.15);
+  // headliner: the LOWEST roof over the cabin's span, so a fastback's dropping
+  // roofline can never push the flat plate out through the paint
+  const linerY = spanMin(hdrZ, backZ, (z) => stationAt(roofSts, z, 2)) - 0.035;
+  // DOOR CARDS COME IN TWO TIERS, and the reason is the near plane. seatAnchor
+  // parks the eye at ±0.35·wid, which on an Octavia is 0.63 m out — and at the
+  // BELTLINE the hull has already tucked its shoulder in to 0.76 m, so a
+  // single card up there would sit 7 cm from the eyeball: closer than FP_NEAR,
+  // clipped into a hole, and filling the screen at full head-turn anyway.
+  // The card proper therefore stops at the DOORLINE (hull.yB — the window
+  // sill), where the ring is still at full width and the panel lands ~0.39 m
+  // from the eye, comfortably solid. Only a thin sill strip carries on up to
+  // the glass, and only that strip is ever near-plane fragile.
+  const sillY = Math.min(beltY, spanMin(cowlZ, backZ, (z) => {
+    const lo = stationAt(sts, z, 1);
+    return lo + (stationAt(sts, z, 2) - lo) * K.hull.yB;
+  }));
+  const floor0 = Math.max(seat.y - 0.34, spanMax(cowlZ, backZ, (z) => stationAt(sts, z, 1)) + 0.05);
+  // sized at BOTH ends of the panel: the sill above and the rocker tuck below
+  const dw = Math.min(spanMin(cowlZ, backZ, (z) => hullHalfAt(K, z, sillY)),
+    spanMin(cowlZ, backZ, (z) => hullHalfAt(K, z, floor0 - 0.04))) - 0.06;
+  // The sill strip is the piece that MEETS the hull's door-top ledge, so it
+  // takes its width from the same number the ledge did: strip outer face
+  // (dwHi + half of its 0.04 thickness) lands exactly on cabinCut()'s x.
+  // Identical arithmetic to the old spanMin(...) − 0.06, just not a second
+  // copy of it.
+  const dwHi = (cutZ ? cutZ.xIn
+    : spanMin(cowlZ, backZ, (z) => hullHalfAt(K, z, beltY)) - 0.04) - 0.02;
+  const wheelZ = seat.z - (g ? CAB_REACH : CAB_REACH_CO);
+  // Above the beltline the greenhouse trapezoid is the limit, not the hull:
+  // its TOP width is the tightest line anything up there has to clear, which
+  // is why the A- and B-pillar trims share it.
+  const topX = g ? g.topW * half : hullHalfAt(K, hdrZ, roofY - 0.08);
+  return {
+    kind, K, g: !!g, beltY, cowlZ, hdrZ, scrY, roofY, backZ, linerY, dw, dwHi, sillY,
+    // interior half width at the dash (front) and at the rear panels; the
+    // greenhouse base governs where it exists, the hull profile where it does not
+    iwF: Math.min(g ? g.baseW * half : Infinity, hullHalfAt(K, cowlZ, beltY)) - CAB_TRIM,
+    iwR: Math.min(g ? g.baseW * half : Infinity, hullHalfAt(K, backZ, beltY)) - CAB_TRIM,
+    iwT: (g ? g.topW * half : spanMin(hdrZ, backZ, (z) => hullHalfAt(K, z, linerY))) - CAB_TRIM,
+    pillarX: topX - 0.065,
+    bpillarX: topX - 0.065,
+    // Stations 2 and 3 bracket the narrow 'pp' segment — the B-pillar — but
+    // only on the SIX-station saloons. The van's greenhouse has four, so 2/3
+    // are its last pair and the midpoint lands at z 1.21: 1.11 m behind backZ,
+    // walled off inside the cargo bay by the bulkhead, where the player cannot
+    // see it from the seat or from outside. Clamping into the cabin puts it
+    // where a panel van's B-pillar actually is, just ahead of the bulkhead,
+    // and leaves all five saloons on the exact z they already had.
+    bpillarZ: g ? clamp((g.sts[2][0] + g.sts[3][0]) / 2, cowlZ + 0.3, backZ - 0.15)
+      : backZ - 0.2,
+    // the floor pan never dips below the hull's own underside anywhere it
+    // spans: a low-slung sedan would otherwise carpet the tarmac
+    floorY: floor0,
+    seatX: Math.abs(seat.x), seatZ: seat.z, eyeY: eye.y,
+    wheelZ, wheelY: beltY - (g ? 0.13 : 0.17),
+    wheelR: clamp(K.wid * 0.10, 0.165, 0.25),
+    rake: g ? 0.38 : 1.02,
+    dashZ: Math.max(wheelZ - 0.13, cowlZ + 0.16),  // the fascia facing the driver
+    sw: Math.min(0.50, ((g ? g.baseW * half : hullHalfAt(K, seat.z, beltY)) - CAB_TRIM) * 0.62),
+    nSeats: g && !g.capEnd ? 4 : 2,     // the van's bulkhead ends its cab
+    bulkhead: !g || !!g.capEnd,
+  };
+}
+
+// The cabin wall at a given height and station: the greenhouse trapezoid above
+// the beltline (this is where the tumblehome bites), the hull profile below it.
+function wallAt(K, g, z, y) {
+  if (!g) return hullHalfAt(K, z, y);
+  const yb = stationAt(g.sts, z, 1);
+  if (y <= yb) return hullHalfAt(K, z, y);
+  const yt = stationAt(g.sts, z, 2);
+  const t = clamp((y - yb) / Math.max(1e-4, yt - yb), 0, 1);
+  return (g.baseW + (g.topW - g.baseW) * t) * K.wid / 2;
+}
+
+// One seat: cushion, pedestal, raked backrest, headrest. The driver's own is
+// almost entirely behind the near plane and that is fine — it exists so the
+// three seats the player CAN turn and look at have a twin.
+//
+// The whole prop is fitted at SHOULDER height, not at the cushion. seatAnchor
+// parks people at ±0.35·wid, which every roofline in the roster is narrower
+// than by the time you get up to a seatback's top corner — so a seat built
+// square on the anchor spears out through the door glass. The anchor is a
+// contract (player.js walks to it, the net layer seats remote riders on it,
+// eyeAnchor rides off it) and must not move, so the FURNITURE slides inboard
+// instead: at most ~13 cm on the narrowest kinds, invisible from the seat.
+function seatBox(d, K, g, ax, z, cy, fy, w) {
+  const sgn = ax < 0 ? -1 : 1;
+  const shoulder = wallAt(K, g, z, cy + 0.56) - 0.03;
+  const hw = Math.min(w / 2, shoulder * 0.48);
+  const x = sgn * Math.min(Math.abs(ax), Math.max(0.12, shoulder - hw));
+  const ww = hw * 2;
+  // …and the same story overhead: a rear bench sits under a fastback's DROPPING
+  // backlight, so the backrest and the headrest are capped by the roof at
+  // their own station rather than by a nominal seat height.
+  const roofAt = (zz) => stationAt(g ? g.sts : K.hull.sts, zz, 2) - 0.05;
+  B(d.seat, ww, 0.10, ww * 1.02, x, cy - 0.05, z);
+  B(d.trim, ww * 0.66, Math.max(0.06, cy - 0.10 - fy), ww * 0.72, x, (fy + cy - 0.10) / 2, z);
+  const brTop = Math.min(cy + 0.545, roofAt(z + 0.34)), brBot = cy - 0.02;
+  if (brTop > brBot + 0.1)
+    B(d.seat, ww, (brTop - brBot) * 0.95, 0.11, x, (brTop + brBot) / 2 - 0.025, z + 0.30, 0, 0.20);
+  const hrTop = Math.min(cy + 0.685, roofAt(z + 0.40));
+  if (hrTop > brTop - 0.06)
+    B(d.seat, ww * 0.50, 0.17, 0.10, x, hrTop - 0.085, z + 0.40);
+}
+
+// The whole interior for one kind, merged per material — a cabin is six meshes
+// plus the wheel badge, and it is built at most once per kind for the lifetime
+// of the tab (cached beside the exterior geometry in _geo).
+function buildCabin(kind) {
+  const s = cabinSpec(kind);
+  const d = { trim: [], liner: [], seat: [], rim: [], screen: [], chrome: [] };
+  const { beltY, cowlZ, hdrZ, scrY, roofY, backZ, linerY, iwF, iwR, iwT, dw, dwHi,
+    sillY, floorY, seatX, seatZ, wheelY, wheelZ, wheelR, rake, dashZ, sw } = s;
+  // each panel's own half-thickness has to clear the shell too
+  const cardX = dw - 0.023, sillX = dwHi - 0.023, cardL = backZ - cowlZ - 0.10;
+
+  // ---- shell: floor, firewall, headliner, door cards -----------------------
+  B(d.trim, cardX * 2, 0.04, backZ - cowlZ, 0, floorY - 0.02, (cowlZ + backZ) / 2);
+  B(d.trim, iwF * 2, Math.max(0.10, beltY - 0.24 - floorY), 0.05,
+    0, (floorY + beltY - 0.24) / 2, cowlZ + 0.04);
+  B(d.liner, iwT * 1.96, 0.026, backZ - hdrZ, 0, linerY + 0.013, (hdrZ + backZ) / 2);
+  pairB(d.trim, 0.045, Math.max(0.12, sillY - floorY - 0.02), cardL,
+    cardX, (floorY + sillY) / 2, (cowlZ + backZ) / 2 + 0.05);
+  if (sillY < beltY - 0.03)                                    // the sill strip
+    pairB(d.trim, 0.04, beltY - sillY, cardL, sillX, (sillY + beltY) / 2, (cowlZ + backZ) / 2 + 0.05);
+  pairB(d.trim, 0.085, 0.055, Math.min(0.60, backZ - cowlZ - 0.3),
+    cardX - 0.05, sillY - 0.10, seatZ - 0.05);                 // armrests
+
+  // ---- dashboard ----------------------------------------------------------
+  // NOTHING here rises above the beltline. At the cowl station the greenhouse
+  // ring is only a few centimetres tall (0.87 → 0.90 on an Octavia), so an
+  // instrument hood standing proud of the dash pokes straight out through the
+  // scuttle. The cluster therefore lives BEHIND the slab, on the face the
+  // driver actually looks at, under a lip that overhangs it.
+  B(d.trim, iwF * 2, 0.20, dashZ - cowlZ, 0, beltY - 0.10, (cowlZ + dashZ) / 2);
+  B(d.trim, iwF * 2, 0.035, 0.11, 0, beltY - 0.020, dashZ + 0.05);   // the lip
+  B(d.trim, iwF * 2, Math.max(0.12, beltY - 0.26 - floorY - 0.06), 0.05,
+    0, (floorY + 0.06 + beltY - 0.20) / 2, dashZ + 0.02);      // lower fascia
+  // the driver sits close to the door, so the cluster slides inboard until its
+  // outer edge clears the fascia
+  const inb = (w) => -Math.min(seatX, Math.max(0, iwF - w / 2));
+  B(d.screen, 0.36, 0.14, 0.014, inb(0.36), beltY - 0.105, dashZ + 0.055, 0, -0.34);
+  const cw = Math.min(0.34, iwF * 0.44);
+  B(d.screen, cw, cw * 0.60, 0.014, 0, beltY - 0.17, dashZ + 0.048, 0, -0.18);
+  pairB(d.chrome, 0.16, 0.028, 0.02, iwF * 0.62, beltY - 0.095, dashZ + 0.040);
+
+  // ---- centre tunnel + shifter -------------------------------------------
+  const conZ1 = seatZ + 0.42;
+  if (conZ1 > dashZ + 0.1) {
+    B(d.trim, cw, 0.24, conZ1 - dashZ, 0, floorY + 0.12, (dashZ + conZ1) / 2);
+    B(d.rim, 0.05, 0.16, 0.05, 0, floorY + 0.30, dashZ + 0.24);
+  }
+
+  // ---- steering wheel: built flat in its own plane, then raked into place --
+  // A torus in the XY plane has its axis on +z; rotateX(−rake) tips that axis
+  // up and REARWARD, which is exactly where a driver's chest is.
+  const tube = Math.max(0.017, wheelR * 0.095);
+  const parts = [new THREE.TorusGeometry(wheelR, tube, 6, 18)];
+  const hub = new THREE.CylinderGeometry(wheelR * 0.30, wheelR * 0.30, 0.05, 10);
+  hub.rotateX(Math.PI / 2);
+  parts.push(hub);
+  for (const a of [0, Math.PI, -Math.PI / 2]) {   // 3-spoke: two across, one down
+    const sp = new THREE.BoxGeometry(wheelR * 0.80, 0.030, 0.024);
+    sp.translate(wheelR * 0.46, 0, 0);
+    sp.rotateZ(a);
+    parts.push(sp);
+  }
+  // same inboard rule as the seat: on the wide-cabin kinds the rim would clip
+  // the door glass if it stayed square on an anchor meant for a head
+  const wx = -Math.min(seatX,
+    Math.max(0.12, wallAt(s.K, s.K.green, wheelZ,
+      wheelY + wheelR * Math.cos(rake) * 0.55) - 0.03 - wheelR - tube));
+  for (const p of parts) { p.rotateX(-rake); p.translate(wx, wheelY, wheelZ); d.rim.push(p); }
+  // column: a stub between the wheel and the fascia, on the same axis
+  const col = new THREE.CylinderGeometry(0.045, 0.055, 0.20, 8);
+  col.rotateX(Math.PI / 2 - rake);
+  col.translate(wx, wheelY - Math.sin(rake) * 0.11, wheelZ - Math.cos(rake) * 0.11);
+  d.trim.push(col);
+
+  // ---- A-pillars + header rail + visors -----------------------------------
+  // The pillar IS the windscreen's rake: it runs from the glass base at the
+  // cowl to the roof at the header station, so every kind's own screen angle
+  // falls out of KIND without a single per-car constant.
+  const dy = roofY - scrY, dz = hdrZ - cowlZ, prx = Math.atan2(dz, dy), pt = 0.085;
+  // Centring the prism ON the glass line would leave half of it OUTSIDE the
+  // windscreen — a rotated box is also longer in y than its own length, since
+  // half its thickness projects onto y as well. So: shorten it by its own
+  // thickness, then push the whole thing along the screen's inward normal
+  // (sin prx, −cos prx points outward) until it hangs entirely under the glass.
+  const pLen = Math.max(0.15, Math.hypot(dy, dz) - pt * 1.6), pOff = pt / 2 + 0.008;
+  pairB(d.trim, 0.075, pLen, pt, s.pillarX,
+    (scrY + roofY) / 2 - Math.sin(prx) * pOff,
+    (cowlZ + hdrZ) / 2 + Math.cos(prx) * pOff, 0, prx);
+  B(d.trim, iwT * 2, 0.08, 0.16, 0, roofY - 0.055, hdrZ + 0.09);
+  pairB(d.trim, 0.32, 0.022, 0.17, iwT * 0.50, roofY - 0.115, hdrZ + 0.17);
+  // B-pillar: the deliberately narrow 'pp' greenhouse segment IS the pillar,
+  // so its two stations bracket exactly where the trim belongs. Cab-over kinds
+  // have no greenhouse loft and no B-pillar to line.
+  if (s.g) {
+    const bTop = stationAt(s.K.green.sts, s.bpillarZ, 2);
+    pairB(d.trim, 0.05, Math.max(0.15, bTop - beltY - 0.02), 0.11,
+      s.bpillarX, (beltY + bTop) / 2, s.bpillarZ);
+  }
+
+  // ---- rear of the cabin ---------------------------------------------------
+  if (s.nSeats > 2) {
+    B(d.trim, iwR * 1.92, 0.03, 0.40, 0, beltY + 0.03, backZ - 0.10);   // parcel shelf
+    B(d.trim, iwR * 1.92, Math.max(0.10, beltY - floorY), 0.05,
+      0, (floorY + beltY) / 2, backZ - 0.02);
+  }
+  if (s.bulkhead) B(d.trim, Math.min(iwR, iwT) * 2, Math.max(0.20, linerY - floorY), 0.05,
+    0, (floorY + linerY) / 2, backZ - 0.03);
+
+  // ---- seats ---------------------------------------------------------------
+  for (let i = 0; i < s.nSeats; i++) {
+    const a = seatAnchor({ kind }, i);
+    seatBox(d, s.K, s.K.green, a.x, a.z, a.y, floorY, sw);
+  }
+
+  const out = {};
+  for (const [key] of CABIN_MATS) out[key] = d[key].length ? mergeGeoms(d[key]) : null;
+  // the marque on the wheel boss, reusing the cached badge texture the nose
+  // already wears — one extra draw call, and the only colour in the cabin
+  const K = KIND[kind] ?? KIND.octavia;
+  out.badge = K.brand ? {
+    brand: K.brand, size: wheelR * 0.46, rx: -rake,
+    x: wx, y: wheelY + Math.sin(rake) * 0.034, z: wheelZ + Math.cos(rake) * 0.034,
+  } : null;
+  out.spec = s;
+  return out;
+}
+
+// ---- attachCabin(car) → THREE.Group | null -------------------------------
+// Grafts the interior onto ONE car and returns the group (idempotent: calling
+// it twice hands back the same group). Geometry is cached per kind beside the
+// exterior set in _geo, so the second time the player gets into an Octavia
+// nothing is built at all. Safe to call on a car whose mesh has already been
+// removed from the scene — the graft goes onto car.mesh either way and dies
+// with it. Nothing here allocates a geometry or a material per CAR, so
+// detachCabin() has nothing to dispose.
+export function attachCabin(car) {
+  const group = car?.mesh;
+  if (!group) return null;
+  if (group.userData.cabin) return group.userData.cabin;
+  const kind = ALIAS[car.kind] ?? car.kind;
+  const geo = geomFor(kind);
+  const cab = geo.cabin ?? (geo.cabin = buildCabin(KIND[kind] ? kind : 'octavia'));
+  const g = new THREE.Group();
+  for (const [key, mat] of CABIN_MATS) {
+    if (!cab[key]) continue;
+    const m = new THREE.Mesh(cab[key], mat);
+    // never casts (it would shadow itself into a black box and leak stripes
+    // out through the glass) and never receives (the car's own shadow falls
+    // straight across the dash otherwise)
+    m.castShadow = m.receiveShadow = false;
+    g.add(m);
+  }
+  if (cab.badge) {
+    const b = cab.badge;
+    const m = new THREE.Mesh(planeGeoFor(b.size, b.size), badgeMatFor(b.brand));
+    m.rotation.x = b.rx;
+    m.position.set(b.x, b.y, b.z);
+    g.add(m);
+  }
+  group.add(g);
+  group.userData.cabin = g;
+  return g;
+}
+
+// ---- detachCabin(car) → boolean ------------------------------------------
+// Removes the graft; true if there was one. Cheap and idempotent, so the
+// caller can fire it from every path that can end a ride (E, a wreck, losing
+// the seat to the net layer, a despawn under the player) without bookkeeping.
+export function detachCabin(car) {
+  const group = car?.mesh, cab = group?.userData.cabin;
+  if (!cab) return false;
+  group.remove(cab);
+  group.userData.cabin = null;
+  return true;
+}
+
+// Test/debug hook: the derived interior dimensions for a kind, no THREE needed.
+export { cabinSpec };

@@ -8,8 +8,8 @@
 // checkout with an empty assets folder. The engine is pure synthesis — no
 // looped sample to pitch-stretch and mangle — because only synthesis can
 // follow revs, gears and throttle continuously at zero asset cost. v2 adds a
-// virtual 5-speed box: speed01 no longer maps straight to pitch, it picks a
-// GEAR, and pitch follows in-gear revs — so accelerating climbs-drops-climbs
+// virtual 5-speed box: road speed no longer maps straight to pitch, it picks
+// a GEAR, and pitch follows in-gear revs — so accelerating climbs-drops-climbs
 // like a real drivetrain instead of one long glissando.
 //
 // v4 adds the CITY layer, and it is deliberately three things and not thirty:
@@ -358,10 +358,13 @@ function duckUpdate() {
 // MORE pipe — higher comb feedback — which is exactly why lifting sounds
 // hollow. On-throttle is louder, brighter and harder.
 //
-// VIRTUAL GEARBOX (unchanged from v2, it was always the good part) — speed01
-// is sliced into five bands (the "gears"); inside a band the in-gear rev
-// fraction runs 0→1 and rpm01 = 0.25 + 0.75·frac, so the engine never sits at
-// true zero revs while rolling. Crossing a band edge triggers a ~120 ms
+// VIRTUAL GEARBOX (unchanged from v2 in shape, it was always the good part —
+// v15 only moved its edges from a normalized 0..1 into absolute m/s, see
+// gearbox()) — road speed is sliced into five bands (the "gears"); inside a
+// band the in-gear rev fraction runs 0→1 and rpm01 = 0.25 + 0.75·frac, so the
+// engine never sits at true zero revs while rolling. The top band now ends at
+// the KIND's own vmax, so a fast car finally revs out instead of pinning at
+// the reference speed. Crossing a band edge triggers a ~120 ms
 // scripted dip: freq+gain glide DOWN past the new gear's landing value, then
 // recover — scheduled entirely with setTargetAtTime (never setValueAtTime) so
 // the curve always departs from the current value and cannot click.
@@ -383,12 +386,20 @@ const ENGINE = {
 // gating a noise band at 1.8 kHz. Shape is shared by every kind — only the
 // level differs, and that level is the petrol/diesel line.
 const KNOCK = { f: 1800, q: 2.5, alpha: 200, beta: 25, base: 0.05, depth: 0.55 };
-// main.js divides by CAR.vmax (config.js) before calling us, so speed01 is
-// |speed| / SPEED_REF and NOT |speed| / the kind's own vmax. For anything
-// slower than this the top gears were unreachable (a truck peaked at 0.69 and
-// never saw fifth); rescaling here fixes the gearbox without touching main.js.
-// Faster kinds are left alone — the caller already clamps at 1, so scaling
-// them DOWN would only throw away range that is genuinely there.
+// engineSet() takes metres per second now, so this is no longer a divisor —
+// it is the REFERENCE ROAD SPEED the whole mix was tuned against (CAR.vmax in
+// config.js, 38 m/s = 137 km/h), and it survives only as the yardstick for the
+// things that are genuinely about absolute speed rather than about revs: where
+// the four lower shift points sit, and where the city bed finishes ducking.
+//
+// It used to be the divisor main.js applied before calling, which is what made
+// this file wrong at both ends. Slow kinds could never reach the top gears (a
+// truck peaked at 0.69 and never saw fifth) and were patched with a per-kind
+// `sK` rescale; fast kinds had the opposite problem and no patch at all — an
+// Octavia does 64 m/s, so everything above 38 arrived clamped at 1 and the
+// engine hung at redline for the last 90 km/h it can actually do. Both are one
+// bug: a fraction of the wrong top speed. Metres per second has no top speed
+// in it, so there is nothing left to get wrong.
 const SPEED_REF = 38;
 // Per-kind engine identity. cyl → firing order and therefore which harmonics
 // exist at all; alpha/beta → pulse shape (bigger beta = shorter pulse =
@@ -583,12 +594,60 @@ function jitterBuffer() {
   }
   return _jitterBuf;
 }
-// upper speed01 edge of each gear; last edge sits past 1 so flat-out stays in
-// 5th (hysteresis below can never push beyond it either)
+// Upper edge of each gear as a fraction of SPEED_REF. This is the SHAPE of the
+// gearbox, not the gearbox: gearbox() below turns it into absolute m/s per
+// kind. Last edge sits past 1 so flat-out stays in 5th (hysteresis below can
+// never push beyond it either).
 const GEAR_TOP = [0.12, 0.28, 0.48, 0.72, 1.001];
 // Cruising exactly ON a band edge must not machine-gun shifts every frame, so
-// a change only registers once speed01 leaves the current band by this much.
+// a change only registers once road speed leaves the current band by this
+// much — also a fraction of the reference, converted alongside the edges.
 const GEAR_HYST = 0.012;
+
+// ---- the gearbox, in metres per second ----------------------------------
+// Shift points are ROAD SPEEDS, not fractions of a top speed. First gear is
+// for pulling away, so an Octavia and a bus both leave it at ~16 km/h; a bus
+// does not shift up at 60 km/h just because it happens to run out of road at
+// 105. Scaling GEAR_TOP by min(vmax, SPEED_REF) is what says that, and it
+// reproduces EXACTLY the four speeds that were audible before this change:
+//   fast kinds (vmax ≥ 38): 4.56 / 10.64 / 18.24 / 27.36 m/s
+//                         = 16 / 38 / 66 / 98 km/h, unchanged
+//   slow kinds:  the same numbers their old sK rescale produced, to the digit
+//                (truck 11 / 27 / 46 / 68 km/h, bus 13 / 29 / 50 / 76)
+// so nobody's gearbox suddenly shifts somewhere new.
+//
+// What changes is what happens ABOVE the reference speed, and the fix is to
+// ADD GEARS, not to stretch the last one. Stretching was the first attempt and
+// it traded one fault for a worse one: fifth then ran 98 → 230 km/h on an
+// Octavia, a 2.34× step where every other step is 1.4–1.7×, and since
+// rpm01 maps every band idle→redline the engine dropped to 992 rpm at 100
+// km/h and did not sound like it was pulling again until about 180. That is
+// dead centre of the band people actually drive on the obchvat. So the ladder
+// keeps climbing at GEAR_UP per gear until the kind's real vmax is in reach:
+// the fast kinds all come out as seven-speeds, which is what a DSG Octavia
+// or a ZF-8 BMW is anyway, and the 98–137 km/h band is note-for-note what it
+// was before this whole round. Only above 137 km/h is anything new, and there
+// the old code was a single held note at the limiter.
+//   octavia  16/38/66/98/137/181 → 231 km/h   bmw   …/181 → 248
+//   fabia    16/38/66/98/137/181 → 202        merc  …/181 → 241
+//   van 17/38/64/95 → 130, truck 12/28/47/70 → 95, bus 14/31/52/77 → 105
+//     (unchanged: their vmax is below the reference, so no gear is added)
+// ×1.001 keeps `v > edge` unreachable on the LAST edge, so the gear index can
+// never walk off the end of the array (v is clamped to vmax by the caller).
+const GEAR_UP = 1.32;    // ratio of each added overdrive; the ladder's own
+                         // taper is 2.33 → 1.71 → 1.50 → 1.39, so this is
+                         // simply where that sequence was heading
+function gearbox(vmax) {
+  const ref = Math.min(vmax, SPEED_REF);
+  const gearEdges = GEAR_TOP.slice(0, -1).map((f) => f * ref);
+  // A gear is only worth having if it gets a band of its own; 0.90 is what
+  // stops a kind whose vmax lands just past an edge from sprouting a top gear
+  // three km/h wide. Nothing is added at all when vmax ≤ the reference.
+  let top = GEAR_TOP[GEAR_TOP.length - 1] * ref;
+  while (top < vmax * 0.90) { gearEdges.push(top); top *= GEAR_UP; }
+  gearEdges.push(vmax * 1.001);
+  return { gearEdges, gearHyst: GEAR_HYST * ref };
+}
 const SHIFT = {
   hold: 0.13,     // engineSet() keeps hands off freq+gain this long after a
                   // shift — per-frame writes would stomp the scheduled recovery
@@ -706,8 +765,10 @@ function buildPiston(P, id) {
     // spiky diesel pulse ends up far quieter in RMS than a smooth six. Undo
     // that here or every kind would need its `vol` hand-tuned twice.
     levelK: Math.min(2.4, Math.max(0.6, 0.20 / (fire.rms || 0.20))),
-    // speed01 arrives divided by SPEED_REF; slow kinds get their range back
-    sK: SPEED_REF / Math.min(P.vmax, SPEED_REF),
+    // this kind's shift points in m/s, resolved once at build time — engineSet
+    // stays scalar math with no per-frame allocation
+    vmax: P.vmax || SPEED_REF,
+    ...gearbox(P.vmax || SPEED_REF),
     gear: 0, shiftT: -1e9, boost: 0, lastT: t, thPrev: 0, popT: -1e9,
     srcs: [osc, kOsc, jit, noise], nodes: [],
   };
@@ -773,7 +834,10 @@ function buildEV(P) {
 
   const e = {
     ev: 1, P, out, whine, whine2, wGain, w2Gain, humOsc, humGain, pwmLfo, pwmDepth,
-    gear: 0, shiftT: -1e9, sK: 1, levelK: 1,
+    // no gearbox at all (one reduction gear), but the speed clamp in
+    // engineSet() is shared, so the top speed still has to be here
+    vmax: P.vmax || SPEED_REF,
+    gear: 0, shiftT: -1e9, levelK: 1,
     srcs: [whine, whine2, humOsc, pwm, pwmLfo], nodes: [],
   };
   engNodes(e, whine, wGain, whine2, w2Gain, humOsc, humGain, pwm, pwmLfo,
@@ -825,38 +889,47 @@ function exhaustPop(t0, level) {
 }
 
 // Called every frame while driving — scalar math and AudioParam writes only,
-// zero allocations. speed01 = |speed|/vmax, throttle01 = |gas| from input.
-export function engineSet(speed01, throttle01) {
+// zero allocations.
+//   speedMS   ABSOLUTE road speed in metres per second (|car.speed|). NOT a
+//             0..1: the caller has no way to know which top speed to divide
+//             by, and dividing by the wrong one is the whole history of this
+//             function — see SPEED_REF. engineStart() was told the kind, so
+//             the normalizing happens here where the kind's vmax is known.
+//   throttle01  0..1 engine LOAD from main.js engineLoad(), not |gas|.
+export function engineSet(speedMS, throttle01) {
   if (!eng) return;
   // written ">0 ? … : 0" rather than "<0 ? 0 : …" so a NaN speed (one bad
   // physics frame) clamps to zero instead of poisoning every AudioParam in
   // the graph — a NaN reaching setTargetAtTime silences the node for good
-  const raw = speed01 > 0 ? (speed01 > 1 ? 1 : speed01) : 0;
+  let v = speedMS > 0 ? speedMS : 0;
+  // driveStep already holds the car at vmax, but a collision impulse can put
+  // it a hair over and there is no gear above the last one to shift into
+  if (v > eng.vmax) v = eng.vmax;
   const th = throttle01 > 0 ? (throttle01 > 1 ? 1 : throttle01) : 0;
   const t = ctx.currentTime, tau = ENGINE.tau;
-  // sK > 1 only for kinds slower than SPEED_REF — see the constant
-  let s = raw * eng.sK; if (s > 1) s = 1;
 
-  if (eng.ev) { evSet(s, th, t, tau); return; }
+  if (eng.ev) { evSet(v, th, t, tau); return; }
 
-  // --- pick the gear: hop bands only once s clears the edge by GEAR_HYST;
-  // the do/while lets hard braking drop several gears in one frame ---
+  // --- pick the gear: hop bands only once v clears the edge by the
+  // hysteresis; the do/while lets hard braking drop several gears in one
+  // frame. Edges and hysteresis are this kind's, in m/s, from gearbox(). ---
+  const edges = eng.gearEdges, hyst = eng.gearHyst;
   let g = eng.gear;
-  if (s > GEAR_TOP[g] + GEAR_HYST) {
-    do g++; while (s > GEAR_TOP[g] + GEAR_HYST);
-  } else if (g > 0 && s < GEAR_TOP[g - 1] - GEAR_HYST) {
-    do g--; while (g > 0 && s < GEAR_TOP[g - 1] - GEAR_HYST);
+  if (v > edges[g] + hyst) {
+    do g++; while (v > edges[g] + hyst);
+  } else if (g > 0 && v < edges[g - 1] - hyst) {
+    do g--; while (g > 0 && v < edges[g - 1] - hyst);
   }
 
-  // --- in-gear revs → voice targets (hysteresis can park s a hair outside
+  // --- in-gear revs → voice targets (hysteresis can park v a hair outside
   // the band, so clamp frac). rpm01 = 0.25 + 0.75·frac per the contract; a
   // standing car sits at the kind's idle rpm, and every upshift audibly drops
   // revs by the same rule. The oscillator runs at rpm/120 = the frequency of
   // the whole four-stroke CYCLE, which is what puts the firing harmonics on
   // k = m·cyl and gives an odd-cylinder engine its half-orders for free. ---
   const P = eng.P;
-  const lo = g > 0 ? GEAR_TOP[g - 1] : 0;
-  let frac = (s - lo) / (GEAR_TOP[g] - lo);
+  const lo = g > 0 ? edges[g - 1] : 0;
+  let frac = (v - lo) / (edges[g] - lo);
   frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
   const rpm01 = 0.25 + 0.75 * frac;
   const f = (P.rpmIdle + (P.rpmMax - P.rpmIdle) * frac) / 120;
@@ -949,14 +1022,18 @@ export function engineSet(speed01, throttle01) {
   // The city bed ducks with ROAD SPEED, not revs: coasting at 120 km/h with
   // your foot off is just as loud inside the cabin as pulling, and ducking off
   // the throttle instead would pump the whole mix on every gear change.
-  // Nothing below ~25 km/h ducks at all — crawling through town, you can still
-  // hear the town. (raw = speed01 as the caller sent it — absolute road speed,
-  // NOT the per-kind rescale, so 0.2·vmax ≈ 27 km/h in every vehicle.)
-  duckSpeed(raw);
+  duckSpeed(v);
 }
 
-function duckSpeed(raw) {
-  const dd = (raw - 0.2) / 0.5;
+// Absolute m/s, the same two numbers for every vehicle — a bus at 90 km/h
+// drowns out the street exactly as much as a BMW at 90 km/h does, because
+// that is a fact about the street and not about the bus. Spelling them out in
+// m/s is also what keeps them where they were: they used to be 0.2 and 0.5 of
+// a speed01 that main.js had already divided by CAR.vmax, i.e. these numbers.
+const DUCK_V0 = 0.2 * SPEED_REF;      // 7.6 m/s = 27 km/h — below this, none
+const DUCK_SPAN = 0.5 * SPEED_REF;    // ...to full duck at 26.6 m/s = 96 km/h
+function duckSpeed(v) {
+  const dd = (v - DUCK_V0) / DUCK_SPAN;
   duckDrive = dd < 0 ? 0 : dd > 1 ? 1 : dd;
   duckUpdate();
 }
@@ -965,8 +1042,14 @@ function duckSpeed(raw) {
 // a single reduction gear leaves nothing else to be a function of. th only
 // controls the inverter tone — that one is proportional to TORQUE, which is
 // why you hear it accelerating and not cruising.
-function evSet(s, th, t, tau) {
-  const v = s * SPEED_REF;                       // m/s, as the caller measures it
+function evSet(v, th, t, tau) {
+  // v is m/s straight from the caller now. It used to be reconstructed as
+  // s·SPEED_REF from a number main.js had already clamped at 1, so every tone
+  // in here — whine, second stage, motor hum, inverter sidebands, the regen
+  // threshold, the fade-in — froze at 137 km/h and the Tesla went eerily
+  // constant for the 120 km/h it still had left. Nothing to reconstruct any
+  // more, and no per-kind vmax needed either: an EV's tones are proportional
+  // to road speed and to nothing else, which is the whole point of the model.
   let fw = EV.whineK * v;
   fw = fw < EV.whineMin ? EV.whineMin : fw > EV.whineMax ? EV.whineMax : fw;
   const n3 = EV.humK * v;                        // motor rate × 3 pole pairs
@@ -975,7 +1058,12 @@ function evSet(s, th, t, tau) {
   // is the cheapest way to make the car read as electric.
   let reg = (1 - th) * ((v - 5) / 10);
   reg = reg < 0 ? 0 : reg > 1 ? 1 : reg;
-  const lvl = 0.25 + 0.75 * s;
+  // LOUDNESS stays on the reference speed, not on the Tesla's own 72 m/s, so
+  // the mix below 137 km/h is bit-identical to before the unit change and only
+  // the PITCHES carry on climbing above it. Riding vmax here would have made
+  // the whine 3.8 dB quieter at every speed people actually drive at, to buy
+  // headroom above 200 km/h where tyre roar owns the mix anyway.
+  const lvl = 0.25 + 0.75 * Math.min(1, v / SPEED_REF);
   eng.whine.frequency.setTargetAtTime(fw, t, tau);
   eng.whine2.frequency.setTargetAtTime(fw * EV.stage2, t, tau);
   eng.humOsc.frequency.setTargetAtTime(n3 < 20 ? 20 : n3, t, tau);
@@ -986,7 +1074,7 @@ function evSet(s, th, t, tau) {
   eng.pwmDepth.gain.setTargetAtTime(0.025 * th, t, tau);
   // no idle: stopped, a Model 3 makes no sound at all
   eng.out.gain.setTargetAtTime(EV.vol * Math.min(1, v / EV.fadeV), t, tau);
-  duckSpeed(s);
+  duckSpeed(v);
 }
 
 // ---- one rumble for ALL nearby traffic ----------------------------------
