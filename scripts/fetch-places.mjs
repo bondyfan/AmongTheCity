@@ -1,77 +1,63 @@
 // ---- Settlement names for the world map ----
 // The region tiles carry geometry, not gazetteer: nothing in them says "this
-// blob of houses is Sezemice". Place nodes are sparse enough that the whole
-// agglomeration fits in ONE Overpass query, so this is a separate, cheap
-// fetch rather than another field on the 72 tile downloads.
+// blob of houses is Sezemice". Place nodes are sparse, so this stays a separate
+// cheap pass rather than another field on 185 tile files.
+//
+// It used to be one Overpass query over a 30 km box. The world now runs from
+// Prague to Hradec, and the same extracts that build the tiles
+// (scripts/lib/osmpbf.mjs) already hold every place node in the country — so
+// this reads them off disk instead, which is both faster and immune to
+// Overpass telling us the server is too busy.
 //
 // Output: public/data/places.json — local metres, same origin as everything
-// else, sorted big-to-small so a label renderer can draw by importance and
+// else, sorted big-to-small so the label renderer can draw by importance and
 // stop when the map gets crowded.
 //
-// Usage: node scripts/fetch-places.mjs
+// Usage: node scripts/fetch-places.mjs   (needs data/raw-osm/*.osm.pbf)
 
-import { writeFileSync, mkdirSync } from 'node:fs';
-
-const ORIGIN = { lat: 50.0317084, lon: 15.7560881 };
-const M_PER_LAT = 111132.9 - 559.8 * Math.cos(2 * ORIGIN.lat * Math.PI / 180);
-const M_PER_LON = 111412.8 * Math.cos(ORIGIN.lat * Math.PI / 180)
-  - 93.5 * Math.cos(3 * ORIGIN.lat * Math.PI / 180);
-
-const UA = 'AmongTheCity-dev/0.4 (three.js game prototype; contact: bondyfanfrankwild@gmail.com)';
-const ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-];
+import { writeFileSync, mkdirSync, readdirSync } from 'node:fs';
+import { readPbf } from './lib/osmpbf.mjs';
+import { ORIGIN, M_PER_LAT, M_PER_LON, ENVELOPE, xOf, zOf } from './lib/world-area.mjs';
 
 // rank drives label size and which names survive a crowded map
 const RANK = {
   city: 0, town: 1, village: 2, suburb: 3, borough: 3,
   quarter: 4, neighbourhood: 4, hamlet: 4, isolated_dwelling: 5,
 };
+const PLACE = /^(city|town|village|hamlet|suburb|borough|quarter|neighbourhood|isolated_dwelling)$/;
 
-const QUERY = `[out:json][timeout:180];
-node["place"~"^(city|town|village|hamlet|suburb|borough|quarter|neighbourhood|isolated_dwelling)$"]
-  (49.92,15.55,50.26,15.97);
-out tags center;`;
-
-async function run(attempt = 0) {
-  const url = ENDPOINTS[attempt % ENDPOINTS.length];
-  process.stdout.write(`↓ places (${url.split('/')[2]}) … `);
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'data=' + encodeURIComponent(QUERY),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    if (!json.elements) throw new Error('no elements[]');
-    console.log(`${json.elements.length} elements`);
-    return json;
-  } catch (err) {
-    console.log(`FAILED (${err.message})`);
-    if (attempt >= 5) throw err;
-    await new Promise(r => setTimeout(r, 8000 + attempt * 6000));
-    return run(attempt + 1);
-  }
+const OSM_DIR = 'data/raw-osm';
+const files = readdirSync(OSM_DIR).filter(f => f.endsWith('.osm.pbf')).map(f => `${OSM_DIR}/${f}`);
+if (!files.length) {
+  console.error(`no .osm.pbf in ${OSM_DIR} — run: node scripts/fetch-world.mjs`);
+  process.exit(1);
 }
 
-const json = await run();
+// The four extracts overlap along their shared borders, so the same village can
+// arrive twice; a node id is the identity that survives that.
+const seen = new Set();
 const places = [];
-for (const e of json.elements) {
-  const name = e.tags?.name;
-  if (!name) continue;                      // an unnamed place is no use as a label
-  const lat = e.lat ?? e.center?.lat, lon = e.lon ?? e.center?.lon;
-  if (lat == null || lon == null) continue;
-  places.push({
-    n: name,
-    t: e.tags.place,
-    r: RANK[e.tags.place] ?? 5,
-    p: [Math.round((lon - ORIGIN.lon) * M_PER_LON), Math.round((ORIGIN.lat - lat) * M_PER_LAT)],
-    pop: e.tags.population ? Number(e.tags.population) || undefined : undefined,
+for (const f of files) {
+  let n = 0;
+  readPbf(f, {
+    onNode(id, lat, lon, tags) {
+      if (!tags || !PLACE.test(tags.place ?? '') || !tags.name) return;
+      if (lat < ENVELOPE.latS || lat > ENVELOPE.latN || lon < ENVELOPE.lonW || lon > ENVELOPE.lonE) return;
+      if (seen.has(id)) return;
+      seen.add(id);
+      places.push({
+        n: tags.name,
+        t: tags.place,
+        r: RANK[tags.place] ?? 5,
+        p: [Math.round(xOf(lon)), Math.round(zOf(lat))],
+        pop: tags.population ? Number(tags.population) || undefined : undefined,
+      });
+      n++;
+    },
   });
+  console.log(`  ${f.split('/').pop()}: ${n} places`);
 }
+
 // biggest first: the label renderer draws in this order and can simply stop
 places.sort((a, b) => a.r - b.r || (b.pop ?? 0) - (a.pop ?? 0));
 

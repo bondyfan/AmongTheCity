@@ -45,7 +45,11 @@ const M_PER_LON = 111412.8 * Math.cos(ORIGIN.lat * Math.PI / 180)
 const WMS = 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer';
 const WMS_PX = 2400;   // px per 480 m tile (config ORTHO.px stays the legacy fetch script's 1024)
 const LRU_MAX = 48;    // supertiles alive at once — see the eviction-safety note up top
-const SANITY = 30000;  // region data ends ~±25 km from origin; beyond that don't ask the server
+// The world runs from Prague (x ≈ −110 km) to east of Hradec, so the clamp is
+// now a bound on the DATA, not on the old 30 km region: past this the WMS would
+// be asked for photos of places the game has no map for. ČÚZK covers the whole
+// country, so the only cost of being generous here is a wasted request.
+const SANITY = { x0: -125000, x1: 30000, z0: -35000, z1: 25000 };
 
 // Supertile (sx, sz) covers x ∈ [sx·T, (sx+1)·T), z ∈ [sz·T, (sz+1)·T) local
 // meters. CRS:84 BBOX wants lonW,latS,lonE,latN — and because our z axis
@@ -117,7 +121,8 @@ export function initOrtho() {
   function orthoGroundMesh(cx, cz) {
     // no fixed extent anymore (the world streams outward as tiles load), just
     // a sanity clamp so absurd indices never turn into WMS requests
-    if (Math.abs(cx * CHUNK) > SANITY || Math.abs(cz * CHUNK) > SANITY) return null;
+    const wx = cx * CHUNK, wz = cz * CHUNK;
+    if (wx < SANITY.x0 || wx > SANITY.x1 || wz < SANITY.z0 || wz > SANITY.z1) return null;
     const sx = Math.floor(cx / S), sz = Math.floor(cz / S), key = sx + ',' + sz;
     let entry = tiles.get(key);
     if (entry === undefined) entry = makeEntry(sx, sz); // ?? would re-fetch failed (null) tiles
@@ -142,7 +147,10 @@ export function initOrtho() {
     const mesh = new THREE.Mesh(geo, entry.mat);
     mesh.position.set(cx * CHUNK + CHUNK / 2, 0, cz * CHUNK + CHUNK / 2); // y=0 ground plane
     mesh.receiveShadow = true;             // buildings/trees drop real shadows onto the photo
-    mesh.matrixAutoUpdate = false;         // static — chunk Groups sit at the origin
+    // Static: the quad never moves again on its own. It IS moved once, by
+    // meshes.rebase(), which shifts a finished chunk into its own local frame —
+    // and that pass knows to call updateMatrix() because of this flag.
+    mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
     return mesh;
   }

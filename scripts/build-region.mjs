@@ -32,7 +32,7 @@
 //
 // Usage: node scripts/build-region.mjs
 
-import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { ORIGIN, M_PER_LAT, M_PER_LON, TILE, tileWanted, wantedTiles } from './lib/world-area.mjs';
 
 const px = (lon) => +((lon - ORIGIN.lon) * M_PER_LON).toFixed(1);
@@ -65,6 +65,44 @@ const makeOwns = (tx, tz) => (pt) => {
 const ring = (geom) => geom.map(g => [px(g.lon), pz(g.lat)]);
 const closed = (pts) => pts.length > 3
   && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1];
+
+// ---- polygon simplification (Douglas–Peucker) ----
+// The world grew from 72 tiles to 185 and from 163 k buildings to 831 k, which
+// took the deployed JSON from 49 MB to 299 MB. Most of that weight is detail
+// nobody can see: a farmland polygon traced to the decimetre, a motorway
+// centreline with a vertex every few metres under an 11 m wide ribbon. Tuned
+// per layer, DP takes 56 % off the green polygons and 19 % off the roads while
+// moving nothing further than the tolerance — which is far under one texel of
+// the ortho photo the ground is drawn from.
+//
+// Buildings are deliberately NOT simplified: their corners are the silhouette,
+// interiors.js lays out real floor plans inside these outlines, and the whole
+// layer would only give back 8 %.
+function simplify(pts, eps) {
+  if (pts.length < 3) return pts;
+  const [a, b] = [pts[0], pts[pts.length - 1]];
+  let dmax = 0, idx = 0;
+  const dx = b[0] - a[0], dz = b[1] - a[1], L2 = dx * dx + dz * dz;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i];
+    const t = L2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / L2)) : 0;
+    const d = Math.hypot(p[0] - (a[0] + dx * t), p[1] - (a[1] + dz * t));
+    if (d > dmax) { dmax = d; idx = i; }
+  }
+  if (dmax <= eps) return [a, b];
+  return simplify(pts.slice(0, idx + 1), eps).slice(0, -1).concat(simplify(pts.slice(idx), eps));
+}
+
+// A closed ring is stored WITHOUT its repeated last point, so close it for the
+// run and drop the duplicate after — otherwise DP is free to cut the corner
+// that joins the last vertex back to the first. Never returns a degenerate
+// ring: below three points the original wins.
+function simplifyRing(pts, eps) {
+  if (pts.length < 5) return pts;
+  const out = simplify([...pts, pts[0]], eps);
+  out.pop();
+  return out.length >= 3 ? out : pts;
+}
 
 // shoelace — signed, for orientation + area thresholds
 function area(pts) {
@@ -141,6 +179,66 @@ function buildingHeight(t) {
   return (TYPE_LEVELS[t.building] ?? 2) * LEVEL_H + 1.2;
 }
 
+// ---------- Prague: real storeys and roofs from IPR ----------
+// OSM has a height for barely half of Prague's 447 000 footprints; the rest get
+// the two-storey guess, which flattens Staré Město into a village. IPR Praha's
+// own survey (scripts/fetch-ipr.mjs) covers 145 123 buildings inside the city
+// with a storey count and a roof shape, so where it has an answer it wins over
+// the guess — but never over an explicit OSM `height`, which is how the
+// landmarks and the Pankrác towers keep their surveyed numbers.
+//
+// The join is spatial: IPR and OSM drew the same city twice and share no ids.
+// An IPR building's centroid falling INSIDE an OSM footprint is the strong
+// match; for the L-shaped courtyard blocks whose centroid lands in the yard,
+// the nearest centroid within IPR_NEAR metres is the fallback.
+const IPR_NEAR = 9;         // m — beyond this, two centroids are two buildings
+function loadIpr() {
+  const file = 'data/ipr-buildings.json';
+  if (!existsSync(file)) return null;
+  const { cell, stride, pts } = JSON.parse(readFileSync(file, 'utf8'));
+  const grid = new Map();
+  for (let i = 0; i < pts.length; i += stride) {
+    const k = Math.floor(pts[i] / cell) + ',' + Math.floor(pts[i + 1] / cell);
+    let a = grid.get(k);
+    if (!a) grid.set(k, a = []);
+    a.push(i);
+  }
+  const inRing = (x, z, poly) => {
+    let hit = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, zi] = poly[i], [xj, zj] = poly[j];
+      if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) hit = !hit;
+    }
+    return hit;
+  };
+  return {
+    used: 0,
+    // → { st, roof } or null. `o` is the OSM outer ring in game metres.
+    match(o) {
+      let cx = 0, cz = 0;
+      for (const [x, z] of o) { cx += x; cz += z; }
+      cx /= o.length; cz /= o.length;
+      const gx = Math.floor(cx / cell), gz = Math.floor(cz / cell);
+      let inside = -1, near = -1, nearD = IPR_NEAR * IPR_NEAR;
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+        const a = grid.get((gx + dx) + ',' + (gz + dz));
+        if (!a) continue;
+        for (const i of a) {
+          const x = pts[i], z = pts[i + 1];
+          if (inside < 0 && inRing(x, z, o)) { inside = i; continue; }
+          const d = (x - cx) ** 2 + (z - cz) ** 2;
+          if (d < nearD) { nearD = d; near = i; }
+        }
+      }
+      const i = inside >= 0 ? inside : near;
+      if (i < 0) return null;
+      this.used++;
+      return { st: pts[i + 2], roof: pts[i + 3] };
+    },
+  };
+}
+const IPR = loadIpr();
+
 const CZ_COLOURS = { // building:colour appears on some RÚIAN buildings
   red: '#b5533c', white: '#e8e4da', yellow: '#d9c47e', brown: '#8a6a4a',
   grey: '#9a9a94', gray: '#9a9a94', green: '#8ba07a', blue: '#7a92a8',
@@ -171,6 +269,19 @@ function processBuildings(els, owns) {
       b.t = kind;
       if (t.name) b.n = t.name;
       if (t['roof:shape'] && t['roof:shape'] !== 'flat') b.r = t['roof:shape'];
+      // …then let Prague's own survey correct the guess. An explicit OSM
+      // `height` is a measurement and outranks it; everything else does not.
+      const m = !(parseFloat(t.height ?? t['building:height']) > 0) && IPR?.match(o);
+      if (m) {
+        b.lv = m.st;
+        // `h` is the wall height to the eaves, for both this join and the OSM
+        // path — the pitched roof above it is geometry meshes.js builds from
+        // `r`, so adding a ridge allowance here as well would count it twice.
+        b.h = +(m.st * LEVEL_H + 1.2).toFixed(1);
+        if (m.roof === 1) b.r ??= 'gabled';
+        else if (m.roof === 2) b.r ??= 'dome';
+        else if (m.roof === 3) delete b.r;      // surveyed flat: no ridge
+      }
       const mh = parseFloat(t.min_height ?? t['building:min_level'] * LEVEL_H);
       if (mh > 0) b.y = +mh.toFixed(1);
       out.push(b);
@@ -211,7 +322,10 @@ function processRoads(els, owns) {
     const k = 'way/' + el.id;
     if (seen.has(k)) continue;
     seen.add(k);
-    const r = { p: ring(el.geometry), t: t.highway, w: spec.w, v: spec.v, d: spec.d };
+    // 0.5 m on a centreline under a 5–11 m ribbon is invisible, and DP never
+    // drops an endpoint — so every junction node the traffic graph keys on
+    // survives untouched.
+    const r = { p: simplify(ring(el.geometry), 0.5), t: t.highway, w: spec.w, v: spec.v, d: spec.d };
     const w = parseFloat(t.width);
     if (w > 1 && w < 30) r.w = +w.toFixed(1);
     if (t.oneway === 'yes' || t.oneway === '1' || t.junction === 'roundabout') r.ow = 1;
@@ -253,6 +367,12 @@ function processRails(els, owns) {
 // `keep` maps its tags to the game kind — split so the green catch-all
 // ('anything with landuse/natural/leisure → grass') can't swallow elements
 // that only entered the combined response via an unrelated clause.
+// Per-kind simplification tolerance. A field boundary and a forest edge can
+// move 2.5 m and nobody will ever know; a tennis court or a cemetery wall is
+// small enough that the same tolerance would visibly round its corners, and a
+// riverbank carries the bridge geometry, so both stay near-exact.
+const AREA_EPS = { wood: 2.5, grass: 2.5, park: 1.2, pitch: 0.8, cemetery: 1.2, water: 1.2, parking: 0.8, plaza: 0.8 };
+
 function processAreas(els, select, keep, owns) {
   const out = [], seen = new Set();
   for (const el of els) {
@@ -264,14 +384,18 @@ function processAreas(els, select, keep, owns) {
     const k = el.type + '/' + el.id;
     if (seen.has(k)) continue;
     seen.add(k);
+    const eps = AREA_EPS[kind] ?? 1;
     if (el.type === 'way' && el.geometry) {
       const o = ring(el.geometry);
       if (closed(o) && Math.abs(area(o.slice(0, -1))) > 25 && owns(o[0]))
-        out.push({ o: o.slice(0, -1), t: kind });
+        out.push({ o: simplifyRing(o.slice(0, -1), eps), t: kind });
     } else if (el.type === 'relation') {
       for (const poly of assembleRelation(el))
         if (Math.abs(area(poly.o)) > 25 && owns(poly.o[0]))
-          out.push({ o: poly.o, i: poly.i.length ? poly.i : undefined, t: kind });
+          out.push({
+            o: simplifyRing(poly.o, eps), t: kind,
+            i: poly.i.length ? poly.i.map(r => simplifyRing(r, eps)) : undefined,
+          });
     }
   }
   return out;
@@ -309,7 +433,7 @@ function processWaterLines(els, owns) {
     const k = 'way/' + el.id;
     if (seen.has(k)) continue;
     seen.add(k);
-    const p = ring(el.geometry);
+    const p = simplify(ring(el.geometry), 1.5);
     if (!owns(p[0])) continue;
     const w = t.waterway === 'river' ? 12 : t.waterway === 'canal' ? 6 : 2.5;
     out.push({ p, w: parseFloat(t.width) > 0 ? +parseFloat(t.width).toFixed(1) : w });
@@ -367,6 +491,82 @@ function processPois(els, owns) {
     seen.add(k);
     const pt = [px(el.lon), pz(el.lat)];
     if (owns(pt)) out.push({ p: pt, t: kind, n: t.name });
+  }
+  return out;
+}
+
+// ---------- the world overview (public/data/overview.json) ----------
+// The world map draws the LIVE city arrays, which is exactly right for a 30 km
+// region that streams in within seconds of spawning. Over 110 km it means the
+// map is an empty olive rectangle until you have personally driven somewhere:
+// open it in Pardubice and Prague simply is not on it.
+//
+// So the builder also emits a sketch of the WHOLE world — motorways down to
+// secondary roads, main railway lines, big water, big forests, and built-up
+// area as a coarse grid of 200 m cells — in the same feature shape the map's
+// own draw helpers already take, so the map gets a permanent base layer for a
+// couple of megabytes and paints live detail over it as tiles arrive.
+const OV = {
+  roads: /^(motorway|trunk|primary|secondary)$/,
+  roadEps: 18,        // m — at region zoom one pixel is 50 m+
+  railMin: 1200,      // m — main lines, not sidings and yard throats
+  railEps: 25,
+  waterMin: 30000,    // m² — the Labe, the Vltava, Sec, Rozkoš; not village ponds
+  waterEps: 12,
+  woodMin: 250000,    // m² — a forest you would navigate by
+  woodEps: 25,
+  cell: 200,          // built-up grid
+};
+const overview = { roads: [], rails: [], water: [], green: [], urban: [] };
+const urbanCells = new Set();
+
+function collectOverview(tile) {
+  for (const r of tile.roads) {
+    if (!OV.roads.test(r.t)) continue;
+    overview.roads.push({ p: simplify(r.p, OV.roadEps), t: r.t });
+  }
+  for (const r of tile.rails) {
+    if (r.t !== 'rail') continue;
+    let L = 0;
+    for (let i = 1; i < r.p.length; i++) L += Math.hypot(r.p[i][0] - r.p[i - 1][0], r.p[i][1] - r.p[i - 1][1]);
+    if (L < OV.railMin) continue;
+    overview.rails.push({ p: simplify(r.p, OV.railEps), t: 'rail' });
+  }
+  for (const w of tile.water)
+    if (Math.abs(area(w.o)) > OV.waterMin) overview.water.push({ o: simplifyRing(w.o, OV.waterEps), t: 'water' });
+  for (const g of tile.green)
+    if (g.t === 'wood' && Math.abs(area(g.o)) > OV.woodMin)
+      overview.green.push({ o: simplifyRing(g.o, OV.woodEps), t: 'wood' });
+  for (const b of tile.buildings)
+    urbanCells.add(Math.floor(b.o[0][0] / OV.cell) + ',' + Math.floor(b.o[0][1] / OV.cell));
+}
+
+// Built-up cells → rectangles, merged into horizontal runs. One rect per cell
+// is ~24 000 rings for this world; runs of adjacent cells in the same row cut
+// that by about four, and the map only ever fills them as a flat wash anyway.
+function urbanRuns() {
+  const rows = new Map();
+  for (const k of urbanCells) {
+    const [cx, cz] = k.split(',').map(Number);
+    let row = rows.get(cz);
+    if (!row) rows.set(cz, row = []);
+    row.push(cx);
+  }
+  const out = [];
+  for (const [cz, row] of rows) {
+    row.sort((a, b) => a - b);
+    let start = row[0], prev = row[0];
+    const flush = (from, to) => {
+      const x0 = from * OV.cell, x1 = (to + 1) * OV.cell;
+      const z0 = cz * OV.cell, z1 = z0 + OV.cell;
+      out.push({ o: [[x0, z0], [x1, z0], [x1, z1], [x0, z1]] });
+    };
+    for (let i = 1; i < row.length; i++) {
+      if (row[i] === prev + 1) { prev = row[i]; continue; }
+      flush(start, prev);
+      start = prev = row[i];
+    }
+    flush(start, prev);
   }
   return out;
 }
@@ -429,6 +629,7 @@ const rawTiles = readdirSync(RAW_DIR)
     let n = 0;
     for (const key of Object.keys(totals)) { n += tile[key].length; totals[key] += tile[key].length; }
     if (!n) { empty++; continue; } // bare corner — nothing to stream, keep it off the manifest
+    collectOverview(tile);
     const json = JSON.stringify(tile);
     writeFileSync(`${OUT_DIR}/tiles/${tx}_${tz}.json`, json);
     manifestTiles.push({ tx, tz, f: `data/tiles/${tx}_${tz}.json`, n });
@@ -441,6 +642,20 @@ writeFileSync(`${OUT_DIR}/manifest.json`, JSON.stringify({
   origin: ORIGIN, mPerLat: +M_PER_LAT.toFixed(1), mPerLon: +M_PER_LON.toFixed(1),
   tile: TILE, tiles: manifestTiles,
 }));
+
+overview.urban = urbanRuns();
+const ovJson = JSON.stringify({
+  origin: ORIGIN, mPerLat: +M_PER_LAT.toFixed(1), mPerLon: +M_PER_LON.toFixed(1), cell: OV.cell, ...overview,
+});
+writeFileSync(`${OUT_DIR}/overview.json`, ovJson);
+console.log(`overview.json: ${overview.roads.length} roads, ${overview.rails.length} rails, `
+  + `${overview.water.length} water, ${overview.green.length} woods, ${overview.urban.length} built-up runs`
+  + ` — ${(ovJson.length / 1e6).toFixed(2)} MB`);
+
+if (IPR) console.log(`IPR Praha: ${IPR.used.toLocaleString()} buildings took their storeys`
+  + ' and roof from the city survey (datový podklad © IPR Praha)');
+else console.log('IPR Praha: data/ipr-buildings.json absent — Prague keeps the OSM guess'
+  + ' (run: node scripts/fetch-ipr.mjs)');
 
 const wanted = wantedTiles().length;
 console.log(`${rawTiles.length} raw tiles read of ${wanted} the world wants`

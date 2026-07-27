@@ -120,6 +120,63 @@ function defaultV(t, x, z) {
 // This is ALSO what stitches tiles: build-region clips ways at tile borders,
 // and both halves carry the border point, so they hash to the same node.
 const keyOf = (x, z) => x.toFixed(1) + ',' + z.toFixed(1);
+
+// ---- spatial hash: what made Prague loadable at all -----------------------
+// Four passes here used to answer "what is near this point?" by scanning every
+// junction or every edge. That is honest bookkeeping for Pardubice — 2 000 roads
+// and 40 controllers — and quadratic death for a world that reaches Prague: one
+// central tile alone carries 18 000 roads, so binding its ~40 000 edges against
+// a few thousand controllers is hundreds of millions of distance tests per tile,
+// and the tab simply stops. Every one of those queries has a radius of at most
+// SYNTH_CLEAR (45 m), so a 64 m bucket grid answers all of them from the 3×3
+// neighbourhood of the query point — with a cell that big, nothing within 45 m
+// can be further than one cell away.
+const GRID = 64;
+class Buckets {
+  constructor() { this.m = new Map(); }
+  static key(x, z) { return Math.floor(x / GRID) + ',' + Math.floor(z / GRID); }
+  add(x, z, v) {
+    const k = Buckets.key(x, z);
+    let a = this.m.get(k);
+    if (!a) this.m.set(k, a = []);
+    a.push(v);
+    return k;
+  }
+  remove(k, v) {
+    const a = this.m.get(k);
+    if (!a) return;
+    const i = a.indexOf(v);
+    if (i >= 0) a.splice(i, 1);
+  }
+  // A polyline occupies every cell it passes through, not just its endpoints'
+  // — a pole can stand beside the middle of a 400 m edge. Walking each segment
+  // in half-cell steps cannot skip a cell, and the Set keeps one entry per
+  // cell per line.
+  addLine(pts, v) {
+    const seen = new Set();
+    for (let i = 0; i < pts.length - 1; i++) {
+      const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
+      const L = Math.hypot(bx - ax, bz - az);
+      const n = Math.max(1, Math.ceil(L / (GRID / 2)));
+      for (let s = 0; s <= n; s++) {
+        const t = s / n, k = Buckets.key(ax + (bx - ax) * t, az + (bz - az) * t);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        let a = this.m.get(k);
+        if (!a) this.m.set(k, a = []);
+        a.push(v);
+      }
+    }
+    return seen;
+  }
+  near(x, z, fn) {
+    const cx = Math.floor(x / GRID), cz = Math.floor(z / GRID);
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+      const a = this.m.get((cx + i) + ',' + (cz + j));
+      if (a) for (let k = 0; k < a.length; k++) fn(a[k]);
+    }
+  }
+}
 // normalize any angle (or angle difference) into (-π, π] — branchless and
 // immune to accumulated drift, worth the two trig calls at 120 cars
 const angWrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -188,6 +245,8 @@ export class Traffic {
     this._usage = new Map();        // keyOf → {n, last}: PERSISTENT so later tiles
                                     // can still detect junctions against earlier ways
     this._junctions = [];           // traffic-light controllers (grow with tiles)
+    this._jgrid = new Buckets();    // …indexed by position (see Buckets above)
+    this._egrid = new Buckets();    // every edge, in every cell its polyline crosses
     this._near = [];                // spawn candidates around the player
     this._nearX = 1e9; this._nearZ = 1e9; this._nearT = 0;
     this._spawnT = 0;
@@ -214,15 +273,18 @@ export class Traffic {
     // SYNTH_CLEAR of a crossing suppresses the fabricated one, never vice versa
     const synth = this._synthSignals();
     if (synth) { if (grown) for (const j of synth) grown.add(j); else grown = synth; }
-    // bind: every NEW edge scans all junctions; every new/updated junction
-    // scans the OLD edges (new ones were just covered). _tryBind keeps the
-    // nearest junction, so double visits are harmless. Cost is (edges ×
-    // junctions) flat math per tile load — one-time, never per frame.
-    for (let i = e0; i < this.edges.length; i++)
-      for (const jn of this._junctions) this._tryBind(this.edges[i], jn);
+    // bind: every NEW edge asks the junction grid what stands near its END
+    // node; every new/updated junction asks the edge grid which edges pass
+    // nearby. _tryBind keeps the nearest junction and gates on SIG_EDGE_R, so
+    // revisiting an already-bound pair is harmless — which is why the second
+    // sweep does not bother excluding the edges the first one just did.
+    for (let i = e0; i < this.edges.length; i++) {
+      const e = this.edges[i];
+      this._jgrid.near(e.b.x, e.b.z, (jn) => this._tryBind(e, jn));
+    }
     if (grown)
       for (const jn of grown)
-        for (let i = 0; i < e0; i++) this._tryBind(this.edges[i], jn);
+        this._egrid.near(jn.x, jn.z, (e) => this._tryBind(e, jn));
     this._nearT = 0;                // fresh streets join the spawn pool right away
   }
 
@@ -346,6 +408,7 @@ export class Traffic {
     e.a.out.push(e);
     e.b.inn.push(e);   // incoming list: where a synthetic junction plants its poles
     this.edges.push(e);
+    this._egrid.addLine(pts, e);
     return e;
   }
 
@@ -362,15 +425,16 @@ export class Traffic {
     for (const pt of list) {
       const x = pt[0], z = pt[1];
       let jn = null, bd = SIG_CLUSTER;
-      for (const j of this._junctions) {
+      this._jgrid.near(x, z, (j) => {
         const d = Math.hypot(j.x - x, j.z - z);
         if (d < bd) { bd = d; jn = j; }
-      }
+      });
       if (!jn) {
         jn = { x, z, n: 0, off: hash01(x, z) * SIG_CYCLE, st0: -1, st1: -1,
           sigs: [], group: new THREE.Group() };
         this.vehicles.scene?.add(jn.group);
         this._junctions.push(jn);
+        jn._gk = this._jgrid.add(x, z, jn);
       }
       // duplicate guard — a re-delivered tile must not sprout twin poles
       let dup = false;
@@ -379,6 +443,11 @@ export class Traffic {
       jn.x = (jn.x * jn.n + x) / (jn.n + 1);
       jn.z = (jn.z * jn.n + z) / (jn.n + 1);
       jn.n++;
+      // the running centroid can walk the controller into a different cell
+      // (never further than SIG_CLUSTER, so at most one) — re-file it, or the
+      // grid would stop answering for it
+      const gk = Buckets.key(jn.x, jn.z);
+      if (gk !== jn._gk) { this._jgrid.remove(jn._gk, jn); this._jgrid.add(jn.x, jn.z, jn); jn._gk = gk; }
       jn.sigs.push(this._makePole(x, z, jn.group));
       jn.st0 = jn.st1 = -1;         // force a lamp refresh — new poles start unlit
       (grown ??= new Set()).add(jn);
@@ -410,8 +479,9 @@ export class Traffic {
       if (!major) for (const r of n.ew) if (SIG_MAJOR.test(r.t)) { major = true; break; }
       if (!major) { n._sg = 1; continue; }
       let owned = false;                        // a real cluster (or an earlier synthetic
-      for (const j of this._junctions)          // one) within SYNTH_CLEAR owns this crossing
-        if (Math.hypot(j.x - n.x, j.z - n.z) < SYNTH_CLEAR) { owned = true; break; }
+      this._jgrid.near(n.x, n.z, (j) => {       // one) within SYNTH_CLEAR owns this crossing
+        if (Math.hypot(j.x - n.x, j.z - n.z) < SYNTH_CLEAR) owned = true;
+      });
       if (owned) { n._sg = 1; continue; }
       // one stop-line point per approach, planted a few meters back up the
       // incoming edge. Capping at 45 % of the edge keeps the point past the
@@ -441,17 +511,15 @@ export class Traffic {
   _makePole(x, z, group) {
     const A = sigAssets();
     let best = null, bestD = 25, bestS = 0;
-    for (const e of this.edges) {
-      // manhattan gate: manhattan ≥ euclid, and any polyline point sits within
-      // e.len of the middle vertex, so past e.len·1.42+36 the nearest point
-      // cannot beat the 25 m cap — prunes the region to a handful of edges
-      if (Math.abs(e.mx - x) + Math.abs(e.mz - z) > e.len * 1.42 + 36) continue;
+    // the edge grid holds every edge in every cell its polyline crosses, so the
+    // 3×3 neighbourhood is a superset of everything inside the 25 m cap
+    this._egrid.near(x, z, (e) => {
       const p = e.pts;
       for (let i = 0; i < p.length - 1; i++) {
         const d = distPointToSegment(x, z, p[i][0], p[i][1], p[i + 1][0], p[i + 1][1], _snap);
         if (d < bestD) { bestD = d; best = e; bestS = e.cum[i] + _snap.t * (e.cum[i + 1] - e.cum[i]); }
       }
-    }
+    });
     let px = x, pz = z, dx = 0, dz = -1;         // orphan fallback: face north in place
     if (best) {
       // of the two directions sharing this asphalt, pick the one whose END is

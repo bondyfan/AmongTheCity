@@ -31,6 +31,7 @@
 import { COLORS } from './config.js';
 
 const PLACES_URL = 'data/places.json';
+const OVERVIEW_URL = 'data/overview.json';
 const TAU = Math.PI * 2;
 
 const ZOOM_MIN = 1, ZOOM_MAX = 12;
@@ -111,6 +112,31 @@ const VOID_BG = css(COLORS.groundBase, 0.38);  // past the loaded region: dead g
 const BLD_FILL = '#c6c2b8';                    // minimap's building grey
 const BLD_WASH = 'rgba(198,194,184,0.72)';     // …as a tint when a house is 1 px
 
+// data/overview.json is the whole world at map fidelity: motorway→secondary
+// roads, main railway lines, big water, big forests, and built-up area as runs
+// of 200 m cells (scripts/build-region.mjs writes it). It exists because the map
+// draws the LIVE city arrays, and over a 110 km world that means Prague is not
+// on the map until you have personally driven there — open it in Pardubice and
+// two thirds of the country is blank olive. Three megabytes buys a permanent
+// base layer that live detail then paints over. Same graceful-failure contract
+// as places: no file, no base layer, map still works.
+let _ovP = null;
+function loadOverview() {
+  if (!_ovP) {
+    _ovP = fetch(OVERVIEW_URL)
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+      .then(d => ({
+        roads: d?.roads ?? [], rails: d?.rails ?? [],
+        water: d?.water ?? [], green: d?.green ?? [], urban: d?.urban ?? [],
+      }))
+      .catch(err => {
+        console.warn('[worldmap] overview.json unavailable, map shows only streamed data:', err.message);
+        return null;
+      });
+  }
+  return _ovP;
+}
+
 // places.json is fetched ONCE per page load and shared by every WorldMap ever
 // built. A failure is not fatal: the promise resolves to an empty list and the
 // map simply has no labels (contract: degrade gracefully).
@@ -186,6 +212,7 @@ export class WorldMap {
     this.minimap = minimap;
     this.waypoint = null;         // {x,z} | null — main.js drives the HUD arrow
     this.places = [];             // filled asynchronously; [] = no labels, fine
+    this.ov = null;               // …and the world base layer; null = streamed only
 
     // ---- view state (world metres) ----
     this.zoom = 1;
@@ -213,11 +240,17 @@ export class WorldMap {
 
     this._buildDom();
     loadPlaces().then(list => { this.places = list; });
+    // 3 MB lands well after the first frames; if the map is already open when
+    // it does, redraw so the world appears instead of waiting for a pan
+    loadOverview().then(ov => { this.ov = ov; if (this._open) this._schedule(TILE_MS); });
 
     // A tile landing invalidates the bitmap: while the map is open we redraw
     // debounced 1 s, so a burst of neighbouring tiles costs ONE render. While
     // it is closed there is nothing to do — every open renders from scratch.
     city.onTileLoaded?.(() => { if (this._open) this._schedule(TILE_MS); });
+    // …and a tile going slim (its buildings evicted 9 km back) leaves the
+    // bitmap showing footprints the arrays no longer hold. Same debounce.
+    city.onTileUnloaded?.(() => { if (this._open) this._schedule(TILE_MS); });
   }
 
   get open() { return this._open; }
@@ -658,6 +691,10 @@ export class WorldMap {
     g.fillRect(0, 0, ow, oh);
     g.lineJoin = g.lineCap = 'round';
 
+    // The world base layer goes down FIRST, so streamed detail paints over it
+    // wherever it exists and the rest of the country is still a country.
+    this._overview(g, x0, z0, s);
+
     // Same layer order as the minimap so the two read as one map: greens and
     // paved surfaces, then water, then the built fabric, then rails, then the
     // road web on top.
@@ -695,6 +732,34 @@ export class WorldMap {
 
     this._roads(g, city, x0, z0, s);
     this._zr = -1;               // force the status line to repaint the zoom
+  }
+
+  // The whole-world base layer. Everything here is the same feature shape the
+  // live layers use — {o} rings and {p} polylines with a `t` class — so it goes
+  // through the very same batching helpers, and the two layers cannot drift
+  // apart in colour or line weight. Drawn a touch flatter than the live data so
+  // that where both exist, the streamed detail is the one you read.
+  _overview(g, x0, z0, s) {
+    const ov = this.ov;
+    if (!ov) return;
+    this._polys(ov.green, () => css(COLORS.green.wood, 0.78));
+    this._polys(ov.water, () => css(COLORS.water, 0.8));
+    // built-up area: runs of 200 m cells that hold at least one building. At
+    // region zoom this is what makes a town look like a town — the same wash
+    // _buildings paints when a real footprint is under a pixel.
+    this._polys(ov.urban, () => BLD_WASH);
+    g.strokeStyle = css(COLORS.rail, 1.4);
+    g.lineWidth = Math.max(0.7, 2 * s);
+    g.beginPath();
+    let any = false;
+    for (const f of ov.rails) {
+      const bb = this._bb(f, f.p);
+      if (!bb || !this._visBB(bb)) continue;
+      this._line(g, f.p, x0, z0, s);
+      any = true;
+    }
+    if (any) g.stroke();
+    this._roads(g, { roads: ov.roads }, x0, z0, s);
   }
 
   _visBB(bb) {

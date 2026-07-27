@@ -17,3 +17,8 @@ data/raw-region/
 # Geofabrik .osm.pbf extracts feeding scripts/build-region.mjs — 320 MB of
 # regenerable input, never served.
 data/raw-osm/
+
+# IPR Praha open data (Podlažnosti) — 146 MB of source for the Prague storey
+# join; reduced to data/ipr-buildings.json, which build-region bakes into tiles.
+data/raw-ipr/
+data/ipr-buildings.json

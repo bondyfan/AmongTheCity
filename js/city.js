@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y } from './config.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeElevation } from './geo.js';
-import { makeMaterials, buildChunkMeshes, buildBuildingsMesh } from './meshes.js';
+import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { stampFranchises } from './interiors.js';
 
@@ -48,6 +48,14 @@ export class CityWorld {
     this._stamped = 0;
     this._stampFranchises();
     city.onTileLoaded?.((t) => { this._dropCells(t.cells); this._stampFranchises(); });
+    // The far side of streaming: a tile that fell 9 km behind gives its
+    // buildings back (geo.js evictFar). Its cells are far out of view, but they
+    // must still be dropped from `built` or coming back would find stale groups
+    // with no data behind them. A building the player wrecked pins its whole
+    // tile — the box model outlives the footprint it was built from.
+    city.onTileUnloaded?.((t) => this._dropCells(t.cells));
+    if ('keepAlive' in city)
+      city.keepAlive = (f) => this.interiors.models.get(f._id)?.damaged === true;
   }
 
   update(dt, focus, opts) {
@@ -110,10 +118,14 @@ export class CityWorld {
     }
   }
 
-  // city.buildings only ever grows, so a running index is all the bookkeeping
-  // the franchise pass needs
+  // A running index is all the bookkeeping the franchise pass needs — until
+  // eviction shortens city.buildings under it, at which point the cursor points
+  // past the end and every future tile would go unstamped. Stamping is
+  // deterministic (hashed from the building's own id), so starting over is free
+  // and idempotent.
   _stampFranchises() {
     const all = this.city.buildings;
+    if (this._stamped > all.length) this._stamped = 0;
     if (this._stamped >= all.length) return;
     stampFranchises(all.slice(this._stamped));
     this._stamped = all.length;
@@ -435,6 +447,9 @@ export class CityWorld {
     }                                                 // door trim and signs
     const [cx, cz] = key.split(',').map(Number);
     const m = buildBuildingsMesh(this.city, cx, cz, this.mats);
-    if (m) group.add(m);
+    // the group is chunk-local now (meshes.js rebase), and this batch was built
+    // in world coordinates like every other — shift it into the same frame or
+    // the rebuilt buildings land a chunk-centre away from their street
+    if (m) { rebase(m, ...chunkBase(cx, cz)); group.add(m); }
   }
 }

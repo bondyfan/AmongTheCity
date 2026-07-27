@@ -595,3 +595,104 @@ scripts/gen-sounds.mjs: `train_horn` (two-tone Czech loco horn), `train_pass`,
 ## main.js integration (MINE)
 E boards/alights a halted train the way it does cars; the HUD shows the
 station name and "odjezd" countdown while stopped.
+
+---
+
+# v8 contract: the world reaches Prague
+
+The world was a 30×38 km rectangle around Pardubice: 72 tiles, 163 k buildings.
+It is now the **D11 corridor** — Prague, the motorway, the villages strung along
+it, Hradec Králové and Pardubice — **185 tiles, 110 km end to end, 831 k
+buildings, 245 MB**. Everything below exists because that is a different order
+of magnitude, not a bigger number.
+
+## The shape of the world — scripts/lib/world-area.mjs
+A rectangle spanning Prague to Hradec would be 252 tiles, most of them farmland
+nobody drives through. The world is a UNION of shapes: the original
+agglomeration box, a ±8 km BAND along the D11/D35 centreline (sampled at its
+junctions), and a box over Prague. `tileWanted(tx, tz)` is the single answer to
+"is this tile part of the world", and the splitter, the builder and the manifest
+all ask it — the world's shape is one edit away and the scripts cannot disagree.
+
+## Getting the data — scripts/{fetch-world,split-extracts}.mjs + lib/osmpbf.mjs
+Overpass was one bbox query per tile. At 185 tiles — and with Prague's density —
+it answers "runtime error: the server is probably too busy" more often than it
+answers data, and a clean run is hours. Replaced by four Geofabrik `.osm.pbf`
+extracts (praha, středočeský, královéhradecký, pardubický; ~320 MB) and a
+**zero-dependency PBF reader** (`lib/osmpbf.mjs`: varints, packed fields, zigzag
+deltas, zlib blobs — the format's field numbers ARE the schema). Whole-country
+parse is seconds, not hours. `npm run fetch-world` is download → split → IPR →
+build → gazetteer, all re-runnable.
+
+`split-extracts.mjs` writes `data/raw-region/<tx>_<tz>.json` in exactly the
+shape Overpass' `out geom` produced, so build-region needed no new parsing —
+only `"owned": true`, which says "this element is already in its one tile, skip
+the first-vertex test". A raw file without the flag is an old Overpass download
+and still gets tested.
+
+## Prague's real heights — scripts/fetch-ipr.mjs + the join in build-region
+OSM has a height for barely half of Prague's 447 k footprints; the rest fell
+back to "2 storeys ≈ 7.4 m", which flattens Staré Město into a village. IPR
+Praha publishes its own survey (CC BY): 145 123 buildings with a storey count
+and a coded roof shape. The join is spatial — IPR and OSM drew the same city
+twice and share no ids — an IPR centroid inside an OSM footprint is the strong
+match, nearest-centroid within 9 m the fallback for courtyard blocks whose
+centroid lands in the yard. **109 700 buildings** now carry surveyed storeys and
+roofs. An explicit OSM `height` still wins: that is a measurement.
+`h` is the wall height to the EAVES in both paths — the pitched roof above it is
+geometry, so adding a ridge allowance to `h` as well would count it twice.
+Attribution is required and lives in README: *datový podklad © IPR Praha*.
+
+## Roofs that follow the plan — meshes.js `roofCap`
+A village house is one ridge over one rectangle and `ridgePrism` (OBB, < 300 m²)
+is right for it. Prague's blocks are 400–2000 m² and L- or U-shaped around a
+courtyard, where one ridge would sail over the yard. Those get a CAP: the real
+outline offset inward along each vertex's angle bisector and lifted — which is
+what a hipped or mansard roof IS, and it turns every corner of the plan.
+Naive offsetting folds through thin wings: measured over the real footprints,
+**55 % self-intersect at full depth**, and the area/winding guards do not catch
+it. So the depth STEPS DOWN (1, ½, ¼, ⅛) until `ringSelfIntersects` says the
+ring is simple, the rise follows the depth that survived, and anything still
+knotted stays flat. Result over the whole world: 12 310 of 13 742 pitched blocks
+capped, 440 866 triangles, **zero down-facing, zero below the eaves**.
+
+## Surviving 110 km — the engine
+- **float32.** Geometry was authored in world coordinates with chunk Groups at
+  the origin. At Prague (x ≈ −95 000) float32 spacing is 7.8 mm and, worse, the
+  vertex shader subtracts two ~10⁵ numbers, so the city SWIMS. `meshes.rebase()`
+  shifts each finished chunk to be local to its own centre and puts the offset
+  in `Group.position`, where three.js computes it in float64 on the CPU. The
+  shift runs on already-float32 arrays, so vertices stay snapped to that 7.8 mm
+  grid — invisible on a low-poly city; it is the jitter the eye catches, not the
+  snap. `city._rebuildBuildings` re-applies it to a re-meshed batch.
+- **Eviction.** Tiles never unloaded. Driving the D11 end to end crosses ~50 of
+  them, and holding every building would be about a gigabyte. A tile 9 km behind
+  goes SLIM: buildings and trees are unpicked from the chunk index and compacted
+  OUT OF THE FLAT ARRAYS IN PLACE (every consumer holds those by reference
+  forever), and re-fetched if you come back. Roads, rails, water and green stay
+  resident — the world map draws them, the traffic graph is built from them, and
+  they are a third of the weight. Feature `_id`s are derived from the tile slot,
+  not a global counter, so a building that leaves and returns is the SAME
+  building (ids seed tree jitter, lamp stagger, which shed is a franchise).
+  A wrecked building pins its tile: `city.keepAlive`.
+- **Traffic.** Four passes answered "what is near this point?" by scanning every
+  junction or every edge. Fine for 2 000 roads; for one central Prague tile's
+  18 000 it is hundreds of millions of distance tests and the tab stops dead.
+  All four now query a 64 m bucket grid (`Buckets`) — every radius involved is
+  ≤ 45 m, so the 3×3 neighbourhood is exhaustive. This is what made Prague load.
+- **Ortho** clamps to a data-shaped box, not the old ±30 km radius.
+
+## The map — public/data/overview.json + worldmap.js
+The map draws the LIVE city arrays, which over 110 km means Prague is not on it
+until you have personally driven there. `build-region.mjs` also emits a sketch
+of the WHOLE world — motorway→secondary roads, main lines, big water, big
+forests, and built-up area as run-length-merged 200 m cells — ~3 MB, in the same
+feature shape the map's own helpers take, so it goes through `_polys`/`_roads`
+unchanged and live detail paints over it. `places.json` is rebuilt from the same
+extracts: **2 331 named settlements** (was 429), Praha included.
+
+## Verification
+`npm test` (17 tests) still passes. Prague renders at 56–78 fps at max settings
+with zero console errors; the Vltava, its bridges, the tram network and the
+signals are all there. meshes.js imports in node under a `three` resolver, which
+is how `roofCap` was checked over all 13 742 real pitched footprints.

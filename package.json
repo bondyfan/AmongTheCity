@@ -8,7 +8,8 @@
     "preview": "vite preview",
     "fetch-city": "node scripts/fetch-city.mjs",
     "build-city": "node scripts/build-city.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "fetch-world": "node scripts/fetch-world.mjs"
   },
   "devDependencies": {
     "vite": "^6.0.0"

@@ -1147,10 +1147,135 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks) {
   // off, and the fascia/totem must match pieces.js regardless of the atlas
   if (brand?.sign !== undefined && sign && trim && marks)
     brandSignage(f, y0, y0 + depth, brand, cell, trim, sign, marks);
-  // small gabled houses get a ridge prism — in facade mode its tris pin to
-  // the plain plaster cell, so it reads as flat color either way
-  if (f.r === 'gabled' && Math.abs(polygonArea(f.o)) < 300)
-    ridgePrism(sink, f.o, y0 + depth, rr, rg, rb);
+  // Roofs. In facade mode their tris pin to the plain plaster cell, so they
+  // read as flat colour either way.
+  //
+  // A village house is one ridge over one rectangle, and an OBB prism is
+  // exactly right for it. Prague is not that: its blocks are 400–2000 m² and
+  // L- or U-shaped around a courtyard, and one giant ridge across such a
+  // footprint would sail straight over the yard. Those get a CAP instead — the
+  // real outline offset inward and lifted — which is what a hipped or mansard
+  // roof actually is, and it follows every wing of the plan.
+  if (f.r && f.r !== 'flat') {
+    const a = Math.abs(polygonArea(f.o));
+    const topY = y0 + depth;
+    if (f.r === 'gabled' && a < 300) ridgePrism(sink, f.o, topY, rr, rg, rb);
+    else if (a >= 300 && PITCHED.has(f.r)) roofCap(sink, f.o, topY, a, rr, rg, rb);
+  }
+}
+
+// Roof shapes worth building a cap for. Everything else in the OSM/IPR domain
+// (dome, onion, sawtooth…) stays flat: 108 domes in Prague are not worth a
+// geometry path that could go wrong on the other 78 000.
+const PITCHED = new Set(['gabled', 'hipped', 'half-hipped', 'mansard', 'gambrel',
+  'pyramidal', 'hip-and-gable', 'round']);
+
+const ROOF_MAX_N = 200;                   // bounds the O(n²) simplicity test
+const ROOF_STEPS = [1, 0.5, 0.25, 0.125]; // depth fractions tried, deepest first
+
+// Offset one ring inward by d along each vertex's angle bisector. Returns null
+// for geometry that cannot be offset at all (a repeated vertex, a 180° spike);
+// the CALLER decides whether the result is usable.
+function insetRing(ring, d, sgn) {
+  const n = ring.length, out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const [px, pz] = ring[(i - 1 + n) % n], [cx, cz] = ring[i], [nx2, nz2] = ring[(i + 1) % n];
+    let ax = cx - px, az = cz - pz, bx = nx2 - cx, bz = nz2 - cz;
+    const la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
+    if (la < 1e-6 || lb < 1e-6) return null;
+    ax /= la; az /= la; bx /= lb; bz /= lb;
+    // inward normals of the two edges meeting here, and their bisector
+    const n1x = -az * sgn, n1z = ax * sgn, n2x = -bz * sgn, n2z = bx * sgn;
+    let mx = n1x + n2x, mz = n1z + n2z;
+    const ml = Math.hypot(mx, mz);
+    if (ml < 1e-3) return null;
+    mx /= ml; mz /= ml;
+    // the bisector travels 1/cos(half-angle) so both eaves stay parallel at
+    // distance d; the clamp stops a sharp corner shooting off to infinity
+    const k = Math.min(4, 1 / Math.max(0.25, (mx * n1x + mz * n1z)));
+    out[i] = [cx + mx * d * k, cz + mz * d * k];
+  }
+  return out;
+}
+
+// Does a closed ring cross itself? The area and winding guards do not catch a
+// ring that folded through a thin wing — over the real Prague footprints they
+// pass 7 603 rings that are knots — so the simplicity test has to be explicit.
+function ringSelfIntersects(ring) {
+  const n = ring.length;
+  const side = (ox, oz, ax, az, bx, bz) => (ax - ox) * (bz - oz) - (az - oz) * (bx - ox);
+  for (let i = 0; i < n; i++) {
+    const a = ring[i], b = ring[(i + 1) % n];
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue;     // shares the closing vertex
+      const c = ring[j], dd = ring[(j + 1) % n];
+      const d1 = side(c[0], c[1], dd[0], dd[1], a[0], a[1]);
+      const d2 = side(c[0], c[1], dd[0], dd[1], b[0], b[1]);
+      const d3 = side(a[0], a[1], b[0], b[1], c[0], c[1]);
+      const d4 = side(a[0], a[1], b[0], b[1], dd[0], dd[1]);
+      if (((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0))) return true;
+    }
+  }
+  return false;
+}
+
+// A roof by inward offset: every eave vertex slides along its own angle
+// bisector toward the interior by `d`, and the band between the original ring
+// and the shrunken one becomes the slope. On a rectangle that is a hipped roof;
+// on an L it is a hipped roof that turns the corner; on a courtyard block it is
+// a mansard that follows all four wings — which is Prague's roofscape.
+//
+// Concave corners are where naive offsetting self-intersects, so the result is
+// CHECKED rather than trusted: a ridge that folded through itself shows up as a
+// collapsed or sign-flipped area, and the building simply keeps its flat top.
+// Better a flat roof than a knot of triangles over Vinohrady.
+export function roofCap(sink, ring, topY, area, r, g, b) {
+  const n = ring.length;
+  if (n < 3 || n > ROOF_MAX_N) return;
+  const sgn = polygonArea(ring) > 0 ? 1 : -1;   // which side of an edge is inside
+  // Slope depth scales with the footprint, capped so a 2 000 m² block does not
+  // grow a cathedral. But a block with a 6 m wing cannot give up 3.5 m from
+  // both sides of it, and the naive offset answers that by folding through
+  // itself — measured over the real data, at full depth that is 55 % of
+  // Prague's big pitched blocks. So the depth STEPS DOWN until the ring comes
+  // back simple, which rescues nine in ten of them; the rest stay flat.
+  const d0 = Math.min(3.5, Math.max(1.2, Math.sqrt(area) / 7));
+  let inner = null, d = 0;
+  for (const f of ROOF_STEPS) {
+    d = d0 * f;
+    const cand = insetRing(ring, d, sgn);
+    if (!cand) continue;
+    const ia = polygonArea(cand);
+    if (!(ia * sgn > 0) || Math.abs(ia) < area * 0.06 || Math.abs(ia) > area) continue;
+    if (ringSelfIntersects(cand)) continue;
+    inner = cand;
+    break;
+  }
+  if (!inner) return;
+  // rise follows the depth that actually survived — a 0.4 m lip with a 4 m
+  // rise would be a spike, not a roof
+  const rise = Math.min(4.2, Math.max(0.8, d * 1.15));
+  const ry = topY + rise;
+  for (let i = 0; i < n; i++) {
+    const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % n];
+    const [cx2, cz2] = inner[(i + 1) % n], [dx2, dz2] = inner[i];
+    // outward-and-up normal of the slope, from the eave edge and the rise
+    let ex = bx - ax, ez = bz - az;
+    const el = Math.hypot(ex, ez);
+    if (el < 1e-6) continue;
+    const ox = ez / el * sgn, oz = -ex / el * sgn;   // outward horizontal
+    const ny = d / Math.hypot(d, rise), nh = rise / Math.hypot(d, rise);
+    const nx3 = ox * ny, nz3 = oz * ny;
+    sink.triFacing(ax, topY, az, bx, topY, bz, cx2, ry, cz2, nx3, nh, nz3, r, g, b);
+    sink.triFacing(ax, topY, az, cx2, ry, cz2, dx2, ry, dz2, nx3, nh, nz3, r, g, b);
+  }
+  // the flat top of the mansard, fanned from the first inner vertex — convex
+  // enough after the area guard, and it is only ever seen from the air. The
+  // facing hint is straight up whatever the ring's winding: triFacing flips the
+  // triangle to match it, and a roof that faces down renders black.
+  for (let i = 1; i < n - 1; i++)
+    sink.triFacing(inner[0][0], ry, inner[0][1], inner[i][0], ry, inner[i][1],
+      inner[i + 1][0], ry, inner[i + 1][1], 0, 1, 0, r, g, b);
 }
 
 // OBB of the footprint (dominant axis = its longest edge), ridge along the
@@ -1415,6 +1540,47 @@ function scatterForest(f, x0, z0, x1, z1, waters, out) {
 // From a helicopter the ortho already shows the roads, roofs and fields, so a
 // ring of these carries the view out to kilometres for one draw call each —
 // the alternative was watching the fully-detailed world simply stop.
+// ---- float32 and a 110 km world ------------------------------------------
+// Every builder below writes WORLD coordinates into geometry, which was fine
+// while the world was a 30 km box: float32 resolves 0.5 mm at 4.8 km. Prague is
+// 95 km west of the origin, where the spacing is 7.8 mm — and worse, the vertex
+// shader computes modelViewMatrix × position with both terms near ±95 000, so
+// the subtraction that should leave a metre of view space instead leaves
+// catastrophic cancellation, and the whole city swims as the camera moves.
+//
+// The fix every large-world renderer uses (Cesium calls it RTC): keep the
+// offset OUT of the vertex data and put it in the object's transform, because
+// three.js computes matrixWorld and modelViewMatrix on the CPU in float64 and
+// only the small, already-cancelled result reaches the GPU. So a finished chunk
+// is shifted to be local to its own centre and the Group carries the rest.
+//
+// The shift itself runs on the already-float32 arrays, which leaves the vertices
+// snapped to that 7.8 mm grid at Prague — invisible on a low-poly city with 3 m
+// windows, and it is the JITTER, not the snap, that the eye catches.
+export function rebase(obj, bx, bz) {
+  obj.traverse((o) => {
+    if (o.isInstancedMesh) {
+      // column-major Matrix4: elements 12,13,14 are the translation
+      const a = o.instanceMatrix.array;
+      for (let i = 12; i + 2 < a.length; i += 16) { a[i] -= bx; a[i + 2] -= bz; }
+      o.instanceMatrix.needsUpdate = true;
+      o.computeBoundingSphere();
+    } else if (o.userData.localGeom) {
+      // a unit quad that already carries its offset in .position (the ortho
+      // photo tile, the far-ring ground plane) — its geometry is local already
+      o.position.x -= bx; o.position.z -= bz;
+      // …and the ortho quad bakes its matrix ONCE (matrixAutoUpdate = false,
+      // because it never moves again). Moving .position on such an object is
+      // a no-op unless the matrix is rebuilt — which is why every aerial photo
+      // silently rendered a chunk-centre away from its own chunk.
+      if (!o.matrixAutoUpdate) o.updateMatrix();
+    } else if (o.geometry) {
+      o.geometry.translate(-bx, 0, -bz);
+    }
+  });
+}
+export const chunkBase = (cx, cz) => [cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2];
+
 export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   const key = cx + ',' + cz;
   const cell = city.chunkIndex.get(key);
@@ -1422,14 +1588,17 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   const group = new THREE.Group();
   group.name = 'chunk:' + key;
   const x0 = cx * CHUNK, z0 = cz * CHUNK, x1 = x0 + CHUNK, z1 = z0 + CHUNK;
+  const [bx, bz] = chunkBase(cx, cz);
+  const done = () => { rebase(group, bx, bz); group.position.set(bx, 0, bz); return group; };
   if (groundOnly) {
     const g = mats.ortho?.orthoGroundMesh?.(cx, cz);
-    if (g) { group.add(g); return group; }
+    if (g) { g.userData.localGeom = true; group.add(g); return done(); }
     const q = new THREE.Mesh(new THREE.PlaneGeometry(CHUNK, CHUNK), mats.flatFar ?? mats.flat);
     q.rotation.x = -Math.PI / 2;
     q.position.set(x0 + CHUNK / 2, 0, z0 + CHUNK / 2);
+    q.userData.localGeom = true;
     group.add(q);
-    return group;
+    return done();
   }
   const flat = [], sink = new TriSink();
 
@@ -1477,7 +1646,10 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   if (!flooded) {
     orthoGround = mats.ortho?.orthoGroundMesh?.(cx, cz) ?? null;
     if (orthoGround) {
+      // carving replaces the unit quad with a world-space ShapeGeometry and
+      // zeroes .position, so only the UNcarved tile is still local
       if (holes.length) carveOrtho(orthoGround, x0, z0, x1, z1, holes);
+      else orthoGround.userData.localGeom = true;
       orthoGround.receiveShadow = true;
       group.add(orthoGround);
     } else {
@@ -1606,5 +1778,5 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
     crown.castShadow = crown.receiveShadow = true;
     group.add(trunk, crown);
   }
-  return group;
+  return done();
 }
