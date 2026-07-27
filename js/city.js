@@ -248,8 +248,14 @@ export class CityWorld {
   // finally became visible. Returns { y, road } and never allocates.
   surfaceY(x, z) {
     _surf.road = false;
+    // THE GROUND FIRST. Every height below is a thickness of surfacing — 20 cm
+    // of asphalt, 10 of paving, 5 of grass — measured from the ground, not from
+    // the sea. Leaving it out parked every car in the world at y ≈ 0.2 while
+    // Pardubice sits at 220 m and Prague at 190: the traffic was all there,
+    // driving, two hundred metres underground.
+    const ground = this.terrain.heightAt(x, z);
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
-    if (!cell) { _surf.y = 0; return _surf; }
+    if (!cell) { _surf.y = ground; return _surf; }
     let best = -1;
     for (const r of cell.roads) {
       if (!r.d) continue;
@@ -260,7 +266,7 @@ export class CityWorld {
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
         if (d < half) {
           const s = along + Math.hypot(_closest.x - ax, _closest.z - az);
-          const y = LAYER_Y.road + (r.br ? bridgeElevation(s, r._len) : 0);
+          const y = ground + LAYER_Y.road + (r.br ? bridgeElevation(s, r._len) : 0);
           if (y > best) best = y;
         }
         along += Math.hypot(bx - ax, bz - az);
@@ -270,10 +276,10 @@ export class CityWorld {
     // car parks and plazas are paved and flat — driveable, not offroad
     for (const p of cell.paved) {
       if (pointInPolygon(x, z, p.o) && !(p.i ?? []).some((h) => pointInPolygon(x, z, h))) {
-        _surf.y = LAYER_Y.paved; _surf.road = true; return _surf;
+        _surf.y = ground + LAYER_Y.paved; _surf.road = true; return _surf;
       }
     }
-    _surf.y = 0.05;                              // grass, dirt, everything else
+    _surf.y = ground + 0.05;                     // grass, dirt, everything else
     return _surf;
   }
 

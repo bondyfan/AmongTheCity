@@ -1869,7 +1869,11 @@ async function boot() {
   // "the blue one is me" used to be true on four screens at once.
   player = new Player(scene, SPAWN.x, SPAWN.z, SPAWN.heading, localUid());
   vehicles = new Vehicles(scene);
-  traffic = new Traffic(city, vehicles);
+  // Immediately, not later: every car built from here on — parked, spawned by
+  // the dev tools, or a peer's — asks this for the height of the road it is
+  // standing on, and one built before it is set is one built underground.
+  vehicles.world = world;
+  traffic = new Traffic(city, vehicles, world);
   // ---- the peers' vehicles (F8/F9) ----
   // Built even in single player: the fleet is empty, update() is a no-op over
   // an empty Map, and every `ghosts?.` site below then has one shape instead
@@ -1892,7 +1896,7 @@ async function boot() {
   trains = new Trains(scene, city);
   worldMap = new WorldMap(city, minimap);
   initNavigation(city);   // lazy + optional; never blocks the boot
-  peds = new Pedestrians(scene, city);
+  peds = new Pedestrians(scene, city, world.terrain);
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact
   // (gender rolled per victim), attenuated by distance like the debris audio
   peds.onPedHit = (p, v) => {
@@ -1926,6 +1930,7 @@ async function boot() {
   // vehicles borrow the shared dust pool for exhaust + wreck smoke, and the
   // focus so only machines near the player breathe visible puffs
   vehicles.dust = world.interiors.dust;
+
   placeParkedCars(city);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)

@@ -1003,11 +1003,18 @@ export class Vehicles {
     if (color === undefined) color = pickCarColor(kind);
     const K = KIND[kind] ?? KIND.octavia;
     const { group, wheels } = makeCarMesh(color, kind);
+    // A car is born ON THE ROAD, not at sea level. Only cars the traffic AI
+    // owns get a pose written every frame; a PARKED car and one dropped in by
+    // the dev spawner are placed once and then simply sit there — so if they
+    // are not put on the ground here, they never are. In Pardubice that is
+    // 221 m underground, which reads exactly like "the spawn button does
+    // nothing".
+    const y0 = this.world?.surfaceY ? this.world.surfaceY(x, z).y : 0;
     const car = { mesh: group, wheels, x, z, heading, speed: 0, steer: 0,
       kind, color, len: K.len, wid: K.wid, ai: null,
-      y: 0, _lat: 0, _pv: 0, _acc: 0, _roll: 0, _pitch: 0, _rammedT: 0,
+      y: y0, _lat: 0, _pv: 0, _acc: 0, _roll: 0, _pitch: 0, _rammedT: 0,
       offroad: 0, _bumpT: 0 };
-    group.position.set(x, 0, z);
+    group.position.set(x, y0, z);
     group.rotation.y = heading;
     this.scene.add(group);
     this.cars.add(car);
@@ -1028,6 +1035,18 @@ export class Vehicles {
     const k = Math.min(1, 8 * dt);
     for (const car of this.cars) {
       const m = car.mesh;
+      // A car nobody drives is placed ONCE and then just sits there — but at
+      // boot it is placed before its height map has arrived, so it is placed at
+      // sea level and stays there. Parked cars therefore settle onto the road
+      // the first frame the ground under them is actually known. One flag, one
+      // check, and only until it lands: the AI's cars have a pose written every
+      // frame and the player's go through driveStep, so neither needs this.
+      if (!car._grounded && !car.ai && this.world?.terrain) {
+        if (this.world.terrain.ready(car.x, car.z)) {
+          car.y = this.world.surfaceY(car.x, car.z).y;
+          car._grounded = true;
+        }
+      }
       m.position.set(car.x, car.y, car.z);
       m.rotation.y = car.heading;
       const spin = car.speed * dt / m.userData.wheelR;

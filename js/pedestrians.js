@@ -368,9 +368,13 @@ const _A = { x: 0, z: 0, dx: 0, dz: 0 };
 const _B = { x: 0, z: 0, dx: 0, dz: 0 };
 
 export class Pedestrians {
-  constructor(scene, city) {
+  constructor(scene, city, terrain = null) {
     this.scene = scene;
     this.city = city;
+    // The ground. Without it every pedestrian in the game walks at y = 0, which
+    // in Pardubice is 220 m underground — they were all there, walking their
+    // beats, just below the map.
+    this.terrain = terrain;
     this.peds = [];                // LIVE bodies (attached or freed) — the list
                                    // main.js, weapons.js and the hit pass iterate
     this.paths = [];               // usable footways, grown as tiles stream
@@ -859,10 +863,13 @@ export class Pedestrians {
     p.rushT += Math.abs(extra);
     p.walkT = (a.walked + p.rushT) * 1.6;
     p.speed = speed;
-    p.mesh.position.set(p.x, 0, p.z);
+    p.mesh.position.set(p.x, this._gy(p.x, p.z), p.z);
     p.mesh.rotation.y = p.heading;
     p.animate(p.walkT, Math.max(0.3, Math.min(1.3, speed / 1.4)));
   }
+
+  /** Ground under a pedestrian — 0 while the height map for that tile is absent. */
+  _gy(x, z) { return this.terrain ? this.terrain.heightAt(x, z) : 0; }
 
   // A body that left its slot — hit, stunned, got up and ran. Its motion is
   // this tab's business alone, so it integrates locally along the beat it was
@@ -883,7 +890,7 @@ export class Pedestrians {
     }
     this._face(p, dx, dz, dt);
     p.walkT += p.speed * dt * 1.6;
-    p.mesh.position.set(p.x, 0, p.z);
+    p.mesh.position.set(p.x, this._gy(p.x, p.z), p.z);
     p.mesh.rotation.y = p.heading;
     p.animate(p.walkT, Math.max(0.3, Math.min(1.3, p.speed / 1.4)));
   }
@@ -1023,7 +1030,7 @@ export class Pedestrians {
       hitCd: 0, hurtS: 0, downT: 0, deadT: 0,
       blend: 0, bx: 0, bz: 0,
     };
-    c.group.position.set(p.x, 0, p.z);
+    c.group.position.set(p.x, this._gy(p.x, p.z), p.z);
     s.body = p;
     this.peds.push(p);
     return p;
@@ -1209,7 +1216,7 @@ export class Pedestrians {
           this._settle(p, tx, tz);
       }
     }
-    m.position.set(p.x, p.y + p.lieY, p.z);
+    m.position.set(p.x, this._gy(p.x, p.z) + p.y + p.lieY, p.z);
   }
 
   // the slide has stopped: become a corpse (blood, budget) or lie stunned
@@ -1218,7 +1225,7 @@ export class Pedestrians {
     p.mesh.rotation.z = tz;
     p.lieY = LIE_Y;
     p.vx = p.vz = p.avx = p.avz = 0;
-    p.mesh.position.set(p.x, p.lieY, p.z);
+    p.mesh.position.set(p.x, this._gy(p.x, p.z) + p.lieY, p.z);
     if (p.dead) {
       p.state = 'dead';
       p.deadT = CORPSE_TIME;
@@ -1286,7 +1293,7 @@ export class Pedestrians {
     this._bloodN = (this._bloodN + 1) % BLOOD_MAX;
     d.t = 0; d.on = true;
     d.g.visible = true;
-    d.g.position.set(x, BLOOD_Y, z);
+    d.g.position.set(x, this._gy(x, z) + BLOOD_Y, z);
     for (let i = 0; i < 3; i++) {
       const m = d.discs[i];
       m.visible = i < 2 || Math.random() < 0.6;        // 2–3 discs

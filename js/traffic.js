@@ -674,9 +674,13 @@ function redWait(jn, bucket, t) {
 export const VIEW_TUNING = { NOTICE_R, GHOST_MAX };
 
 export class Traffic {
-  constructor(city, vehicles) {
+  constructor(city, vehicles, world = null) {
     this.city = city;
     this.vehicles = vehicles;
+    // Only for the ground: the AI writes car poses directly and has to put them
+    // on the terrain itself. Optional so the traffic tests can keep handing in
+    // a bare { roads: [...] } city with no world at all.
+    this.world = world;
     this.cars = new Set();          // public — minimap reads this. Only cars with a
                                     // MESH live here; schedules without one are in _pool.
     this.edges = [];                // every DIRECTED edge (reverse twins too)
@@ -1680,8 +1684,13 @@ export class Traffic {
     p.sh = p.ph = heading;
     p.sx = p.px = pose.x - pose.dz * p.laneOff;   // right of travel = (-dz, dx)
     p.sz = p.pz = pose.z + pose.dx * p.laneOff;
-    p.sy = p.py = LAYER_Y.road +
-      (e.road.br ? bridgeElevation(e.off0 + e.offSign * p.s, e.road._len) : 0);
+    // LAYER_Y.road is the thickness of the asphalt over the GROUND, not a
+    // height above the sea. The AI drives its cars by writing this pose
+    // directly (it never goes through driveStep), so it is the one place that
+    // has to add the terrain itself — without it the whole city's traffic
+    // drove 220 m under Pardubice, invisible but perfectly well behaved.
+    p.sy = p.py = this._groundAt(p.sx, p.sz) + LAYER_Y.road
+      + (e.road.br ? bridgeElevation(e.off0 + e.offSign * p.s, e.road._len) : 0);
     const car = this.vehicles.add(kind, p.sx, p.sz, heading, color);
     car.vK = p.vK;
     car.speed = this._nomV(p);
@@ -2178,8 +2187,12 @@ export class Traffic {
     p.sz = pose.z + hx * p.laneOff;
     // off0 + offSign·s = meters from the WAY start (not the edge), which is
     // what the shared ramp math wants — decks rise only near the way's ends.
-    p.sy = LAYER_Y.road + (re.road.br ? bridgeElevation(re.off0 + re.offSign * p.s, re.road._len) : 0);
+    p.sy = this._groundAt(p.sx, p.sz) + LAYER_Y.road
+      + (re.road.br ? bridgeElevation(re.off0 + re.offSign * p.s, re.road._len) : 0);
   }
+
+  /** Ground under a point. 0 for the bare {roads:[…]} fixtures the tests use. */
+  _groundAt(x, z) { return this.world?.terrain?.heightAt(x, z) ?? 0; }
 
   // ---- diagnostics / test seams ------------------------------------------
 
