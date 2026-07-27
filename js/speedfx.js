@@ -20,14 +20,18 @@ import * as THREE from 'three';
 // tuning splits in two: `k` is the onset ramp a car lives on, and `fast` keeps
 // climbing all the way to jet speed, driving density, reach and lifetime.
 const POOL = 170;               // enough for the jet's spawn rate × its lifetime
-const V_ON = 100 / 3.6;         // streaks begin at 100 km/h…
+const V_ON = 115 / 3.6;         // streaks begin at 115 km/h…
 const V_FULL = 145 / 3.6;       // …and reach a car's full density by ~145
 const V_JET = 600;              // m/s — where the effect is as violent as it gets
 const LIFE = 0.34;              // s a streak hangs in the air at car speed
 const LIFE_FAST = 0.42;         // …shortened by this fraction at V_JET
 const R_IN = 1.7, R_OUT = 5.2;  // spawn annulus around the hull, at car speed
 const R_FAST = 26;              // …widened by this much at V_JET, past the wings
-const RATE_CAR = 14, RATE_K = 46, RATE_FAST = 190;   // streaks per second
+// Road-tested down: at 120 km/h the old numbers read like 400. A car spends its
+// life in the bottom of this range and everyone has a calibrated feel for what
+// 120 looks like, so the car band is deliberately sparse and faint — the drama
+// is reserved for speeds that deserve it.
+const RATE_CAR = 9, RATE_K = 26, RATE_FAST = 190;   // streaks per second
 const AHEAD = 0.65;             // bias spawns toward where the vehicle is GOING
 
 export class SpeedStreaks {
@@ -91,12 +95,14 @@ export class SpeedStreaks {
         z + (az * Math.cos(ang) + bz * Math.sin(ang)) * r + uz * off);
       // orient the quad's +x along the velocity
       s.m.quaternion.setFromUnitVectors(_X, _v.set(ux, uy, uz));
-      s.m.scale.set(2.2 + v * 0.16, 1, 1);       // faster = longer lines
+      // length: gentle in the car band, then opened right up for the jet, where
+      // a 100 m streak is what a 2 400 km/h frame actually looks like
+      s.m.scale.set(2.2 + v * 0.09 + v * 0.11 * fast, 1, 1);
       s.t = 0;
       // Shorter lives at speed are what turn a drifting swarm into a WHIP: the
       // line is gone before it can drift far, so the eye reads pure velocity.
       s.life = LIFE * (1 - LIFE_FAST * fast) * (0.7 + Math.random() * 0.6);
-      s.peak = (0.06 + 0.16 * k + 0.1 * fast) * (0.6 + Math.random() * 0.7);
+      s.peak = (0.04 + 0.085 * k + 0.13 * fast) * (0.6 + Math.random() * 0.7);
       s.m.material.opacity = 0;
       s.m.visible = true;
     }

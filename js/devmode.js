@@ -38,6 +38,7 @@ const KIND_LABEL = {
   mercedes: 'Mercedes', tesla: 'Tesla', van: 'Dodávka',
   truck: 'Náklaďák', bus: 'Autobus',
   sedan: 'Sedan', hatch: 'Hatchback', kombi: 'Kombi', suv: 'SUV',
+  heli: '🚁 Vrtulník', gripen: '✈️ Gripen (stíhačka)',
 };
 
 const CSS = `
@@ -108,7 +109,10 @@ export function initDevMode(actions) {
     const row = document.createElement('div');
     row.className = 'atc-dev-row';
     const sel = document.createElement('select');
-    for (const k of CAR_KINDS) {
+    // The flying machines ride the same dropdown: they are vehicles you walk up
+    // to and press E on, exactly like a car, so a separate control would be a
+    // second way to say one thing.
+    for (const k of [...CAR_KINDS, 'heli', 'gripen']) {
       const o = document.createElement('option');
       o.value = k;
       o.textContent = KIND_LABEL[k] ?? k;
@@ -117,7 +121,7 @@ export function initDevMode(actions) {
     const spawn = document.createElement('button');
     spawn.type = 'button';
     spawn.className = 'atc-dev-btn';
-    spawn.textContent = '🚗 Spawnout';
+    spawn.textContent = 'Spawnout';
     spawn.addEventListener('click', () => actions.spawnCar?.(sel.value));
     row.append(sel, spawn);
     grid.appendChild(row);

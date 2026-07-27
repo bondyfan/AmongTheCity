@@ -175,6 +175,10 @@ const COMPOSITE_FRAG = /* glsl */`
   uniform float rayStrength;
   uniform float uBlur;            // 0 = off; how far the smear reaches, in uv
   uniform vec2  uBlurC;           // the point it smears AWAY from
+  uniform vec2  uBlurAniso;       // x/y weight — sideways beats forwards
+  uniform vec2  uFlareUv;         // sun position on screen
+  uniform float uFlare;           // 0 = off; overall strength
+  uniform vec3  uFlareCol;
   uniform bool useAO;
   uniform bool useCanopy;
   uniform bool useBloom;
@@ -254,7 +258,18 @@ const COMPOSITE_FRAG = /* glsl */`
     // sampling this texture. Pixels near the centre barely move, the frame
     // edges tear past, which is exactly the real thing's signature.
     if (uBlur > 0.0005) {
-      vec2 d = (vUv - uBlurC) * uBlur;
+      vec2 off = vUv - uBlurC;
+      // Two shapes on top of the radial smear, both about WHERE you are looking:
+      //  · a sharp core. Radial blur alone still smears the middle of the frame
+      //    a little, and the middle of the frame is the road you are driving
+      //    down — so the inner fifth is left completely alone and the effect
+      //    ramps in from there out to the corners.
+      //  · sideways bias. What actually streams past a driver is the scenery to
+      //    the LEFT and RIGHT; the road ahead mostly grows rather than sweeps.
+      //    Weighting x over y puts the smear where the motion really is.
+      float rad = length(off * vec2(uBlurAniso.x, uBlurAniso.y));
+      float gate = smoothstep(0.20, 0.72, rad);
+      vec2 d = off * uBlurAniso * uBlur * gate;
       vec3 acc = c;
       for (int i = 1; i <= 6; i++) {
         float t = float(i) / 6.0;
@@ -283,6 +298,35 @@ const COMPOSITE_FRAG = /* glsl */`
     // white at noon, deep gold at sunset)
     if (useRays) c += rayColor * (texture2D(tRays, vUv).r * rayStrength);
     if (useBloom) c += texture2D(tBloom, vUv).rgb * bloomStrength;
+
+    // ---- lens flare ------------------------------------------------------
+    // Ghosts along the line from the sun THROUGH the centre of the frame, which
+    // is what a real lens does: each element in the stack reflects the source
+    // back at a different scale, so the artefacts march across the middle as
+    // the sun moves. Cheap, and it needs nothing the composite does not already
+    // know — the god-ray pass has already worked out where the sun is.
+    if (uFlare > 0.001) {
+      vec2 d = uFlareUv - vUv;
+      float aspect = texel.y / texel.x;
+      vec2 da = vec2(d.x * aspect, d.y);
+      // the halo hugging the sun itself
+      float halo = exp(-dot(da, da) * 26.0) * 1.3;
+      // …and the ghosts, mirrored through the frame centre at fixed spacings
+      vec2 toC = (vec2(0.5) - uFlareUv);
+      float ghosts = 0.0;
+      for (int i = 1; i <= 5; i++) {
+        float sc = float(i) * 0.42;
+        vec2 gp = uFlareUv + toC * (2.0 * sc);
+        vec2 gd = vec2((gp.x - vUv.x) * aspect, gp.y - vUv.y);
+        // alternate tight/loose so the stack does not read as five identical dots
+        float tight = mod(float(i), 2.0) > 0.5 ? 320.0 : 90.0;
+        ghosts += exp(-dot(gd, gd) * tight) * (0.5 / float(i));
+      }
+      // fade the whole thing out toward the frame edge, where a real flare
+      // loses the aperture anyway
+      float edge = 1.0 - smoothstep(0.55, 1.15, length(vec2((uFlareUv.x - 0.5) * aspect, uFlareUv.y - 0.5)));
+      c += uFlareCol * ((halo + ghosts) * uFlare * edge);
+    }
     gl_FragColor = vec4(l2s(c), 1.0);              // LINEAR → sRGB for the canvas
   }`;
 
@@ -359,12 +403,17 @@ export class PostFX {
       uCanopyStrength: { value: 0.9 },
       texel: { value: new THREE.Vector2() },
       uBlur: { value: 0 }, uBlurC: { value: new THREE.Vector2(0.5, 0.5) },
+      uBlurAniso: { value: new THREE.Vector2(1, 0.45) },
+      uFlareUv: { value: new THREE.Vector2(0.5, 0.5) }, uFlare: { value: 0 },
+      uFlareCol: { value: new THREE.Color(1, 0.92, 0.8) },
       aoStrength: { value: 0.25 }, aoFloor: { value: 0.30 }, bloomStrength: { value: 0.55 },
       useAO: { value: false }, useCanopy: { value: false },
       useBloom: { value: false }, useRays: { value: false }, useFXAA: { value: false },
     });
     this._sunWorld = new THREE.Vector3();
     this._camFwd = new THREE.Vector3();
+    this._flareUv = new THREE.Vector2(0.5, 0.5);
+    this._flareFacing = 0;
   }
 
   setSize(w, h) {
@@ -389,6 +438,7 @@ export class PostFX {
   //         sun; shafts fade out as it leaves the view and vanish behind you
   render(scene, camera, opts = {}) {
     const r = this.renderer;
+    this._flareFacing = 0;          // recomputed below when the sun is in front
     r.setRenderTarget(this.rtScene);
     r.render(scene, camera);
 
@@ -430,6 +480,11 @@ export class PostFX {
         if (dAz > Math.PI) dAz = Math.PI * 2 - dAz;
         const halfH = Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect);
         const sideFade = 1 - Math.min(1, Math.max(0, (dAz - halfH) / 0.4));
+        // the flare wants the sun's TRUE screen position, not the clamped
+        // shaft origin — a ghost stack anchored to the frame edge would slide
+        // along it instead of tracking the sun
+        this._flareUv.set((e[0] * v.x / facing) * 0.5 + 0.5, (e[5] * v.y / facing) * 0.5 + 0.5);
+        this._flareFacing = facing;
         rayK = opts.rays.strength * Math.min(1, facing * 2.2) * sideFade;
         if (rayK > 0.001) {
           this.rayMat.uniforms.tDepth.value = this.rtScene.depthTexture;
@@ -481,6 +536,18 @@ export class PostFX {
     c.uBlur.value = opts.motionBlur ?? 0;
     if (opts.blurCenter) c.uBlurC.value.copy(opts.blurCenter);
     else c.uBlurC.value.set(0.5, 0.5);
+    // a jet is closer to isotropic: at Mach 2 the whole frame is moving
+    if (opts.blurAniso) c.uBlurAniso.value.set(opts.blurAniso[0], opts.blurAniso[1]);
+    else c.uBlurAniso.value.set(1, 0.45);
+    // Lens flare. Only when the sun is genuinely in front of the camera, and
+    // scaled by the caller — main.js gives it a fraction on the ground and the
+    // full amount in the air, where there is nothing between you and the sun.
+    const flare = (opts.flare ?? 0) * (this._flareFacing > 0 ? 1 : 0);
+    c.uFlare.value = flare;
+    if (flare > 0) {
+      c.uFlareUv.value.copy(this._flareUv);
+      if (opts.rays?.color) c.uFlareCol.value.copy(opts.rays.color);
+    }
     c.useRays.value = rayK > 0;
     c.tRays.value = rayK > 0 ? this.rtRay.texture : this.rtAOb.texture;
     c.rayStrength.value = rayK;

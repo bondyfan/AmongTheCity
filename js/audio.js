@@ -1755,6 +1755,17 @@ export function windStop() {
   }, 1200);
 }
 
+/**
+ * The wing tearing at the air in a hard turn. Rides the slipstream's own voice
+ * rather than a second source: a loaded wing does not add a NEW sound, it makes
+ * the existing rush louder and harder-edged, which is exactly what a gain lift
+ * plus an open filter is. `g` is 0..1 of wing load.
+ */
+export function windLoad(g) {
+  windG = g < 0 ? 0 : g > 1 ? 1 : g;
+}
+let windG = 0;
+
 /** speed in m/s — the only thing the slipstream cares about. */
 export function windSet(speed) {
   windLvl = speed <= WIND.from ? 0
@@ -1763,7 +1774,10 @@ export function windSet(speed) {
   const t = ctx.currentTime;
   // squared: the first third of the range stays a whisper, so the wind arriving
   // is something you notice rather than something that was always there
-  wind.gain.gain.setTargetAtTime(WIND.vol * windLvl * windLvl, t, WIND.tau);
+  // a loaded wing is worth up to +60 % level and a much brighter filter — the
+  // buffeting you hear in a hard break turn
+  const load = 1 + 0.6 * windG;
+  wind.gain.gain.setTargetAtTime(WIND.vol * windLvl * windLvl * load, t, 0.12);
   wind.lp.frequency.setTargetAtTime(
-    WIND.cutLo + (WIND.cutHi - WIND.cutLo) * windLvl, t, WIND.tau);
+    (WIND.cutLo + (WIND.cutHi - WIND.cutLo) * windLvl) * (1 + 0.8 * windG), t, 0.12);
 }

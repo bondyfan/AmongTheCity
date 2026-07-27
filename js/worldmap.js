@@ -53,6 +53,7 @@ const MIN_SPAN = 3000;       // m — a world this small still gets a sane zoom-
 const ASPECT_MIN = 0.5, ASPECT_MAX = 2.0; // the canvas never gets sillier than this
 const MAX_LABELS = 400;      // collision boxes kept per frame (preallocated)
 const FOOT_S = 0.22;         // px/m below which footpaths are noise, not map
+const POLY_S = 0.05;         // …and below which live green/paved are too (20 m/px)
 
 // Per-rank presentation, indexed by the `r` field of places.json (0 city …
 // 5 isolated dwelling). The zoom gates are the contract's: 0-1 always, 2 from
@@ -284,6 +285,7 @@ export class WorldMap {
     this._ps = { sx: 0, sy: 0, off: false };
     this.places = [];             // filled asynchronously; [] = no labels, fine
     this.ov = null;               // …and the world base layer; null = streamed only
+    this._ovBmp = null;           // …rasterised once (see _overviewBitmap)
 
     // ---- view state (world metres) ----
     this.zoom = 1;
@@ -337,7 +339,17 @@ export class WorldMap {
     loadPlaces().then(list => { this.places = list; });
     // 3 MB lands well after the first frames; if the map is already open when
     // it does, redraw so the world appears instead of waiting for a pan
-    loadOverview().then(ov => { this.ov = ov; if (this._open) this._schedule(TILE_MS); });
+    loadOverview().then(ov => {
+      this.ov = ov;
+      if (this._open) this._schedule(TILE_MS);
+      // Rasterising the base layer is a ~500 ms job. Doing it on the first map
+      // open put that half-second squarely on the keypress; doing it here, in
+      // an idle slot minutes earlier, means the first open is as quick as
+      // every one after it.
+      const build = () => { try { this._computeBounds(); this._overviewBitmap(); } catch {} };
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(build, { timeout: 8000 });
+      else setTimeout(build, 3000);
+    });
 
     // A tile landing invalidates the bitmap: while the map is open we redraw
     // debounced 1 s, so a burst of neighbouring tiles costs ONE render. While
@@ -592,6 +604,9 @@ export class WorldMap {
     if (maxZ - minZ < MIN_SPAN) {
       const c = (minZ + maxZ) / 2; minZ = c - MIN_SPAN / 2; maxZ = c + MIN_SPAN / 2;
     }
+    // bounds moved → the pre-rendered base layer is registered to the old ones
+    if (this._ovBmp && (this._ovBmp.x0 !== minX || this._ovBmp.z0 !== minZ
+      || Math.abs((this._ovBmp.w / this._ovBmp.s) - (maxX - minX)) > 1)) this._ovBmp = null;
     this.rx0 = minX; this.rz0 = minZ; this.rx1 = maxX; this.rz1 = maxZ;
   }
 
@@ -917,13 +932,19 @@ export class WorldMap {
 
     // The world base layer goes down FIRST, so streamed detail paints over it
     // wherever it exists and the rest of the country is still a country.
-    this._overview(g, x0, z0, s);
+    this._blitOverview(g, x0, z0, s, ow, oh);
 
     // Same layer order as the minimap so the two read as one map: greens and
     // paved surfaces, then water, then the built fabric, then rails, then the
     // road web on top.
-    this._polys(city.green, f => css(COLORS.green[f.t] ?? COLORS.green.grass, 0.9));
-    this._polys(city.paved, f => css(COLORS.paved[f.t] ?? COLORS.paved.parking, 1));
+    // Live green and paved cost 73 ms of a region render for features that are
+    // a pixel across at that zoom — and the base layer already carries every
+    // forest big enough to navigate by. Below POLY_S they are noise you pay
+    // for, so they wait until you are zoomed in enough to read them.
+    if (s >= POLY_S) {
+      this._polys(city.green, f => css(COLORS.green[f.t] ?? COLORS.green.grass, 0.9));
+      this._polys(city.paved, f => css(COLORS.paved[f.t] ?? COLORS.paved.parking, 1));
+    }
     this._polys(city.water, () => css(COLORS.water, 0.85));
     // waterways are polylines (the Chrudimka arms, mill races). One batched
     // stroke at a nominal 5 m: their real `w` varies by a metre or two, which
@@ -962,6 +983,61 @@ export class WorldMap {
     // the one zoom step the bitmap already absorbs keep their names too.
     this._collectStreets(city, x0, z0, x1, z1, k);
     this._zr = -1;               // force the status line to repaint the zoom
+  }
+
+  // The overview is IMMUTABLE — it is a file, it never streams, it never grows.
+  // Drawing it per render cost 421 ms of the map's 508 (measured at spawn), all
+  // of it rasterising one path holding 14 421 built-up rectangles, and that is
+  // the whole of "the game freezes when I open the map". So it is rasterised
+  // ONCE into its own canvas covering the region, and every render after that
+  // is a single drawImage.
+  //
+  // Resolution is capped on the long side; at 110 km that is ~27 m per pixel,
+  // which is far finer than the base layer is ever asked to be — by the time
+  // you are zoomed in enough to see it soften, the live streamed detail is
+  // drawn on top of it anyway.
+  _overviewBitmap() {
+    if (this._ovBmp || !this.ov) return this._ovBmp;
+    const OV_PX = 4096;
+    const w = Math.max(1, this.rx1 - this.rx0), h = Math.max(1, this.rz1 - this.rz0);
+    const sc = OV_PX / Math.max(w, h);
+    const cw = Math.max(2, Math.round(w * sc)), ch = Math.max(2, Math.round(h * sc));
+    const cv = document.createElement('canvas');
+    cv.width = cw; cv.height = ch;
+    const g = cv.getContext('2d', { alpha: true });
+    g.lineJoin = g.lineCap = 'round';
+    // The draw helpers all read this.offg / this.bx / this.bz / this.bs and the
+    // visibility window, so point that state at the new canvas for the duration
+    // rather than duplicating every batching routine.
+    const save = [this.offg, this.bx, this.bz, this.bs,
+      this._wx0, this._wz0, this._wx1, this._wz1];
+    this.offg = g; this.bx = this.rx0; this.bz = this.rz0; this.bs = sc;
+    this._wx0 = this.rx0 - 500; this._wz0 = this.rz0 - 500;
+    this._wx1 = this.rx1 + 500; this._wz1 = this.rz1 + 500;
+    try {
+      this._overview(g, this.rx0, this.rz0, sc);
+    } finally {
+      [this.offg, this.bx, this.bz, this.bs,
+        this._wx0, this._wz0, this._wx1, this._wz1] = save;
+    }
+    this._ovBmp = { cv, x0: this.rx0, z0: this.rz0, s: sc, w: cw, h: ch };
+    return this._ovBmp;
+  }
+
+  // Blit the window of the pre-rendered base layer that this bitmap covers.
+  // Source and destination are clamped TOGETHER: a source rect running off the
+  // edge of the overview canvas would otherwise be stretched to fill the whole
+  // destination, sliding the base layer out of register with the live data.
+  _blitOverview(g, x0, z0, s, ow, oh) {
+    const b = this._overviewBitmap();
+    if (!b) return;
+    const wx1 = x0 + ow / s, wz1 = z0 + oh / s;
+    const cx0 = Math.max(x0, b.x0), cz0 = Math.max(z0, b.z0);
+    const cx1 = Math.min(wx1, b.x0 + b.w / b.s), cz1 = Math.min(wz1, b.z0 + b.h / b.s);
+    if (cx1 <= cx0 || cz1 <= cz0) return;
+    g.drawImage(b.cv,
+      (cx0 - b.x0) * b.s, (cz0 - b.z0) * b.s, (cx1 - cx0) * b.s, (cz1 - cz0) * b.s,
+      (cx0 - x0) * s, (cz0 - z0) * s, (cx1 - cx0) * s, (cz1 - cz0) * s);
   }
 
   // The whole-world base layer. Everything here is the same feature shape the

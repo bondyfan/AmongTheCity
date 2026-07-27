@@ -159,6 +159,8 @@ function fighterGeom() {
     flame: new THREE.ConeGeometry(0.44, 3.4, 8).rotateX(Math.PI / 2).translate(0, 0, 8.6),
     // open end aft, apex forward at the nose — the cone the shock actually makes
     shock: new THREE.ConeGeometry(4.6, 9, 20, 1, true).rotateX(-Math.PI / 2).translate(0, 0, 0.5),
+    // a flat ribbon streaming back from a wingtip; scaled in z to lengthen
+    vapour: new THREE.PlaneGeometry(0.9, 1).rotateX(-Math.PI / 2).translate(0, 0, 0.5),
     pylon: new THREE.BoxGeometry(0.18, 0.3, 1.6),
     missile: new THREE.CylinderGeometry(0.11, 0.11, 2.9, 6).rotateX(Math.PI / 2),
     strut: new THREE.CylinderGeometry(0.075, 0.075, GEAR_H, 6),
@@ -180,6 +182,11 @@ const flameMat = new THREE.MeshBasicMaterial({ color: 0xffb454, transparent: tru
 // vapour, not fire: white, thin, lit from nowhere, and visible from inside as
 // well as out (the chase camera sits behind the open end of the cone)
 const shockMat = new THREE.MeshBasicMaterial({ color: 0xeaf2ff, transparent: true,
+  opacity: 0, side: THREE.DoubleSide, depthWrite: false, toneMapped: false });
+// Wingtip vapour. Same white as the shock cone because it is the same physics —
+// air dropped below its dew point by the pressure the wing is making — just
+// continuous instead of a single event.
+const vapourMat = new THREE.MeshBasicMaterial({ color: 0xf2f6ff, transparent: true,
   opacity: 0, side: THREE.DoubleSide, depthWrite: false, toneMapped: false });
 
 export function makeFighterMesh() {
@@ -240,8 +247,22 @@ export function makeFighterMesh() {
   shock.visible = false;
   body.add(shock);
 
+  // Wingtip vortices: the white ribbons that spill off the tips when a fighter
+  // is pulling hard. They are not decoration — they are the visible evidence
+  // of the wing working, which is why they belong to the TURN and not to the
+  // speed. One per tip, each with its own material so they can fade together
+  // without the shared-material trick fighting the shock cone.
+  const vapour = [];
+  for (const side of [-1, 1]) {
+    const v = new THREE.Mesh(g.vapour, vapourMat.clone());
+    v.position.set(side * 4.1, -0.16, 4.6);
+    v.visible = false;
+    body.add(v);
+    vapour.push(v);
+  }
+
   group.userData.kind = 'fighter';
-  return { group, body, gear, burner, shock };
+  return { group, body, gear, burner, shock, vapour };
 }
 
 // Where the pilot sits, in the airframe's local frame — under the canopy, on
@@ -261,7 +282,9 @@ export class Fighter {
     this._gear = m.gear;
     this._burner = m.burner;
     this._shock = m.shock;
+    this._vapour = m.vapour;
     this.shockT = 0;                   // seconds left of the vapour cone
+    this.gLoad = 0;                    // how hard the wing is working, 0..1
 
     this.x = x; this.y = 0; this.z = z;
     this.heading = heading;
@@ -389,6 +412,16 @@ export class Fighter {
       } else this.pitch -= this.pitch * Math.min(1, dt * 3);
     }
 
+    // ---- how hard is the wing working -------------------------------------
+    // Vapour needs two things at once: a wing pulling enough to drop the local
+    // pressure, and air with enough moisture and speed to condense. So the load
+    // is the PULL times the airspeed — hauling back at taxi speed makes nothing,
+    // and cruising straight and level at Mach 1 makes nothing either. It is the
+    // hard turn that streams.
+    const pullK = Math.max(0, pIn) * auth;
+    const wantG = this.airborne ? clamp(pullK * clamp(this.speed / 220, 0, 1.4), 0, 1) : 0;
+    this.gLoad += (wantG - this.gLoad) * Math.min(1, dt * 4);
+
     // ---- Mach 1 -----------------------------------------------------------
     // Owned here rather than by main.js because "am I supersonic" is a fact
     // about the aircraft, and because the visual and the bang have to be the
@@ -439,6 +472,14 @@ export class Fighter {
       this._shock.scale.set(grow, grow, 0.8 + (1 - k) * 0.7);
     } else if (this._shock.visible) {
       this._shock.visible = false;
+    }
+    // wingtip ribbons follow the load, and lengthen with it
+    const vg = this.gLoad;
+    for (const v of this._vapour) {
+      if (vg < 0.06) { if (v.visible) v.visible = false; continue; }
+      v.visible = true;
+      v.material.opacity = Math.min(0.5, (vg - 0.06) * 0.85);
+      v.scale.set(1, 1, 3 + vg * 16);
     }
     const ab = this.reheat;
     this._burner.visible = ab;

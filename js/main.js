@@ -18,7 +18,7 @@ import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
 import { initAudio, sfx, sfxAt, engineStart, engineStop, engineSet, tireSet, setVolume,
   heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
-  windStart, windStop, windSet,
+  windStart, windStop, windSet, windLoad,
   ambientStart, nearbyTrafficHum } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
@@ -26,6 +26,7 @@ import { Pedestrians } from './pedestrians.js';
 import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
 import { buildAirfields, nearestParked } from './airfield.js';
+import { Fighter } from './aircraft.js';
 import { Clouds } from './clouds.js';
 import { WorldMap } from './worldmap.js';
 import { Trains } from './trains.js';
@@ -542,9 +543,17 @@ function leadFocus(focus) {
 // and is fully out by 150, which puts real blur on an ordinary fast drive. The
 // first cut squared the ramp and opened at 79 km/h, which made 100 km/h worth
 // 0.003 uv — arithmetically present, visually nothing.
-const MB_CAR = [15, 42, 0.05];
-const MB_HELI = [25, 60, 0.045];
+// Softened for the car after road-testing: 0.05 at 120 km/h read like 400. The
+// car is the machine you spend the most time in and the one whose real-world
+// speeds everyone has a calibrated feel for, so it gets the gentlest curve of
+// the three.
+const MB_CAR = [18, 46, 0.026];
+const MB_HELI = [25, 60, 0.04];
 const MB_JET = [110, 600, 0.085];
+// x/y weight of the smear. A car's world streams past sideways; a jet at Mach 2
+// is moving so fast that the whole frame goes, so it gets closer to round.
+const MB_ANISO_GROUND = [1, 0.45];
+const MB_ANISO_JET = [1, 0.8];
 function motionBlurAmount() {
   let v = 0, band = null;
   if (game.jet) { v = game.jet.speed; band = MB_JET; }
@@ -594,6 +603,17 @@ function sharedCars() {
   const out = [];
   if (traffic) for (const c of traffic.cars) if (!isGhostCar(c)) out.push(c);
   return out;
+}
+
+// How much lens flare. On the ground the sun is fighting haze, buildings and
+// trees, so it is a hint; in the air there is nothing between the lens and it,
+// which is exactly when a flare sells the altitude. It also needs the sun to
+// actually be UP — postfx already refuses when it is behind the camera.
+function flareAmount() {
+  const flier = game.jet ?? game.heli;
+  const alt = flier ? Math.max(0, flier.y) : 0;
+  const air = Math.min(1, alt / 900);           // full effect by ~900 m
+  return 0.16 + 0.75 * air;
 }
 
 // ---------- enter / exit cars ----------
@@ -1309,6 +1329,26 @@ async function initDev() {
       },
       spawnCar(kind) {
         if (!world || !player || !vehicles) return;
+        // A helicopter or a jet needs room the road in front of you does not
+        // have, so they land further out and clear of the kerb — and they join
+        // the same lists main.js already scans for "what am I standing next
+        // to", so E works on them with no extra wiring.
+        if (kind === 'heli' || kind === 'gripen') {
+          const h0 = game.car?.heading ?? player.heading;
+          const d = kind === 'gripen' ? 26 : 16;
+          const sx = player.pos.x - Math.sin(h0) * d;
+          const sz = player.pos.z - Math.cos(h0) * d;
+          if (kind === 'heli') {
+            scene.add(makeHelipad(sx, sz));
+            const h = new Helicopter(scene, sx, sz, h0 + Math.PI);
+            helis.push(h);
+            ui_hint?.('🚁 vrtulník před tebou');
+          } else {
+            fighters.push(new Fighter(scene, sx, sz, h0 + Math.PI));
+            ui_hint?.('✈️ Gripen před tebou');
+          }
+          return;
+        }
         // 7 m ahead of where the player faces, nudged clear of walls by the
         // same collide() the traffic uses — a car spawned inside a facade is
         // worse than no car at all.
@@ -1980,7 +2020,8 @@ function tick(src) {
     // without it in this test, switching bloom AND rays off silently killed the
     // blur too, with the toggle still reading "on"
     const wantPost = game.mode === 'play'
-      && (gs.bloom !== false || gs.rays !== false || gs.mblur !== false);
+      && (gs.bloom !== false || gs.rays !== false || gs.mblur !== false
+        || gs.flare !== false);
     if (wantPost && !postfx) {
       postfx = new PostFX(renderer);
       postfx.setSize(renderer.domElement.width, renderer.domElement.height);
@@ -1993,7 +2034,9 @@ function tick(src) {
         if (dayK > 0.02) rays = { dir: sky.sunDir, color: sky.sun.color, strength: dayK * 0.7 };
       }
       postfx.render(scene, camera, { ssao: false, bloom: gs.bloom !== false, rays, canopy: null,
-        motionBlur: gs.mblur === false ? 0 : motionBlurAmount() });
+        motionBlur: gs.mblur === false ? 0 : motionBlurAmount(),
+        blurAniso: game.jet ? MB_ANISO_JET : MB_ANISO_GROUND,
+        flare: gs.flare === false ? 0 : flareAmount() });
     } else {
       renderer.render(scene, camera);
     }
@@ -2074,6 +2117,7 @@ function stepGame(dt) {
     player.update(dt, { input, camYaw, world });   // stays glued to the cockpit
     jetSet?.(jetThrottle, Math.min(1, jet.speed / 690), jet.reheat);
     windSet?.(jet.speed);
+    windLoad?.(jet.gLoad ?? 0);
     // aircraft.js owns "am I supersonic" so the bang and the vapour cone are
     // one event; this just plays the bang. Loud, because it is competing with
     // an afterburner four metres away.
