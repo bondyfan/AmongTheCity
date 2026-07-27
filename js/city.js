@@ -11,6 +11,7 @@ import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeElevation } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
+import { Terrain } from './terrain.js';
 import { stampFranchises } from './interiors.js';
 
 const _closest = { x: 0, z: 0, t: 0 };
@@ -38,6 +39,15 @@ export class CityWorld {
     // have rooms, the debris pools, and the people in them; the chunk mesh
     // reads its `hidden` set so a building promoted to boxes stops being
     // drawn twice.
+    // The ground. Created before the interiors because everything that asks
+    // "how high is the world here" — collision, the walk controller, the debris
+    // pool — resolves through heightAt(), and heightAt() is now this.
+    this.terrain = new Terrain(city.tile ?? 4800);
+    this.mats.terrain = this.terrain;
+    // A height map landing changes the SHAPE of ground that has already been
+    // meshed, so the chunks over it have to be rebuilt — the same treatment a
+    // feature tile gets when it arrives late.
+    this.terrain.onTileLoaded(({ tx, tz }) => this._dropTileChunks(tx, tz));
     this.interiors = new Interiors(scene, city, this);
     this.mats.hidden = this.interiors.hidden;
     this.built = new Map();     // key -> Group (or null for empty cells)
@@ -52,6 +62,7 @@ export class CityWorld {
     this.buildBudgetMs = 7;
     this.farChunks = 0;         // ground-only ring BEYOND viewChunks (flight)
     this._detail = new Map();   // key -> true when built at full detail
+    this._hadTerrain = new Map(); // key -> was the ground known when it was built
     this._tileT = 0;            // ensureTiles throttle — 1 Hz, fetches run km ahead
     // Region tiles can land AFTER their chunks were already built: the boot
     // frames raise empty spawn cells before the first fetch returns, and long
@@ -90,6 +101,10 @@ export class CityWorld {
     if (this._tileT <= 0) {
       this._tileT = 1;
       this.city.ensureTiles(focus.x, focus.z).catch(console.error);
+      // …and the ground under them. Reach is generous because a height map is
+      // 116 KB against a feature tile's several megabytes, and terrain that
+      // arrives late means a chunk gets built flat and then rebuilt.
+      this.terrain.ensure(focus.x, focus.z, 6000);
     }
     const fx = Math.floor(focus.x / CHUNK), fz = Math.floor(focus.z / CHUNK);
     const outer = this.viewChunks + this.farChunks;
@@ -131,10 +146,12 @@ export class CityWorld {
       const full = ring <= this.viewChunks;
       const prev = this.built.get(key);         // upgrading a far tile in place
       if (prev) { this.scene.remove(prev); prev.traverse(o => o.geometry?.dispose?.()); }
+      const hadTerrain = this.terrain.ready(cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2);
       const group = buildChunkMeshes(this.city, cx, cz, this.mats, !full);
       if (group) this.scene.add(group);
       this.built.set(key, group ?? null);
       this._detail.set(key, full);
+      this._hadTerrain.set(key, hadTerrain);
     }
     // drop cells far behind us (hysteresis +2 so the edge doesn't flicker)
     for (const [key, group] of this.built) {
@@ -146,6 +163,7 @@ export class CityWorld {
         }
         this.built.delete(key);
         this._detail.delete(key);
+        this._hadTerrain.delete(key);
       }
     }
   }
@@ -169,6 +187,27 @@ export class CityWorld {
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++)
       if (!this.built.has((fx + dx) + ',' + (fz + dz))) return false;
     return true;
+  }
+
+  // Every built chunk inside one world tile, dropped so the streamer rebuilds
+  // it — used when a height map lands after its ground was already meshed flat.
+  _dropTileChunks(tx, tz) {
+    const T = this.city.tile ?? 4800, per = T / CHUNK;
+    const c0x = tx * per, c0z = tz * per;
+    const keys = [];
+    for (const key of this.built.keys()) {
+      const c = key.indexOf(',');
+      const cx = +key.slice(0, c), cz = +key.slice(c + 1);
+      if (cx < c0x || cx >= c0x + per || cz < c0z || cz >= c0z + per) continue;
+      // ONLY the chunks that were meshed on flat ground. A world tile is 40×40
+      // chunks, so dropping the lot on every height map that lands means the
+      // whole visible world rebuilds several times over during a normal drive —
+      // measured as a fall from 60 fps to 18. A chunk built when the ground was
+      // already known is already correct and must be left alone.
+      if (this._hadTerrain.get(key)) continue;
+      keys.push(key);
+    }
+    if (keys.length) this._dropCells(keys);
   }
 
   // Drop the built groups of specific cells (a freshly indexed tile put new
@@ -242,9 +281,14 @@ export class CityWorld {
   // standing on a bridge road means standing on its deck. Nearest drivable or
   // walkable bridge way within half its width owns the point.
   heightAt(x, z) {
+    // The ground itself. Bridges then ride ABOVE it: bridgeElevation returns a
+    // lift over the surrounding surface, not an absolute height, so the two
+    // simply add — which is what keeps a bridge deck the right distance over a
+    // river that is now at 185 m rather than at zero.
+    const ground = this.terrain.heightAt(x, z);
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
-    if (!cell) return 0;
-    let y = 0;
+    if (!cell) return ground;
+    let y = ground;
     for (const r of cell.roads) {
       if (!r.br) continue;
       let dist = 0;
@@ -253,7 +297,7 @@ export class CityWorld {
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
         if (d < r.w / 2 + 1.5) {
           const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
-          y = Math.max(y, bridgeElevation(along, r._len));
+          y = Math.max(y, ground + bridgeElevation(along, r._len));
         }
         dist += Math.hypot(bx - ax, bz - az);
       }

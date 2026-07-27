@@ -29,6 +29,7 @@
 // carry real window openings, you can see into the rooms from the street.
 
 import { chunkKey, pointInPolygon } from './geo.js';
+import { groundFor } from './terrain.js';
 import { CHUNK, INTERIOR, PLAYER_SCALE } from './config.js';
 import { buildingPlan, hasInterior, entranceOf, planToWorld } from './interiors.js';
 import { BuildingModel, Debris, Dust } from './destructible.js';
@@ -222,7 +223,11 @@ export class Interiors {
     // the plan wants the local roads (so the front door faces the street) and
     // the local buildings (so it is not cut into a shared party wall)
     const cell = this.city.chunkIndex.get(chunkKey(f.o[0][0], f.o[0][1]));
-    const plan = buildingPlan(f, cell?.roads, cell?.buildings);
+    // the SAME ground the chunk mesh extruded this building from — see
+    // terrain.groundFor. Two answers here is a building that sinks the moment
+    // you walk close enough for its interior to replace the far model.
+    const plan = buildingPlan(f, cell?.roads, cell?.buildings,
+      groundFor(f, this.world?.terrain));
     // Hand the plan the facade's own wall colour. This is what stops a building
     // visibly changing identity the instant it is promoted from painted quads
     // to solid boxes: the boxes come out the colour the facade already was,

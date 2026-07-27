@@ -7,6 +7,7 @@
 //   1. download the regional .osm.pbf extracts (skipped if already on disk)
 //   2. split them into per-tile raw JSON        (scripts/split-extracts.mjs)
 //   3. fetch Prague's storeys and roof shapes   (scripts/fetch-ipr.mjs)
+//   3b. fetch the terrain height maps          (scripts/fetch-terrain.mjs)
 //   4. process those into the runtime tiles     (scripts/build-region.mjs)
 //   5. rebuild the world-map gazetteer          (scripts/fetch-places.mjs)
 //
@@ -75,6 +76,7 @@ const step = (label, script) => {
 };
 step('splitting extracts into raw tiles…', 'scripts/split-extracts.mjs');
 step('fetching Prague storeys + roofs (IPR)…', 'scripts/fetch-ipr.mjs');
+step('fetching the terrain (ČÚZK DMR 5G)…', 'scripts/fetch-terrain.mjs');
 step('building runtime tiles…', 'scripts/build-region.mjs');
 step('rebuilding the gazetteer…', 'scripts/fetch-places.mjs');
-console.log('\nworld rebuilt — public/data/{tiles,manifest.json,overview.json,places.json}');
+console.log('\nworld rebuilt — public/data/{tiles,terrain,manifest.json,overview.json,places.json}');

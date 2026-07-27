@@ -31,6 +31,7 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH } from './config.js';
 import { bridgeElevation, polygonArea, pointInPolygon, chunkKey } from './geo.js';
+import { groundFor, fallFor } from './terrain.js';
 import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
 
@@ -42,6 +43,7 @@ const RAIL_HW = 0.09;                                // steel ribbon half-width
 const SLEEPER_STEP = 0.8, SLEEPER_HL = 1.25, SLEEPER_HW = 0.12;
 const FASCIA = 0.55;                                 // girder face below a bridge deck edge
 const RAILING_H = 0.9, RAILING_COL = 0x2b2d31;       // bridge parapet strips
+const TRENCH_D = 1.2;                                // a stream sits this far under its banks
 const BANK_TOP = 0.05, BANK_COL = 0x6b5f4c;          // river bank walls: curb lip → just under water
 const SKIRT_MAX = 30;                                // bank wall piece length — keeps chunk ownership local
 const DASH_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary']);
@@ -121,7 +123,16 @@ export function makeMaterials() {
 // Optional uv mode (facade walls): plain tris pin to the neutral plaster cell
 // so ridge prisms and roof caps sample "nothing", wallUV maps real sub-rects.
 class TriSink {
-  constructor(uv = false) { this.pos = []; this.nrm = []; this.col = []; this.uv = uv ? [] : null; }
+  constructor(uv = false) {
+    this.pos = []; this.nrm = []; this.col = []; this.uv = uv ? [] : null;
+    // Ranges of this.pos that are ALREADY at their absolute height and must not
+    // be draped again. Two things need it: a bridge deck, which spans a valley
+    // and has to stay level rather than dive into the river, and a riverbank
+    // skirt, whose top follows the land while its foot stays at the water.
+    this.fixed = [];
+  }
+  mark() { return this.pos.length; }
+  fixFrom(start) { if (this.pos.length > start) this.fixed.push(start, this.pos.length); }
   tri(ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b) {
     const ux = bx - ax, uy = by - ay, uz = bz - az;
     const vx = cx - ax, vy = cy - ay, vz = cz - az;
@@ -200,6 +211,62 @@ function shapePoly(ring, holes, y, hex) {
   const g = new THREE.ShapeGeometry(ringShape(ring, holes)).rotateX(-Math.PI / 2);
   if (!g.attributes.position.count) return null;
   if (y) g.translate(0, y, 0);
+  return colorize(g, hex);
+}
+
+// ---- draping ------------------------------------------------------------
+// Everything flat that used to live at a fixed y now has to lie ON the ground.
+// That is one operation — take a geometry authored at some height above zero
+// and push every vertex up by the terrain under it, keeping the offset — so it
+// is one function, used by the ground fills, the road ribbons, the rails and
+// the painted markings alike. Vertices are in WORLD coordinates at this point
+// (the chunk is rebased later), which is what makes the sampling trivial.
+function drape(geo, terrain, fixed = null) {
+  if (!terrain || !geo) return geo;
+  const p = geo.attributes.position;
+  const a = p.array;
+  if (!fixed || !fixed.length) {
+    for (let i = 0; i < a.length; i += 3) a[i + 1] += terrain.heightAt(a[i], a[i + 2]);
+  } else {
+    // walk the gaps between the fixed ranges, which are recorded in order
+    let at = 0;
+    for (let k = 0; k < fixed.length; k += 2) {
+      for (let i = at; i < fixed[k]; i += 3) a[i + 1] += terrain.heightAt(a[i], a[i + 2]);
+      at = fixed[k + 1];
+    }
+    for (let i = at; i < a.length; i += 3) a[i + 1] += terrain.heightAt(a[i], a[i + 2]);
+  }
+  p.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// A chunk-sized ground quad subdivided to the TERRAIN's own grid and displaced.
+// The subdivision is not a guess: chunks are 120 m and samples are 20 m apart,
+// so six cells a side lands every vertex exactly on a sample and the mesh is
+// the height map rather than an approximation of it. Chunk corners are samples
+// too, so neighbouring chunks share their edge vertices by construction and no
+// crack can open between them.
+function terrainQuad(x0, z0, terrain, hex, y = 0) {
+  const SEG = 6;
+  const step = CHUNK / SEG;
+  const pos = [], idx = [];
+  for (let j = 0; j <= SEG; j++) {
+    for (let i = 0; i <= SEG; i++) {
+      const x = x0 + i * step, z = z0 + j * step;
+      pos.push(x, y + (terrain ? terrain.heightAt(x, z) : 0), z);
+    }
+  }
+  for (let j = 0; j < SEG; j++) {
+    for (let i = 0; i < SEG; i++) {
+      const a = j * (SEG + 1) + i, b = a + 1, c = a + SEG + 1, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
   return colorize(g, hex);
 }
 
@@ -309,7 +376,39 @@ function clipSeg(ax, az, bx, bz, x0, z0, x1, z1) {
 // the piece midpoint — global dedupe with no second index. `inward` walls the
 // ring interior (river outer ring); false faces away (island: into the water).
 // Interior of a positive-area ring lies on (−dz,dx) — see wallQuad's note.
-function skirtRing(sink, ring, key, inward, r, g, b) {
+// The surface height of one body of water, cached on the feature. DMR 5G is
+// LiDAR and light does not go through water, so what the model records over a
+// river IS the river's surface — which means the LOWEST ground the outline
+// touches is the water, and the higher samples are the banks it is cut into.
+// Cached because a river is one feature crossing dozens of chunks and every one
+// of them must agree, or the Vltava gets a staircase at each cell border.
+function waterLevel(f, terrain) {
+  if (f._wy !== undefined) return f._wy;
+  if (!terrain) return WATER_Y;
+  const ring = f.o;
+  // stride so a 4 000-vertex riverbank is not sampled to death; the minimum is
+  // stable under sparse sampling because it is the water, not the bank
+  const step = Math.max(1, Math.floor(ring.length / 96));
+  let lo = Infinity, known = 0, n = 0;
+  for (let i = 0; i < ring.length; i += step) {
+    n++;
+    if (!terrain.ready(ring[i][0], ring[i][1])) continue;
+    known++;
+    const h = terrain.heightAt(ring[i][0], ring[i][1]);
+    if (h < lo) lo = h;
+  }
+  // DO NOT CACHE A GUESS. A chunk can be meshed before its height map lands —
+  // that is the normal case at boot — and heightAt answers 0 there. Caching
+  // that put the Vltava at −0.35 m and, because the cache lives on the FEATURE,
+  // it survived the rebuild that the arriving terrain triggers: the river was
+  // permanently 190 m under Prague. So a level is only remembered once the
+  // ground it was measured against actually existed.
+  const level = (Number.isFinite(lo) ? lo : 0) - 0.35;
+  if (known > n * 0.5) f._wy = level;
+  return level;
+}
+
+function skirtRing(sink, ring, key, inward, r, g, b, terrain, wy) {
   const sgn = (polygonArea(ring) > 0 ? 1 : -1) * (inward ? 1 : -1);
   for (let i = 0; i < ring.length; i++) {
     const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
@@ -320,7 +419,16 @@ function skirtRing(sink, ring, key, inward, r, g, b) {
       const p0x = ax + (bx - ax) * k / n, p0z = az + (bz - az) * k / n;
       const p1x = ax + (bx - ax) * (k + 1) / n, p1z = az + (bz - az) * (k + 1) / n;
       if (chunkKey((p0x + p1x) / 2, (p0z + p1z) / 2) !== key) continue;
-      wallQuad(sink, p0x, p0z, p1x, p1z, BANK_TOP, BANK_DEPTH, fx, fz, r, g, b);
+      // The bank runs from the GROUND at this point down to just under the
+      // water. On a flat world both ends were constants; on terrain the top
+      // follows the land and only the bottom is shared, which is what makes a
+      // cutting look like a cutting instead of a trench of fixed depth.
+      // Absolute heights, so the chunk-wide drape must skip them.
+      if (terrain) {
+        const gy = terrain.heightAt((p0x + p1x) / 2, (p0z + p1z) / 2);
+        const top = Math.max(gy + BANK_TOP, wy + 0.05);
+        wallQuad(sink, p0x, p0z, p1x, p1z, top, wy - 0.4, fx, fz, r, g, b);
+      } else wallQuad(sink, p0x, p0z, p1x, p1z, BANK_TOP, BANK_DEPTH, fx, fz, r, g, b);
     }
   }
 }
@@ -358,7 +466,7 @@ function wwBuckets(city) {
 // ground carve, sunken surface, and bank walls facing the centreline. End
 // caps only where the stream truly begins/ends — chunk-border cuts stay open
 // so the neighbour's piece continues seamlessly.
-function emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1) {
+function emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1, terrain) {
   const n = run.length, ring = [];
   for (let i = 0; i < n; i++) ring.push([run[i].x + run[i].px * hw, run[i].z + run[i].pz * hw]);
   for (let i = n - 1; i >= 0; i--) ring.push([run[i].x - run[i].px * hw, run[i].z - run[i].pz * hw]);
@@ -367,7 +475,11 @@ function emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1
   const clip = clipRingToRect(ring, x0, z0, x1, z1);
   if (clip && Math.abs(polygonArea(clip)) > 0.5) {
     holes.push(clip);
-    const g = shapePoly(clip, null, WATER_Y, COLORS.water);
+    // A stream is a local cut, not a body with a level of its own: it runs
+    // downhill with the land. So its surface is a fixed depth BELOW the ground
+    // it crosses, which drape() produces for free — and which is what lets a
+    // brook descend a hillside instead of pooling at one absolute height.
+    const g = drape(shapePoly(clip, null, -TRENCH_D, COLORS.water), terrain);
     if (g) flat.push(g);
   }
   for (let i = 0; i < n - 1; i++) {
@@ -394,14 +506,14 @@ function emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1
 // drop legs already inside a mapped water polygon (double-carved overlapping
 // holes are the one thing earcut genuinely hates, and mid-river trench walls
 // would look absurd), and stitch surviving stretches into runs.
-function trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb) {
+function trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, terrain) {
   const fr = (f._fr ??= ribbonFrame(f.p));
   if (!fr) return;
   const { q, per } = fr;
   const hw = Math.max(0.5, (f.w ?? 2) / 2);
   let run = null;
   const flush = (cap1) => {
-    if (run && run.length > 1) emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1);
+    if (run && run.length > 1) emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1, terrain);
     run = null;
   };
   for (let i = 0; i < q.length - 1; i++) {
@@ -436,13 +548,25 @@ function trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb) {
 }
 
 // ---- roads: mitered ribbon + caps + bridge fascia/parapets + dashes ----
-function roadRibbon(sink, f) {
+function roadRibbon(sink, f, terrain) {
   const fr = ribbonFrame(f.p);
   if (!fr) return;
   const { q, per, along, len } = fr;
   const hw = Math.max(0.8, (f.w ?? 3) / 2);
   const baseY = FOOT_CLASSES.has(f.t) ? LAYER_Y.footway : LAYER_Y.road;
-  const elev = (d) => (f.br ? bridgeElevation(d, len) : 0);
+  // A bridge is the one road that does NOT follow the ground: it leaves one
+  // bank and arrives at the other, straight and level. Its deck height is
+  // therefore interpolated between the terrain at its two ENDS and resolved
+  // right here, and the range is flagged so the chunk-wide drape leaves it
+  // alone — otherwise Karlův most would sink into the Vltava and climb out on
+  // the far side.
+  const bridge = !!f.br && !!terrain;
+  const bStart = bridge ? terrain.heightAt(q[0][0], q[0][1]) : 0;
+  const bEnd = bridge ? terrain.heightAt(q[q.length - 1][0], q[q.length - 1][1]) : 0;
+  const mark = bridge ? sink.mark() : -1;
+  const elev = (d) => (f.br
+    ? bridgeElevation(d, len) + (bridge ? bStart + (bEnd - bStart) * (len ? d / len : 0) : 0)
+    : 0);
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
   const cr = _c.r, cg = _c.g, cb = _c.b;
   _c.setHex(RAILING_COL);
@@ -486,6 +610,9 @@ function roadRibbon(sink, f) {
     }
   } else if (f.t === 'runway') runwayPaint(sink, fr, hw);
   else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr);
+  // everything this bridge emitted — deck, fascia, parapets, lane paint — is
+  // already at its absolute height
+  if (bridge) sink.fixFrom(mark);
 }
 
 // ---- runway paint ---------------------------------------------------------
@@ -1140,10 +1267,26 @@ function brandSignage(f, y0, top, brand, cell, trim, sign, marks) {
   markWall(mk, W0[0], W0[1], W1[0], W1[1], panelY - hm / 2, panelY + hm / 2, fx, fz);
 }
 
-function buildingInto(f, geos, sink, facades, cell, trim, sign, marks) {
+function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) {
   if (!f.o || f.o.length < 3) return;
-  const y0 = f.y ?? 0;
-  const depth = Math.max(1, Math.max(2.2, f.h ?? 6) - y0); // h is total height; skyways start at y0
+  // WHERE THE BUILDING STANDS. On flat ground this was zero and there was
+  // nothing to decide. On a slope there is: found it at the LOWEST ground under
+  // its footprint and it floats at the high corner; found it at the highest and
+  // it is buried at the low one. Real buildings are cut into the slope, so the
+  // floor goes near the low end — but not AT it, or every house on a hillside
+  // grows a plinth. The low point plus a fifth of the fall is what stops both
+  // failure modes, and the footing below fills whatever gap is left.
+  const ground = terrain ? groundFor(f, terrain) : 0;
+  const fall = terrain ? fallFor(f) : 0;
+  const y0 = ground + (f.y ?? 0);
+  // `f.y` (a skyway's underside) stays RELATIVE to its own ground, and the
+  // height stays the height — a five-storey house is five storeys whether it
+  // stands in Polabí or on Petřín.
+  const depth = Math.max(1, Math.max(2.2, f.h ?? 6) - (f.y ?? 0));
+  // …and the footing: a skirt from the floor down past the lowest corner, so a
+  // building cut into a hillside meets the ground instead of hovering over it.
+  // Only where there is a real drop — on flat ground it is not built at all.
+  const footing = fall > 0.35 ? Math.min(fall + 0.6, 14) : 0;
   // read the brand fresh at build time: stampFranchises() renames its hosts at
   // tile load, before chunks build, so a McDonald's is branded on the very
   // first mesh — and the chunk is re-meshed on interiors activation anyway
@@ -1181,7 +1324,9 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks) {
     if (P.door && P.sH > INTERIOR.entryH + 0.35) doorInto(sink, trim, sign, f.o, P);
     for (const h of f.i ?? []) if (h.length >= 3) ringFacade(sink, h, true, P);
     capInto(sink, f.o, f.i, y0 + depth, true, rr, rg, rb);
-    if (y0 > 0.5) capInto(sink, f.o, f.i, y0, false, rr, rg, rb); // skyway underside
+    // skyway underside — tested against the building's own offset now that y0
+    // carries the ground height, or every house on a hill would grow a lid
+    if ((f.y ?? 0) > 0.5) capInto(sink, f.o, f.i, y0, false, rr, rg, rb);
   } else {
     // v1 flat-color path: one extrude, painted vertices, no uv anywhere
     const g = new THREE.ExtrudeGeometry(ringShape(f.o, f.i), { depth, bevelEnabled: false, steps: 1 });
@@ -1207,6 +1352,28 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks) {
   // off, and the fascia/totem must match pieces.js regardless of the atlas
   if (brand?.sign !== undefined && sign && trim && marks)
     brandSignage(f, y0, y0 + depth, brand, cell, trim, sign, marks);
+  // The footing. A plain skirt in the wall colour, darkened, from the floor
+  // down past the lowest ground the footprint touches — what a real building
+  // shows as a plinth where the pavement falls away from it.
+  if (footing > 0) {
+    const fr2 = wr * 0.72, fg2 = wg * 0.72, fb2 = wb * 0.72;
+    const n = f.o.length;
+    const sgn = polygonArea(f.o) > 0 ? 1 : -1;
+    for (let i = 0; i < n; i++) {
+      const [ax, az] = f.o[i], [bx, bz] = f.o[(i + 1) % n];
+      const ex = bx - ax, ez = bz - az;
+      const L = Math.hypot(ex, ez);
+      if (L < 1e-6) continue;
+      const ox = ez / L * sgn, oz = -ex / L * sgn;      // outward horizontal
+      sink.quad(ax, y0, az, bx, y0, bz, bx, y0 - footing, bz, ax, y0 - footing, az,
+        fr2, fg2, fb2);
+      // …and the same wall facing the other way, because a plinth seen from
+      // below the slope is looked at from outside, from above from inside
+      sink.quad(ax, y0 - footing, az, bx, y0 - footing, bz, bx, y0, bz, ax, y0, az,
+        fr2, fg2, fb2);
+    }
+  }
+
   // Roofs. In facade mode their tris pin to the plain plaster cell, so they
   // read as flat colour either way.
   //
@@ -1434,7 +1601,7 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   for (const f of cell.buildings) {
     if (f._home !== key) continue;
     if (hidden && hidden.has(f._id)) continue;   // now made of boxes instead
-    buildingInto(f, bGeos, bSink, facades, cell, trim, sign, marks);
+    buildingInto(f, bGeos, bSink, facades, cell, trim, sign, marks, mats.terrain);
   }
   const pg = bSink.geo();
   if (pg) bGeos.push(pg);
@@ -1663,10 +1830,8 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
     // clamps its requests to the region) — the apron is the right answer there,
     // and paving open country with grey quads would only cost draw calls.
     if (!cell) return null;
-    const q = new THREE.Mesh(new THREE.PlaneGeometry(CHUNK, CHUNK), mats.flatFar ?? mats.flat);
-    q.rotation.x = -Math.PI / 2;
-    q.position.set(x0 + CHUNK / 2, 0, z0 + CHUNK / 2);
-    q.userData.localGeom = true;
+    const q = new THREE.Mesh(terrainQuad(x0, z0, mats.terrain, COLORS.groundBase),
+      mats.flatFar ?? mats.flat);
     group.add(q);
     return done();
   }
@@ -1682,8 +1847,15 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   let flooded = false;                          // some ring swallowed the whole cell
   _c.setHex(BANK_COL);
   const kr = _c.r, kg = _c.g, kb = _c.b;
+  const bankMark = sink.mark();
   for (const f of cell.water) {
     if (!f.o || f.o.length < 3) continue;
+    // WHERE THE WATER SITS. On a flat world every surface was WATER_Y, a metre
+    // or two below a ground that was everywhere zero. With terrain that is a
+    // hole: the Vltava would render 187 m below Prague. So each body gets its
+    // own level, computed ONCE per feature and cached — per feature and not
+    // per chunk, or one river would step at every cell boundary.
+    const wy = waterLevel(f, mats.terrain);
     // clip-per-chunk instead of _home dedupe: the Labe is one polygon spanning
     // dozens of cells, and home-only rendering would pop it with one far cell
     const clip = clipRingToRect(f.o, x0, z0, x1, z1);
@@ -1691,23 +1863,25 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
       if (Math.abs(polygonArea(clip)) >= CHUNK * CHUNK * 0.999) flooded = true;
       else holes.push(clip);
       const iClip = (f.i ?? []).map((h) => clipRingToRect(h, x0, z0, x1, z1)).filter(Boolean);
-      wet.push({ o: clip, i: iClip });
-      const surf = shapePoly(clip, iClip, WATER_Y, COLORS.water);
+      wet.push({ o: clip, i: iClip, wy });
+      const surf = shapePoly(clip, iClip, wy, COLORS.water);
       if (surf) flat.push(surf);
       // islands are land: give them a lid just under the green-fill layer,
       // their outline already grows a skirt facing out into the water below
       for (const h of iClip) {
-        const plate = shapePoly(h, null, 0.02, COLORS.groundBase);
+        const plate = drape(shapePoly(h, null, 0.02, COLORS.groundBase), mats.terrain);
         if (plate) flat.push(plate);
       }
     }
     // skirts ride the ORIGINAL rings — the clipped ones grew artificial edges
     // along the cell border that would dam the river with earth walls
-    skirtRing(sink, f.o, key, true, kr, kg, kb);
-    for (const h of f.i ?? []) if (h.length >= 3) skirtRing(sink, h, key, false, kr, kg, kb);
+    skirtRing(sink, f.o, key, true, kr, kg, kb, mats.terrain, wy);
+    for (const h of f.i ?? []) if (h.length >= 3)
+      skirtRing(sink, h, key, false, kr, kg, kb, mats.terrain, wy);
   }
+  if (mats.terrain) sink.fixFrom(bankMark);   // bank skirts resolved absolutely
   const ww = wwBuckets(city).get(key);
-  if (ww) for (const f of ww) trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb);
+  if (ww) for (const f of ww) trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, mats.terrain);
 
   // -- ground: aerial photo when the ortho manager has the tile, flat quad
   // otherwise — both carved with the water holes; a fully flooded cell needs
@@ -1723,7 +1897,15 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
       orthoGround.receiveShadow = true;
       group.add(orthoGround);
     } else {
-      const g = shapePoly([[x0, z0], [x1, z0], [x1, z1], [x0, z1]], holes, 0, COLORS.groundBase);
+      // Without holes the ground is a displaced grid; with them it has to be a
+      // carved polygon, which is then draped vertex by vertex. The carved case
+      // is coarser (ShapeGeometry triangulates the outline, not a grid), but it
+      // only happens where water crosses the cell — and there the ground is a
+      // riverbank, which is where the flat WATER surface is the shape that
+      // matters anyway.
+      const g = holes.length
+        ? drape(shapePoly([[x0, z0], [x1, z0], [x1, z1], [x0, z1]], holes, 0, COLORS.groundBase), mats.terrain)
+        : terrainQuad(x0, z0, mats.terrain, COLORS.groundBase);
       if (g) flat.push(g);
     }
   }
@@ -1744,16 +1926,22 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
     ];
     for (const [list, y, pick] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;
-      const g = shapePoly(f.o, f.i, y, pick(f));
+      const g = drape(shapePoly(f.o, f.i, y, pick(f)), mats.terrain);
       if (g) flat.push(g);
     }
   }
 
   // -- roads + rails ribbons into the same sink, merged with everything --
-  for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f);
+  for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f, mats.terrain);
   for (const f of cell.rails) if (f._home === key) railWay(sink, f);
+  // Roads, rails, kerbs, lane paint, bank skirts and bridge parapets all land
+  // in this one sink, and every one of them is authored as a height ABOVE the
+  // ground — so draping the finished buffer once puts the whole lot on the
+  // hillside in a single pass, and the layering they were given (LAYER_Y) is
+  // preserved because the terrain is ADDED to it rather than replacing it.
+  // Bridges keep working for the same reason: their deck is already a lift.
   const sg = sink.geo();
-  if (sg) flat.push(sg);
+  if (sg) flat.push(drape(sg, mats.terrain, sink.fixed));
   if (flat.length) {
     const flatMesh = new THREE.Mesh(mergeGeometries(flat, false), mats.flat);
     flatMesh.receiveShadow = true;              // ground catches, never casts
@@ -1796,7 +1984,7 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
       for (let i = 0; i < spots.length; i++) {
         const [px, pz, rot] = spots[i];
         _q.setFromAxisAngle(_up, rot);
-        _v.set(px, 0, pz); _s.set(1, 1, 1);
+        _v.set(px, mats.terrain ? mats.terrain.heightAt(px, pz) : 0, pz); _s.set(1, 1, 1);
         _m4.compose(_v, _q, _s);
         posts.setMatrixAt(i, _m4);
         heads.setMatrixAt(i, _m4);
@@ -1830,7 +2018,7 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
       // a canopy that shades itself, not a line of park lollipops
       const s = t.forest ? 1.05 + rnd(id, 4) * 0.70 : 0.70 + rnd(id, 4) * 0.42;
       const yk = t.forest ? 1.0 + rnd(id, 6) * 0.45 : 0.88 + rnd(id, 6) * 0.30;
-      _v.set(t.x, 0, t.z);
+      _v.set(t.x, mats.terrain ? mats.terrain.heightAt(t.x, t.z) : 0, t.z);
       _q.setFromAxisAngle(_up, rnd(id, 5) * Math.PI * 2);
       _s.set(s, s * yk, s);
       _m4.compose(_v, _q, _s);

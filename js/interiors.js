@@ -972,15 +972,23 @@ function houseLayout(f, plan, fi) {
  * and gameplay actually read are: use, label, y0, sH, storeys, fr, pal,
  * floors[{y, walls, rooms, open, rails}], core, entrance, occupants, tile.
  */
-export function buildingPlan(f, roads, neighbours) {
-  if (f._plan) return f._plan;
+export function buildingPlan(f, roads, neighbours, ground = 0) {
+  // The plan is cached, but the ground under it is discovered ASYNCHRONOUSLY —
+  // a height map can land after the first plan was drawn. A plan founded on a
+  // different ground than the one we now know is a plan for a different
+  // building, so it is thrown away rather than reused.
+  if (f._plan && f._plan.ground === ground) return f._plan;
+  if (f._plan) f._plan = null;
   const use = classify(f);
   const brand = brandOf(f);
   const ring = f.o;
   const fr = frameOf(ring);
   const area = Math.abs(f._area ??= polygonArea(ring));
-  const y0 = f.y ?? 0;
-  const total = Math.max(2.4, (f.h ?? 6) - y0);
+  // `f.y` is a skyway's underside ABOVE ITS OWN GROUND, and `f.h` its total
+  // height above the same — so the ground is added once, here, and everything
+  // downstream keeps working in absolute metres.
+  const y0 = ground + (f.y ?? 0);
+  const total = Math.max(2.4, (f.h ?? 6) - (f.y ?? 0));
   // the roof eats the top of the extrusion; what's left is habitable
   const usable = Math.max(2.4, total - 0.5);
   let levels = f.lv ?? Math.max(1, Math.round(usable / 3.1));
@@ -1003,7 +1011,7 @@ export function buildingPlan(f, roads, neighbours) {
     use, label: brand?.label ?? USE_LABEL[use] ?? 'Budova', brand,
     id: f._id, name: f.n ?? null,
     fr, ring, holes: f.i ?? null, area,
-    y0, sH, storeys, top: y0 + total, usable,
+    y0, sH, storeys, top: y0 + total, usable, ground,
     pal: INTERIOR_PALETTES[use] ?? INTERIOR_PALETTES.civic,
     entrance: entranceOf(f, roads, neighbours),
     core: null, lift: null, floors: [], occupants: 0,

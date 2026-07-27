@@ -86,7 +86,7 @@ function tileUrl(sx, sz, px) {
     + `&BBOX=${bbox}&WIDTH=${px}&HEIGHT=${px}&FORMAT=image/jpeg`;
 }
 
-export function initOrtho() {
+export function initOrtho(terrain = null) {
   const loader = new THREE.TextureLoader(); // default crossOrigin 'anonymous' — the WMS allows it
   const S = ORTHO.tile / CHUNK;             // chunks per supertile edge (480/120 = 4)
 
@@ -187,14 +187,28 @@ export function initOrtho() {
     // north again. North meets north with NO extra flip; the windowed v just
     // counts lz rows DOWN from 1: v ∈ [1−(lz+1)/S, 1−lz/S].
     const lx = cx - sx * S, lz = cz - sz * S;
-    const geo = new THREE.PlaneGeometry(CHUNK, CHUNK);
+    // Six segments a side, because the terrain samples are 20 m apart and a
+    // chunk is 120 m: every vertex of this quad lands exactly on a height
+    // sample, so the photo lies on the ground rather than near it, and two
+    // neighbouring photos share their edge vertices and cannot crack apart.
+    const SEG = 6;
+    const geo = new THREE.PlaneGeometry(CHUNK, CHUNK, SEG, SEG);
     geo.rotateX(-Math.PI / 2);             // face up; local +y → world −z (north)
     const uv = geo.attributes.uv;
     for (let i = 0; i < uv.count; i++)
       uv.setXY(i, (lx + uv.getX(i)) / S, (S - 1 - lz + uv.getY(i)) / S);
 
     const mesh = new THREE.Mesh(geo, entry.mat);
-    mesh.position.set(cx * CHUNK + CHUNK / 2, 0, cz * CHUNK + CHUNK / 2); // y=0 ground plane
+    mesh.position.set(cx * CHUNK + CHUNK / 2, 0, cz * CHUNK + CHUNK / 2);
+    // …and displace it. The quad is built around its own centre, so a vertex's
+    // world position is its local one plus that centre.
+    if (terrain) {
+      const p = geo.attributes.position, a = p.array;
+      const ox = mesh.position.x, oz = mesh.position.z;
+      for (let i = 0; i < a.length; i += 3) a[i + 1] = terrain.heightAt(ox + a[i], oz + a[i + 2]);
+      p.needsUpdate = true;
+      geo.computeVertexNormals();
+    }
     mesh.receiveShadow = true;             // buildings/trees drop real shadows onto the photo
     // Static: the quad never moves again on its own. It IS moved once, by
     // meshes.rebase(), which shifts a finished chunk into its own local frame —

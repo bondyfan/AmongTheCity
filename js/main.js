@@ -1929,7 +1929,7 @@ async function boot() {
   placeParkedCars(city);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)
-  orthoMgr = initOrtho();
+  orthoMgr = initOrtho(world.terrain);   // the photo lies ON the ground now
   // initSettings moved to start(): the gear must exist while the MENU is up,
   // before boot ever runs — boot only re-applies the loaded values to the
   // freshly built world.
