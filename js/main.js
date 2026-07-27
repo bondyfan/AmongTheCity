@@ -6,23 +6,25 @@
 // drives the AI cars, vehicles.js does car physics, sky.js does the light.
 
 import * as THREE from 'three';
-import { SPAWN, CITY_DATA_URL, DAY_LENGTH, START_TOD, CAR_COLORS, CAR } from './config.js';
+import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR } from './config.js';
 import { loadCity, chunkKey } from './geo.js';
 import { CityWorld } from './city.js';
 import { input } from './input.js';
 import { Player, worldSeatAnchor } from './player.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
-  attachCabin, detachCabin } from './vehicles.js';
+  attachCabin, detachCabin, setVehicleEventSink } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
 import { initAudio, sfx, sfxAt, engineStart, engineStop, engineSet, tireSet, setVolume,
-  heliStart, heliStop, heliSet, ambientStart, nearbyTrafficHum } from './audio.js';
+  heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
+  ambientStart, nearbyTrafficHum } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
 import { Pedestrians } from './pedestrians.js';
 import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
+import { buildAirfields, nearestParked } from './airfield.js';
 import { Clouds } from './clouds.js';
 import { WorldMap } from './worldmap.js';
 import { Trains } from './trains.js';
@@ -30,7 +32,18 @@ import { Weapons } from './weapons.js';
 import { SpeedStreaks } from './speedfx.js';
 import { MISSILE } from './config.js';
 import { showMenu } from './menu.js';
-import { connectCity, vehId as netVehId } from './netcity.js';
+import { connectCity, queueEvent, getPlayerName, CityNetWS } from './netcity.js';
+// ---- the co-op wave, wired in here and nowhere else ----
+// worldclock: the day is a pure function of the shared wall clock now, so two
+//   players never run two different afternoons (js/worldclock.js explains why).
+// identity:   one uid → one look, for our own avatar and for the HUD dot.
+// netvehicles: PROXY cars for the peers, the only honest answer to "which car
+//   is he in" — see F8 below.
+// netui:      the HUD that can say "you are alone now" out loud.
+import { tod, worldT, setEpoch } from './worldclock.js';
+import { localUid, lookForUid, baseUid, strHash } from './identity.js';
+import { makeGhostCars } from './netvehicles.js';
+import { makeNetUI } from './netui.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -57,16 +70,35 @@ window.addEventListener('resize', () => {
 
 // ---------- game state ----------
 const game = {
-  tod: START_TOD,       // 0..1 day clock
+  // The day clock is READ-ONLY here now. It used to be a local accumulator
+  // (`game.tod += dt / DAY_LENGTH`), which meant every client ran its own
+  // afternoon: a minute of extra loading put two players a permanent in-game
+  // hour apart, and since traffic density is scaled by the hour (0.06 at 03:00
+  // against 1.45 at 16:00) they could not even have matching traffic in
+  // principle. worldclock.tod() derives it from the shared wall clock instead,
+  // so there is nothing to seed, nothing to send and nothing to drift. The
+  // getter stays because the debug handle and a dozen call sites read it —
+  // but NOTHING may write it, hence no setter.
+  get tod() { return tod(); },
   mode: 'boot',         // boot → play
   car: null,            // the car the player is driving (null = on foot)
   heli: null,           // the helicopter being flown (null = not flying)
+  jet: null,            // …and the Gripen (they are never both set)
 };
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let peds = null;
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
-let heli = null, clouds = null;   // the helipad's machine, and the sky to fly it through
+let clouds = null;                // the sky to fly the machines through
+// Every machine parked at Pardubice and at Prague. `heli` stays as the one
+// the player last had business with, because a lot of code below asks about
+// "the helicopter" and only ever means the one within arm's reach.
+let helis = [], fighters = [], heli = null;
+// the throttle lever's position, kept across frames — a jet's thrust is set,
+// not held down, and it must survive letting go of the key
+let jetThrottle = 0;
+let jetNearest = null;   // the Gripen within reach, for the hint
+let jetBoomed = false;   // has this flight already cracked through Mach 1
 let worldMap = null;   // the full-region map on M, and the waypoint it owns
 let trains = null;     // České dráhy on the real 532 km network
 let weapons = null;  // the rocket pod under that machine, and what it does to walls
@@ -74,6 +106,25 @@ let streaks = null;  // the air, showing itself past 100 km/h
 let aimMark = null;  // the ring on the ground where the next rocket would land
 let _aimT = 0;
 const parked = [];      // cars placed by us, enterable
+
+// ---------- multiplayer plumbing (all null / empty in single player) --------
+// `ghosts` is the peers' vehicle fleet — proxies we own, keyed by uid. `ui` is
+// the co-op HUD. Both are created before the socket, because the HUD has to be
+// able to report the connection FAILING, and because a null ghost fleet would
+// mean every `ghosts?.` site below silently doing nothing in single player
+// where it should simply be cheap.
+let ghosts = null;      // makeGhostCars(vehicles) — built in boot()
+let ui = null;          // makeNetUI() — built in start(), before the socket
+// uid → the `veh` descriptor object we last handed to ghosts.sync. netcity
+// replaces r.state (and with it r.state.veh) wholesale on every packet, so
+// object IDENTITY is an exact "is this a new packet?" test — which matters,
+// because sync() resets the ghost's dead-reckoning age and calling it every
+// frame would quietly disable extrapolation between packets.
+const _ghostVeh = new Map();
+// uid → index into `helis` that peer has claimed (F22). One machine, one pilot.
+const _heliClaims = new Map();
+let _heliClaimT = 0;    // s until we re-announce our own claim (late joiners)
+let _myHeliClaim = -1;  // index of the helicopter WE hold, or -1
 
 // ---------- camera rig ----------
 // Walk: orbit-follow — eases behind the player's heading, right-drag orbits
@@ -290,6 +341,19 @@ function updateCamera(dt) {
     height = 2.4 + speedK * 1.1;
     tx = c.x; ty = (c.mesh?.position.y ?? 0) + 1.1; tz = c.z;
     fov = BASE_FOV + speedK * 13;   // the road starts to RUSH at speed
+  } else if (game.jet) {
+    // A Gripen crosses a 120 m chunk in a sixth of a second, so the camera
+    // hangs much further back than the helicopter's and widens hard with
+    // speed — otherwise the airframe fills the frame and you cannot see what
+    // you are about to fly into.
+    const j = game.jet;
+    wantYaw = j.heading;
+    const speedK = Math.min(1, j.speed / 340);
+    dist = camDist + 14 + speedK * 26;
+    height = 3.2 + speedK * 2.4;
+    pitchK = 0.5;
+    tx = j.x; ty = j.y + 2.2; tz = j.z;
+    fov = BASE_FOV + speedK * 22;     // the world starts to STREAK past
   } else if (game.heli) {
     // flight: hang back but stay close to the machine's own level — a chase
     // cam perched high enough to look down at the fuselage crops the whole sky
@@ -405,8 +469,83 @@ input.onKey('KeyM', () => {
 // already driving.
 const freeSeat = (veh) => !veh.seats?.[0] ? 0 : !veh.seats?.[1] ? 1 : -1;
 
+// ---------- F22: one helicopter, one pilot ----------------------------------
+// `helis` holds ONE object per machine and it is a purely local simulation, so
+// before this there was no lock at all: two players could each press E on the
+// Pardubice machine and each fly "it", ending up flying two different aircraft
+// that both claim to be the same one. `seats` is no help — it is a local array
+// nobody else writes.
+//
+// The claim is an EVENT, not a lease from an authority: the pilot announces
+// `heli_claim {i, on}` and re-announces every CLAIM_REANNOUNCE_S so a player
+// who joined after take-off learns about it too. That makes it advisory (a
+// simultaneous double-press within one round trip still double-books) and
+// self-healing (a claim from a peer who has gone quiet is dropped with their
+// avatar). A hard lock would need a server that knows what a helicopter is; an
+// advisory one needs nothing and covers every case that actually happens.
+//
+// The INDEX is the identity. buildAirfields() walks a static AIRFIELDS table,
+// so helis[2] is the same machine on every client in the room, forever — which
+// is exactly the property vehId()'s colour hash never had.
+const CLAIM_REANNOUNCE_S = 5;
+
+// who (if anyone) holds machine `i` — a peer uid, or null
+function heliHolder(i) {
+  for (const [uid, hi] of _heliClaims) if (hi === i) return uid;
+  return null;
+}
+// …and the same question for an object, which is what the E handler has
+function heliClaimedByPeer(h) {
+  if (!h || _heliClaims.size === 0) return null;
+  const i = helis.indexOf(h);
+  return i < 0 ? null : heliHolder(i);
+}
+
+// Announce (on=1) or release (on=0) our own claim. Idempotent and free in
+// single player: queueEvent's outbox is capped and drained by nobody.
+function claimHeli(h, on) {
+  const i = on ? helis.indexOf(h) : _myHeliClaim;
+  if (i < 0) return;
+  _myHeliClaim = on ? i : -1;
+  _heliClaimT = on ? CLAIM_REANNOUNCE_S : 0;
+  if (net) queueEvent('heli_claim', { i, on: on ? 1 : 0 });
+}
+
+// A peer's claim landed (or was dropped). The local machine is HIDDEN while
+// somebody else flies it, because they are simultaneously flying a ghost copy
+// of it built by netvehicles — leaving both on screen would show the same
+// helicopter twice, once flying and once parked on its pad.
+function setHeliClaim(uid, i, on) {
+  if (!Number.isInteger(i) || i < 0 || i >= helis.length) return;
+  if (on) _heliClaims.set(uid, i);
+  else if (_heliClaims.get(uid) === i) {
+    _heliClaims.delete(uid);
+    // Put the machine back where the pilot left it rather than teleporting it
+    // home: their ghost is about to disappear from that spot and the real one
+    // reappearing 8 km away on its pad reads as the world resetting itself.
+    const p = ghosts?.pose(uid);
+    const h = helis[i];
+    if (h && p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
+      h.x = p.x; h.z = p.z; h.heading = Number.isFinite(p.heading) ? p.heading : h.heading;
+      h.y = Math.max(world?.heightAt(p.x, p.z) ?? 0, 0);
+      h.vx = h.vy = h.vz = 0; h.airborne = false;
+      h.mesh.position.set(h.x, h.y, h.z);
+      h.mesh.rotation.y = h.heading;
+    }
+  }
+  applyHeliVisibility();
+}
+
+function applyHeliVisibility() {
+  for (let i = 0; i < helis.length; i++) {
+    const claimed = heliHolder(i) !== null && helis[i] !== game.heli;
+    if (helis[i].mesh.visible !== !claimed) helis[i].mesh.visible = !claimed;
+  }
+}
+
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
+  let jetNear = null;              // set by the fighter branch's own test
   if (trains?.riding) {
     // only with the doors open — stepping off at 140 km/h is not a feature
     if (!trains.alight()) { ui_hint('Vystoupit lze jen ve stanici'); return; }
@@ -415,7 +554,7 @@ input.onKey('KeyE', () => {
     // the carriage's last speed frozen in the corner until you found a car
     $id('speedo').classList.add('hidden');
     sfx('train_doors', 0.7);
-  } else if (!player.inCar && !game.car && !game.heli && !player.boarding && !player.exiting
+  } else if (!player.inCar && !game.car && !game.heli && !game.jet && !player.boarding && !player.exiting
       && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
     // !player.inCar, not just !game.car: a PASSENGER has no game.car but his
     // pos mirrors the vehicle's, so parking within 6 m of a halted train used
@@ -440,9 +579,21 @@ input.onKey('KeyE', () => {
     tireSet(0, 0);
     sfx('door_open', 0.7);
     player.beginExit({ onOut: () => sfx('door_close', 0.8) });
+  } else if (game.jet) {
+    // …and nobody climbs out of a Gripen in the air either. Wheels down and
+    // slow enough to stop: taxi speed, not a 200 km/h rollout.
+    if (game.jet.airborne) { ui_hint('Nejdřív přistaň'); return; }
+    if (game.jet.speed > 12) { ui_hint('Nejdřív zastav'); return; }
+    game.jet.throttle = 0;
+    game.jet = null;
+    $id('speedo').classList.add('hidden');
+    jetStop?.();
+    sfx('door_open', 0.7);
+    player.beginExit({ onOut: () => sfx('door_close', 0.8) });
   } else if (game.heli) {
     // step out of the helicopter — only with the skids down
     if (game.heli.airborne) { ui_hint('Nejdřív přistaň'); return; }
+    claimHeli(game.heli, false);   // the machine is free again — tell the room
     game.heli = null;
     $id('speedo').classList.add('hidden');
     heliStop?.();
@@ -462,8 +613,14 @@ input.onKey('KeyE', () => {
     hideCarName();
     sfx('door_open', 0.7);
     player.beginExit({ onOut: () => sfx('door_close', 0.8) });
-  } else if (heli && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5
-      && !heli.airborne) {
+  } else if (heli && !heli.airborne
+      && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5) {
+    // F22: somebody in the room is already flying this one. `seats` cannot know
+    // that — it is a local array — so the claim registry is asked first, and by
+    // NAME, because "Obsazeno" for a machine standing empty in front of you is
+    // the kind of hint that reads as a bug.
+    const holder = heliClaimedByPeer(heli);
+    if (holder) { ui_hint('Vrtulník pilotuje ' + (net?.peerName(holder) || 'jiný hráč')); return; }
     const seat = freeSeat(heli);
     if (seat < 0) { ui_hint('Obsazeno'); return; }
     player.boardVehicle(heli, seat, {
@@ -472,9 +629,29 @@ input.onKey('KeyE', () => {
         sfx('door_close', 0.6);
         if (s !== 0) return;             // co-pilot seat: ride along, no controls
         game.heli = heli;
+        // Claimed from onSeated, not from the keypress: the walk-up is
+        // cancellable (a second E, the 6 s timeout), and locking the room out
+        // of a machine nobody got into is worse than the race it prevents.
+        claimHeli(heli, true);
         $id('speedo').classList.remove('hidden');
         sfx('heli_start', 0.75);
         heliStart?.();
+      },
+    });
+  } else if ((jetNear = nearestParked(fighters, player.pos.x, player.pos.z, 7))) {
+    // A Gripen is single-seat: there is no co-pilot to ride along.
+    if (jetNear.seats?.[0]) { ui_hint('Obsazeno'); return; }
+    player.boardVehicle(jetNear, 0, {
+      onDoor: () => sfx('door_open', 0.8),
+      onSeated: () => {
+        sfx('door_close', 0.6);
+        game.jet = jetNear;
+        jetThrottle = 0;               // every flight starts at idle
+        jetBoomed = false;
+        sfx('jet_start', 0.8);
+        jetStart?.();
+        $id('speedo').classList.remove('hidden');
+        ui_hint('W = tah (Shift forsáž) · ↓ vzlet · ←→ náklon · mezerník brzdy');
       },
     });
   } else {
@@ -483,7 +660,16 @@ input.onKey('KeyE', () => {
     const seat = freeSeat(car);
     if (seat < 0) { ui_hint('Obsazeno'); return; }
     const inTraffic = traffic.cars instanceof Set ? traffic.cars.has(car) : traffic.cars.includes?.(car);
-    if (inTraffic) traffic.steal(car);   // stops driving while we walk up
+    if (inTraffic) {
+      // The slot key has to be read BEFORE steal(), which nulls car.ai and
+      // takes the key with it. Sending it lets every other client call
+      // claimSlot() and kill its own copy of this car — traffic is a shared
+      // SCHEDULE, so without this the peer keeps driving the phantom of the
+      // Fabia you just took, in the middle of the road you are now on.
+      const key = traffic.slotKey(car);
+      traffic.steal(car);                // stops driving while we walk up
+      if (net && key) queueEvent('steal', { key });
+    }
     const pi = parked.indexOf(car);
     if (pi >= 0) parked.splice(pi, 1);
     player.boardVehicle(car, seat, {
@@ -591,24 +777,50 @@ function hideCarName() {
 // ---------- parked cars around the spawn ----------
 // A handful of cars wait on the forecourt and the nearby parking lots, so the
 // first thing you do at the station is what you'd do in any GTA: take a car.
+//
+// F21 — THE FLEET IS A PROPERTY OF THE PLACE, NOT OF THE SESSION. Every choice
+// here used to be Math.random(): the heading, the body style, the paint. So the
+// two cars on the forecourt were a blue kombi to one player and a white van to
+// the other, standing in the same two spots — and since these are enterable,
+// "get in the red one" was a different car on each screen. Everything below is
+// now a pure function of the SPOT's coordinates, hashed with identity.strHash
+// (an integer FNV-1a + avalanche; no Math.sin, so no engine-dependent ULP).
+//
+// The second half of the fix is the ORDER. city.paved is filled by the tile
+// streamer, so which parking polygons are in it — and in what sequence — is a
+// property of how the download happened to interleave, and `n >= 8` would then
+// take a different eight on a slow connection than on a fast one. Sorting the
+// candidates by position before the cap makes the cut-off a fact about the map.
+const PARK_KINDS = ['sedan', 'hatch', 'kombi', 'suv', 'van'];
+// deterministic 0..1 from a world position plus a salt. 0.1 m quantisation so
+// two clients that computed a centroid with a last-bit difference still agree.
+function spotRnd(x, z, salt) {
+  return strHash(salt + ':' + Math.round(x * 10) + ',' + Math.round(z * 10)) / 4294967296;
+}
 function placeParkedCars(city) {
   const spots = [[SPAWN.x + 9, SPAWN.z + 8, 1.2], [SPAWN.x - 14, SPAWN.z + 12, 1.9]];
   // parking polygons near the station → one car at each centroid
-  let n = 0;
+  const lots = [];
   for (const p of city.paved) {
-    if (p.t !== 'parking' || n >= 8) continue;
+    if (p.t !== 'parking') continue;
     let cx = 0, cz = 0;
     for (const [x, z] of p.o) { cx += x; cz += z; }
     cx /= p.o.length; cz /= p.o.length;
     if (Math.hypot(cx - SPAWN.x, cz - SPAWN.z) > 260) continue;
-    spots.push([cx, cz, Math.random() * Math.PI * 2]);
-    n++;
+    lots.push([cx, cz]);
   }
+  lots.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  for (const [cx, cz] of lots.slice(0, 8))
+    spots.push([cx, cz, spotRnd(cx, cz, 'h') * Math.PI * 2]);
   for (const [x, z, h] of spots) {
     const pos = { x, z };
     world.collide(pos, 1.2); // never inside a wall
-    const kind = ['sedan', 'hatch', 'kombi', 'suv', 'van'][(Math.random() * 5) | 0];
-    const car = vehicles.add(kind, pos.x, pos.z, h, CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0]);
+    // hashed off the SPOT, not off the collided position: collide() nudges the
+    // car out of a wall using the local geometry, and a client whose building
+    // tile has not streamed in yet would nudge differently and repaint the car.
+    const kind = PARK_KINDS[(spotRnd(x, z, 'k') * PARK_KINDS.length) | 0];
+    const color = CAR_COLORS[(spotRnd(x, z, 'c') * CAR_COLORS.length) | 0];
+    const car = vehicles.add(kind, pos.x, pos.z, h, color);
     parked.push(car);
   }
 }
@@ -618,10 +830,21 @@ function _crashList() {
   return traffic ? [...traffic.cars, ...parked] : parked;
 }
 
-// ---------- how busy the roads are, right here and right now ----------
-// Two multipliers ride on the player's traffic-density setting, because one
-// global number cannot be right for 03:00 on a field track AND 16:00 on
-// Masarykovo náměstí.
+// ---------- how busy the roads are, right now ----------
+// ONE multiplier rides on the player's traffic-density setting, and it is a
+// function of the SHARED clock only.
+//
+// There used to be a second one, trafficPlaceK(), which counted the buildings
+// in the chunk index around the player and scaled traffic by how built-up the
+// surroundings were. It is gone, and its removal is a REQUIREMENT of the shared
+// traffic model, not a tidy-up: traffic.js now derives the population of each
+// 256 m cell from the length of drivable road in that cell, which is a property
+// of the world and therefore the same on every client. A per-player term in the
+// same product means two people standing in different districts scale the ONE
+// shared fleet by different factors — i.e. they disagree about how many cars
+// exist between them, which is exactly the disagreement the schedule was built
+// to remove. Built-up-ness is still honoured; it is just honoured per cell,
+// where both clients can see it, instead of per viewer.
 //
 // TIME: a real Czech city has twin peaks — the commute in around 08:00 and the
 // heavier one home around 16:00 — a lunchtime plateau, and a dead trough near
@@ -632,8 +855,10 @@ const TRAFFIC_HOURS = [
   [12, 0.80], [14, 0.85], [16, 1.45], [17, 1.35], [19, 0.75],
   [21, 0.42], [23, 0.22], [24, 0.16],
 ];
-function trafficTimeK(tod) {
-  const h = (tod ?? 0) * 24;
+// the parameter is named t01, not tod: `tod` is the imported worldclock reader
+// in this module now, and a shadowed import is one rename away from a bug
+function trafficTimeK(t01) {
+  const h = (t01 ?? 0) * 24;
   for (let i = 0; i < TRAFFIC_HOURS.length - 1; i++) {
     const [h0, v0] = TRAFFIC_HOURS[i], [h1, v1] = TRAFFIC_HOURS[i + 1];
     if (h >= h0 && h <= h1) {
@@ -644,25 +869,42 @@ function trafficTimeK(tod) {
   return 0.5;
 }
 
-// PLACE: count the buildings the chunk index already holds around the player.
-// A city block carries hundreds per cell, a village a dozen, open fields none
-// — so this is a free, always-current read on how built-up the surroundings
-// are, with no extra data and no per-place tuning.
-let _densK = 1, _densT = 0;
-function trafficPlaceK(dt, focus) {
-  _densT -= dt;
-  if (_densT <= 0) {
-    _densT = 2;                       // a couple of times a minute is plenty
-    const cx = Math.floor(focus.x / 120), cz = Math.floor(focus.z / 120);
-    let n = 0;
-    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++)
-      n += world?.city?.chunkIndex?.get((cx + dx) + ',' + (cz + dz))?.buildings?.length ?? 0;
-    // 25 cells ≈ 0.36 km². Empty country → 0.18, a village ≈ 0.5,
-    // suburbs ≈ 1, the middle of Pardubice or Hradec ≈ 1.5.
-    const want = Math.max(0.18, Math.min(1.5, 0.18 + Math.sqrt(n) / 26));
-    _densK += (want - _densK) * 0.5;  // ease so a corner never snaps the flow
+// ---------- everybody the AI traffic has to brake for ----------------------
+// traffic.actors is the single biggest lever on whether two clients agree
+// about the cars between them. The schedule (where a car nominally is at a
+// given shared instant) is already identical on both machines to the bit; the
+// only thing that makes the RENDERED positions differ is `lag`, and lag is
+// bought by braking for obstacles. Feed one client only its own player and the
+// two of them brake for different things — the fleets diverge for a reason
+// that has nothing to do with either simulation being wrong.
+//
+// So this is every player in the room: us (in whatever we are driving), and
+// every peer, taken from their ghost vehicle when they have one and from their
+// avatar when they are on foot. Records are POOLED — this runs every frame and
+// twenty fresh little objects a frame is 1200 allocations a second for nothing.
+const _actors = [];
+const _actorPool = [];
+function pushActor(x, z, half) {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+  const a = _actorPool[_actors.length] ??= { x: 0, z: 0, half: 0 };
+  a.x = x; a.z = z; a.half = half;
+  _actors.push(a);
+}
+function updateActors() {
+  _actors.length = 0;
+  if (game.car) pushActor(game.car.x, game.car.z, 3.9);
+  else pushActor(player.pos.x, player.pos.z, 2.3);
+  if (!net) return _actors;
+  for (const [uid, r] of net.remotes) {
+    const p = ghosts?.pose(uid);
+    // `riding` means they are a passenger in something we already listed (our
+    // car, or another peer's ghost) — a second obstacle on the same metre of
+    // tarmac would make the queue behind it twice as timid on this client only.
+    if (p && !p.riding) {
+      if (p.kind !== 'heli') pushActor(p.x, p.z, 3.9);
+    } else if (!p) pushActor(r.x, r.z, 2.3);
   }
-  return _densK;
+  return _actors;
 }
 
 // ---------- horizon: how far the world is built, and where the haze sits ----
@@ -678,7 +920,9 @@ function updateHorizon(dt) {
   if (!world || !sky) return;
   const gs = getSettings();
   const base = gs.viewChunks ?? GROUND_CHUNKS;
-  const alt = game.heli ? Math.max(0, game.heli.y) : 0;
+  // altitude drives the horizon whichever machine is up there
+  const flier = game.heli ?? game.jet;
+  const alt = flier ? Math.max(0, flier.y) : 0;
   const climb = Math.min(1, alt / 300);
   // climb 0 → 300 m widens the view from the ground setting to the air cap
   const want = Math.round(base + (AIR_CHUNKS_MAX - base) * climb);
@@ -688,7 +932,17 @@ function updateHorizon(dt) {
   // photo already contains the roads and roofs it reads as real city out to
   // kilometres — which is what stops the world ending in mid-air.
   world.farChunks = Math.round(AIR_FAR_MAX * climb);
-  world.chunksPerFrame = alt > 20 ? 8 : 2;   // keep the edge ahead of the nose
+  // Keep the edge ahead of the nose. These are CAPS, not targets: city.js
+  // spends a millisecond budget and stops, so a high number costs nothing over
+  // open country and cannot blow a frame over Prague. The jet gets the widest
+  // cap because its nose moves twenty times faster than a helicopter's — but
+  // it also gets a slightly bigger time slice, because a stalled edge in front
+  // of a 700 m/s aircraft is a hole in the world.
+  world.chunksPerFrame = game.jet ? 16 : alt > 20 ? 8 : 2;
+  world.buildBudgetMs = game.jet ? 9 : 7;
+  // The aerial photo picks its resolution from distance to HERE, so the tier
+  // boundaries travel with the player instead of sitting around the origin.
+  orthoMgr?.setFocus?.(player.pos.x, player.pos.z);
   const radius = (world.viewChunks + world.farChunks) * 120;
   // haze reaches 88 % of the built radius: geometry has fully dissolved before
   // the streamed edge, so there is nothing to notice
@@ -709,6 +963,63 @@ function updateHorizon(dt) {
     camera.far = wantFar;
     camera.near = camNear;
     camera.updateProjectionMatrix();
+  }
+}
+
+// ---------- navigation: where am I, and how do I get to the waypoint ------
+// These three modules are loaded LAZILY and each is optional. A static import
+// of a module that does not exist yet takes the entire game down at boot (it
+// did, once), and navigation is a luxury: the city must still be drivable if
+// any of it fails to load.
+let placeFinder = null, navigation = null, navLine = null;
+let _navWpX = null, _navWpZ = null;
+async function initNavigation(city) {
+  try {
+    const [{ PlaceFinder }, { Navigation }, { NavLine }] = await Promise.all([
+      import('./place.js'), import('./navigation.js'), import('./navline.js'),
+    ]);
+    placeFinder = new PlaceFinder(city);
+    navigation = new Navigation(city);
+    navLine = new NavLine(scene);
+  } catch (err) {
+    console.warn('navigation unavailable:', err.message);
+  }
+}
+
+function updateNavigation(dt) {
+  if (placeFinder) {
+    placeFinder.update(player.pos.x, player.pos.z);
+    const el = $id('place-hud');
+    if (el) {
+      const town = placeFinder.town ?? '', street = placeFinder.street ?? '';
+      if (town || street) {
+        el.classList.remove('hidden');
+        const t = el.querySelector('.pl-town'), st = el.querySelector('.pl-street');
+        if (t.textContent !== town) t.textContent = town;
+        if (st.textContent !== street) st.textContent = street;
+      } else el.classList.add('hidden');
+    }
+  }
+  if (!navigation) return;
+  // the world map owns the waypoint; hand it over only when it actually moves
+  const wp = worldMap?.waypoint ?? null;
+  if (wp) {
+    if (wp.x !== _navWpX || wp.z !== _navWpZ) {
+      _navWpX = wp.x; _navWpZ = wp.z;
+      navigation.setDestination(wp.x, wp.z);
+    }
+  } else if (_navWpX !== null) {
+    _navWpX = _navWpZ = null;
+    navigation.clear();
+    navLine?.clear();
+  }
+  navigation.update(dt, player.pos.x, player.pos.z);
+  // the line belongs on the road under a CAR — on foot it would just be litter
+  if (navLine) {
+    if (game.car && navigation.route) {
+      navLine.set(navigation.route);
+      navLine.update(dt, player.pos.x, player.pos.z, world);
+    } else navLine.clear();
   }
 }
 
@@ -817,7 +1128,7 @@ function updateNightLights(dt) {
 // ---------- HUD ----------
 let hintT = 0;
 function updateHud(dt) {
-  $id('tod-clock').textContent = todClock(game.tod);
+  $id('tod-clock').textContent = todClock(tod());
   if (game.car) {
     $id('speed-num').textContent = Math.round(Math.abs(game.car.speed) * 3.6);
     $id('speed-unit').textContent = 'km/h';
@@ -825,6 +1136,15 @@ function updateHud(dt) {
     $id('speedo').classList.remove('hidden');
     $id('speed-num').textContent = Math.round(Math.abs(trains.riding.speed ?? 0) * 3.6);
     $id('speed-unit').textContent = 'km/h · ČD';
+  } else if (game.jet) {
+    // airspeed, altitude, and whether the burner is lit — the three numbers a
+    // pilot actually watches. Mach is worth showing because past 1 234 km/h it
+    // is the number that means something.
+    const j = game.jet;
+    const mach = j.kmh / 1234;
+    $id('speed-num').textContent = Math.round(j.kmh);
+    $id('speed-unit').textContent =
+      `km/h · M${mach.toFixed(2)} · ${Math.round(j.y)} m${j.reheat ? ' · AB' : ''}`;
   } else if (game.heli) {
     // in flight the readout becomes an altimeter with the airspeed beside it,
     // so the trailing unit has to switch too (it used to read "137 m km/h")
@@ -861,9 +1181,20 @@ function updateHud(dt) {
         : '<kbd>E</kbd> vystoupit · <kbd>↑</kbd> vzlet · <kbd>V</kbd> raketa';
       hint.classList.remove('hidden');
     }
+    else if (game.jet) {
+      hint.innerHTML = game.jet.airborne
+        ? '<kbd>W</kbd><kbd>S</kbd> tah · <kbd>Shift</kbd> forsáž · <kbd>↓</kbd> nahoru · <kbd>↑</kbd> dolů · <kbd>←</kbd><kbd>→</kbd> náklon'
+        : '<kbd>E</kbd> vystoupit · <kbd>W</kbd> tah · <kbd>↓</kbd> vzlet po rozjezdu';
+      hint.classList.remove('hidden');
+    }
     else if (heli && !game.car && !player.inCar
         && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5) {
       hint.innerHTML = '<kbd>E</kbd> nastoupit do vrtulníku';
+      hint.classList.remove('hidden');
+    }
+    else if (jetNearest && !game.car && !player.inCar
+        && Math.hypot(jetNearest.x - player.pos.x, jetNearest.z - player.pos.z) < 7) {
+      hint.innerHTML = '<kbd>E</kbd> nastoupit do stíhačky';
       hint.classList.remove('hidden');
     }
     // player.inCar, not game.car: the passenger is seated too, and E now takes
@@ -895,18 +1226,43 @@ function updateHud(dt) {
         : '🚀 ' + '▮'.repeat(weapons.ammo);
     } else pod.classList.add('hidden');
   }
-  // the map draws its own markers while open; the waypoint it owns is mirrored
-  // onto the HUD compass and the minimap so it is useful once the map closes
-  worldMap?.update(player, game.car, heli);
-  const wp = worldMap?.waypoint ?? null;
+  // ---- the maps, and the peers on them (F10) ----
+  // peerList() is built ONCE a frame and handed to both maps: it allocates a
+  // record per peer and calls lookForUid() on each, and doing that twice for
+  // the same frame is pure waste.
+  //
+  // The array must be passed EVERY frame, open map or not: worldmap.js reads
+  // `null` as "the caller said nothing this frame, keep chasing" and an array
+  // as "this is the room, and anyone not in it has left". Skipping the call
+  // while the map is closed would freeze a followed friend at the last place
+  // the map happened to be open — the chase would neither track nor stop.
+  const peers = net ? net.peerList() : null;
+  worldMap?.update(player, game.car, heli, peers);
+  // The waypoint the map owns wins; failing that, point at the nearest friend.
+  // This is what makes "kde jsi?" answerable without opening anything: the
+  // compass on the HUD always has somebody to point at in a shared session.
+  const wp = worldMap?.waypoint ?? nearestPeerPoint(peers);
   minimap?.setWaypoint?.(wp);
   const wpEl = $id('waypoint-hud');
   if (wpEl) {
+    // styling hook: a chase after a person is not the same promise as a pin
+    // dropped on a map, and index.html may one day want to say so
+    wpEl.dataset.peer = (!worldMap?.waypoint && wp) || worldMap?.followUid ? '1' : '';
     if (wp) {
       const d = Math.hypot(wp.x - player.pos.x, wp.z - player.pos.z);
-      // bearing relative to where the CAMERA looks, so the arrow reads as
-      // "turn that way" rather than as a compass needle
-      const ang = Math.atan2(wp.x - player.pos.x, wp.z - player.pos.z) - camYaw + Math.PI;
+      // Bearing relative to where the CAMERA looks, so the arrow reads as
+      // "turn that way" rather than as a compass needle.
+      //
+      // Derived, not guessed — the first version was MIRRORED (it sent you
+      // left for a target on the right). updateCamera parks the camera at
+      // (tx + sin·flat, tz + cos·flat) looking at the target, so the view
+      // direction is f = (−sin y, −cos y) and three's right vector is
+      // cross(f, up) = (cos y, −sin y). The screen bearing clockwise from
+      // "up" is then atan2(d·right, d·forward). Checked against seven
+      // hand-worked cases (N/E/S/W target × N/E/W facing).
+      const dx = wp.x - player.pos.x, dz = wp.z - player.pos.z;
+      const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+      const ang = Math.atan2(dx * cy - dz * sy, -dx * sy - dz * cy);
       wpEl.classList.remove('hidden');
       wpEl.style.setProperty('--wp-rot', (ang * 180 / Math.PI).toFixed(1) + 'deg');
       wpEl.querySelector('.wp-dist').textContent = d > 1500
@@ -914,7 +1270,29 @@ function updateHud(dt) {
     } else wpEl.classList.add('hidden');
   }
   minimap?.update(player.pos.x, player.pos.z, camYaw,
-    traffic ? [...traffic.cars] : []);
+    traffic ? [...traffic.cars] : [], peers);
+}
+
+// The closest peer, as a waypoint-shaped {x, z}, or null. Returns a FRESH
+// object only when the target actually moved: minimap.setWaypoint keeps the
+// reference it is given, and handing it a new object every frame is 60
+// allocations a second plus a repaint the map has no reason to do.
+let _npWp = null, _npUid = null;
+function nearestPeerPoint(peers) {
+  if (!peers || !peers.length) { _npWp = null; _npUid = null; return null; }
+  let best = null, bd = Infinity;
+  const px = player.pos.x, pz = player.pos.z;
+  for (const p of peers) {
+    const d = (p.x - px) ** 2 + (p.z - pz) ** 2;
+    if (d < bd) { bd = d; best = p; }
+  }
+  if (!best) { _npWp = null; _npUid = null; return null; }
+  if (!_npWp || _npUid !== best.uid
+      || (best.x - _npWp.x) ** 2 + (best.z - _npWp.z) ** 2 > 2.25) {
+    _npWp = { x: best.x, z: best.z };
+    _npUid = best.uid;
+  }
+  return _npWp;
 }
 
 // ---------- where the next rocket lands ----------
@@ -1073,6 +1451,7 @@ async function boot() {
   minimap = new Minimap($id('minimap'), city);
   trains = new Trains(scene, city);
   worldMap = new WorldMap(city, minimap);
+  initNavigation(city);   // lazy + optional; never blocks the boot
   peds = new Pedestrians(scene, city);
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact
   // (gender rolled per victim), attenuated by distance like the debris audio
@@ -1095,12 +1474,11 @@ async function boot() {
   apron.renderOrder = -800;     // before the city, after the sky dome
   apron.frustumCulled = false;
   scene.add(apron);
-  // The heliport: a pad on the open forecourt apron east of the hall, clear of
-  // the bus stands, with the machine sitting on it — visible the moment you
-  // spawn, so the sky is an obvious invitation rather than a secret.
-  const padX = SPAWN.x + 62, padZ = SPAWN.z - 16;
-  scene.add(makeHelipad(padX, padZ));
-  heli = new Helicopter(scene, padX, padZ, Math.PI * 0.75);
+  // Flying machines live at airports now, not on the station forecourt:
+  // Pardubice (LKPD) and Václav Havel Prague (LKPR), each with a pad, a
+  // helicopter and a pair of Gripens on the apron. airfield.js owns the where.
+  ({ helis, fighters } = buildAirfields(scene));
+  heli = helis[0] ?? null;
   // the pod shares the interior manager's dust pool: one set of sprites does
   // rocket smoke, blast plume and the dust off a collapsing floor alike
   weapons = new Weapons(scene, world, { dust: world.interiors.dust });
@@ -1253,7 +1631,35 @@ function stepGame(dt) {
   const focus = game.car ?? player.pos;
   world.update(dt, { x: focus.x, z: focus.z }, { onFoot: !game.car && !game.heli });
 
-  if (game.heli) {
+  if (game.jet) {
+    // Same hands as the helicopter, and the same hands GTA trained everyone's
+    // fingers on: W/S is the ENGINE, the arrows are the attitude. ↓ pulls the
+    // nose up (stick back), ↑ pushes it down, ←/→ roll. It is not how a stick
+    // is labelled in a cockpit, but it is how every player already expects an
+    // aircraft to fly, and consistency with the machine parked next to it on
+    // the apron matters more than the label.
+    const k = input.keys;
+    const jet = game.jet;
+    if (k.has('KeyW')) jetThrottle = Math.min(1, jetThrottle + dt * 0.8);
+    if (k.has('KeyS')) jetThrottle = Math.max(0, jetThrottle - dt * 0.9);
+    if (k.has('ShiftLeft') || k.has('ShiftRight')) jetThrottle = 1;
+    jet.update(dt, {
+      // aircraft.js takes pitch +1 = nose UP, so ArrowDown is the +1
+      pitch: (k.has('ArrowDown') ? 1 : 0) - (k.has('ArrowUp') ? 1 : 0),
+      roll:  (k.has('ArrowRight') ? 1 : 0) - (k.has('ArrowLeft') ? 1 : 0),
+      // A/D stay useful: the rudder in the air, the nosewheel on the ground
+      yaw:   (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0),
+      throttle: jetThrottle,
+      brake: k.has('Space') ? 1 : 0,
+    }, world);
+    player.update(dt, { input, camYaw, world });   // stays glued to the cockpit
+    jetSet?.(jetThrottle, Math.min(1, jet.speed / 690), jet.reheat);
+    // Mach 1 is an EVENT, not a threshold to be re-crossed every frame: fire
+    // once on the way through and rearm only after dropping well back below,
+    // or level flight around the number machine-guns the sample.
+    if (!jetBoomed && jet.speed > 343) { jetBoomed = true; sfx('jet_boom', 0.9); }
+    else if (jetBoomed && jet.speed < 320) jetBoomed = false;
+  } else if (game.heli) {
     // WASD flies the machine, the ARROWS work the collective and the pedals.
     // input.moveX/moveZ alias the arrows onto WASD for walking, so flight
     // reads the raw keys instead — otherwise ↑ would also pitch the nose down.
@@ -1309,7 +1715,14 @@ function stepGame(dt) {
   peds.playerCar = game.car;
   peds.update(dt, focus);
   trains?.update(dt, focus);
-  if (heli && !game.heli) heli.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
+  for (const h of helis) if (h !== game.heli) h.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
+  for (const j of fighters) if (j !== game.jet) j.update(dt, { throttle: 0 }, world);
+  // There are machines at two airports now, but everything downstream — the
+  // E hint, the map icon, the net layer's seat anchor — means "the helicopter
+  // I am dealing with". Keep that pointing at the one being flown, else the
+  // nearest parked one.
+  heli = game.heli ?? nearestParked(helis, player.pos.x, player.pos.z, Infinity);
+  jetNearest = game.jet ?? nearestParked(fighters, player.pos.x, player.pos.z, Infinity);
   weapons?.update(dt, { cars: _crashList(), peds });
   updateAim(dt);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
@@ -1317,6 +1730,7 @@ function stepGame(dt) {
     const base = getSettings().traffic ?? 60;
     traffic.maxCars = Math.round(base * trafficTimeK(game.tod) * trafficPlaceK(dt, focus));
   }
+  updateNavigation(dt);
   updateHorizon(dt);
   updateNightLights(dt);
   // one cheap rumble for the whole nearby fleet — never per-car audio

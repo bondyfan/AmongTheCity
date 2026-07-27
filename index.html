@@ -24,6 +24,8 @@
   <div id="hud" class="hidden">
     <div id="location-name">PARDUBICE HLAVNÍ NÁDRAŽÍ</div>
     <div id="fps-meter" class="hidden"></div>
+    <!-- where you are: settlement on top, street under it (nav.js fills these) -->
+    <div id="place-hud" class="hidden"><span class="pl-town"></span><span class="pl-street"></span></div>
     <div id="tod-clock" title="Time of day"></div>
     <div id="speedo" class="hidden"><span id="speed-num">0</span><small id="speed-unit">km/h</small></div>
     <!-- the car you just got into, named over the speedo for 3 s. Never
@@ -36,9 +38,12 @@
     <div id="pod" class="hidden"></div>
     <div id="reticle" class="hidden"><span></span></div>
     <canvas id="minimap" width="220" height="220"></canvas>
+    <!-- M was bound in main.js from the day the world map landed and has never
+         been listed here: the region is 134 km across and the one key that
+         makes it navigable was a secret. -->
     <div id="controls-hint">
       <b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>Shift</b> sprint ·
-      <b>C</b> pohled řidiče · <b>V</b> raketa (z vrtulníku) ·
+      <b>C</b> pohled řidiče · <b>V</b> raketa (z vrtulníku) · <b>M</b> mapa regionu ·
       <b>myš (drag)</b> kamera · <b>kolečko</b> zoom
     </div>
   </div>

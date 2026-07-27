@@ -194,3 +194,20 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
 html, body { overscroll-behavior: none; touch-action: none; }
 #game, #game canvas { touch-action: none; }
 .atc-set-body, .panel, [data-scroll] { touch-action: auto; }
+
+
+/* ---- where am I: town + street, bottom-left above the minimap ---- */
+#place-hud {
+  position: fixed; left: 14px; bottom: 210px; z-index: 12; pointer-events: none;
+  display: flex; flex-direction: column; gap: 1px;
+  text-shadow: 0 1px 4px rgba(0,0,0,.9);
+}
+#place-hud.hidden { display: none; }
+#place-hud .pl-town {
+  font: 700 15px/1.2 system-ui, sans-serif; color: #ffffff;
+  letter-spacing: .02em;
+}
+#place-hud .pl-street {
+  font: 500 12.5px/1.2 system-ui, sans-serif; color: #ffd166;
+}
+#place-hud .pl-town:empty, #place-hud .pl-street:empty { display: none; }

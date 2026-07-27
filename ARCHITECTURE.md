@@ -696,3 +696,143 @@ extracts: **2 331 named settlements** (was 429), Praha included.
 with zero console errors; the Vltava, its bridges, the tram network and the
 signals are all there. meshes.js imports in node under a `three` resolver, which
 is how `roofCap` was checked over all 13 742 real pitched footprints.
+
+---
+
+# v9 contract: airfields and the Gripen
+
+## The data — aeroway, at last
+The pipeline never fetched `aeroway`, so both airports were blank fields with a
+terminal on them. `split-extracts.mjs` now wants every aeroway way, and
+`build-region.mjs` sorts them into the layers that already exist rather than a
+parallel one: **runways and taxiways ride the ROAD layer** (they are polylines
+with a width — which is what a road is), and aprons/helipads ride `paved`.
+That buys streaming, collision, the minimap and the world map for free.
+
+Runways carry `d: 0` so the traffic AI never routes a Škoda onto one, and the
+road `width` sanity cap opens from 30 m to 90 m for aeroways or a 45 m strip
+would be clamped to a bus lane. `ref` ("09/27") comes through for the paint.
+What the world got: **Pardubice LKPD** 09/27, 2 499 m × 75 m, 102 taxiways,
+6 aprons; **Praha LKPR** 12/30 at 3 200 m and 06/24 at 3 724 m (two ways),
+182 taxiways, 30 aprons.
+
+## The paint — meshes.js `runwayPaint`/`taxiPaint`
+A runway is not a wide road, and the entire difference is paint. Three marks at
+real ICAO dimensions: the 30 m / 20 m dashed centreline, the threshold "piano
+keys" (30 m × 1.8 m, count scaled from the strip's width), and edge stripes set
+3 m in from each lip. Taxiways get the one mark that matters — a continuous
+YELLOW centreline, which is the thread that visibly ties apron to threshold.
+
+## js/aircraft.js — Saab JAS 39 Gripen
+The type the Czech Air Force actually flies. Mach 2 (2 484 km/h), 14.1 m long,
+delta-canard, single fin — modelled from the three shapes that make it
+recognisable at a glance and nothing else.
+
+The flight model is deliberately NOT the helicopter's. A helicopter hangs under
+a thrust vector and can stop in the air; a fighter is a dart that has to keep
+moving. Velocity follows the NOSE, and everything interesting falls out of three
+real relationships:
+- **Top speed is not a constant.** It is where thrust meets drag, and drag
+  scales with air density (`ρ = exp(−y/8500)`). Sea level tops out at
+  1 410 km/h; Mach 2 costs ~12 km of altitude. Climbing IS the throttle.
+- **A turn is a banked turn**, ω = g·tan(φ)/V. Roll and the heading follows;
+  because V is in the denominator the turn widens as you go faster. There is no
+  separate steering input in the air.
+- **Control authority scales with dynamic pressure.** Parked, the stick does
+  nothing; below V_ROTATE (70 m/s) the nose will not come up.
+
+Thrust is quoted in g because that is what makes it checkable: 0.56 g dry,
+1.12 g in reheat. The first cut used 4.5 g and rotated after **77 metres**,
+which is a catapult — `tests/aircraft.test.mjs` exists to catch exactly that
+class of drift and pins rotation speed, take-off roll, both top speeds, the
+turn-rate/airspeed relationship, the stall, and the landing rollout against
+Pardubice's 2 499 m.
+
+## js/airfield.js — where the machines live
+The helicopter used to sit on the station forecourt, which was convenient and
+slightly absurd. `AIRFIELDS` places a pad, a helicopter and 2–3 Gripens on the
+real apron at each airport. Every parking spot was chosen by testing candidate
+points against the actual apron polygons and rejecting anything inside — or
+within 22 m of — a building, so nothing is parked in a hangar wall.
+main.js keeps flat `helis`/`fighters` lists and one rule: walk up, press E.
+
+## main.js integration
+`game.jet` beside `game.heli` (never both). The stick is W/S pitch (back = nose
+up, as in every aircraft), A/D roll, arrows throttle and rudder, Shift for the
+burner — deliberately not the helicopter's mapping, because a jet has no
+collective and sharing a key between thrust and climb would bury the one
+control that matters. The chase camera hangs 14–40 m back and widens 22° with
+speed; the streamer gets `chunksPerFrame = 14` while a jet is up, because a
+Gripen crosses a 120 m chunk in a sixth of a second.
+
+---
+
+# v7 contract: navigation
+
+Roads carry `n` (street name) on ~23 % of ways — every named street; the rest
+are service roads and footways. `public/data/places.json` holds 429+ named
+settlements with a rank. Together these are enough to answer "where am I" and
+"how do I get there" without any new download.
+
+## js/navigation.js — AGENT NAV
+```js
+export class Navigation {
+  constructor(city)
+  setDestination(x, z) / clear()
+  update(dt, x, z)                 // re-routes when the player leaves the path
+  route                            // [[x,z]…] world polyline, or null
+  remainingM                       // metres left along the route, or null
+  nextTurn                         // { dist, dir: 'left'|'right'|'straight', street } | null
+}
+```
+- Build a DRIVING graph from `city.roads` with `d === 1`, exactly the way
+  traffic.js already keys its nodes (round the coordinate) so the two agree;
+  grow it incrementally from `city.onTileLoaded`.
+- A* over that graph, cost = length / speed (so it prefers main roads), with a
+  straight-line heuristic scaled by the fastest speed in the graph so it stays
+  admissible. Cap the expansion (~40 k nodes) and return the best partial路
+  route if the target is unreachable — a car in a village must still get a
+  line toward the motorway rather than nothing.
+- Snap start and destination to the nearest graph edge, not node.
+- Re-route only when the player is > 35 m from the route, and at most once a
+  second: a route is expensive and a driver weaving in a lane is not lost.
+
+## js/navline.js — AGENT NAV (same agent)
+```js
+export class NavLine { constructor(scene); set(route); clear(); update(dt, x, z, world) }
+```
+The GPS line drawn ON the road: a ribbon ~1.6 m wide following the route
+polyline, laid at LAYER_Y.marking + 0.02 so it sits above the tarmac and the
+lane dashes, bright cyan (#25d0ff) with a soft emissive glow (toneMapped:false
+so bloom catches it), and a subtle scrolling texture offset so it reads as
+"flow toward the destination". Only the next ~400 m of route is built into
+geometry; rebuild when the player advances past a threshold. Fades out behind
+the car. Hidden when the player is not driving.
+
+## js/place.js — AGENT PLACE
+```js
+export class PlaceFinder {
+  constructor(city)                        // loads places.json itself
+  update(x, z)                             // throttled internally
+  town     // "Pardubice" | null
+  street   // "Masarykovo náměstí" | null
+}
+```
+- Street = the nearest `city.roads` way with a name whose distance to (x,z) is
+  under (w/2 + 12) m, searched through the chunk index (never the whole array).
+- Town = the nearest place from places.json, weighted by rank so a city wins
+  over a neighbourhood at similar distance; report nothing past ~4 km.
+- Both are sticky: a name only changes after the new one has held for ~0.6 s,
+  so walking a junction does not flicker between two streets.
+
+## Labels on the maps — AGENT LABELS
+- `js/minimap.js`: draw street names along the road they belong to, inside the
+  circular clip, only for roads whose class is >= residential and only when
+  the name fits the drawn length; rotate the text to the road's angle, keep it
+  upright (flip if it would read upside down), and cap the number drawn.
+- `js/worldmap.js`: the same, at map scale — street labels appear from zoom
+  >= 3, with the same collision-box rejection the place labels already use.
+
+## main.js (MINE)
+A HUD readout bottom-left showing town + street, and the destination handed to
+Navigation whenever the world map's waypoint changes.
