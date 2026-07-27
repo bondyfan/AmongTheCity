@@ -404,8 +404,14 @@ function updateCamera(dt) {
   const pitch = camPitch * pitchK;
   // Indoors the orbit has to shrink or a 14 m boom simply lives in the flat
   // next door. 3.4 m is about as far back as a Czech living room allows.
-  const indoors = !game.car && !game.heli
-    && !!world.interiors?.modelAt(tx, tz);
+  // FLYING IS NEVER INDOORS. modelAt() is a 2-D lookup, so overflying a
+  // building at 300 m "found" its interior and collapsed a 40 m boom to 3.4 m,
+  // then released it on the far side — the camera lunging in and out over
+  // every block, which reads as the picture juddering rather than as a camera
+  // bug. The helicopter was already excluded; the jet was not, and the jet is
+  // the one that crosses a block every fifth of a second.
+  const flying = !!(game.heli || game.jet);
+  const indoors = !flying && !game.car && !!world.interiors?.modelAt(tx, tz);
   if (indoors) dist = Math.min(dist, 3.4);
   const flat = Math.cos(pitch) * dist;
   let px = tx + Math.sin(camYaw) * flat;
@@ -415,7 +421,7 @@ function updateCamera(dt) {
   // from full length until the camera sits in air: the same trick every
   // third-person game uses, done against the interior's own boxes rather than
   // a raycast, because the boxes are already in a spatial hash.
-  if (world.interiors?.occupied(px, py, pz, 0.28)) {
+  if (!flying && world.interiors?.occupied(px, py, pz, 0.28)) {
     const bx = px - tx, by = py - ty, bz = pz - tz;
     // MIN_T is a floor, not an option: collapsing the boom onto the target
     // makes lookAt() aim the camera at its own position, which renders as one
@@ -437,6 +443,30 @@ function updateCamera(dt) {
   camShake();
   camera.lookAt(tx, ty, tz);
   applyLens(dt, fov, CAM_NEAR);
+}
+
+// How far ahead of the player the streamer should be looking. Only the fast
+// machines get a lead worth having: on foot or in a car the loader is never the
+// bottleneck, and a lead there would only blur which chunks count as "near".
+const LEAD_S = 2.0;          // seconds of travel to look ahead
+const LEAD_MAX = 1600;       // …capped, or Mach 2 would stream a different town
+const _lead = { x: 0, z: 0 };
+function leadFocus(focus) {
+  _lead.x = focus.x; _lead.z = focus.z;
+  const f = game.jet ?? game.heli;
+  if (!f) return _lead;
+  const v = game.jet ? game.jet.speed : Math.hypot(f.vx ?? 0, f.vz ?? 0);
+  if (v < 30) return _lead;                    // hovering or taxiing: look here
+  // The lead may never push the player OUT of the built area — that would
+  // trade a hole in front for a hole underneath, which is far worse. The
+  // streamer builds `viewChunks` cells around the focus, so keep the offset
+  // to a fraction of that radius whatever the speed asks for.
+  const built = (world?.viewChunks ?? 6) * 120;
+  const d = Math.min(v * LEAD_S, LEAD_MAX, built * 0.6);
+  // heading convention: dir(h) = (−sin h, −cos h)
+  _lead.x = focus.x - Math.sin(f.heading) * d;
+  _lead.z = focus.z - Math.cos(f.heading) * d;
+  return _lead;
 }
 
 // ---------- enter / exit cars ----------
@@ -1058,7 +1088,13 @@ function updateHorizon(dt) {
   // altitude drives the horizon whichever machine is up there
   const flier = game.heli ?? game.jet;
   const alt = flier ? Math.max(0, flier.y) : 0;
-  const climb = Math.min(1, alt / 300);
+  // Altitude is one reason to see further; SPEED is the other, and the jet has
+  // it at any height. A Gripen on the deck at Mach 1 crosses the whole 720 m
+  // ground-setting radius in two seconds, so it needs the wide horizon just as
+  // much as a helicopter at 300 m — and without it the look-ahead focus has no
+  // room to move and the ground ahead stays unbuilt.
+  const rush = game.jet ? Math.min(1, game.jet.speed / 260) : 0;
+  const climb = Math.max(Math.min(1, alt / 300), rush);
   // climb 0 → 300 m widens the view from the ground setting to the air cap
   const want = Math.round(base + (AIR_CHUNKS_MAX - base) * climb);
   world.viewChunks = Math.max(base, want);
@@ -1075,9 +1111,11 @@ function updateHorizon(dt) {
   // of a 700 m/s aircraft is a hole in the world.
   world.chunksPerFrame = game.jet ? 16 : alt > 20 ? 8 : 2;
   world.buildBudgetMs = game.jet ? 9 : 7;
-  // The aerial photo picks its resolution from distance to HERE, so the tier
-  // boundaries travel with the player instead of sitting around the origin.
-  orthoMgr?.setFocus?.(player.pos.x, player.pos.z);
+  // The aerial photo picks its resolution from distance to the same LOOK-AHEAD
+  // point the chunk streamer uses, so the full-detail ring sits over the ground
+  // you are about to cross rather than the ground behind you.
+  const of = leadFocus(game.car ?? player.pos);
+  orthoMgr?.setFocus?.(of.x, of.z);
   const radius = (world.viewChunks + world.farChunks) * 120;
   // haze reaches 88 % of the built radius: geometry has fully dissolved before
   // the streamed edge, so there is nothing to notice
@@ -1098,6 +1136,48 @@ function updateHorizon(dt) {
     camera.far = wantFar;
     camera.near = camNear;
     camera.updateProjectionMatrix();
+  }
+}
+
+// ---------- dev tools (?devmode) ----------
+// Loaded lazily and only when the URL asks, so a normal session never pays for
+// it and a missing file can never take the boot down.
+async function initDev() {
+  try {
+    const { initDevMode, isDevMode } = await import('./devmode.js');
+    if (!isDevMode()) return;
+    initDevMode({
+      teleport(p) {
+        if (!world || !player) return;      // panel can be open at the menu
+        // Put the player (and whatever they are riding) down at the place, then
+        // let the streamer catch up: ensureTiles first so the ground under the
+        // feet exists before the camera is there, otherwise you land inside the
+        // void for a second and the collision has nothing to push against.
+        const ride = game.car ?? game.heli ?? null;
+        world.city.ensureTiles?.(p.x, p.z)?.catch?.(() => {});
+        player.pos.x = p.x; player.pos.z = p.z;
+        player.heading = p.h ?? 0;
+        if (ride) { ride.x = p.x; ride.z = p.z; ride.heading = p.h ?? 0; ride.speed = 0;
+          if (ride.y !== undefined) ride.y = 0; }
+        camInit = false;              // stop the chase cam sliding 100 km
+        ui_hint?.('📍 ' + p.n);
+      },
+      spawnCar(kind) {
+        if (!world || !player || !vehicles) return;
+        // 7 m ahead of where the player faces, nudged clear of walls by the
+        // same collide() the traffic uses — a car spawned inside a facade is
+        // worse than no car at all.
+        const h = game.car?.heading ?? player.heading;
+        const pos = { x: player.pos.x - Math.sin(h) * 7, z: player.pos.z - Math.cos(h) * 7 };
+        world.collide(pos, 2.4);
+        const color = CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0];
+        const car = vehicles.add(kind, pos.x, pos.z, h + Math.PI, color);
+        parked.push(car);
+        ui_hint?.('🚗 ' + kind);
+      },
+    });
+  } catch (err) {
+    console.warn('devmode unavailable:', err.message);
   }
 }
 
@@ -1808,7 +1888,17 @@ function stepGame(dt) {
   // interior streamer: rooms only matter to somebody who can walk into them,
   // and building them for a car doing 130 km/h would be a hitch for nothing.
   const focus = game.car ?? player.pos;
-  world.update(dt, { x: focus.x, z: focus.z }, { onFoot: !game.car && !game.heli });
+  // STREAM WHERE YOU WILL BE, NOT WHERE YOU ARE. Everything downstream of this
+  // point — chunk meshes, region tiles, the aerial photo — is keyed to one
+  // focus, and centring it on the aircraft means a tile is only requested once
+  // it is already under the nose. At 690 m/s a WMS round trip is a kilometre of
+  // ground, which is exactly the bare grey hole you see ahead of a fast jet.
+  // So the focus is pushed forward along the velocity vector by a couple of
+  // seconds of travel: standing still it is the player, at Mach 2 it is 1.4 km
+  // down the track, and the loader spends its budget on ground you are about
+  // to fly over instead of ground already behind the wing.
+  const lead = leadFocus(focus);
+  world.update(dt, lead, { onFoot: !game.car && !game.heli && !game.jet });
 
   if (game.jet) {
     // Same hands as the helicopter, and the same hands GTA trained everyone's
@@ -2163,6 +2253,7 @@ function onNetEvent(ev) {
 
 async function start() {
   initSettings(applySettings);
+  initDev();                 // ?devmode only — attaches to that panel
   // The clock is anchored to THIS machine until a server tells us otherwise.
   // Explicit rather than implicit: worldclock defaults here anyway, but the
   // call is the documented reset and it is where the server anchor belongs the
