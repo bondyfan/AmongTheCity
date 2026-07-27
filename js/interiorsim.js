@@ -68,6 +68,11 @@ export class Interiors {
     this.occupants = [];
     this._scanT = 0;
     this._clock = 0;
+    /** Where the LOCAL player is, refreshed every frame by update(). Anything
+     *  that decides "can anybody see this" must measure from here — never from
+     *  the blast, which in multiplayer may have gone off in another town. */
+    this.focus = null;
+    this._dseq = 0;                       // order buildings were first wrecked in
     this._fx = { debris: this.debris, dust: this.dust };
   }
 
@@ -78,6 +83,10 @@ export class Interiors {
     // the last listener position. main.js is not ours to edit, so THIS is the
     // per-frame hook that owns the player position — feed it from here.
     setListener?.(focus.x, focus.z);
+    // …and the same position is the only honest answer to "is anyone looking at
+    // this building", which weapons.js and _pruneWrecks both need.
+    (this.focus ??= { x: 0, z: 0 }).x = focus.x;
+    this.focus.z = focus.z;
     this.debris.update(dt);
     this.dust.update(dt);
     // wrecks keep coming down for a few seconds after the hit
@@ -278,27 +287,46 @@ export class Interiors {
   damage(f, x, y, z, r, power = 1) {
     const m = this.activate(f);          // already carries its shell
     this._flushChunks();                 // …and the facade is already stood down
+    if (m.dseq === undefined) m.dseq = ++this._dseq;   // the order it was wrecked in
     const lost = m.blast(x, y, z, r, power);
     this._panic(x, z, r * 4.5);
-    this._pruneWrecks(x, z);
+    this._pruneWrecks();
     return lost;
   }
 
   // Wrecks are kept for the session, but not without limit. Past the cap the
-  // oldest one that is FAR AWAY is restored to its facade — never one the
-  // player could be looking at.
-  _pruneWrecks(x, z) {
+  // ones that go back are the ones wrecked EARLIEST — and never one anybody
+  // could be looking at.
+  //
+  // Both halves of that used to be wrong in a way only multiplayer exposes.
+  // The order was `lastTouch`, which is set by the streaming scan and therefore
+  // means "how recently was I near it" — purely local. The distance test
+  // measured from the BLAST, so a peer's rocket in Chrudim would evaluate every
+  // wreck against Chrudim and cheerfully restore the block of flats the local
+  // player was standing in front of. Two clients thus healed different
+  // buildings and the city drifted apart even when every hit was delivered.
+  // Damage order is the same on every client that saw the same hits, and the
+  // distance is measured from OUR player, where visibility actually lives.
+  _pruneWrecks() {
     const wrecks = [];
     for (const [id, m] of this.models) if (m.damaged) wrecks.push([id, m]);
-    if (wrecks.length <= I.maxDamaged) return;
-    wrecks.sort((a, b) => a[1].lastTouch - b[1].lastTouch);
+    let over = wrecks.length - I.maxDamaged;
+    if (over <= 0) return;
+    wrecks.sort((a, b) => (a[1].dseq ?? 0) - (b[1].dseq ?? 0));
+    const f = this.focus;
+    const guard = Math.max(this.drawR, I.activateR) + 60;   // out past the shell ring
+    // Two per call: each restore re-meshes a chunk's whole building batch, and a
+    // snapshot replay applying forty hits at once would otherwise do forty of
+    // them in one frame. Going a wreck or two over the cap for a moment is
+    // cheaper than that hitch.
+    let done = 0;
     for (const [id, m] of wrecks) {
-      if (wrecks.length - 1 < I.maxDamaged) break;
-      if (bbDist(m.bb, x, z) < 520) continue;
+      if (over <= 0 || done >= 2) break;
+      if (f && bbDist(m.bb, f.x, f.z) < guard) continue;  // in view — leave it wrecked
       this.hidden.delete(id);
       this.world.unhideBuilding?.(m.f);
       this._drop(id);
-      return;
+      over--; done++;
     }
   }
 
@@ -373,6 +401,13 @@ export class Interiors {
   // own floor. They are the same box people who walk the pavements, so the
   // scale, palette and stride all match for free.
   _populate(m) {
+    // A building wrecked by a PEER can be kilometres away — damage() activates
+    // it wherever it is, and the full activation would otherwise spend the
+    // global occupant budget on residents nobody will ever see, starving the
+    // street the local player is actually standing in. `populated` deliberately
+    // stays false here, so walking up to that building later still fills it.
+    const f = this.focus;
+    if (f && bbDist(m.bb, f.x, f.z) > Math.max(this.drawR, I.activateR) + 40) return;
     m.populated = true;      // set even for the empty cases — never retried
     const plan = m.plan;
     let n = Math.min(plan.occupants, MAX_OCCUPANTS - this.occupants.length);

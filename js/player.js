@@ -39,8 +39,10 @@
 
 import { WALK, PLAYER_SCALE, INTERIOR } from './config.js';
 import { makeCitizen } from './citizen.js';
+import { localUid, baseUid, lookForUid } from './identity.js';
 import { seatAnchor as carSeatAnchor } from './vehicles.js';
 import { seatAnchor as heliSeatAnchor } from './helicopter.js';
+import { seatAnchor as jetSeatAnchor } from './aircraft.js';
 
 const TWO_PI = Math.PI * 2;
 // v5: the player now has a y. Buildings have floors, so "the ground" stopped
@@ -50,8 +52,12 @@ const TWO_PI = Math.PI * 2;
 // 175 mm above the last, and STEP_UP quietly carries you up them.
 const GRAVITY = 21;          // m/s² — game gravity, snappier than the real thing
 const TERMINAL = 42;         // m/s cap so a fall off a tower block can't tunnel
-// the protagonist's fixed outfit — blue jacket so you always find yourself
-const LOOK = { jacket: 0x3a63a8, pants: 0x2f3540, skin: 0xd9a066, hair: 0x3a2a1a };
+// The protagonist has NO fixed outfit any more. It used to be a hard-coded blue
+// jacket "so you always find yourself" — but every other client dressed you
+// from identity's palette instead, so the person you saw in blue was nobody the
+// others could see. The hero now goes through exactly the same lookForUid() as
+// every peer: what you see in the mirror is what the room sees. (The old blue,
+// 0x3a63a8, survives as PLAYER_JACKETS[8] — some uid still wears it.)
 
 // ---- boarding tuning -----------------------------------------------------
 const BOARD_T = 0.55;        // s — the door-to-seat slide
@@ -64,10 +70,12 @@ const SIT_DROP = 0.78 * PLAYER_SCALE;
 const smooth = (k) => k * k * (3 - 2 * k);
 
 const isHeli = (v) => v.rotorSpeed !== undefined;   // ducks, quacks, hovers
+const isJet = (v) => v.throttle !== undefined && v.reheat !== undefined;
 
 // seat anchor in the vehicle's LOCAL frame, whichever module owns the shape
 export function localSeatAnchor(veh, i = 0) {
-  return isHeli(veh) ? heliSeatAnchor(veh, i) : carSeatAnchor(veh, i);
+  return isJet(veh) ? jetSeatAnchor(veh, i)
+    : isHeli(veh) ? heliSeatAnchor(veh, i) : carSeatAnchor(veh, i);
 }
 
 // …and in WORLD space, off the vehicle's live pose. Exported for main.js,
@@ -85,8 +93,15 @@ export function worldSeatAnchor(veh, i = 0) {
 }
 
 export class Player {
-  constructor(scene, x, z, heading) {
-    const c = makeCitizen(LOOK);
+  // uid defaults to this tab's identity, so main.js needs to pass nothing; a
+  // caller that already knows the uid (a replay, a test, a second local body)
+  // may hand it in. jacketIdx lets an authority override just the jacket later.
+  constructor(scene, x, z, heading, uid = localUid(), jacketIdx = null) {
+    this.uid = uid;                        // 'base:tab' — what goes on the wire
+    this.baseUid = baseUid(uid);           // the person: look and name come from here
+    this.look = lookForUid(this.baseUid, jacketIdx);
+    const c = makeCitizen(this.look);
+    this._cit = c;
     this.mesh = c.group;
     this._animate = c.walk;
     this._sit = c.sitPose;
@@ -120,7 +135,17 @@ export class Player {
       // it so the streamer, minimap and the exit math keep one source of truth
       this.pos.x = this.inCar.x; this.pos.z = this.inCar.z;
       this.heading = this.inCar.heading;
-      this.speed = this.inCar.speed;
+      // A HELICOPTER HAS NO `.speed`. helicopter.js says so out loud ("a scalar
+      // speed like the cars carry would be a lie" — it flies sideways and
+      // backwards, so it carries vx/vy/vz instead). Copying it blind therefore
+      // left this.speed === undefined for the whole flight, and netcity.js's
+      // `s: +p.speed.toFixed(2)` turned the first state packet after take-off
+      // into a TypeError — thrown from inside stepGame, i.e. BEFORE the frame
+      // was rendered, so co-op froze on the last drawn frame under a red banner
+      // and stayed frozen, every frame, for as long as you were in the air.
+      // Ground speed is the honest scalar for both machine and HUD.
+      this.speed = Number.isFinite(this.inCar.speed) ? this.inCar.speed
+        : Math.hypot(this.inCar.vx ?? 0, this.inCar.vz ?? 0);
       this.y = this.inCar.y ?? this.inCar.mesh?.position.y ?? 0;
       this.vy = 0;
       return;
@@ -432,5 +457,17 @@ export class Player {
       this._animate(this.walkT, 0);      // limbs relaxed the instant we appear
     }
     this.mesh.visible = true;
+  }
+
+  // Scene teardown (mode switch, hot reload). Releases the seat first so the
+  // vehicle's occupancy registry does not keep a dead body parked in it, then
+  // hands the avatar back to citizen.js — which unhooks it from whatever it is
+  // parented to, the scene or a car's body group.
+  dispose() {
+    const veh = this.inCar ?? this.boarding?.veh ?? null;
+    const seat = this.inCar ? this.seat : this.boarding?.seat;
+    if (veh?.seats && seat != null && veh.seats[seat] === this) veh.seats[seat] = null;
+    this.inCar = null; this.boarding = null; this.exiting = null;
+    this._cit.dispose();
   }
 }

@@ -630,11 +630,16 @@ function setParkClaim(uid, i, on) {
 function applyParkVisibility() {
   for (let i = 0; i < parkedFleet.length; i++) {
     const car = parkedFleet[i];
-    const claimed = parkHolder(i) !== null && car !== game.car && car !== player?.inCar;
+    // "ours" is three states, not one: driving it, riding in it, and WALKING UP
+    // to it — boardVehicle has already written us into veh.seats by then, so
+    // hiding it out from under the animation would leave us sliding into a car
+    // nobody can see. A double-book that far in is the race the claim admits to.
+    const mine = car === game.car || car === player?.inCar || car === player?.boarding?.veh;
+    const claimed = parkHolder(i) !== null && !mine;
     if (car.mesh.visible !== !claimed) car.mesh.visible = !claimed;
     const at = parked.indexOf(car);
     if (claimed) { if (at >= 0) parked.splice(at, 1); }
-    else if (at < 0 && car !== game.car && car !== player?.inCar) parked.push(car);
+    else if (at < 0 && !mine) parked.push(car);
   }
 }
 
@@ -1022,6 +1027,14 @@ function updateActors() {
     // `riding` means they are a passenger in something we already listed (our
     // car, or another peer's ghost) — a second obstacle on the same metre of
     // tarmac would make the queue behind it twice as timid on this client only.
+    // A rider in ANY aircraft is not on the road, and the test has to be the
+    // wire descriptor rather than the ghost, because a jet has no ghost at all
+    // (netvehicles refuses to approximate a Gripen with a car — see readState).
+    // Without this, `!p` sent a fighter pilot's avatar to traffic as a 2.3 m
+    // obstacle from 5 km up, which is the very asymmetry the local-flier guard
+    // above just removed.
+    const vk = r.state?.veh?.k;
+    if (vk === 'heli' || vk === 'jet') continue;
     if (p && !p.riding) {
       if (p.kind !== 'heli') pushActor(p.x, p.z, 3.9);
     } else if (!p) pushActor(r.x, r.z, 2.3);
@@ -1989,18 +2002,17 @@ function stepGame(dt) {
 //     and neither leaves an abandoned Škoda idling in the street.
 
 // A car derives its own altitude from the road under it, so the wire does not
-// carry one. A HELICOPTER cannot: the wire descriptor netcity builds has no `y`
-// field at all, so a ghost machine would fly at y = 0 — i.e. a friend crossing
-// the Labe at 200 m appears to slide along the ground, and the seat anchor
-// built on that ghost drags his avatar down with it.
+// carry one. An AIRCRAFT must, or the ghost flies along y = 0 and the seat
+// anchor built on it drags the pilot's avatar through the riverbed.
 //
-// The altitude is already in the packet, just not in the descriptor: player.js
-// sets `this.y = this.inCar.y` for a seated rider, so the state's own `y` IS
-// the helicopter's y, to the metre. Patched in here rather than in netcity
-// because netcity is not mine to edit — see the request list; the day the
-// descriptor carries `y`, this function becomes a no-op on its own.
+// netcity's descriptor now sends `y` for both flying classes, so on a current
+// peer this returns its argument untouched — which is what the note that used
+// to live here predicted it would become. It stays as a COMPATIBILITY SHIM for
+// a peer running the older client: the altitude was always in the packet, just
+// not in the descriptor (player.js mirrors `this.y = this.inCar.y` for a seated
+// rider), so the state's own `y` reconstructs it to the metre.
 function heliAltitude(veh, state) {
-  if (!veh || veh.k !== 'heli' || Number.isFinite(veh.y)) return veh;
+  if (!veh || (veh.k !== 'heli' && veh.k !== 'jet') || Number.isFinite(veh.y)) return veh;
   if (!Number.isFinite(state?.y)) return veh;
   return { ...veh, y: state.y };
 }
@@ -2131,6 +2143,13 @@ function onNetEvent(ev) {
     case 'heli_claim':
       if (typeof ev.from === 'string') setHeliClaim(ev.from, ev.i, !!ev.on);
       break;
+    // …and the same for one of the spawn-fleet cars. `from` is stamped by the
+    // relay (server-city/room.js onEvent puts it on LAST, so a client cannot
+    // sign a claim with somebody else's uid) — without it a release could be
+    // forged for a car another player is driving.
+    case 'park_claim':
+      if (typeof ev.from === 'string') setParkClaim(ev.from, ev.i, !!ev.on);
+      break;
     // A peer yanked open the door of an AI car. Our copy of that schedule slot
     // has to die, or we keep driving a phantom of the car he is now sitting in
     // — through him, on the road he is on. claimSlot works even for a slot we
@@ -2179,6 +2198,7 @@ async function start() {
         // every proxy dies with the session; pumpGhosts finishes the job on
         // the next frame once `net` goes null, this covers the socket dropping
         // while the session object is still alive
+        for (const uid of [..._parkClaims.keys()]) setParkClaim(uid, _parkClaims.get(uid), false);
         for (const uid of _ghostVeh.keys()) ghosts?.drop(uid);
         _ghostVeh.clear();
         if (_heliClaims.size) { _heliClaims.clear(); applyHeliVisibility(); }
@@ -2214,8 +2234,10 @@ window.addEventListener('pagehide', () => {
   // drained by NetGame.update() and there is no next frame from here.
   try {
     if (_myHeliClaim >= 0) CityNetWS.sendEvent({ type: 'heli_claim', i: _myHeliClaim, on: 0 });
+    if (_myParkClaim >= 0) CityNetWS.sendEvent({ type: 'park_claim', i: _myParkClaim, on: 0 });
   } catch {}
   _myHeliClaim = -1;
+  _myParkClaim = -1;
   // The sink outlives the session object (it is module state in vehicles.js),
   // so unhook it or every wall a car hits after this queues into an outbox
   // nobody drains.
@@ -2224,6 +2246,7 @@ window.addEventListener('pagehide', () => {
   // drop the proxies but keep the fleet itself alive: bfcache can restore this
   // page, and a disposed ghost API would be a broken game rather than a lonely
   // one. pumpGhosts sees `net === null` next frame and finishes the cleanup.
+  try { for (const uid of [..._parkClaims.keys()]) setParkClaim(uid, _parkClaims.get(uid), false); } catch {}
   for (const uid of _ghostVeh.keys()) { try { ghosts?.drop(uid); } catch {} }
   _ghostVeh.clear();
   if (_heliClaims.size) { _heliClaims.clear(); try { applyHeliVisibility(); } catch {} }

@@ -31,23 +31,54 @@ export const BANK_DEPTH = -2.4;  // bank skirts reach just under the water
 // 480 m supertiles fetched by scripts/fetch-ortho.mjs into public/data/ortho
 export const ORTHO = { tile: 480, px: 1024, dir: 'data/ortho', extent: 2400 };
 
-// day clock — one in-game day in 24 real minutes, spawning mid-morning
+// ---- the shared day clock (see js/worldclock.js) ----
+// One in-game day in 24 real minutes. 1440 s divides the 86400 s real day
+// exactly 60 times, and that is not a coincidence worth losing: it makes the
+// in-game hour a pure function of the real wall clock, so two players who
+// booted eleven minutes apart still see the same sun.
 export const DAY_LENGTH = 24 * 60;
+// The time of day at WORLD_EPOCH_MS — no longer "the hour you spawn at" but
+// the phase offset of the whole world clock. Because DAY_LENGTH divides the
+// real day evenly and the epoch is a UTC midnight, the world reads exactly
+// 10:30 at every real UTC midnight and cycles 60× a day from there.
 export const START_TOD = 10.5 / 24;
+// Fixed origin of world time, hard-coded so every client computes the SAME
+// worldT() from its own clock with nothing to negotiate. UTC so no machine's
+// time zone or DST can shift it. Never edit this on a live build: moving it
+// re-phases every traffic light and jumps the sky for everyone.
+export const WORLD_EPOCH_MS = Date.UTC(2026, 0, 1);
+export const CLOCK = {
+  // Correction bigger than this (ms) is a broken clock, not drift: step it.
+  // Smaller than this is slewed, which keeps worldT() monotonic.
+  stepMs: 2000,
+  // Slew speed, ms of correction per ms of real time. 0.2 fixes a 2 s error
+  // in 10 s while the world clock still runs at 0.8–1.2× — invisible.
+  slewRate: 0.2,
+  // Our monotonic base vs Date.now() drifting apart by more than this means
+  // the machine slept or the OS clock was stepped; re-anchor to the wall.
+  reanchorMs: 30000,
+};
 
 // ---- palette (low-poly flat look, borrowed from the Woods art direction) ----
 export const COLORS = {
   groundBase: 0x8f9484,      // suburb gray-green base plane
   green: { park: 0x6fa05a, wood: 0x4e7a44, grass: 0x7fa863, pitch: 0x6f9e75, cemetery: 0x7a9468 },
-  paved: { parking: 0x8a8d90, plaza: 0x9d9a92 },
+  // airport concrete is paler and greyer than street asphalt — it is concrete,
+  // not tarmac, and that contrast is most of what makes an airfield read as one
+  paved: { parking: 0x8a8d90, plaza: 0x9d9a92, apron: 0x93969a, helipad: 0x6e7176, runway: 0x55585d },
   water: 0x3f6f95,
   road: {
     motorway: 0x4c4f55, trunk: 0x4c4f55, primary: 0x53565c, secondary: 0x55585e,
     tertiary: 0x585b60, unclassified: 0x5c5f64, residential: 0x5c5f64,
     living_street: 0x67696d, service: 0x64666a, pedestrian: 0x8f8c84,
     footway: 0x9a968c, path: 0x8f8a7c, cycleway: 0x7d6f74, steps: 0xa09c92, track: 0x84796a,
+    runway: 0x55585d, taxiway: 0x6e7176, taxilane: 0x74777c, airstrip: 0x6a6257,
   },
   marking: 0xd8d8d2,
+  // Runway paint is brighter and cleaner than a street's worn lane dash: it is
+  // repainted every season and it has to be legible from a kilometre up.
+  runwayPaint: 0xe8e9e4,
+  taxiPaint: 0xd8bf4a,               // taxiway centrelines are yellow, always
   railBed: 0x6d6a62, rail: 0x3c3e42, sleeper: 0x5a5248,
   treeTrunk: 0x6b4a2e, treeCrown: [0x5d8a4a, 0x6a9a52, 0x527e42, 0x74a25e],
 };

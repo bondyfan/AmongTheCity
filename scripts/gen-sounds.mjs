@@ -158,6 +158,25 @@ const SOUNDS = [
   ['crowd_panic',
     'panicked crowd screaming and running, exterior: many people shouting in alarm, fleeing '
     + 'footsteps, chaotic and urgent. No music, no clear speech or words', 5.0],
+
+  // ---- v9: the Gripen ----
+  // The continuous engine is procedural (audio.js JET) for the same reason the
+  // rotor is: it has to track a lever that moves every frame. What synthesis
+  // cannot do is a TRANSIENT — the moment a turbine lights and spools, and the
+  // shockwave of going supersonic — so those two are renders.
+  ['jet_start',
+    'A fighter jet turbofan starting up on the apron: the whirr of the starter, '
+    + 'ignition catching with a soft whoomph, then the turbine spooling up into a '
+    + 'rising metallic whine that settles into a steady idle. Close, dry, exterior, '
+    + 'no music, no voice', 4.5],
+  ['jet_boom',
+    'A single sonic boom heard from the ground: a sharp double crack like a giant '
+    + 'whip, followed by a deep rolling rumble that fades across the sky. Dry, '
+    + 'outdoors, no music, no voice', 3.0],
+  ['jet_flyby',
+    'A fighter jet passing low overhead at high speed: the roar rushing in, a '
+    + 'hard doppler shift as it passes, then the thunder trailing away behind it. '
+    + 'Exterior, no music, no voice', 3.5],
 ];
 
 const exists = async (p) => { try { await access(p); return true; } catch { return false; } };

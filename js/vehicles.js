@@ -34,6 +34,50 @@ import { crash } from './audio.js';   // no-ops headless — safe for node --che
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 
+// ---- outbound one-shot events (F20) --------------------------------------
+// Ramming a wall knocks pieces off the facade — locally, through
+// world.damageBuilding(), and until now ONLY locally: the peer watching you
+// demolish a shopfront saw an intact shopfront. The wall damage has to travel.
+//
+// It travels through a SINK, not through an import of the net layer. vehicles.js
+// is the physics of a single-player game that happens to have multiplayer
+// bolted on: it must keep working — and keep importing — with no netcity.js in
+// the build at all (tests, single player, `node --check`). So the net layer
+// installs itself here and unsets itself on dispose; with nothing installed
+// the events evaporate, which is exactly what single player wants. Whoever
+// installs the sink forwards to netcity's queueEvent().
+//
+// THE RATE LIMIT IS THE POINT, not decoration. Every event we emit becomes a
+// demolition on every other client in the room. A modified client (or an
+// honest one wedged nose-first against a wall) that emitted per frame would be
+// a denial of service on everyone else's frame budget, and no receiver can
+// tell "he really is crashing a lot" from an attack. So the cap lives at the
+// SOURCE too, as a token bucket: EV_BURST back-to-back events (a genuine
+// multi-car pile-up), then EV_RATE per second sustained. Dropped events are
+// dropped silently — the local damage already happened, the remote copy of one
+// facade chip is worth nothing.
+const EV_BURST = 4;      // tokens
+const EV_RATE = 2;       // tokens/s refill
+let _evSink = null;
+let _evTokens = EV_BURST;
+let _evT = 0;            // ms timestamp of the last refill
+
+// setVehicleEventSink(fn | null) — fn(type, data). Install once from main.js
+// when a net session starts, pass null when it ends.
+export function setVehicleEventSink(fn) {
+  _evSink = typeof fn === 'function' ? fn : null;
+}
+function emitVehicleEvent(type, data) {
+  if (!_evSink) return false;
+  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  if (_evT) _evTokens = Math.min(EV_BURST, _evTokens + (now - _evT) / 1000 * EV_RATE);
+  _evT = now;
+  if (_evTokens < 1) return false;
+  _evTokens -= 1;
+  try { _evSink(type, data); } catch {}   // a broken sink must not stop the car
+  return true;
+}
+
 // ---- shared materials (glass/rubber/lamps never vary; body paint is cached) --
 const glassMat = new THREE.MeshLambertMaterial({ color: 0x1e242b });
 const wheelMat = new THREE.MeshLambertMaterial({ color: 0x24262a });
@@ -318,6 +362,20 @@ export const CAR_KINDS = ['octavia', 'fabia', 'bmw', 'mercedes', 'tesla', 'van',
 // door into this module, so an old save gets an Octavia, not a crash.
 const ALIAS = { sedan: 'octavia', hatch: 'fabia', kombi: 'octavia', suv: 'bmw' };
 const kindOf = (k) => KIND[k] ?? KIND[ALIAS[k]] ?? KIND.octavia;
+
+// ---- normalizeKind(k) → a kind string geomFor() is ALLOWED to see ---------
+// kindOf() above is forgiving about the SPEC it hands back, but geomFor()
+// caches by the STRING: an unknown name gets a fresh copy of the Octavia
+// geometry filed under that name, and nothing ever evicts it. That is fine for
+// our own spawn code, which only ever says names from CAR_KINDS. It is not
+// fine for the net layer, where `kind` is a field a remote client typed: ten
+// invented names a second at 10 Hz is a memory leak aimed at everybody else in
+// the room. So anything that arrives from outside this program launders its
+// kind through here first, and an unknown one comes back as a plain Octavia.
+export function normalizeKind(k) {
+  const s = typeof k === 'string' ? (ALIAS[k] ?? k) : '';
+  return KIND[s] ? s : 'octavia';
+}
 
 // ---- carLabel / carSubtitle: what a Czech driver calls the thing ---------
 // The roster keys are silhouette names for the mesh builder; the HUD needs
@@ -1273,7 +1331,17 @@ export function driveStep(car, ctl, dt, world, others) {
       car._chipCd = Math.max(0, (car._chipCd ?? 0));
       if (impact > 14 && car._chipCd <= 0 && world.damageBuilding) {
         car._chipCd = 1.5;
-        world.damageBuilding(null, _hitX, car.y + 1.0, _hitZ, 2.0 + sev * 1.2);
+        const hy = car.y + 1.0, r = 2.0 + sev * 1.2;
+        world.damageBuilding(null, _hitX, hy, _hitZ, r);
+        // …and the same hole on everyone else's copy of that facade. Same
+        // {x,y,z,r} shape city.applyHit() takes, so the receiver has nothing to
+        // translate. Rounded to 10 cm: this is a 2–3 m blast sphere, the extra
+        // digits are pure bandwidth. Rate-limited inside emitVehicleEvent —
+        // per-car _chipCd (1.5 s) is not a global cap and never was.
+        emitVehicleEvent('vhit', {
+          x: +_hitX.toFixed(1), y: +hy.toFixed(1), z: +_hitZ.toFixed(1),
+          r: +r.toFixed(2),
+        });
       }
     }
   }

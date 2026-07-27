@@ -19,13 +19,11 @@
 // flash gets long enough to read as a bug, so the placeholder now matches
 // the flat-ground fallback color instead.)
 //
-// VRAM is bounded by an LRU: at most LRU_MAX supertiles stay alive; evicted
-// entries dispose texture AND material. That is safe because chunks die at
-// focus ±(viewChunks+2) cells (≤ ±960 m), a footprint of ≤ ~36 supertiles —
-// under the 48 cap, so any material a live chunk still references was
-// touched too recently to be evicted. Failed fetches cache null (flat-color
-// fallback, no server hammering) and sit in the same LRU, which doubles as
-// a natural retry: revisit the area much later and the tile is asked again.
+// VRAM is bounded by an LRU over BYTES, not entries, because entries no longer
+// cost the same: see the detail tiers below. Evicted entries dispose texture
+// AND material. Failed fetches cache null (flat-color fallback, no server
+// hammering) and sit in the same LRU, which doubles as a natural retry:
+// revisit the area much later and the tile is asked again.
 
 import * as THREE from 'three';
 import { CHUNK, ORTHO, COLORS } from './config.js';
@@ -43,8 +41,29 @@ const M_PER_LON = 111412.8 * Math.cos(ORIGIN.lat * Math.PI / 180)
   - 93.5 * Math.cos(3 * ORIGIN.lat * Math.PI / 180);
 
 const WMS = 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer';
-const WMS_PX = 2400;   // px per 480 m tile (config ORTHO.px stays the legacy fetch script's 1024)
-const LRU_MAX = 48;    // supertiles alive at once — see the eviction-safety note up top
+// RESOLUTION BY DISTANCE. The cache used to be a flat 48 supertiles at 2400²,
+// and the note above justified that with "chunks die at ≤ ±960 m, a footprint
+// of ≤ ~36 supertiles". Flight voided that arithmetic: with the far ground ring
+// unrolled, chunks live out to 3.8 km behind a helicopter and 4.6 km behind a
+// jet, which is 289 and 400 live supertiles against a cache of 48. The result
+// is not a memory problem, it is a THRASH — the same photos evicted and
+// re-fetched continuously, each one a request plus a 31 MB texture upload, felt
+// as the world hitching every second or so while flying.
+//
+// It cannot be fixed by raising the cap: 400 × 31 MB is twelve gigabytes. It is
+// fixed by noticing that 0.20 m/px is the right detail under your feet and
+// absurd four kilometres away. Each tier is a separate cache entry, so walking
+// toward a tile upgrades it and flying away lets the coarse one serve.
+// 2400² is 30.6 MB a tile, so the near tier is the whole budget on its own and
+// its radius has to match what you can actually SEE in detail: 960 m is the
+// on-foot chunk radius, i.e. exactly as far as full-detail geometry reaches.
+// Past that 0.94 m/px, and past 3 km 1.9 m/px, which at those distances is
+// under a screen pixel anyway.
+const PX_NEAR = 2400, PX_MID = 512, PX_FAR = 256;
+const R_NEAR = 960, R_MID = 3000;    // m from the focus
+const LRU_MAX = 480;                 // entries — the tiers keep the bytes sane
+const VRAM_MAX = 640e6;              // …and this is the actual budget
+const pxBytes = (px) => px * px * 4 * 1.33;   // RGBA + the mip chain
 // The world runs from Prague (x ≈ −110 km) to east of Hradec, so the clamp is
 // now a bound on the DATA, not on the old 30 km region: past this the WMS would
 // be asked for photos of places the game has no map for. ČÚZK covers the whole
@@ -56,7 +75,7 @@ const SANITY = { x0: -125000, x1: 30000, z0: -35000, z1: 25000 };
 // points SOUTH, the tile's smaller-z edge is its NORTH edge, i.e. the LARGER
 // latitude: latN comes from sz·T, latS from (sz+1)·T. Get this backwards and
 // every photo arrives mirrored top-to-bottom.
-function tileUrl(sx, sz) {
+function tileUrl(sx, sz, px) {
   const T = ORTHO.tile;
   const lonW = ORIGIN.lon + (sx * T) / M_PER_LON;
   const lonE = ORIGIN.lon + ((sx + 1) * T) / M_PER_LON;
@@ -64,7 +83,7 @@ function tileUrl(sx, sz) {
   const latS = ORIGIN.lat - ((sz + 1) * T) / M_PER_LAT;
   const bbox = [lonW, latS, lonE, latN].map((v) => v.toFixed(7)).join(',');
   return `${WMS}?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=0&STYLES=&CRS=CRS:84`
-    + `&BBOX=${bbox}&WIDTH=${WMS_PX}&HEIGHT=${WMS_PX}&FORMAT=image/jpeg`;
+    + `&BBOX=${bbox}&WIDTH=${px}&HEIGHT=${px}&FORMAT=image/jpeg`;
 }
 
 export function initOrtho() {
@@ -75,17 +94,28 @@ export function initOrtho() {
   // order IS the LRU order: a touch deletes + re-inserts the entry, eviction
   // pops the head (the least recently requested tile).
   const tiles = new Map();
+  let bytes = 0;                            // live texture bytes, tracked
+  let fx = 0, fz = 0;                       // the focus the tiers are measured from
 
   function evict() {
-    while (tiles.size > LRU_MAX) {
+    while (tiles.size > LRU_MAX || bytes > VRAM_MAX) {
       const [key, entry] = tiles.entries().next().value;
       tiles.delete(key);
-      if (entry) { entry.mat.dispose(); entry.tex.dispose(); }
+      if (entry) { bytes -= entry.bytes; entry.mat.dispose(); entry.tex.dispose(); }
+      if (!tiles.size) break;
     }
   }
 
-  function makeEntry(sx, sz) {
-    const key = sx + ',' + sz;
+  // How much detail this supertile deserves, from its distance to the focus.
+  function pxFor(sx, sz) {
+    const T = ORTHO.tile;
+    const cx = (sx + 0.5) * T - fx, cz = (sz + 0.5) * T - fz;
+    const d = Math.hypot(cx, cz);
+    return d <= R_NEAR ? PX_NEAR : d <= R_MID ? PX_MID : PX_FAR;
+  }
+
+  function makeEntry(sx, sz, px) {
+    const key = sx + ',' + sz + '@' + px;
     // The material starts WITHOUT its map, tinted the flat-ground color:
     // Lambert over a not-yet-loaded texture samples black, and black squares
     // chasing the car read broken. When the JPEG lands, the callback attaches
@@ -93,7 +123,7 @@ export function initOrtho() {
     // needsUpdate recompiles the shader with the map define — once per
     // supertile, cheap. (Both callbacks fire async, so `entry` exists.)
     const mat = new THREE.MeshLambertMaterial({ color: COLORS.groundBase });
-    const tex = loader.load(tileUrl(sx, sz),
+    const tex = loader.load(tileUrl(sx, sz, px),
       () => {
         if (tiles.get(key) !== entry) { tex.dispose(); return; } // evicted mid-flight
         mat.map = tex; mat.color.set(0xffffff); mat.needsUpdate = true;
@@ -111,8 +141,9 @@ export function initOrtho() {
     // +33% VRAM is inside what the LRU cap already budgets for.
     tex.anisotropy = 4;                    // keeps far streets legible at grazing angles
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping; // each chunk samples strictly its own tile
-    const entry = { tex, mat };
+    const entry = { tex, mat, bytes: pxBytes(px) };
     tiles.set(key, entry);
+    bytes += entry.bytes;
     evict();
     return entry;
   }
@@ -123,9 +154,10 @@ export function initOrtho() {
     // a sanity clamp so absurd indices never turn into WMS requests
     const wx = cx * CHUNK, wz = cz * CHUNK;
     if (wx < SANITY.x0 || wx > SANITY.x1 || wz < SANITY.z0 || wz > SANITY.z1) return null;
-    const sx = Math.floor(cx / S), sz = Math.floor(cz / S), key = sx + ',' + sz;
+    const sx = Math.floor(cx / S), sz = Math.floor(cz / S);
+    const px = pxFor(sx, sz), key = sx + ',' + sz + '@' + px;
     let entry = tiles.get(key);
-    if (entry === undefined) entry = makeEntry(sx, sz); // ?? would re-fetch failed (null) tiles
+    if (entry === undefined) entry = makeEntry(sx, sz, px); // ?? would re-fetch failed (null) tiles
     if (entry === null) return null;       // known-dead tile → flat-color fallback
     tiles.delete(key); tiles.set(key, entry); // LRU touch — move to the tail
 
@@ -155,5 +187,10 @@ export function initOrtho() {
     return mesh;
   }
 
-  return { orthoGroundMesh };
+  // main.js calls this each frame with wherever the camera's attention is.
+  // The tiers are measured from here, so the detail follows the player rather
+  // than the world origin — which is the whole point.
+  function setFocus(x, z) { fx = x; fz = z; }
+
+  return { orthoGroundMesh, setFocus };
 }

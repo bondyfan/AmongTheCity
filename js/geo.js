@@ -164,6 +164,26 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
 
 const _resolved = Promise.resolve(); // ensureTiles' no-work answer, allocated once
 
+// One tile is indexed per frame, at most, and never in the same task as the
+// one before it. Everything queued here is main-thread work measured in tens of
+// milliseconds, so the ONLY thing that keeps it from being felt is spreading it
+// out. Chained promises give the serialisation; the rAF gives the frame break.
+let _indexChain = _resolved;
+function indexGate() {
+  _indexChain = _indexChain.then(() => new Promise((done) => {
+    // rAF alone would DEADLOCK the world: a tab that is not the foreground tab
+    // never paints, so the frame callback never comes, so no tile ever indexes
+    // — and boot, which awaits the spawn tiles, hangs on the loading spinner
+    // forever. The timer is the floor that keeps streaming alive off-screen;
+    // whichever fires first wins.
+    let fired = false;
+    const go = () => { if (!fired) { fired = true; done(); } };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(go);
+    setTimeout(go, 50);
+  }));
+  return _indexChain;
+}
+
 export async function loadCity(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`city data: HTTP ${res.status}`);
@@ -218,6 +238,14 @@ export async function loadCity(url) {
       const res = await fetch(t.f); // f is app-root-relative, like CITY_DATA_URL
       if (!res.ok) throw new Error(`tile ${t.tx},${t.tz}: HTTP ${res.status}`);
       const payload = await res.json();
+      // Measured on a Prague tile: 6.5 MB, 55 ms to parse and 47 ms to index —
+      // 100 ms of BLOCKED main thread. Fetches finish whenever the network says
+      // so, so three tiles landing together used to freeze a third of a second
+      // in one frame, which is exactly the hitch you feel crossing a city at
+      // 700 m/s. The gate serialises the indexing and puts each tile on its own
+      // frame: the same total work, but never two hitches back to back, and
+      // never one while the renderer is trying to present.
+      await indexGate();
       const touched = new Set();
       const { roads, signals, heavy } = indexPayload(city, payload, touched, t.slot, back === 3);
       t.heavy = heavy;
@@ -277,6 +305,12 @@ export async function loadCity(url) {
       t.heavy = null;
       t.state = 3;
       for (const cb of unloadListeners) cb({ tx: t.tx, tz: t.tz, cells });
+      // ONE per call. Each eviction walks every cell the tile touched and then
+      // compacts the whole (six-figure) building array, and a jet leaves half a
+      // dozen tiles behind at once — doing them all in one tick is a freeze in
+      // its own right. ensureTiles runs every second, so the backlog drains in
+      // seconds and nothing is ever more than a tile or two over budget.
+      return;
     }
   }
   return city;

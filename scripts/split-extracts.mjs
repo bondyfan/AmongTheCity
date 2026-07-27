@@ -40,6 +40,7 @@ const POI_AMENITY = /^(fuel|hospital|police|fire_station)$/;
 const wantWay = (t) => !!t && (
   !!t.building
   || !!t.highway
+  || !!t.aeroway                    // runways, taxiways, aprons, helipads, hangars
   || RAILWAY.test(t.railway ?? '')
   || t.natural === 'water' || WATERWAY.test(t.waterway ?? '')
   || GREEN_LANDUSE.test(t.landuse ?? '') || GREEN_LEISURE.test(t.leisure ?? '')
@@ -60,6 +61,7 @@ const wantRelation = (t) => !!t && (
 const wantNode = (t) => !!t && (
   t.natural === 'tree' || t.highway === 'traffic_signals' || t.highway === 'bus_stop'
   || t.railway === 'station' || POI_AMENITY.test(t.amenity ?? '')
+  || t.aeroway === 'aerodrome'      // the airport's own name, for the map
 );
 
 // ---- tile writer -----------------------------------------------------------

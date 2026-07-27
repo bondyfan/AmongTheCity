@@ -1565,3 +1565,137 @@ export function crash(k = 0.5) {
   osc.onended = () => { osc.disconnect(); og.disconnect(); };
   if (v > 0.55) sfx('debris_crash', v * 0.8);    // parts on the tarmac
 }
+
+// ---- procedural jet engine (Saab JAS 39 Gripen, js/aircraft.js) ----------
+// A turbofan is three sounds stacked, and getting the BALANCE between them
+// right with power is the whole job — the same engine is a polite whistle on
+// the apron and a physical assault at full reheat:
+//
+//   · the FAN WHINE. At idle this is all you hear: a hard, buzzy tone at the
+//     fan's blade-pass frequency, up around a kilohertz and climbing with N1.
+//     A sawtooth through a high-Q bandpass gives the metallic edge that a pure
+//     tone cannot — a jet whistle is rich, not sinusoidal.
+//   · the CORE ROAR. Broadband noise through a lowpass that opens with both
+//     power and airspeed. This is what takes over past ~60 % and it is what
+//     makes a take-off run feel like weight rather than pitch.
+//   · the AFTERBURNER. Not "louder" — DIFFERENT: raw combustion instability,
+//     which is noise shaped down to a rumble and then amplitude-modulated by a
+//     slow, deliberately non-musical LFO. Lighting it should feel like the
+//     floor dropping out, so it comes in on its own path with its own lowpass
+//     and its own level, under everything else.
+//
+// Airspeed brightens the whole thing (you are dragging the mix through the air
+// with you) and lifts the level, for the same reason the rotor does. As with
+// every other voice here, all movement is setTargetAtTime, so nothing clicks
+// and jetSet() allocates nothing.
+const JET = {
+  fanLo: 620, fanHi: 3100,     // blade-pass Hz across throttle — idle to max dry
+  fanQ: 7.5,                   // high Q: a whistle with a metallic edge
+  fanLevel: 0.30,
+  roarBand: 900, roarQ: 0.5,   // where the core noise sits before the lowpass
+  cutBase: 300, cutThr: 2600,  // lowpass: 300 Hz at idle → ~2.9 kHz at full dry
+  cutSpeedK: 2.6,              // ...× as speed01 → 1
+  roarLevel: 0.85,
+  abCut: 190,                  // the burner lives entirely below this
+  abLevel: 1.5,                // and is the loudest thing in the game when lit
+  abRumbleHz: 11,              // combustion roughness — felt, not heard as pitch
+  abRumbleDepth: 0.42,
+  vol: 0.5,                    // master, before throttle shapes it
+  speedLift: 0.9,              // ×1.9 at V_MAX: a fast jet is a loud jet
+  idleFloor: 0.12,             // an engine at idle is never silent
+  tau: 0.10,                   // spool lag — a turbine has inertia
+};
+let jet = null;
+
+export function jetStart() {
+  if (!ctx || ctx.state !== 'running' || jet) return;
+  const t = ctx.currentTime;
+
+  const noise = ctx.createBufferSource();
+  noise.buffer = noiseBuffer(); noise.loop = true;
+  const roarBand = ctx.createBiquadFilter();
+  roarBand.type = 'bandpass';
+  roarBand.frequency.value = JET.roarBand; roarBand.Q.value = JET.roarQ;
+  const roarGain = ctx.createGain(); roarGain.gain.value = JET.roarLevel;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = JET.cutBase;
+
+  const fan = ctx.createOscillator();
+  fan.type = 'sawtooth'; fan.frequency.value = JET.fanLo;
+  const fanBand = ctx.createBiquadFilter();
+  fanBand.type = 'bandpass';
+  fanBand.frequency.value = JET.fanLo; fanBand.Q.value = JET.fanQ;
+  const fanGain = ctx.createGain(); fanGain.gain.value = JET.fanLevel;
+
+  // the burner: its own noise tap, its own lowpass, gated by a slow rumble
+  const abNoise = ctx.createBufferSource();
+  abNoise.buffer = noiseBuffer(); abNoise.loop = true;
+  const abLp = ctx.createBiquadFilter();
+  abLp.type = 'lowpass'; abLp.frequency.value = JET.abCut;
+  const abRumble = ctx.createOscillator();
+  abRumble.type = 'triangle'; abRumble.frequency.value = JET.abRumbleHz;
+  const abDepth = ctx.createGain(); abDepth.gain.value = JET.abRumbleDepth;
+  const abMod = ctx.createGain(); abMod.gain.value = 1 - JET.abRumbleDepth;
+  const abGain = ctx.createGain(); abGain.gain.value = 0;   // lit by jetSet only
+
+  const gain = ctx.createGain(); gain.gain.value = 0;       // born silent
+
+  noise.connect(roarBand); roarBand.connect(roarGain); roarGain.connect(lp);
+  fan.connect(fanBand); fanBand.connect(fanGain); fanGain.connect(lp);
+  lp.connect(gain);
+  abNoise.connect(abLp); abLp.connect(abMod);
+  abRumble.connect(abDepth); abDepth.connect(abMod.gain);   // AM around the base
+  abMod.connect(abGain); abGain.connect(gain);
+  gain.connect(master);
+
+  noise.start(t); fan.start(t); abNoise.start(t); abRumble.start(t);
+  jet = { noise, roarBand, roarGain, lp, fan, fanBand, fanGain,
+    abNoise, abLp, abRumble, abDepth, abMod, abGain, gain };
+}
+
+export function jetStop() {
+  if (!jet) return;
+  const j = jet;
+  jet = null;                         // jetSet() goes inert immediately
+  duckHeli = 0; duckUpdate();         // the street comes back
+  const t = ctx.currentTime;
+  j.gain.gain.cancelScheduledValues(t);
+  j.gain.gain.setTargetAtTime(0, t, 0.12);   // a turbine winds DOWN
+  setTimeout(() => {
+    try { j.noise.stop(); j.fan.stop(); j.abNoise.stop(); j.abRumble.stop(); } catch {}
+    for (const n of [j.noise, j.roarBand, j.roarGain, j.lp, j.fan, j.fanBand,
+      j.fanGain, j.abNoise, j.abLp, j.abRumble, j.abDepth, j.abMod, j.abGain, j.gain])
+      n.disconnect();
+  }, 900);
+}
+
+/**
+ * throttle01 0..1 — the lever, which sets pitch and level
+ * speed01    0..1 — airspeed over V_MAX, which brightens and lifts
+ * reheat     bool — is the burner lit
+ */
+export function jetSet(throttle01, speed01, reheat) {
+  if (!jet) return;
+  const th = throttle01 < 0 ? 0 : throttle01 > 1 ? 1 : throttle01;
+  const sp = speed01 < 0 ? 0 : speed01 > 1 ? 1 : speed01;
+  const t = ctx.currentTime, tau = JET.tau;
+
+  const fanHz = JET.fanLo + (JET.fanHi - JET.fanLo) * th;
+  jet.fan.frequency.setTargetAtTime(fanHz, t, tau);
+  jet.fanBand.frequency.setTargetAtTime(fanHz, t, tau);
+  // the whine is the WHOLE sound at idle and gets buried by the roar at power
+  jet.fanGain.gain.setTargetAtTime(JET.fanLevel * (1 - 0.55 * th), t, tau);
+  jet.lp.frequency.setTargetAtTime(
+    (JET.cutBase + JET.cutThr * th) * Math.pow(JET.cutSpeedK, sp), t, tau);
+  // reheat is a step change in kind, so it gets a fast attack and a slow decay:
+  // lighting it should be an event, cutting it should be a sag
+  jet.abGain.gain.setTargetAtTime(reheat ? JET.abLevel : 0, t, reheat ? 0.05 : 0.35);
+  // pow(th, 0.6): the first half of the lever is most of the audible change,
+  // which is how a turbine actually behaves — and the idle floor means the
+  // machine is never mute while you sit on the apron deciding.
+  const lvl = JET.idleFloor + (1 - JET.idleFloor) * Math.pow(th, 0.6);
+  jet.gain.gain.setTargetAtTime(JET.vol * lvl * (1 + JET.speedLift * sp), t, tau);
+  // a jet flattens the street the way a rotor does, only more so
+  duckHeli = Math.max(0.35, th);
+  duckUpdate();
+}

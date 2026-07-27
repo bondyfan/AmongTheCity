@@ -484,7 +484,67 @@ function roadRibbon(sink, f) {
       sink.quad(_WA.x - px, ya, _WA.z - pz, _WB.x - px, yb, _WB.z - pz,
         _WB.x + px, yb, _WB.z + pz, _WA.x + px, ya, _WA.z + pz, mr, mg, mb);
     }
+  } else if (f.t === 'runway') runwayPaint(sink, fr, hw);
+  else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr);
+}
+
+// ---- runway paint ---------------------------------------------------------
+// A runway is not a wide road, and the difference is entirely paint. Three
+// marks carry it, in descending order of how much they matter from the air:
+// the long dashed centreline that tells you where the middle is, the threshold
+// "piano keys" that shout where the concrete starts, and the two edge stripes
+// that give the strip its hard rectangular edge against the grass. Real ICAO
+// dimensions: 30 m stripe / 20 m gap on the centreline, 0.9 m wide; threshold
+// bars 30 m long and 1.8 m wide; edge stripes 0.9 m, set 3 m in from the lip.
+const RW_DASH = 30, RW_GAP = 20, RW_HW = 0.45;
+const RW_KEY_LEN = 30, RW_KEY_HW = 0.9, RW_KEY_GAP = 4.8, RW_KEY_START = 12;
+const RW_EDGE_HW = 0.45, RW_EDGE_IN = 3;
+
+// one flat stripe along the ribbon between arc lengths s0..s1, offset `off`
+// metres to the right of the centreline and `hwid` half-width
+function stripe(sink, fr, s0, s1, off, hwid, r, g, b) {
+  walkAt(fr, s0, _WA); walkAt(fr, s1, _WB);
+  const y = LAYER_Y.marking;
+  const ax = _WA.x + _WA.dz * off, az = _WA.z - _WA.dx * off;
+  const bx = _WB.x + _WB.dz * off, bz = _WB.z - _WB.dx * off;
+  const p0x = _WA.dz * hwid, p0z = -_WA.dx * hwid;
+  const p1x = _WB.dz * hwid, p1z = -_WB.dx * hwid;
+  sink.quad(ax - p0x, y, az - p0z, bx - p1x, y, bz - p1z,
+    bx + p1x, y, bz + p1z, ax + p0x, y, az + p0z, r, g, b);
+}
+
+function runwayPaint(sink, fr, hw) {
+  const len = fr.len;
+  if (len < 120) return;                       // a stub, not a strip
+  _c.setHex(COLORS.runwayPaint);
+  const r = _c.r, g = _c.g, b = _c.b;
+  // centreline
+  for (let s = RW_KEY_START + RW_KEY_LEN + 12; s + RW_DASH < len - (RW_KEY_START + RW_KEY_LEN + 12);
+    s += RW_DASH + RW_GAP) stripe(sink, fr, s, s + RW_DASH, 0, RW_HW, r, g, b);
+  // threshold keys at both ends, symmetric about the centreline. The count is
+  // the real rule of thumb — a 45 m runway wears eight, a 60 m twelve.
+  const keys = Math.max(4, Math.min(12, Math.round(hw * 2 / 7.5)) & ~1);
+  for (const end of [0, 1]) {
+    const s0 = end ? len - RW_KEY_START - RW_KEY_LEN : RW_KEY_START;
+    for (let i = 0; i < keys; i++) {
+      // lay them out in pairs either side of the middle, skipping the centre
+      const k = i - (keys - 1) / 2;
+      const off = k * (RW_KEY_HW * 2 + RW_KEY_GAP) + Math.sign(k) * RW_KEY_GAP * 0.5;
+      if (Math.abs(off) + RW_KEY_HW > hw - 1) continue;
+      stripe(sink, fr, s0, s0 + RW_KEY_LEN, off, RW_KEY_HW, r, g, b);
+    }
   }
+  // edge stripes down both lips
+  for (const side of [-1, 1])
+    stripe(sink, fr, 2, len - 2, side * (hw - RW_EDGE_IN), RW_EDGE_HW, r, g, b);
+}
+
+// Taxiways get the one mark that matters: a continuous yellow centreline. It
+// is the thread that visibly ties the apron to the runway threshold.
+function taxiPaint(sink, fr) {
+  if (fr.len < 20) return;
+  _c.setHex(COLORS.taxiPaint);
+  stripe(sink, fr, 1, fr.len - 1, 0, 0.3, _c.r, _c.g, _c.b);
 }
 
 // ---- rails: two steel ribbons on the shared frame + sleeper quads ----

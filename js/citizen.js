@@ -10,6 +10,7 @@
 // group.rotation.y = heading and the face points along (−sin h, −cos h).
 
 import * as THREE from 'three';
+import { lookForUid, baseUid } from './identity.js';
 
 // Muted Czech-street wardrobe. Deliberately no per-instance tint jitter: that
 // would need a cloned material per citizen and break the shared-material
@@ -26,19 +27,71 @@ function mat(color) {
   if (!matCache.has(color)) matCache.set(color, new THREE.MeshLambertMaterial({ color }));
   return matCache.get(color);
 }
+
+// ---- shared geometry cache ------------------------------------------------
+// A citizen is eleven boxes, but there are only about eight DISTINCT box sizes
+// among them and every citizen in the city uses the same eight. Building
+// BoxGeometry per limb per body meant a 40-pedestrian street plus a dozen
+// remote players allocated ~600 geometries, each with its own GPU buffers, and
+// nothing disposed them when a body went away: the room runs 24/7, players join
+// and are reaped, and VRAM only ever went up. Keyed by (w,h,d) the whole world
+// shares one set — allocation on join drops to zero, and there is nothing
+// per-instance left to leak.
+const geoCache = new Map();
+function geo(w, h, d) {
+  const key = w + '|' + h + '|' + d;
+  let g = geoCache.get(key);
+  if (!g) {
+    g = new THREE.BoxGeometry(w, h, d);
+    // These geometries outlive every mesh that references them. Owners that
+    // tear a body down conventionally — `mesh.traverse(o => o.geometry?.
+    // dispose?.())` — would otherwise free the GPU buffers of geometry still
+    // in use by forty other citizens (three.js re-uploads it, so it is a
+    // stutter rather than a crash, but it is a stutter on every despawn).
+    // Neutering dispose() here makes the shared cache safe for callers that do
+    // not know they are sharing; disposeCitizenAssets() below is the real one.
+    g.dispose = () => {};
+    geoCache.set(key, g);
+  }
+  return g;
+}
 function box(w, h, d, color) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(color));
+  const m = new THREE.Mesh(geo(w, h, d), mat(color));
   m.castShadow = true;
   return m;
 }
+
+// Full teardown of the shared caches — for tests and for a hard scene reset,
+// never mid-game (every live citizen references these). Calls the real
+// dispose off the prototype, since the cached instances carry a no-op.
+export function disposeCitizenAssets() {
+  for (const g of geoCache.values()) THREE.BufferGeometry.prototype.dispose.call(g);
+  geoCache.clear();
+  for (const m of matCache.values()) m.dispose();
+  matCache.clear();
+}
+
 const pick = (arr) => arr[(Math.random() * arr.length) | 0];
 
-// look = optional { jacket, pants, skin } hex overrides (the player has a
-// fixed outfit; anonymous pedestrians roll the palette dice).
+// look = { jacket, pants, skin, hair } hex overrides, or { uid } to derive the
+// whole outfit from identity.js.
+//
+// The uid path exists because a PARTIAL look was worse than none: the net layer
+// used to pass only { jacket } and let the three remaining fields fall through
+// to Math.random(), so the same remote body had different trousers on every
+// screen AND different trousers again after each reap-and-respawn. For anything
+// with a uid — the local hero, every peer — this function must not reach for
+// Math.random at all. Anonymous pedestrians still roll the dice; nobody has to
+// agree on what a passer-by wears.
 export function makeCitizen(look = {}) {
-  const jacket = look.jacket ?? pick(JACKETS);
-  const pants = look.pants ?? pick(PANTS);
-  const skin = look.skin ?? pick(SKINS);
+  // one lookForUid call, only when a uid was given; the ?? chain below then
+  // prefers any explicit override the caller also passed
+  const id = look.uid ?? null;
+  const byUid = id == null ? null : lookForUid(baseUid(id));
+  const jacket = look.jacket ?? byUid?.jacket ?? pick(JACKETS);
+  const pants = look.pants ?? byUid?.pants ?? pick(PANTS);
+  const skin = look.skin ?? byUid?.skin ?? pick(SKINS);
+  const hair = look.hair ?? byUid?.hair ?? pick(HAIRS);
 
   const group = new THREE.Group();
   // Everything hangs off an inner `body` group so the walk bob can dip the
@@ -57,7 +110,7 @@ export function makeCitizen(look = {}) {
 
   const torso = box(0.5, 0.6, 0.28, jacket); torso.position.y = 1.16;
   const head = box(0.28, 0.28, 0.28, skin); head.position.y = 1.61; // top ≈ 1.75 m
-  const hair = box(0.3, 0.09, 0.3, look.hair ?? pick(HAIRS)); hair.position.y = 1.74;
+  const hairMesh = box(0.3, 0.09, 0.3, hair); hairMesh.position.y = 1.74;
 
   // eyes on the −z face — bright whites + dark pupils, Woods style
   const eyeL = box(0.07, 0.06, 0.02, EYE); eyeL.position.set(-0.065, 1.635, -0.145);
@@ -73,7 +126,7 @@ export function makeCitizen(look = {}) {
   const sleeveR = box(0.14, 0.56, 0.14, jacket); sleeveR.position.y = -0.28; armR.add(sleeveR);
   const handR = box(0.13, 0.12, 0.13, skin); handR.position.y = -0.61; armR.add(handR);
 
-  body.add(legL, legR, torso, head, hair, eyeL, eyeR, pupL, pupR, armL, armR);
+  body.add(legL, legR, torso, head, hairMesh, eyeL, eyeR, pupL, pupR, armL, armR);
 
   // walkT = phase in radians (owner advances it with distance), speedK 0..~1.25
   // scales the swing so a stroll barely sways and a sprint pumps. Positive
@@ -127,6 +180,20 @@ export function makeCitizen(look = {}) {
     body.position.y = 0;
   };
 
-  return { group, walk, sitPose, ragdollPose, standPose,
+  // Retire this body. Geometry and materials are SHARED (see geoCache/matCache)
+  // so there is deliberately nothing to free here beyond the scene graph —
+  // detaching the group and emptying it drops the only references that kept the
+  // eleven meshes alive, and the GC does the rest. Owners that used to call
+  // `scene.remove(group)` and stop should call this instead: remove() alone
+  // leaves the meshes hanging off the group, and any owner map still pointing
+  // at the record keeps the whole subtree resident.
+  const dispose = () => {
+    group.parent?.remove(group);
+    body.clear();
+    group.clear();
+  };
+
+  return { group, walk, sitPose, ragdollPose, standPose, dispose,
+    look: { jacket, pants, skin, hair },
     parts: { body, torso, head, armL, armR, legL, legR } };
 }

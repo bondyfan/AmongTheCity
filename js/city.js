@@ -7,7 +7,7 @@
 // hit.
 
 import * as THREE from 'three';
-import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y } from './config.js';
+import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeElevation } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
@@ -15,6 +15,19 @@ import { stampFranchises } from './interiors.js';
 
 const _closest = { x: 0, z: 0, t: 0 };
 const _surf = { y: 0, road: false };   // surfaceY's reusable answer
+
+// How much demolition history one session carries. The log exists so a player
+// who joins an hour late still finds the holes everybody else made, so it wants
+// to be long — but it also goes on the wire in one snapshot message, and
+// interiorsim only keeps INTERIOR.maxDamaged wrecks standing anyway, so beyond
+// a couple of hundred entries the tail describes buildings that have already
+// been restored. Oldest fall off the front.
+const HIT_LOG_MAX = 240;
+// Blasts waiting for their region tile to stream in. A peer can flatten a
+// village 8 km away that this client has never fetched; the hit waits here
+// until onTileLoaded says the ground under it exists.
+const PENDING_HITS_MAX = 128;
+const HIT_IDS_MAX = 8192;          // dedupe set ceiling — see _rememberHit
 
 export class CityWorld {
   constructor(scene, city) {
@@ -33,6 +46,10 @@ export class CityWorld {
     this.viewChunks = VIEW_CHUNKS; // runtime-adjustable (settings: draw distance)
     this.chunksPerFrame = CHUNKS_PER_FRAME; // raised in flight — the edge must
                                             // stay ahead of a 60 m/s nose
+    // …and the real limit: how many milliseconds of a frame chunk building may
+    // eat. At 60 fps a frame is 16.7 ms and the renderer needs most of it, so
+    // 7 ms of streaming is a chunk or two of Prague, or a dozen of open field.
+    this.buildBudgetMs = 7;
     this.farChunks = 0;         // ground-only ring BEYOND viewChunks (flight)
     this._detail = new Map();   // key -> true when built at full detail
     this._tileT = 0;            // ensureTiles throttle — 1 Hz, fetches run km ahead
@@ -47,13 +64,17 @@ export class CityWorld {
     // shed is the same restaurant every session.
     this._stamped = 0;
     this._stampFranchises();
-    city.onTileLoaded?.((t) => { this._dropCells(t.cells); this._stampFranchises(); });
+    this._initHits();
+    city.onTileLoaded?.((t) => {
+      this._dropCells(t.cells); this._stampFranchises();
+      this._tileIn(t, true); this._flushHits();
+    });
     // The far side of streaming: a tile that fell 9 km behind gives its
     // buildings back (geo.js evictFar). Its cells are far out of view, but they
     // must still be dropped from `built` or coming back would find stale groups
     // with no data behind them. A building the player wrecked pins its whole
     // tile — the box model outlives the footprint it was built from.
-    city.onTileUnloaded?.((t) => this._dropCells(t.cells));
+    city.onTileUnloaded?.((t) => { this._dropCells(t.cells); this._tileIn(t, false); });
     if ('keepAlive' in city)
       city.keepAlive = (f) => this.interiors.models.get(f._id)?.damaged === true;
   }
@@ -89,8 +110,19 @@ export class CityWorld {
         }
       }
     }
-    // build a few per frame
+    // Build until the BUDGET is spent, not until a COUNT is reached. A count is
+    // a lie about cost: a rural ground-only cell is a single textured quad and
+    // a cell in central Prague is two hundred buildings with facades, and they
+    // differ by two orders of magnitude. "8 chunks" therefore means 3 ms over
+    // Polabí and 300 ms over Vinohrady — which is exactly the stutter you feel
+    // flying fast over a city, because the fast machines are the ones that ask
+    // for the most cells per second. chunksPerFrame stays as the hard cap so a
+    // pathologically cheap area cannot spin the loop forever.
+    const budget = performance.now() + this.buildBudgetMs;
     for (let i = 0; i < this.chunksPerFrame && this.queue.length; i++) {
+      // always build at least one — otherwise a frame that arrived late never
+      // makes progress and the world stops streaming altogether
+      if (i > 0 && performance.now() > budget) break;
       const key = this.queue.shift();
       this._queued.delete(key);
       const [cx, cz] = key.split(',').map(Number);
@@ -394,11 +426,140 @@ export class CityWorld {
     return null;
   }
 
+  // ---- the shared demolition record --------------------------------------
+  // Destruction is the game, so in multiplayer it is state, not an effect. Three
+  // things follow from that and all three live here:
+  //   · every blast goes through ONE door (applyHit) whoever set it off,
+  //   · a blast whose ground has not streamed in yet is KEPT, not dropped —
+  //     TILE_REACH is 2.6 km and the world is 50 km wide, so "the peer bombed a
+  //     village I have never loaded" is the normal case, not the corner one,
+  //   · the whole history is kept in `hitLog` so a late joiner can be handed the
+  //     wrecked city instead of an intact one.
+
+  _initHits() {
+    /** Array<{x,y,z,r,id}> — every blast this world has accepted, oldest first.
+     *  Feed it straight to sendSnap; feed a peer's copy back through applyHits.
+     *  The `id` is what makes that round trip idempotent. */
+    this.hitLog = [];
+    /** Prefix for locally minted hit ids. A random session token by default, so
+     *  two clients never mint the same id; multiplayer may overwrite it with the
+     *  player uid to make ids stable and readable. */
+    this.hitOrigin = 'h' + Math.random().toString(36).slice(2, 8);
+    this._hitSeq = 0;
+    this._hitIds = new Set();
+    this._pendingHits = [];
+    this._tilesIn = new Set();          // 'tx,tz' of manifest tiles indexed NOW
+    this._tileKeys = null;              // …of every tile the manifest lists
+    const mt = this.city.manifestTiles;
+    if (mt) { this._tileKeys = new Set(); for (const t of mt) this._tileKeys.add(t.tx + ',' + t.tz); }
+  }
+
+  _tileIn(t, on) {
+    if (!t || t.tx === undefined) return;
+    const key = t.tx + ',' + t.tz;
+    if (on) this._tilesIn.add(key); else this._tilesIn.delete(key);
+  }
+
+  // Is there anything at (x,z) for a blast to bite into YET? Two answers, and
+  // the cheap one is also the trustworthy one: a chunk cell that already holds
+  // buildings proves the data is resident no matter what the tile ledger below
+  // it believes (a tile that finished loading before this CityWorld existed
+  // never told us). Only when the neighbourhood is empty do we ask whether the
+  // tile that owns the spot is actually missing — a hit in a genuinely empty
+  // field on a LOADED tile must be applied and forgotten, not queued forever.
+  _hitReady(x, z) {
+    const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const cell = this.city.chunkIndex.get((cx + dx) + ',' + (cz + dz));
+      if (cell && cell.buildings.length) return true;
+    }
+    const T = this.city.tile;
+    if (!T || !this._tileKeys) return true;                  // legacy whole-city file
+    const key = Math.floor(x / T) + ',' + Math.floor(z / T);
+    if (!this._tileKeys.has(key)) return true;               // outside the region
+    return this._tilesIn.has(key);
+  }
+
+  /**
+   * applyHit({x, y, z, r, id}) → boolean — the one door every blast goes
+   * through, local or relayed or replayed out of a snapshot. Applies the damage
+   * NOW if the ground is loaded, otherwise queues it against onTileLoaded.
+   * Returns true when the damage actually landed, false when it was queued or
+   * refused.
+   *
+   * `id` is the identity of the BLAST, not of the packet, and it is what keeps
+   * the mesh honest: a hit whose id has been seen is ignored, so replaying a
+   * snapshot that already contains hits we took live is a no-op. A hit without
+   * one has an id minted here AND STAMPED BACK onto the caller's object, so
+   * whoever is about to put it on the wire can forward the same id to everyone
+   * else. Forward it — without it a hit that reaches a player twice (once live,
+   * once inside somebody's snapshot) detonates twice.
+   */
+  applyHit(hit) {
+    if (!hit) return false;
+    const x = +hit.x, y = +hit.y, z = +hit.z;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
+    // the wire is not a trusted source: a radius is a rocket's radius, not
+    // whatever a hand-rolled client felt like sending
+    const raw = +hit.r;
+    const r = Number.isFinite(raw) && raw > 0 ? Math.min(raw, MISSILE.blast * 3) : MISSILE.blast;
+    let id = typeof hit.id === 'string' && hit.id ? hit.id : null;
+    if (!id) { id = this.hitOrigin + ':' + (++this._hitSeq); try { hit.id = id; } catch {} }
+    if (this._hitIds.has(id)) return false;
+    const rec = { x, y, z, r, id };
+    this._rememberHit(rec);
+    if (!this._hitReady(x, z)) {
+      this._pendingHits.push(rec);
+      if (this._pendingHits.length > PENDING_HITS_MAX) this._pendingHits.shift();
+      return false;
+    }
+    this.damageBuilding(null, x, y, z, r);
+    return true;
+  }
+
+  /** applyHits(list) — a whole snapshot at once. Returns how many landed. */
+  applyHits(list) {
+    if (!Array.isArray(list)) return 0;
+    let n = 0;
+    for (const h of list) if (this.applyHit(h)) n++;
+    return n;
+  }
+
+  _rememberHit(rec) {
+    this._hitIds.add(rec.id);
+    this.hitLog.push(rec);
+    if (this.hitLog.length > HIT_LOG_MAX) this.hitLog.shift();
+    // The id set must outlive the log (a snapshot may still carry an id we
+    // dropped), but it cannot grow without bound either — a peer spraying
+    // events would otherwise be a slow leak. Past the ceiling, re-seed it from
+    // the log: the worst that can happen is a very old hit being applied twice.
+    if (this._hitIds.size > HIT_IDS_MAX) {
+      this._hitIds = new Set();
+      for (const h of this.hitLog) this._hitIds.add(h.id);
+    }
+  }
+
+  // A tile arrived: anything that was waiting for ground under it lands now.
+  _flushHits() {
+    if (!this._pendingHits.length) return;
+    const still = [];
+    for (const h of this._pendingHits) {
+      if (this._hitReady(h.x, h.z)) this.damageBuilding(null, h.x, h.y, h.z, h.r);
+      else still.push(h);
+    }
+    this._pendingHits = still;
+  }
+
   /**
    * damageBuilding(hit, x, y, z, r) — route a blast into every building the
    * sphere actually reaches, not only the one the nose touched. A rocket into
    * a party wall has to open BOTH flats, and one into the street has to chew
-   * the shopfronts either side of it, which is why `hit` may be null.
+   * the shopfronts either side of it, which is why `hit` may be null — in fact
+   * it is never read at all, the sphere finds its own targets.
+   *
+   * This is the RAW, local, unlogged path: the car that scrapes a corner
+   * (vehicles.js) uses it because chipping plaster is not worth a packet.
+   * Anything a second player should also see goes through applyHit().
    */
   damageBuilding(hit, x, y, z, r) {
     const seen = new Set();

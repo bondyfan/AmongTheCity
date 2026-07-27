@@ -17,19 +17,36 @@
 // fades out entirely by MAX_DIST. A fixed world height would either be a
 // billboard in your face up close or an unreadable speck down the street.
 //
+// RANGE. 120 m was a walking-simulator number. This is a 134×43 km world with
+// cars that do 180: at 120 m a friend's name survives about five seconds of
+// following them down a straight, and the whole point of a name tag is
+// knowing which of the dots ahead is a person. The default is now 400 m, the
+// player can raise it to 2 km in the settings panel, and — the part that makes
+// a long range worth anything — the screen-referred growth gets a SECOND,
+// gentler slope past the knee. With one slope and a hard ceiling a 400 m tag
+// is ~4 px tall, i.e. hidden with extra steps; the far slope keeps it around
+// 12 px at 400 m and still legible as a marker at 2 km, while a nearby tag is
+// untouched. Occlusion still does the real filtering: the sprite depth-tests,
+// so a name 400 m away only shows when there is genuinely a line of sight.
+//
 // Import-time safety: nothing here touches the DOM until update() is first
 // called with a real peer, so `node --check` and headless tests are free.
 
 import * as THREE from 'three';
 
 const DEF = {
-  maxDist: 120,     // m — past this the tag is hidden outright
-  fadeDist: 90,     // m — fade begins here and reaches zero at maxDist
+  maxDist: 400,     // m — past this the tag is hidden outright
+  fadeDist: 320,    // m — fade begins here and reaches zero at maxDist
   pxScale: 0.030,   // world metres of tag height per metre of camera distance
   minHeight: 0.10,  // m — floor, so a tag pressed against the lens stays sane
-  maxHeight: 1.90,  // m — ceiling; beyond it the tag shrinks with distance
+  maxHeight: 1.90,  // m — the knee: constant apparent size ends here (~63 m)
+  farScale: 0.0105, // m of extra height per metre past the knee (see RANGE)
   headroom: 1.85,   // m above peer.y when the peer gives no explicit tagY
 };
+
+// The visible range the settings panel offers, in metres. Exported so
+// settings.js and this module can never disagree about what "Daleko" means.
+export const NAME_RANGES = [120, 400, 900, 2000];
 
 // Never trust a name that came off the wire — netcity sanitizes on receive,
 // but this module is the one that rasterises it, so it re-checks rather than
@@ -55,6 +72,10 @@ function clean(s) {
   const n = String(s ?? '').replace(STRIP, '').trim().slice(0, 14).trim();
   return INK.test(n) ? n : '';
 }
+// Same function, exported, so every OTHER surface that renders a nickname —
+// the co-op toasts, the map labels — filters it identically instead of growing
+// a fourth copy of this regex that drifts from the other three.
+export { clean as cleanName };
 
 const FONT_PX = 72;
 const PAD_X = 30, PAD_Y = 16;
@@ -122,6 +143,19 @@ export class NameTags {
     this._camPos = new THREE.Vector3();
   }
 
+  // Visible range in metres, straight from the settings panel. The fade band
+  // is derived rather than configured — a caller that sets a range and forgets
+  // the fade would otherwise get tags that pop out of existence, and the two
+  // numbers only ever make sense together. Non-finite or tiny input is
+  // ignored, so a corrupt localStorage value cannot blank every tag.
+  setRange(maxDist) {
+    const d = Number(maxDist);
+    if (!Number.isFinite(d) || d < 20) return this.opt.maxDist;
+    this.opt.maxDist = d;
+    this.opt.fadeDist = d * 0.8;
+    return d;
+  }
+
   // peers: any iterable of peer records — a Map (values are used), Set or
   // Array. Each record is read for:
   //   uid   string, required — the tag identity
@@ -161,10 +195,16 @@ export class NameTags {
       t.sprite.visible = true;
       t.sprite.position.set(x, y, z);
 
-      // screen-referred height, clamped at both ends (see the header note)
+      // screen-referred height (see the RANGE note): constant apparent size up
+      // to the knee, then a shallow slope so a far tag shrinks on screen
+      // without vanishing. farScale = pxScale would be no shrink at all;
+      // farScale = 0 is the old hard ceiling.
       let h = dist * o.pxScale;
       if (h < o.minHeight) h = o.minHeight;
-      else if (h > o.maxHeight) h = o.maxHeight;
+      else if (h > o.maxHeight) {
+        const knee = o.maxHeight / o.pxScale;              // m at which growth bends
+        h = o.maxHeight + (dist - knee) * (o.farScale ?? 0);
+      }
       t.sprite.scale.set(h * t.aspect, h, 1);
 
       t.mat.opacity = dist <= o.fadeDist

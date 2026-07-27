@@ -18,14 +18,26 @@
 // reads as a decal: a flash (real PointLight, so the street lights up), an
 // expanding fireball, a ground shockwave ring, and a lot of dust — plus the
 // actual destruction, which city.js routes into the building's box model.
+//
+// Multiplayer sees the SAME explosion in every client, so detonate() is written
+// to be replayable: `onDetonate` reports a local blast the instant it happens
+// (never a frame later — at 210 m/s a frame is 3.5 m of wall) and
+// `detonate(..., {remote:true})` replays somebody else's without shaking the
+// local camera or shouting into the local headphones.
 
 import * as THREE from 'three';
 import { MISSILE } from './config.js';
-import { missileLaunch, explosion, sfx } from './audio.js';
+import { missileLaunch, explosion, sfx, sfxAt } from './audio.js';
 
 const M = MISSILE;
 const STEP = 1.2;                 // m — collision sub-step along the path
 const POOL = 12;                  // rockets in the air at once
+// A blast somebody ELSE set off still lights up the street, but past this it is
+// a few pixels on the horizon and would only steal the sprite pool from a hit
+// the player can actually see. The light has a 90 m falloff, so its own cut is
+// tighter still: past that it contributes literally nothing but a stolen slot.
+const REMOTE_FX_R = 700;
+const REMOTE_LIGHT_R = 120;
 
 // ---- shared geometry / materials ---------------------------------------
 let _geo = null, _mat = null;
@@ -86,7 +98,8 @@ function fireTexture() {
 export class Weapons {
   /**
    * @param scene  THREE.Scene
-   * @param world  CityWorld — needs heightAt, buildingHitAt, damageBuilding
+   * @param world  CityWorld — needs heightAt, buildingHitAt and applyHit
+   *               (damageBuilding is the pre-multiplayer fallback)
    * @param fx     { dust } — the shared dust pool from interiorsim
    */
   constructor(scene, world, fx) {
@@ -132,6 +145,30 @@ export class Weapons {
     this.light.visible = false;
     scene.add(this.light);
     this._lightT = 0;
+    // Detonation subscribers. Multiplayer used to POLL `live` and infer a blast
+    // from a missile that had left the array — which is a whole frame late, and
+    // at 210 m/s a frame is up to 3.5 m of flight (10 m on a 30 Hz tab). The
+    // peer then wrecked the wrong wall. This fires from inside detonate(), at
+    // the exact metre the blast happened.
+    this._det = [];
+  }
+
+  /**
+   * onDetonate(fn) — fn({x, y, z, r, id}) on EVERY LOCAL detonation,
+   * synchronously, from inside the blast. Remote blasts replayed with
+   * {remote:true} do NOT re-fire it, so a relayed explosion cannot bounce back
+   * onto the wire. `id` is the city's identity for that blast: put it on the
+   * wire and pass it back in on the receiving side (detonate opts.id) and the
+   * same hit can be delivered twice — live and again inside a snapshot —
+   * without going off twice. Returns an unsubscribe.
+   */
+  onDetonate(fn) {
+    if (typeof fn !== 'function') return () => {};
+    this._det.push(fn);
+    return () => {
+      const i = this._det.indexOf(fn);
+      if (i >= 0) this._det.splice(i, 1);
+    };
   }
 
   get ready() { return this.cool <= 0 && this.reload <= 0 && this.ammo > 0; }
@@ -248,31 +285,71 @@ export class Weapons {
     return null;
   }
 
-  /** The blast: FX, sound, the shove on nearby traffic, and the demolition. */
-  detonate(x, y, z, b, ctx) {
+  /**
+   * The blast: FX, sound, the shove on nearby traffic, and the demolition.
+   *
+   * `opts.remote` marks a blast that happened in SOMEBODY ELSE'S helicopter and
+   * arrived over the wire. It is the same explosion in the same world — same
+   * fireball, same hole in the wall — but it must not touch the two things that
+   * belong to the local player's body: the camera does not shake (a peer three
+   * kilometres away was rattling the pilot's teeth) and the report is played
+   * POSITIONED via sfxAt instead of the flat mono `sfx`, which used to go off at
+   * full volume inside the headphones whatever the distance.
+   * `opts.id` is the sender's id for the blast — pass the one that came off the
+   * wire so the city can recognise it if it ever arrives a second time.
+   */
+  detonate(x, y, z, b, ctx, opts) {
     const r = M.blast;
+    const remote = opts?.remote === true;
     const gy = this.world.heightAt(x, z);
+    // How far the local ear/eye is from this blast. interiorsim owns the focus
+    // (it is the module that feeds audio's listener), so it is the one honest
+    // source available here; without it, treat a remote blast as mid-distance.
+    const foc = remote ? this.world.interiors?.focus : null;
+    const dist = foc ? Math.hypot(foc.x - x, foc.z - z) : (remote ? 260 : 0);
     // fireball + rings + light
-    for (let i = 0; i < 4; i++) this._fireball(x + (Math.random() - 0.5) * r * 0.5,
-      y + (Math.random() - 0.4) * r * 0.5, z + (Math.random() - 0.5) * r * 0.5,
-      r * (0.35 + Math.random() * 0.3), r * (1.3 + Math.random() * 0.9),
-      0.42 + Math.random() * 0.35);
-    this._ring(x, Math.max(gy + 0.1, y - r * 0.6), z, r * 3.4);
-    this.light.position.set(x, y + 1.5, z);
-    this.light.intensity = 260;
-    this.light.visible = true;
-    this._lightT = 0.28;
-    if (this.fx.dust) for (let i = 0; i < 7; i++)
-      this.fx.dust.puff(x + (Math.random() - 0.5) * r, y + Math.random() * r * 0.7,
-        z + (Math.random() - 0.5) * r, r * 0.4, r * 2.4, 2.6 + Math.random() * 2,
-        0.42, 0x6e6660);
-    explosion?.(1);
-    sfx?.('explosion_big', 0.95);   // sample layered over the synth blast; no-ops if absent
-    this.shake = Math.min(1.6, this.shake + M.shake);
+    if (!remote || dist < REMOTE_FX_R) {
+      for (let i = 0; i < 4; i++) this._fireball(x + (Math.random() - 0.5) * r * 0.5,
+        y + (Math.random() - 0.4) * r * 0.5, z + (Math.random() - 0.5) * r * 0.5,
+        r * (0.35 + Math.random() * 0.3), r * (1.3 + Math.random() * 0.9),
+        0.42 + Math.random() * 0.35);
+      this._ring(x, Math.max(gy + 0.1, y - r * 0.6), z, r * 3.4);
+      if (this.fx.dust) for (let i = 0; i < 7; i++)
+        this.fx.dust.puff(x + (Math.random() - 0.5) * r, y + Math.random() * r * 0.7,
+          z + (Math.random() - 0.5) * r, r * 0.4, r * 2.4, 2.6 + Math.random() * 2,
+          0.42, 0x6e6660);
+    }
+    if (!remote || dist < REMOTE_LIGHT_R) {
+      this.light.position.set(x, y + 1.5, z);
+      this.light.intensity = 260;
+      this.light.visible = true;
+      this._lightT = 0.28;
+    }
+    if (remote) {
+      // `explosion()` is the synth blast and has no panner and no fallback in
+      // audio.js, so distance has to be baked into its amplitude by hand; the
+      // sample rides on top through sfxAt, which does its own attenuation and
+      // simply drops out when it is inaudible.
+      const k = Math.max(0.05, Math.min(1, 1 - dist / 900));
+      explosion?.(k);
+      sfxAt?.('explosion_big', 0.95, x, z, 900);
+      // NO this.shake — the camera belongs to the local player.
+    } else {
+      explosion?.(1);
+      sfx?.('explosion_big', 0.95); // sample layered over the synth blast; no-ops if absent
+      this.shake = Math.min(1.6, this.shake + M.shake);
+    }
 
-    // the demolition itself — city.js finds every building the sphere touches,
-    // not just the one the nose met, so a hit on a party wall opens both flats
-    this.world.damageBuilding?.(b, x, y, z, r);
+    // The demolition itself. applyHit() is the multiplayer-safe door: it logs
+    // the hit for late joiners and QUEUES it when the region tile it landed on
+    // has not streamed in yet (a peer can perfectly well blow up a village
+    // 8 km away). damageBuilding stays the fallback for a world that predates
+    // it — it never read `b` anyway, the sphere finds its own targets.
+    // `hit` comes back carrying its id (minted by the city when we did not pass
+    // one), which is what the subscribers below hand to the network.
+    const hit = { x, y, z, r, ...(opts?.id ? { id: opts.id } : {}) };
+    if (this.world.applyHit) this.world.applyHit(hit);
+    else this.world.damageBuilding?.(b, x, y, z, r);
 
     // traffic gets thrown about. Cars carry a scalar speed along their heading,
     // so the shove becomes "spun and flung down your own axis", which at these
@@ -289,6 +366,12 @@ export class Weapons {
       c._rammedT = Math.max(c._rammedT ?? 0, 2.6);
     }
     ctx?.peds?.panic?.(x, z, r * 5);
+
+    // …and only now, with the world already changed, tell the network. A
+    // subscriber that throws is a bug in the subscriber, not a reason for the
+    // rocket to half-explode.
+    if (!remote && this._det.length)
+      for (const fn of this._det) { try { fn(hit); } catch (e) { console.error(e); } }
   }
 
   /**

@@ -7,6 +7,11 @@
 // picking Low/Medium/High stamps all graphics keys at once, and touching any advanced field
 // forks the dropdown to "Vlastní" (custom) so the label never lies about what's on screen.
 
+// The name-tag range ladder comes FROM nametags.js rather than being retyped
+// here: this panel is the only thing that moves that number, and two lists
+// that must match are one list that will not.
+import { NAME_RANGES } from './nametags.js';
+
 const LS_KEY = 'atc-settings';
 
 // The graphics keys a preset owns. mouseLook and volume are personal preferences, not
@@ -23,8 +28,13 @@ const PRESETS = {
             interiors: true, buildingR: 280 },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
+// showNames / nameDist are co-op preferences, not performance knobs: a name
+// tag is a handful of sprites, so they live in "Hra" beside mouse look and
+// never fork the graphics preset. showNames existed as a hardcoded `true` on
+// NetGame that nothing could ever flip — this is where the player gets the
+// switch. nameDist is metres of visible range (nametags.NAME_RANGES).
 const DEFAULTS = { preset: 'medium', ...PRESETS.medium, mouseLook: true, volume: 0.8,
-  showFps: false };
+  showFps: false, showNames: true, nameDist: NAME_RANGES[1] };
 
 // The live settings object — handed out by reference so main can keep one pointer to it.
 let S = { ...DEFAULTS };
@@ -43,6 +53,12 @@ function load() {
     // buildingR added), a profile saved as "medium" must get the new medium —
     // only "custom" keeps hand-tuned values verbatim.
     if (PRESETS[S.preset]) Object.assign(S, PRESETS[S.preset]);
+    // A range that is not one of the offered steps (an old build, a hand-edited
+    // blob) would leave the <select> showing nothing and the value unreachable
+    // — snap it to the nearest rung instead of trusting it.
+    if (!NAME_RANGES.includes(S.nameDist))
+      S.nameDist = NAME_RANGES.reduce((a, b) =>
+        Math.abs(b - S.nameDist) < Math.abs(a - S.nameDist) ? b : a, NAME_RANGES[1]);
   } catch { /* corrupt blob → keep defaults */ }
 }
 function save() {
@@ -215,6 +231,13 @@ export function initSettings(apply) {
   hGrid.append(
     toggleRow('showFps', 'Zobrazit FPS'),
     toggleRow('mouseLook', 'Mouse look (kurzor v okně)'),
+    // Co-op: the name over a friend's head, and how far away it survives. The
+    // labels are distances in the world's own terms — 120 m is the far side of
+    // a square, 2 km is the next village.
+    toggleRow('showNames', 'Jména hráčů nad hlavou'),
+    selectRow('nameDist', 'Dosah jmen', [[NAME_RANGES[0], 'Blízko (120 m)'],
+      [NAME_RANGES[1], 'Střední (400 m)'], [NAME_RANGES[2], 'Daleko (900 m)'],
+      [NAME_RANGES[3], 'Přes celé město (2 km)']]),
     sliderRow('volume', 'Hlasitost'),
   );
   body.appendChild(hGrid);

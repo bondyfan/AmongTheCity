@@ -311,11 +311,27 @@ const ROAD = {
   steps: { w: 1.8, v: 0, d: 0 }, track: { w: 2.5, v: 0, d: 0 },
 };
 
+// Runways and taxiways are polylines with a width, which is exactly what a road
+// is — so they ride the road layer rather than inventing a parallel one, and
+// get streaming, the minimap and the world map for free. `d: 0` keeps the
+// traffic AI off them (a Škoda queueing for take-off is not the joke we want);
+// the player can still drive onto one, because driving is free physics.
+// Default widths are the real thing: Pardubice's 09/27 is 45 m wide, Prague's
+// 06/24 is 60 m, and a taxiway is 23 m.
+const AERO_LINE = {
+  runway: { w: 45, v: 0, d: 0 },
+  taxiway: { w: 23, v: 0, d: 0 },
+  taxilane: { w: 15, v: 0, d: 0 },
+  airstrip: { w: 20, v: 0, d: 0 },
+};
+const AERO_AREA = { apron: 'apron', helipad: 'helipad', taxiway: 'apron', runway: 'runway' };
+
 function processRoads(els, owns) {
   const out = [], seen = new Set();
   for (const el of els) {
     const t = el.tags ?? {};
-    const spec = ROAD[t.highway];  // unknown classes (construction, proposed…) drop here
+    // an aeroway line is a road with a very generous width (see AERO_LINE)
+    const spec = ROAD[t.highway] ?? (t.area === 'yes' ? null : AERO_LINE[t.aeroway]);
     if (!spec || el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
     if (t.area === 'yes') continue; // pedestrian squares live in `paved`
     if (t.tunnel && t.tunnel !== 'no') continue; // nothing renders underground
@@ -325,9 +341,12 @@ function processRoads(els, owns) {
     // 0.5 m on a centreline under a 5–11 m ribbon is invisible, and DP never
     // drops an endpoint — so every junction node the traffic graph keys on
     // survives untouched.
-    const r = { p: simplify(ring(el.geometry), 0.5), t: t.highway, w: spec.w, v: spec.v, d: spec.d };
+    const r = { p: simplify(ring(el.geometry), 0.5), t: t.highway ?? t.aeroway, w: spec.w, v: spec.v, d: spec.d };
     const w = parseFloat(t.width);
-    if (w > 1 && w < 30) r.w = +w.toFixed(1);
+    // a runway's own `width` tag is 45–60 m, well past the 30 m road sanity cap
+    if (w > 1 && w < (t.aeroway ? 90 : 30)) r.w = +w.toFixed(1);
+    // the painted designation ("09/27", "06/24") — meshes paints the numbers
+    if (t.aeroway === 'runway' && t.ref) r.ref = t.ref;
     if (t.oneway === 'yes' || t.oneway === '1' || t.junction === 'roundabout') r.ow = 1;
     else if (t.oneway === '-1') { r.p.reverse(); r.ow = 1; }
     // ownership AFTER the oneway=-1 reverse — runtime _home reads the STORED p[0]
@@ -418,9 +437,12 @@ const greenKind = (t) =>
 
 const isPaved = (t) =>
   (t.amenity === 'parking' && !/underground|multi-storey/.test(t.parking ?? ''))
-  || (t.highway === 'pedestrian' && t.area === 'yes') || t.place === 'square';
+  || (t.highway === 'pedestrian' && t.area === 'yes') || t.place === 'square'
+  // aprons and helipads are always areas; runways/taxiways sometimes are too
+  || (!!AERO_AREA[t.aeroway] && (t.area === 'yes' || t.aeroway === 'apron' || t.aeroway === 'helipad'));
 const pavedKind = (t) =>
   t.amenity === 'parking' ? 'parking'
+  : AERO_AREA[t.aeroway] ? AERO_AREA[t.aeroway]
   : (t.highway === 'pedestrian' || t.place === 'square') ? 'plaza' : null;
 
 // ---------- waterway centerlines ----------
@@ -484,6 +506,7 @@ function processPois(els, owns) {
     const kind = t.railway === 'station' ? 'station'
       : t.railway === 'tram_stop' ? 'tram_stop'
       : t.highway === 'bus_stop' ? 'bus_stop'
+      : t.aeroway === 'aerodrome' ? 'aerodrome'
       : /^(fuel|hospital|police|fire_station)$/.test(t.amenity ?? '') ? t.amenity : null;
     if (!kind) continue;
     const k = 'node/' + el.id;
