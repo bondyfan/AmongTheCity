@@ -177,6 +177,19 @@ const SOUNDS = [
     'A fighter jet passing low overhead at high speed: the roar rushing in, a '
     + 'hard doppler shift as it passes, then the thunder trailing away behind it. '
     + 'Exterior, no music, no voice', 3.5],
+
+  // ---- v10: what fast actually sounds like ----
+  ['jet_wind',
+    'Sustained rushing airflow heard from inside a fast-moving aircraft: a broad, '
+    + 'steady wind roar with a slight buffeting flutter, no engine, no music, no '
+    + 'voice. Seamless loop', 6.0, { loop: true }],
+  ['jet_brake',
+    'A fighter jet decelerating hard on a runway after touchdown: tyres scrubbing '
+    + 'on concrete, wheel brakes grinding and squealing, rumbling down to a stop. '
+    + 'Exterior, dry, no music, no voice', 3.5],
+  ['tyre_touchdown',
+    'Aircraft tyres slamming onto a runway at landing: a sharp double chirp of '
+    + 'rubber on concrete with a puff of scrub, then rolling. Dry, close, no music', 1.6],
 ];
 
 const exists = async (p) => { try { await access(p); return true; } catch { return false; } };

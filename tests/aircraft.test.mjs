@@ -74,24 +74,46 @@ test('it reaches the 2 000 km/h the brief asked for — but only up high', () =>
     'altitude should be worth hundreds of km/h, or nobody will ever climb');
 });
 
-test('a bank turns it, and speed widens the turn', () => {
-  const slow = new Fighter(scene, 0, 0, 0);
-  slow.airborne = true; slow.y = 3000; slow.speed = 150;
-  const h0 = slow.heading;
-  fly(slow, 6, () => ({ throttle: 0.6, roll: 1 }));
-  assert.ok(Math.abs(slow.heading - h0) > 0.2, 'a banked jet must change heading');
+test('you roll to point the pull, and the pull is what turns you', () => {
+  // The stick commands BODY rates, so a bank on its own does NOT turn the
+  // aeroplane — it just puts the wing where the pull will be spent. This is
+  // the whole difference between an aircraft and a car, and the first version
+  // got it wrong by turning straight out of the bank angle.
+  const rolled = new Fighter(scene, 0, 0, 0);
+  rolled.airborne = true; rolled.y = 3000; rolled.speed = 250;
+  const h0 = rolled.heading;
+  fly(rolled, 0.35, () => ({ throttle: 0.7, roll: 1 }));
+  assert.ok(rolled.roll < -0.3, `stick right must bank RIGHT (negative), got ${rolled.roll}`);
+  assert.ok(Math.abs(rolled.heading - h0) < 0.05,
+    'rolling alone must not change heading — only the pull turns you');
 
-  // ω = g·tan(φ)/V — so at twice the speed, the same bank sweeps less heading.
-  const turnRate = (v) => {
+  // …and now the pull, held with the wing already banked right, turns right,
+  // which in this frame means the heading DECREASES.
+  const h1 = rolled.heading;
+  fly(rolled, 2, () => ({ throttle: 0.7, pitch: 1 }));
+  assert.ok(rolled.heading - h1 < -0.5,
+    `banked right and pulling must turn right, swept ${rolled.heading - h1}`);
+
+  // Upright, the same pull is a pure climb with no turn in it at all.
+  const up = new Fighter(scene, 0, 0, 0);
+  up.airborne = true; up.y = 3000; up.speed = 250;
+  const y0 = up.y, h2 = up.heading;
+  fly(up, 3, () => ({ throttle: 0.7, pitch: 1 }));
+  assert.ok(up.y - y0 > 150, `upright pull should climb, gained ${Math.round(up.y - y0)} m`);
+  assert.ok(Math.abs(up.heading - h2) < 0.05, 'upright pull must not turn');
+
+  // The heading RATE no longer depends on speed, but the RADIUS does: same
+  // rate, more metres per second, wider circle. That is still "fast is wide".
+  const radius = (v) => {
     const j = new Fighter(scene, 0, 0, 0);
-    j.airborne = true; j.y = 3000; j.speed = v;
-    j.roll = -0.8;                       // fixed 46° right bank, stick centred
+    j.airborne = true; j.y = 3000; j.speed = v; j.roll = -0.9;
     const a = j.heading;
-    for (let i = 0; i < 60 * 2; i++) j.update(DT, { throttle: 0.6 }, flatWorld);
-    return Math.abs(j.heading - a);
+    fly(j, 2, () => ({ throttle: 0.7, pitch: 1 }));
+    const swept = Math.abs(j.heading - a);
+    return swept > 1e-3 ? v * 2 / swept : Infinity;
   };
-  assert.ok(turnRate(150) > turnRate(400) * 1.8,
-    'the turn equation is not scaling with airspeed');
+  assert.ok(radius(400) > radius(150) * 1.8,
+    'a faster jet must carve a wider circle');
 });
 
 test('below the stall it comes down', () => {

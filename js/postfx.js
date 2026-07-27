@@ -173,6 +173,8 @@ const COMPOSITE_FRAG = /* glsl */`
   uniform sampler2D tRays;
   uniform vec3 rayColor;
   uniform float rayStrength;
+  uniform float uBlur;            // 0 = off; how far the smear reaches, in uv
+  uniform vec2  uBlurC;           // the point it smears AWAY from
   uniform bool useAO;
   uniform bool useCanopy;
   uniform bool useBloom;
@@ -242,6 +244,24 @@ const COMPOSITE_FRAG = /* glsl */`
     // output encode, so writing linear straight out (the old bug) darkened
     // the whole frame ~60% the moment the post path switched on.
     vec3 c = useFXAA ? fxaa(vUv) : texture2D(tScene, vUv).rgb;
+    // ---- motion blur -----------------------------------------------------
+    // A RADIAL smear away from where the machine is heading. Real camera blur
+    // needs per-pixel velocity, which needs a velocity buffer and a second
+    // pass; but almost all of the blur a driver or a pilot actually perceives
+    // is the world streaming outward from the vanishing point, and that is a
+    // pure function of one screen-space point and one strength. Six taps, no
+    // extra target, no extra pass — it rides the composite that was already
+    // sampling this texture. Pixels near the centre barely move, the frame
+    // edges tear past, which is exactly the real thing's signature.
+    if (uBlur > 0.0005) {
+      vec2 d = (vUv - uBlurC) * uBlur;
+      vec3 acc = c;
+      for (int i = 1; i <= 6; i++) {
+        float t = float(i) / 6.0;
+        acc += texture2D(tScene, vUv - d * t).rgb;
+      }
+      c = acc / 7.0;
+    }
     if (useAO || useCanopy) {
       float occl = 1.0;
       if (useAO) {
@@ -338,6 +358,7 @@ export class PostFX {
       uCanopyCenter: { value: new THREE.Vector2() }, uCanopyInvSize: { value: 1 / 400 },
       uCanopyStrength: { value: 0.9 },
       texel: { value: new THREE.Vector2() },
+      uBlur: { value: 0 }, uBlurC: { value: new THREE.Vector2(0.5, 0.5) },
       aoStrength: { value: 0.25 }, aoFloor: { value: 0.30 }, bloomStrength: { value: 0.55 },
       useAO: { value: false }, useCanopy: { value: false },
       useBloom: { value: false }, useRays: { value: false }, useFXAA: { value: false },
@@ -454,6 +475,12 @@ export class PostFX {
     c.useFXAA.value = false;
     c.aoStrength.value = opts.aoStrength ?? 0.25;
     c.aoFloor.value = opts.aoFloor ?? 0.30;
+    // motion blur: main.js hands us a strength and, optionally, where the
+    // vanishing point is on screen (the nose, not the frame centre — you are
+    // rarely looking exactly where you are going)
+    c.uBlur.value = opts.motionBlur ?? 0;
+    if (opts.blurCenter) c.uBlurC.value.copy(opts.blurCenter);
+    else c.uBlurC.value.set(0.5, 0.5);
     c.useRays.value = rayK > 0;
     c.tRays.value = rayK > 0 ? this.rtRay.texture : this.rtAOb.texture;
     c.rayStrength.value = rayK;

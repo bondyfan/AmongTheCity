@@ -1644,7 +1644,13 @@ export const chunkBase = (cx, cz) => [cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK
 export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   const key = cx + ',' + cz;
   const cell = city.chunkIndex.get(key);
-  if (!cell) return null;                       // outside the mapped city
+  // A GROUND-ONLY cell needs nothing from the city — it is an aerial photo and
+  // nothing else. Requiring an indexed cell first meant that whenever the
+  // region tiles lagged behind (which is exactly what happens at 700 m/s) the
+  // far ring returned null and the world simply had a HOLE in it: no photo, no
+  // quad, just the fog-coloured apron showing through. So the photo goes down
+  // as soon as the WMS can serve it, and the data fills in behind it.
+  if (!cell && !groundOnly) return null;        // outside the mapped city
   const group = new THREE.Group();
   group.name = 'chunk:' + key;
   const x0 = cx * CHUNK, z0 = cz * CHUNK, x1 = x0 + CHUNK, z1 = z0 + CHUNK;
@@ -1653,6 +1659,10 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   if (groundOnly) {
     const g = mats.ortho?.orthoGroundMesh?.(cx, cz);
     if (g) { g.userData.localGeom = true; group.add(g); return done(); }
+    // No photo AND no data means we are off the edge of the world (ortho.js
+    // clamps its requests to the region) — the apron is the right answer there,
+    // and paving open country with grey quads would only cost draw calls.
+    if (!cell) return null;
     const q = new THREE.Mesh(new THREE.PlaneGeometry(CHUNK, CHUNK), mats.flatFar ?? mats.flat);
     q.rotation.x = -Math.PI / 2;
     q.position.set(x0 + CHUNK / 2, 0, z0 + CHUNK / 2);

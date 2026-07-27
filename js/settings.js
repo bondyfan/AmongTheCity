@@ -19,13 +19,13 @@ const LS_KEY = 'atc-settings';
 const PRESETS = {
   low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 60,
             ortho: false, facades: false, trees: true, peds: 12, bloom: false, rays: false,
-            interiors: false, buildingR: 80 },
+            interiors: false, buildingR: 80, mblur: false },
   medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 240,
             ortho: true,  facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
-            interiors: true, buildingR: 160 },
+            interiors: true, buildingR: 160, mblur: true },
   high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
             ortho: true,  facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
-            interiors: true, buildingR: 280 },
+            interiors: true, buildingR: 280, mblur: true },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
 // showNames / nameDist are co-op preferences, not performance knobs: a name
@@ -218,6 +218,7 @@ export function initSettings(apply) {
     toggleRow('facades', 'Textury fasád'),
     toggleRow('bloom', 'Bloom (záře světel)'),
     toggleRow('rays', 'Sluneční paprsky'),
+    toggleRow('mblur', 'Motion blur (rozmaz při rychlosti)'),
     toggleRow('trees', 'Stromy'),
     selectRow('peds', 'Chodci', [[0, 'Žádní'], [12, 'Málo'], [34, 'Běžně'], [60, 'Rušno']]),
     // Interiors stream only around a walking player, so the cost is bounded —

@@ -1699,3 +1699,71 @@ export function jetSet(throttle01, speed01, reheat) {
   duckHeli = Math.max(0.35, th);
   duckUpdate();
 }
+
+// ---- slipstream: the wind, once you are going fast enough to hear it -------
+// The engine is behind you; the WIND is the sound of the airframe pushing a
+// hole through the sky, and it is what actually tells a pilot how fast they
+// are going. Kept as a looping render rather than synthesis because broadband
+// rush with buffeting in it is one thing samples do better than filters.
+//
+// It is speed-gated, not throttle-gated: chopping the power at Mach 1 leaves
+// you just as fast and just as loud for a while, which is exactly right. The
+// lowpass opens with speed too, so the character travels from a distant hiss
+// to a hard roar rather than simply getting louder.
+const WIND = {
+  from: 90,          // m/s (324 km/h) where it first becomes audible
+  full: 620,         // m/s where it is everything
+  vol: 0.75,
+  cutLo: 700, cutHi: 6000,
+  tau: 0.25,         // slow: the slipstream has no transients
+};
+let wind = null, windWant = false, windPending = false, windLvl = 0;
+
+export function windStart() { windWant = true; windBuild(); }
+
+function windBuild() {
+  if (!ctx || ctx.state !== 'running' || wind || windPending || !windWant) return;
+  windPending = true;
+  loadBuffer('jet_wind').then((buf) => {
+    windPending = false;
+    if (!buf || !windWant || wind || !ctx || ctx.state !== 'running') return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = WIND.cutLo; lp.Q.value = 0.4;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    src.connect(lp); lp.connect(gain); gain.connect(master);
+    src.start(t, Math.random() * buf.duration);
+    wind = { src, lp, gain };
+  });
+}
+
+export function windStop() {
+  windWant = false;
+  windLvl = 0;
+  if (!wind) return;
+  const w = wind;
+  wind = null;
+  const t = ctx.currentTime;
+  w.gain.gain.cancelScheduledValues(t);
+  w.gain.gain.setTargetAtTime(0, t, 0.2);
+  setTimeout(() => {
+    try { w.src.stop(); } catch {}
+    w.src.disconnect(); w.lp.disconnect(); w.gain.disconnect();
+  }, 1200);
+}
+
+/** speed in m/s — the only thing the slipstream cares about. */
+export function windSet(speed) {
+  windLvl = speed <= WIND.from ? 0
+    : Math.min(1, (speed - WIND.from) / (WIND.full - WIND.from));
+  if (!wind) return;
+  const t = ctx.currentTime;
+  // squared: the first third of the range stays a whisper, so the wind arriving
+  // is something you notice rather than something that was always there
+  wind.gain.gain.setTargetAtTime(WIND.vol * windLvl * windLvl, t, WIND.tau);
+  wind.lp.frequency.setTargetAtTime(
+    WIND.cutLo + (WIND.cutHi - WIND.cutLo) * windLvl, t, WIND.tau);
+}

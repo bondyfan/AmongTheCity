@@ -114,6 +114,20 @@ export function initOrtho() {
     return d <= R_NEAR ? PX_NEAR : d <= R_MID ? PX_MID : PX_FAR;
   }
 
+  // The coarse version of this supertile, if one is already loaded. Upgrading
+  // detail used to REFRESH VISIBLY: the new entry began as a flat grey material
+  // and the photo snapped in when the JPEG landed, so approaching anywhere made
+  // the ground blink to grey and back. Handing the new entry the old texture as
+  // a placeholder means the picture never leaves — it just gets sharper.
+  function coarserTex(sx, sz, px) {
+    for (const p of [PX_NEAR, PX_MID, PX_FAR]) {
+      if (p === px) continue;
+      const e = tiles.get(sx + ',' + sz + '@' + p);
+      if (e && e.tex && e.mat.map) return e.tex;
+    }
+    return null;
+  }
+
   function makeEntry(sx, sz, px) {
     const key = sx + ',' + sz + '@' + px;
     // The material starts WITHOUT its map, tinted the flat-ground color:
@@ -122,7 +136,10 @@ export function initOrtho() {
     // the map and resets the tint to white so the photo shows unfiltered;
     // needsUpdate recompiles the shader with the map define — once per
     // supertile, cheap. (Both callbacks fire async, so `entry` exists.)
-    const mat = new THREE.MeshLambertMaterial({ color: COLORS.groundBase });
+    const stale = coarserTex(sx, sz, px);
+    const mat = new THREE.MeshLambertMaterial(stale
+      ? { map: stale, color: 0xffffff }          // wear the blurry one meanwhile
+      : { color: COLORS.groundBase });
     const tex = loader.load(tileUrl(sx, sz, px),
       () => {
         if (tiles.get(key) !== entry) { tex.dispose(); return; } // evicted mid-flight

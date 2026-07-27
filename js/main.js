@@ -18,6 +18,7 @@ import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
 import { initAudio, sfx, sfxAt, engineStart, engineStop, engineSet, tireSet, setVolume,
   heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
+  windStart, windStop, windSet,
   ambientStart, nearbyTrafficHum } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
@@ -98,7 +99,8 @@ let helis = [], fighters = [], heli = null;
 // not held down, and it must survive letting go of the key
 let jetThrottle = 0;
 let jetNearest = null;   // the Gripen within reach, for the hint
-let jetBoomed = false;   // has this flight already cracked through Mach 1
+let jetWasAir = false;   // edge detector for touchdown
+let jetBraking = false;  // …and for the brakes, so the sample fires once
 let worldMap = null;   // the full-region map on M, and the waypoint it owns
 let trains = null;     // České dráhy on the real 532 km network
 let weapons = null;  // the rocket pod under that machine, and what it does to walls
@@ -445,6 +447,68 @@ function updateCamera(dt) {
   applyLens(dt, fov, CAM_NEAR);
 }
 
+// ---------- what the player can actually see ----------
+// traffic.js and pedestrians.js both refuse to create or destroy an actor the
+// player could catch doing it, and both ask the same question through the same
+// setViewer() contract (pedestrians.js adopted traffic.js's signature verbatim,
+// down to the 0.42 rad margin). One snapshot therefore feeds both.
+//
+// Both modules accept `{ camera, fogFar }` and will pull the numbers out
+// themselves. We hand over the numbers instead, for two reasons. The cheap one:
+// getWorldDirection() runs once a frame rather than twice. The real one: the
+// two modules then judge the cone from BIT-IDENTICAL inputs, so a car and the
+// pedestrian stepping in front of it can never disagree about where the screen
+// ends — and the fov is eased every frame (applyLens), so a half-degree
+// difference between two reads is not hypothetical.
+//
+// TIMING — this reads the camera as updateCamera() left it at the END of the
+// previous frame. updateCamera() must run after the vehicles have moved, which
+// puts it well below traffic.update(); hoisting it would change what the
+// clouds, the reticle and the sky see, for a lag of one frame on a yaw. That
+// lag is exactly what VIEW_MARGIN is for: 0.42 rad of slack absorbs a 24°
+// slew, and a mouse whip fast enough to beat it is a frame in which nobody was
+// reading the picture anyway.
+const _viewDir = new THREE.Vector3();
+// Mutated in place, never reallocated — this runs 60×/s and both callees copy
+// what they need out of it synchronously, inside setViewer().
+const _viewer = { x: 0, z: 0, dirX: 0, dirZ: 1, fovRad: 1.05, aspect: 16 / 9, fogFar: 900 };
+function viewerState() {
+  // Until updateCamera() has placed it once, the camera sits at the origin
+  // looking down −Z while the player stands kilometres away in Pardubice.
+  // Handing that over would protect a cone over empty fields AND declare
+  // everything around the player unobserved — on precisely the frame where the
+  // whole fleet is minted. "No camera" is the honest answer until there is one;
+  // both modules have a documented, safe meaning for null (traffic falls back
+  // to v8, pedestrians to a 110 m sphere watched in every direction).
+  if (!camInit) return null;
+  camera.getWorldDirection(_viewDir);
+  _viewer.x = camera.position.x;
+  _viewer.z = camera.position.z;
+  _viewer.dirX = _viewDir.x;
+  _viewer.dirZ = _viewDir.z;
+  // Read from the camera, not from camYaw/camPitch: first person sets
+  // camera.position/lookAt directly and never touches the boom, and the aim in
+  // FP is camYaw + fpPitch rather than camYaw alone. The camera's own world
+  // matrix is the one thing true in every mode — chase, driver's seat,
+  // helicopter, jet.
+  //
+  // three.js keeps fov in DEGREES, and applyLens eases it every frame (55°
+  // walking, 68° at speed, 74–79° from the driver's seat), so it cannot be
+  // cached at boot.
+  _viewer.fovRad = camera.fov * Math.PI / 180;
+  _viewer.aspect = camera.aspect;
+  // The fog wall, which is where a fade-in stops being catchable — and it is
+  // not a constant. updateHorizon() stretches it with the streamed radius
+  // (~634 m on the ground, past 3 km from a helicopter) and sky.js pulls it in
+  // at night. Both modules clamp it into their own range, so pass it raw.
+  _viewer.fogFar = scene.fog?.far ?? 900;
+  // A camera looking dead vertical has no horizontal bearing and the cone is
+  // meaningless. Unreachable today (camPitch tops out at 1.15 rad, fpPitch at
+  // 0.75), but say it here rather than letting both modules discover it.
+  if (!(Math.abs(_viewer.dirX) + Math.abs(_viewer.dirZ) > 1e-6)) return null;
+  return _viewer;
+}
+
 // How far ahead of the player the streamer should be looking. Only the fast
 // machines get a lead worth having: on foot or in a car the loader is never the
 // bottleneck, and a lead there would only blur which chunks count as "near".
@@ -469,6 +533,69 @@ function leadFocus(focus) {
   return _lead;
 }
 
+// How hard to smear the frame. Speed alone is not the input: 130 km/h in a car
+// is a rush and 130 km/h in a Gripen is taxiing, so each machine gets its own
+// band — where the smear starts, where it maxes out, and how far it goes.
+//
+// [onset m/s, full m/s, peak uv]. The car band is the one that matters most in
+// practice because it is where most of the game is played: it opens at 54 km/h
+// and is fully out by 150, which puts real blur on an ordinary fast drive. The
+// first cut squared the ramp and opened at 79 km/h, which made 100 km/h worth
+// 0.003 uv — arithmetically present, visually nothing.
+const MB_CAR = [15, 42, 0.05];
+const MB_HELI = [25, 60, 0.045];
+const MB_JET = [110, 600, 0.085];
+function motionBlurAmount() {
+  let v = 0, band = null;
+  if (game.jet) { v = game.jet.speed; band = MB_JET; }
+  else if (game.car) { v = Math.abs(game.car.speed); band = MB_CAR; }
+  else if (game.heli) { v = Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0); band = MB_HELI; }
+  else return 0;
+  const [on, full, peak] = band;
+  const t = Math.min(1, Math.max(0, (v - on) / (full - on)));
+  // pow 1.5, not 2: still nothing at a crawl, but the middle of the band —
+  // which is where you actually drive — gets a third of the effect rather
+  // than a tenth of it
+  return Math.pow(t, 1.5) * peak;
+}
+
+// ---------- ghost cars: things to look at, and nothing else ----------
+// traffic.js keeps drawing a car whose shared slot has already rolled over, so
+// that it can drive off the screen instead of blinking out of it (see the v9
+// header there). Such a GHOST is by construction a car NO PEER HAS: on his
+// machine that slot string already names the next generation's car, standing
+// somewhere else. traffic.cars holds both kinds, so anything that reads that
+// Set has to decide which it meant.
+//
+// The rule: a ghost may be seen and heard. It may not touch shared state.
+//   · running a pedestrian over writes the ped's SHARED slot (`held`, the
+//     ragdoll, the corpse, the decal) — a ghost doing it kills a walker on one
+//     screen and leaves him strolling on the other, for up to a whole TRIP_T;
+//   · crashing writes the player's own car, whose pose every peer is watching
+//     — bouncing off thin air is the desync everybody actually sees;
+//   · boarding one hands the player a car with no shared identity, and the
+//     steal is not even broadcast (slotKey() is null for a ghost), so the peer
+//     goes on driving his own generation through the one you are sitting in.
+// Left deliberately ghost-inclusive, because they only move pixels: the
+// minimap, the traffic hum, and the rocket pod (a rocket must not fly through
+// a car body you can see — and the detonation is computed once here and then
+// shipped through world.applyHit, so the peer never recomputes it and cannot
+// disagree about the hole).
+//
+// slotKey() is the canonical question rather than car.ai.ghost: it is the
+// public method whose documented contract is exactly "null = the peer has no
+// such car", and it also covers a car whose schedule has been torn off.
+function isGhostCar(c) { return traffic ? traffic.slotKey(c) === null : false; }
+
+// The AI fleet minus the ghosts — every car both clients agree exists.
+// Rebuilt per call: traffic.cars churns every frame and callers hold the
+// result only for the length of one update.
+function sharedCars() {
+  const out = [];
+  if (traffic) for (const c of traffic.cars) if (!isGhostCar(c)) out.push(c);
+  return out;
+}
+
 // ---------- enter / exit cars ----------
 function nearestEnterableCar() {
   let best = null, bd = 3.4;
@@ -478,6 +605,8 @@ function nearestEnterableCar() {
     if (d < bd) { bd = d; best = c; }
   }
   if (traffic) for (const c of traffic.cars) {
+    // a ghost is on borrowed time and belongs to nobody — the door is locked
+    if (isGhostCar(c)) continue;
     const d = Math.hypot(c.x - px, c.z - pz);
     // moving traffic must slow right down before you can yank the door
     if (d < bd && Math.abs(c.speed) < 3) { bd = d; best = c; }
@@ -720,6 +849,7 @@ input.onKey('KeyE', () => {
     game.jet = null;
     $id('speedo').classList.add('hidden');
     jetStop?.();
+    windStop?.();
     sfx('door_open', 0.7);
     player.beginExit({ onOut: () => sfx('door_close', 0.8) });
   } else if (game.heli) {
@@ -779,9 +909,10 @@ input.onKey('KeyE', () => {
         sfx('door_close', 0.6);
         game.jet = jetNear;
         jetThrottle = 0;               // every flight starts at idle
-        jetBoomed = false;
+        jetWasAir = false; jetBraking = false;
         sfx('jet_start', 0.8);
         jetStart?.();
+        windStart?.();
         $id('speedo').classList.remove('hidden');
         ui_hint('W = tah (Shift forsáž) · ↓ vzlet · ←→ náklon · mezerník brzdy');
       },
@@ -973,8 +1104,22 @@ function placeParkedCars(city) {
   }
 }
 
-// every car the player can hit — traffic + parked, self filtered in driveStep
+// every car the player can hit — traffic + parked, self filtered in driveStep.
+// SHARED traffic only: see isGhostCar. A ghost is not a wall, because on the
+// peer's screen there is nothing there to bounce off.
 function _crashList() {
+  if (!traffic) return parked;
+  const out = sharedCars();
+  for (const c of parked) out.push(c);
+  return out;
+}
+
+// what a rocket can hit and shove. Everything the player can SEE, ghosts
+// included — this list moves no shared state (the blast's hole in the wall
+// goes out over the wire from here, it is not recomputed on the far side), and
+// a rocket sailing through a car that is plainly there is a worse lie than a
+// car the peer happens not to draw.
+function _blastList() {
   return traffic ? [...traffic.cars, ...parked] : parked;
 }
 
@@ -1831,7 +1976,11 @@ function tick(src) {
     // back under the bar). Without this pass emissive is just a pale box.
     // God rays ride the same pass at dawn and dusk.
     const gs = getSettings();
-    const wantPost = game.mode === 'play' && (gs.bloom !== false || gs.rays !== false);
+    // motion blur lives in the composite pass, so it needs the post path up —
+    // without it in this test, switching bloom AND rays off silently killed the
+    // blur too, with the toggle still reading "on"
+    const wantPost = game.mode === 'play'
+      && (gs.bloom !== false || gs.rays !== false || gs.mblur !== false);
     if (wantPost && !postfx) {
       postfx = new PostFX(renderer);
       postfx.setSize(renderer.domElement.width, renderer.domElement.height);
@@ -1843,7 +1992,8 @@ function tick(src) {
         const dayK = Math.min(1, Math.max(0, (sky.sun?.intensity ?? 0) / 1.4));
         if (dayK > 0.02) rays = { dir: sky.sunDir, color: sky.sun.color, strength: dayK * 0.7 };
       }
-      postfx.render(scene, camera, { ssao: false, bloom: gs.bloom !== false, rays, canopy: null });
+      postfx.render(scene, camera, { ssao: false, bloom: gs.bloom !== false, rays, canopy: null,
+        motionBlur: gs.mblur === false ? 0 : motionBlurAmount() });
     } else {
       renderer.render(scene, camera);
     }
@@ -1923,11 +2073,18 @@ function stepGame(dt) {
     }, world);
     player.update(dt, { input, camYaw, world });   // stays glued to the cockpit
     jetSet?.(jetThrottle, Math.min(1, jet.speed / 690), jet.reheat);
-    // Mach 1 is an EVENT, not a threshold to be re-crossed every frame: fire
-    // once on the way through and rearm only after dropping well back below,
-    // or level flight around the number machine-guns the sample.
-    if (!jetBoomed && jet.speed > 343) { jetBoomed = true; sfx('jet_boom', 0.9); }
-    else if (jetBoomed && jet.speed < 320) jetBoomed = false;
+    windSet?.(jet.speed);
+    // aircraft.js owns "am I supersonic" so the bang and the vapour cone are
+    // one event; this just plays the bang. Loud, because it is competing with
+    // an afterburner four metres away.
+    if (jet.justWentSupersonic) sfx('jet_boom', 1.0);
+    // Landing: the tyres bite once, then the brakes grind until you are slow.
+    // `_wasAir` is the edge detector — touchdown is a transition, not a state.
+    if (jetWasAir && !jet.airborne) sfx('tyre_touchdown', Math.min(1, jet.speed / 90));
+    jetWasAir = jet.airborne;
+    if (!jet.airborne && k.has('Space') && jet.speed > 14) {
+      if (!jetBraking) { jetBraking = true; sfx('jet_brake', 0.85); }
+    } else jetBraking = false;
   } else if (game.heli) {
     // WASD flies the machine, the ARROWS work the collective and the pedals.
     // input.moveX/moveZ alias the arrows onto WASD for walking, so flight
@@ -1981,12 +2138,23 @@ function stepGame(dt) {
   // avatars off them (remoteSeatAnchor, called from inside net.update), and
   // both want this frame's pose rather than last frame's.
   pumpGhosts(dt);
+  // One look, both crowds. This is the fix for "auta a chodci se z ničeho nic
+  // objevují a mizí": without it traffic.js reaps a car the moment its shift
+  // expires and pedestrians.js spawns from 18 m out, both of them in plain
+  // sight. With it, neither module makes a lifecycle decision inside this cone.
+  // It has to precede BOTH update() calls — a setViewer() after the fact would
+  // describe the frame the pop already happened in.
+  const view = viewerState();
+  traffic.setViewer(view);
+  peds.setViewer(view);
   traffic.actors = updateActors();
   traffic.update(dt, player.pos, game.car);
-  // ragdoll physics needs to know what can hit a pedestrian: every AI car
-  // plus whatever the player is driving, refreshed per frame because the
-  // player's car changes identity on every E
-  peds.cars = traffic ? traffic.cars : null;
+  // ragdoll physics needs to know what can hit a pedestrian: every SHARED AI
+  // car plus whatever the player is driving, refreshed per frame because the
+  // player's car changes identity on every E. Ghosts are filtered out here and
+  // not in pedestrians.js on purpose — traffic.cars is main.js's wiring, and
+  // pedestrians.js has no business knowing traffic.js has two kinds of car.
+  peds.cars = sharedCars();
   peds.playerCar = game.car;
   peds.update(dt, focus);
   trains?.update(dt, focus);
@@ -1998,7 +2166,7 @@ function stepGame(dt) {
   // nearest parked one.
   heli = game.heli ?? nearestParked(helis, player.pos.x, player.pos.z, Infinity);
   jetNearest = game.jet ?? nearestParked(fighters, player.pos.x, player.pos.z, Infinity);
-  weapons?.update(dt, { cars: _crashList(), peds });
+  weapons?.update(dt, { cars: _blastList(), peds });
   updateAim(dt);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
   if (traffic) {
@@ -2028,6 +2196,14 @@ function stepGame(dt) {
     const c = game.car, fx2 = -Math.sin(c.heading), fz2 = -Math.cos(c.heading);
     streaks?.update(dt, c.x, (c.mesh?.position.y ?? 0) + 0.9, c.z,
       fx2 * c.speed, 0, fz2 * c.speed);
+  } else if (game.jet) {
+    // the jet's velocity is along its nose (it does not fly sideways), and the
+    // vertical component matters here — a vertical climb should streak too
+    const j = game.jet, cp = Math.cos(j.pitch);
+    streaks?.update(dt, j.x, j.y, j.z,
+      -Math.sin(j.heading) * cp * j.speed,
+      Math.sin(j.pitch) * j.speed,
+      -Math.cos(j.heading) * cp * j.speed);
   } else if (game.heli) {
     const h = game.heli;
     streaks?.update(dt, h.x, h.y + 0.6, h.z, h.vx ?? 0, h.vy ?? 0, h.vz ?? 0);
@@ -2359,6 +2535,10 @@ window.__atc = {
   // assert the interior really came off after a wreck or an exit at speed
   cam: () => ({ camDist, camPitch, camYaw, fpView, fpPitch, near: camera.near,
     cabin: !!_cabinCar }),
+  // The exact snapshot traffic.js and pedestrians.js are gating their lifecycle
+  // on, so a harness can assert the cone is live (and is the SAME one) instead
+  // of inferring it from pops. A copy: the real record is mutated in place.
+  viewer: () => { const v = viewerState(); return v && { ...v }; },
   get weapons() { return weapons; },
   get interiors() { return world?.interiors; },
   get postfx() { return postfx; },

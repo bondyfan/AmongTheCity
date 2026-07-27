@@ -16,9 +16,10 @@
 //     it takes ~10 km of altitude to see 2 400. Climbing is therefore not
 //     decoration, it is how you go fast, which is exactly how the real thing
 //     behaves.
-//   • A turn is a banked turn: ω = g·tan(φ)/V. Roll the aircraft and the
-//     heading follows, and because V is in the denominator, the faster you go
-//     the wider you turn. No separate "steering" input exists in the air.
+//   • The stick commands BODY rates, not world angles. Pull, and the nose goes
+//     toward the CANOPY — which upright is a climb and banked is a turn. That
+//     is why you roll before you pull, and it is the one thing that makes an
+//     aircraft feel like an aircraft rather than a car with altitude.
 //   • Control authority scales with airspeed. Parked on the apron the stick
 //     does nothing; below rotation speed you cannot lift the nose.
 //
@@ -72,6 +73,8 @@ const AIRBRAKE = 9;            // m/s² of extra drag with the boards out
 const GEAR_H = 1.35;           // m from the ground to the fuselage centreline
 const AOA_LIFT = 0.9;          // how hard the wing pulls the velocity to the nose
 const SINK_RATE = 14;          // m/s of sag when the wing has nothing to bite
+const MACH1 = 340;             // m/s at altitude — near enough for a game
+const SHOCK_T = 0.7;           // s the vapour cone lives
 
 // ---- shared geometry ------------------------------------------------------
 // One Gripen's worth of boxes and wedges, built once. A delta-canard reads at a
@@ -154,6 +157,8 @@ function fighterGeom() {
     intake: new THREE.BoxGeometry(0.52, 0.78, 2.6),
     nozzle: new THREE.CylinderGeometry(0.52, 0.62, 1.0, 10).rotateX(Math.PI / 2).translate(0, 0, 6.6),
     flame: new THREE.ConeGeometry(0.44, 3.4, 8).rotateX(Math.PI / 2).translate(0, 0, 8.6),
+    // open end aft, apex forward at the nose — the cone the shock actually makes
+    shock: new THREE.ConeGeometry(4.6, 9, 20, 1, true).rotateX(-Math.PI / 2).translate(0, 0, 0.5),
     pylon: new THREE.BoxGeometry(0.18, 0.3, 1.6),
     missile: new THREE.CylinderGeometry(0.11, 0.11, 2.9, 6).rotateX(Math.PI / 2),
     strut: new THREE.CylinderGeometry(0.075, 0.075, GEAR_H, 6),
@@ -172,6 +177,10 @@ const metalMat = new THREE.MeshLambertMaterial({ color: 0x3d4045, flatShading: t
 const roundelMat = new THREE.MeshBasicMaterial({ color: 0xb03a3a, toneMapped: false });
 const flameMat = new THREE.MeshBasicMaterial({ color: 0xffb454, transparent: true,
   opacity: 0.85, toneMapped: false, depthWrite: false });
+// vapour, not fire: white, thin, lit from nowhere, and visible from inside as
+// well as out (the chase camera sits behind the open end of the cone)
+const shockMat = new THREE.MeshBasicMaterial({ color: 0xeaf2ff, transparent: true,
+  opacity: 0, side: THREE.DoubleSide, depthWrite: false, toneMapped: false });
 
 export function makeFighterMesh() {
   const g = fighterGeom();
@@ -223,8 +232,16 @@ export function makeFighterMesh() {
   burner.visible = false;
   body.add(burner);
 
+  // The shock cone: a vapour collar that flares off the airframe as it goes
+  // through Mach 1. Real ones are a condensation cloud in the low-pressure
+  // region behind the shock, which is why this is a cone opening BACKWARDS
+  // from the nose and not a ring around it — and why it lasts under a second.
+  const shock = new THREE.Mesh(g.shock, shockMat);
+  shock.visible = false;
+  body.add(shock);
+
   group.userData.kind = 'fighter';
-  return { group, body, gear, burner };
+  return { group, body, gear, burner, shock };
 }
 
 // Where the pilot sits, in the airframe's local frame — under the canopy, on
@@ -243,6 +260,8 @@ export class Fighter {
     this._body = m.body;
     this._gear = m.gear;
     this._burner = m.burner;
+    this._shock = m.shock;
+    this.shockT = 0;                   // seconds left of the vapour cone
 
     this.x = x; this.y = 0; this.z = z;
     this.heading = heading;
@@ -252,6 +271,8 @@ export class Fighter {
     this.throttle = 0;
     this.airborne = false;
     this.vy = 0;                       // vertical rate, m/s
+    this._supersonic = false;
+    this.justWentSupersonic = false;
     // player.js walks to a door point offset by half the vehicle's width: the
     // fuselage, not the 8.4 m wingspan, or the pilot would board from out over
     // the wing. `len` is the real one — nothing depends on it but the HUD.
@@ -300,23 +321,52 @@ export class Fighter {
     const auth = q * q * (0.35 + 0.65 * rho);
 
     if (this.airborne) {
-      // pitch and roll are rate commands, damped back toward level when the
-      // stick is centred (a real jet is trimmed, not a free gyroscope)
-      this.pitch += pIn * PITCH_RATE * auth * dt;
-      if (!pIn) this.pitch -= this.pitch * Math.min(1, dt * 0.6);
-      this.pitch = clamp(this.pitch, -1.2, 1.2);
-      this.roll += rIn * ROLL_RATE * auth * dt;
-      if (!rIn) this.roll -= this.roll * Math.min(1, dt * 0.9);
-      this.roll = clamp(this.roll, -Math.PI, Math.PI);
-      this.roll = angWrap(this.roll);
+      // ---- attitude, in the AIRCRAFT'S OWN AXES ---------------------------
+      // The first cut turned the heading straight from the bank angle (the
+      // g·tan φ / V equation) and climbed straight from the pitch angle. Those
+      // are the right formulas for an aircraft that is always upright, and they
+      // are wrong the moment it is not: rolled 90° left and hauling back, that
+      // model climbed vertically instead of carving left, because "pull" meant
+      // "toward the sky" rather than "toward the canopy".
+      //
+      // So the stick now commands BODY rates — p about the nose, q about the
+      // wing, r about the fin — and the Euler angles are integrated through the
+      // standard kinematic transform:
+      //
+      //   ḣ = (q·sin φ + r·cos φ) / cos θ
+      //   θ̇ =  q·cos φ − r·sin φ
+      //   φ̇ =  p + (q·sin φ + r·cos φ)·tan θ
+      //
+      // Upright (φ=0) that collapses to "pull = climb", exactly as before.
+      // Banked, the same pull spends itself on heading instead — which is what
+      // a turn IS, and why you roll before you pull.
+      // SIGNS. The convention (ARCHITECTURE.md, and helicopter.js follows it)
+      // is that a right bank is a NEGATIVE roll angle and turning right
+      // DECREASES heading. Stick right must therefore drive roll negative, and
+      // rudder right likewise — the first version had both the other way up,
+      // so the aeroplane banked left while turning right.
+      const p = -rIn * ROLL_RATE * auth;
+      const q = pIn * PITCH_RATE * auth;
+      const r = -yIn * YAW_RATE_AIR * auth;
+      const sf = Math.sin(this.roll), cf = Math.cos(this.roll);
+      // cos θ → 0 at the vertical, where heading is undefined (gimbal lock).
+      // The floor keeps a hard pull through the vertical finite instead of
+      // spinning the aircraft to infinity in one frame.
+      const ct = Math.max(0.20, Math.cos(this.pitch));
+      const yawTerm = q * sf + r * cf;
 
-      // THE turn equation: a banked wing pulls the nose round at g·tan(φ)/V.
-      // Right bank is negative roll in this convention and must DECREASE
-      // heading, matching a car's steer sign.
-      const v = Math.max(this.speed, V_STALL);
-      this.heading += Math.tan(clamp(-this.roll, -1.4, 1.4)) * (G / v) * dt
-        + yIn * YAW_RATE_AIR * auth * dt;
-      this.heading = angWrap(this.heading);
+      this.pitch += (q * cf - r * sf) * dt;
+      this.pitch = clamp(this.pitch, -1.45, 1.45);
+      this.roll = angWrap(this.roll + (p + yawTerm * Math.tan(this.pitch)) * dt);
+      // roll is a rate command and STAYS where you leave it — a fly-by-wire
+      // fighter holds its bank. Only pitch trims itself back toward level, and
+      // only gently, so hands-off is a slow recovery rather than a rail.
+      if (!pIn) this.pitch -= this.pitch * Math.min(1, dt * 0.35);
+      // …and a banked wing lifts less than a level one, so the nose drops on
+      // its own unless you hold it up. This is what makes a turn cost you
+      // altitude and gives the bank a reason to exist.
+      this.pitch -= (1 - Math.abs(cf)) * 0.5 * dt;
+      this.heading = angWrap(this.heading + yawTerm / ct * dt);
 
       // Vertical: the wing turns the velocity toward where the nose points,
       // but only while it has airflow. Below the stall it stops arguing with
@@ -337,6 +387,21 @@ export class Fighter {
         this.pitch = Math.min(this.pitch + PITCH_RATE * 0.5 * dt, 0.28);
         if (this.pitch > 0.10) { this.airborne = true; this.vy = 1.5; }
       } else this.pitch -= this.pitch * Math.min(1, dt * 3);
+    }
+
+    // ---- Mach 1 -----------------------------------------------------------
+    // Owned here rather than by main.js because "am I supersonic" is a fact
+    // about the aircraft, and because the visual and the bang have to be the
+    // same event. `justWentSupersonic` is a one-frame flag main.js reads to
+    // fire the boom; the rearm hysteresis keeps level flight around the number
+    // from machine-gunning it.
+    this.justWentSupersonic = false;
+    if (!this._supersonic && this.speed > MACH1) {
+      this._supersonic = true;
+      this.justWentSupersonic = true;
+      this.shockT = SHOCK_T;
+    } else if (this._supersonic && this.speed < MACH1 - 25) {
+      this._supersonic = false;
     }
 
     // ---- integrate --------------------------------------------------------
@@ -364,6 +429,17 @@ export class Fighter {
     this._body.rotation.x = this.pitch;
     this._body.rotation.z = this.roll;
     this._gear.visible = !this.airborne || this.y - ground < 60;
+    // the shock cone blooms and fades over ~0.7 s, growing as it goes
+    if (this.shockT > 0) {
+      this.shockT = Math.max(0, this.shockT - dt);
+      const k = this.shockT / SHOCK_T;               // 1 → 0
+      this._shock.visible = true;
+      this._shock.material.opacity = 0.55 * Math.sin(Math.PI * k) ** 0.6;
+      const grow = 0.65 + (1 - k) * 0.9;
+      this._shock.scale.set(grow, grow, 0.8 + (1 - k) * 0.7);
+    } else if (this._shock.visible) {
+      this._shock.visible = false;
+    }
     const ab = this.reheat;
     this._burner.visible = ab;
     if (ab) {

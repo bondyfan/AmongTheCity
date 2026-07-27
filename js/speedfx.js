@@ -13,11 +13,21 @@
 
 import * as THREE from 'three';
 
-const POOL = 44;
+// The pool has to cover the WHOLE speed range now, not just a fast car. A
+// Gripen at Mach 2 does seventeen times the speed the old saturation point
+// (145 km/h) allowed for, and everything above it looked identical — the same
+// sparse handful of short lines whether you were doing 150 or 2 400. So the
+// tuning splits in two: `k` is the onset ramp a car lives on, and `fast` keeps
+// climbing all the way to jet speed, driving density, reach and lifetime.
+const POOL = 170;               // enough for the jet's spawn rate × its lifetime
 const V_ON = 100 / 3.6;         // streaks begin at 100 km/h…
-const V_FULL = 145 / 3.6;       // …and reach full density/opacity by ~145
-const LIFE = 0.34;              // s a streak hangs in the air
-const R_IN = 1.7, R_OUT = 5.2;  // spawn annulus around the hull
+const V_FULL = 145 / 3.6;       // …and reach a car's full density by ~145
+const V_JET = 600;              // m/s — where the effect is as violent as it gets
+const LIFE = 0.34;              // s a streak hangs in the air at car speed
+const LIFE_FAST = 0.42;         // …shortened by this fraction at V_JET
+const R_IN = 1.7, R_OUT = 5.2;  // spawn annulus around the hull, at car speed
+const R_FAST = 26;              // …widened by this much at V_JET, past the wings
+const RATE_CAR = 14, RATE_K = 46, RATE_FAST = 190;   // streaks per second
 const AHEAD = 0.65;             // bias spawns toward where the vehicle is GOING
 
 export class SpeedStreaks {
@@ -46,6 +56,8 @@ export class SpeedStreaks {
   update(dt, x, y, z, vx, vy, vz) {
     const v = Math.hypot(vx, vy, vz);
     const k = Math.max(0, Math.min(1, (v - V_ON) / (V_FULL - V_ON)));
+    // …and the part that does NOT saturate at a car's top speed
+    const fast = Math.max(0, Math.min(1, (v - V_FULL) / (V_JET - V_FULL)));
     // age the live ones
     for (const s of this.pool) {
       if (!s.m.visible) continue;
@@ -56,7 +68,7 @@ export class SpeedStreaks {
     }
     if (k <= 0) return;
     // spawn rate scales with how far past the threshold we are
-    this._acc += dt * (14 + 46 * k);
+    this._acc += dt * (RATE_CAR + RATE_K * k + RATE_FAST * fast * fast);
     while (this._acc >= 1) {
       this._acc -= 1;
       const s = this.pool.find((p) => !p.m.visible);
@@ -68,7 +80,10 @@ export class SpeedStreaks {
       const al = Math.hypot(ax, ay, az) || 1; ax /= al; az /= al;
       const bx = uy * az - uz * ay, by = uz * ax - ux * az, bz = ux * ay - uy * ax;
       const ang = Math.random() * Math.PI * 2;
-      const r = R_IN + Math.random() * (R_OUT - R_IN);
+      // the swarm spreads out as it intensifies: at car speed it is a tight
+      // sleeve around the roof, at Mach 2 it fills the frame
+      const rOut = R_OUT + R_FAST * fast;
+      const r = R_IN + Math.random() * (rOut - R_IN);
       const off = (Math.random() * 2 - 0.5) * v * AHEAD * LIFE;
       s.m.position.set(
         x + (ax * Math.cos(ang) + bx * Math.sin(ang)) * r + ux * off,
@@ -78,8 +93,10 @@ export class SpeedStreaks {
       s.m.quaternion.setFromUnitVectors(_X, _v.set(ux, uy, uz));
       s.m.scale.set(2.2 + v * 0.16, 1, 1);       // faster = longer lines
       s.t = 0;
-      s.life = LIFE * (0.7 + Math.random() * 0.6);
-      s.peak = (0.06 + 0.16 * k) * (0.6 + Math.random() * 0.7);
+      // Shorter lives at speed are what turn a drifting swarm into a WHIP: the
+      // line is gone before it can drift far, so the eye reads pure velocity.
+      s.life = LIFE * (1 - LIFE_FAST * fast) * (0.7 + Math.random() * 0.6);
+      s.peak = (0.06 + 0.16 * k + 0.1 * fast) * (0.6 + Math.random() * 0.7);
       s.m.material.opacity = 0;
       s.m.visible = true;
     }
