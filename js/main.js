@@ -40,8 +40,8 @@ import { connectCity, queueEvent, getPlayerName, CityNetWS } from './netcity.js'
 // netvehicles: PROXY cars for the peers, the only honest answer to "which car
 //   is he in" — see F8 below.
 // netui:      the HUD that can say "you are alone now" out loud.
-import { tod, worldT, setEpoch } from './worldclock.js';
-import { localUid, lookForUid, baseUid, strHash } from './identity.js';
+import { tod, setEpoch } from './worldclock.js';
+import { localUid, strHash } from './identity.js';
 import { makeGhostCars } from './netvehicles.js';
 import { makeNetUI } from './netui.js';
 
@@ -105,7 +105,14 @@ let weapons = null;  // the rocket pod under that machine, and what it does to w
 let streaks = null;  // the air, showing itself past 100 km/h
 let aimMark = null;  // the ring on the ground where the next rocket would land
 let _aimT = 0;
-const parked = [];      // cars placed by us, enterable
+const parked = [];      // cars placed by us, enterable RIGHT NOW
+// …and the deterministic spawn fleet, in spawn order, never spliced. `parked`
+// is a working set (a car leaves it when somebody gets in, a stolen taxi joins
+// it when somebody gets out), so its indices are a fact about THIS session and
+// useless as a name. This one is the fleet placeParkedCars() built from the
+// map, so parkedFleet[3] is the same physical Škoda on every client in the
+// room — the same property that makes helis[i] a usable claim key.
+const parkedFleet = [];
 
 // ---------- multiplayer plumbing (all null / empty in single player) --------
 // `ghosts` is the peers' vehicle fleet — proxies we own, keyed by uid. `ui` is
@@ -125,6 +132,11 @@ const _ghostVeh = new Map();
 const _heliClaims = new Map();
 let _heliClaimT = 0;    // s until we re-announce our own claim (late joiners)
 let _myHeliClaim = -1;  // index of the helicopter WE hold, or -1
+// uid → index into `parkedFleet` that peer is driving. Same mechanism, and for
+// the same reason the helicopter needed one — see claimParked() below.
+const _parkClaims = new Map();
+let _parkClaimT = 0;
+let _myParkClaim = -1;
 
 // ---------- camera rig ----------
 // Walk: orbit-follow — eases behind the player's heading, right-drag orbits
@@ -525,7 +537,13 @@ function setHeliClaim(uid, i, on) {
     // reappearing 8 km away on its pad reads as the world resetting itself.
     const p = ghosts?.pose(uid);
     const h = helis[i];
-    if (h && p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
+    // …but NEVER the machine we are flying ourselves. The claim is advisory —
+    // the comment above admits two players can double-book one helicopter
+    // inside a round trip — and in that race the loser's release would snatch
+    // the aircraft out from under the winner mid-air: position, heading and
+    // airborne all overwritten with a peer's landing spot. A double-booked
+    // machine has to be double-booked visually; it must not fall out of the sky.
+    if (h && h !== game.heli && p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
       h.x = p.x; h.z = p.z; h.heading = Number.isFinite(p.heading) ? p.heading : h.heading;
       h.y = Math.max(world?.heightAt(p.x, p.z) ?? 0, 0);
       h.vx = h.vy = h.vz = 0; h.airborne = false;
@@ -540,6 +558,83 @@ function applyHeliVisibility() {
   for (let i = 0; i < helis.length; i++) {
     const claimed = heliHolder(i) !== null && helis[i] !== game.heli;
     if (helis[i].mesh.visible !== !claimed) helis[i].mesh.visible = !claimed;
+  }
+}
+
+// ---------- the parked fleet is shared too, not merely identical -----------
+// F21 made the forecourt cars a pure function of the map, so both players see
+// a blue kombi in the same bay. That is where it stopped, and it is only half
+// of what "vidíme stejná auta" means: the moment one of them DROVE the kombi
+// away, the other's copy stayed parked exactly where it was and a second,
+// pixel-identical kombi (the ghost netvehicles builds from the wire) drove off
+// past it. Both were enterable — `seats` is a local array — so two people
+// could sit in "the same" car and watch it go two different ways, which is the
+// duplicate netvehicles.js exists to prevent and the one place it could not
+// see. It cannot: a ghost only dedupes against vehicles this client OWNS
+// (ghosts.localVehicles), and a car nobody here is driving is not one of them.
+//
+// So the fleet gets the helicopter's mechanism, key included: the INDEX into
+// parkedFleet, which is the same object on every client because the spawn is
+// deterministic. Advisory, re-announced, self-healing when the claimant goes
+// quiet — the trade-offs are the same and the note above heli_claim covers
+// them. The one difference is the release: a helicopter is put back where the
+// pilot left it because that is a courtesy, whereas for a car it is the whole
+// point. Your friend parks by the river; the car is by the river for you too.
+function parkHolder(i) {
+  for (const [uid, pi] of _parkClaims) if (pi === i) return uid;
+  return null;
+}
+function parkClaimedByPeer(car) {
+  if (!car || _parkClaims.size === 0) return null;
+  const i = car.parkIdx;
+  return Number.isInteger(i) ? parkHolder(i) : null;
+}
+
+// Announce (on=1) or drop (on=0) our own claim. A car we never claimed (a
+// stolen taxi — traffic has its own `steal` lane) is silently nothing.
+function claimParked(car, on) {
+  const i = on ? (Number.isInteger(car?.parkIdx) ? car.parkIdx : -1) : _myParkClaim;
+  if (i < 0) return;
+  _myParkClaim = on ? i : -1;
+  _parkClaimT = on ? CLAIM_REANNOUNCE_S : 0;
+  if (net) queueEvent('park_claim', { i, on: on ? 1 : 0 });
+}
+
+function setParkClaim(uid, i, on) {
+  if (!Number.isInteger(i) || i < 0 || i >= parkedFleet.length) return;
+  const car = parkedFleet[i];
+  if (on) _parkClaims.set(uid, i);
+  else if (_parkClaims.get(uid) === i) {
+    _parkClaims.delete(uid);
+    // Where the driver actually left it. Same guard as the helicopter's: if we
+    // are somehow sitting in this car ourselves (a double-book inside one round
+    // trip), nobody teleports it out from under us.
+    const p = ghosts?.pose(uid);
+    if (car && car !== game.car && car !== player?.inCar
+        && p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
+      car.x = p.x; car.z = p.z;
+      if (Number.isFinite(p.heading)) car.heading = p.heading;
+      car.speed = 0;
+      car.y = world?.heightAt(car.x, car.z) ?? car.y ?? 0;
+      car.mesh.position.set(car.x, car.y, car.z);
+      car.mesh.rotation.y = car.heading;
+    }
+  }
+  applyParkVisibility();
+}
+
+// Hidden AND out of `parked`, which is the list that decides three separate
+// things: what E can open (nearestEnterableCar), what you can crash into
+// (_crashList) and what the minimap draws. A merely invisible car would still
+// be a wall in the middle of the road.
+function applyParkVisibility() {
+  for (let i = 0; i < parkedFleet.length; i++) {
+    const car = parkedFleet[i];
+    const claimed = parkHolder(i) !== null && car !== game.car && car !== player?.inCar;
+    if (car.mesh.visible !== !claimed) car.mesh.visible = !claimed;
+    const at = parked.indexOf(car);
+    if (claimed) { if (at >= 0) parked.splice(at, 1); }
+    else if (at < 0 && car !== game.car && car !== player?.inCar) parked.push(car);
   }
 }
 
@@ -573,6 +668,8 @@ input.onKey('KeyE', () => {
     game.car = null;
     fpView = false;          // step out and you are looking at yourself again
     parked.includes(c) || parked.push(c);
+    // Hand it back to the room where it now stands, not where it was born.
+    claimParked(c, false);
     $id('speedo').classList.add('hidden');
     hideCarName();
     engineStop();
@@ -657,6 +754,12 @@ input.onKey('KeyE', () => {
   } else {
     const car = nearestEnterableCar();
     if (!car) return;
+    // A claimed car is already out of `parked`, so this is the double-book
+    // window only (two people press E inside one round trip). Say who has it,
+    // by name, exactly as the helicopter does — "Obsazeno" on a car standing
+    // empty in front of you reads as a bug.
+    const holder = parkClaimedByPeer(car);
+    if (holder) { ui_hint('Řídí ' + (net?.peerName(holder) || 'jiný hráč')); return; }
     const seat = freeSeat(car);
     if (seat < 0) { ui_hint('Obsazeno'); return; }
     const inTraffic = traffic.cars instanceof Set ? traffic.cars.has(car) : traffic.cars.includes?.(car);
@@ -683,6 +786,12 @@ input.onKey('KeyE', () => {
         showCarName(car);
         if (s !== 0) return;             // passenger seat: no engine, no speedo
         game.car = car;
+        // Claimed from onSeated for the same reason the helicopter is: the
+        // walk-up is cancellable, and taking a car off everybody else's street
+        // because somebody started strolling towards it is worse than the race
+        // it would prevent. Only the DRIVER claims — a passenger is riding a
+        // car somebody has already spoken for.
+        claimParked(car, true);
         $id('speedo').classList.remove('hidden');
         // per-model engine voice: audio.js synthesises an I3 for the Fabia, a
         // diesel for the bus, motor whine for the Tesla. Without the kind it
@@ -821,6 +930,10 @@ function placeParkedCars(city) {
     const kind = PARK_KINDS[(spotRnd(x, z, 'k') * PARK_KINDS.length) | 0];
     const color = CAR_COLORS[(spotRnd(x, z, 'c') * CAR_COLORS.length) | 0];
     const car = vehicles.add(kind, pos.x, pos.z, h, color);
+    // The claim key. Stamped at spawn and never renumbered, because `parked`
+    // is spliced all session while parkedFleet is not — see the declaration.
+    car.parkIdx = parkedFleet.length;
+    parkedFleet.push(car);
     parked.push(car);
   }
 }
@@ -892,8 +1005,17 @@ function pushActor(x, z, half) {
 }
 function updateActors() {
   _actors.length = 0;
+  // …and the ASYMMETRY that used to sit right here. player.pos mirrors whatever
+  // you are riding (player.js does that so the streamer and the exit maths have
+  // one truth), so flying a helicopter at 180 m put a 2.3 m obstacle on the
+  // street underneath it — `_obst` is two-dimensional and never reads a height.
+  // Peers were already filtered out of that (`p.kind !== 'heli'` below), so a
+  // client braked for something no other client in the room could see: one
+  // player takes off, and the traffic on both screens stops agreeing along the
+  // whole flight path. Fliers are not on the road; nobody's are.
+  const flying = !!(game.heli || game.jet || player.inCar?.airborne);
   if (game.car) pushActor(game.car.x, game.car.z, 3.9);
-  else pushActor(player.pos.x, player.pos.z, 2.3);
+  else if (!flying) pushActor(player.pos.x, player.pos.z, 2.3);
   if (!net) return _actors;
   for (const [uid, r] of net.remotes) {
     const p = ghosts?.pose(uid);
@@ -1189,7 +1311,15 @@ function updateHud(dt) {
     }
     else if (heli && !game.car && !player.inCar
         && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5) {
-      hint.innerHTML = '<kbd>E</kbd> nastoupit do vrtulníku';
+      // Offering E on a machine somebody in the room is already flying (and
+      // which is therefore not even drawn here) reads as a dead key. Say who
+      // has it instead — textContent, because that name came off the wire.
+      const holder = heliClaimedByPeer(heli);
+      if (holder) {
+        hint.textContent = 'Vrtulník pilotuje ' + (net?.peerName(holder) || 'jiný hráč');
+      } else {
+        hint.innerHTML = '<kbd>E</kbd> nastoupit do vrtulníku';
+      }
       hint.classList.remove('hidden');
     }
     else if (jetNearest && !game.car && !player.inCar
@@ -1415,6 +1545,15 @@ function applySettings(s, key) {
     }
   }
   if (!s.mouseLook && input.locked) document.exitPointerLock();
+  // co-op preferences. These are not performance knobs and deliberately do not
+  // ride the graphics preset: a name tag is either information you want over
+  // your friends' heads or clutter you don't, and that has nothing to do with
+  // how fast the machine is. Both are no-ops in single player — netcity never
+  // constructs a NameTags when there is nobody to label.
+  if (net) {
+    net.showNames = s.showNames !== false;
+    net.tags?.setRange?.(s.nameDist);
+  }
   // chunk-recipe knobs: flip the flags on the shared mats and rebuild
   if (world) {
     const wantOrtho = s.ortho ? orthoMgr : null;
@@ -1445,9 +1584,32 @@ async function boot() {
   if (!city) city = await loadCity(CITY_DATA_URL);
   world = new CityWorld(scene, city);
   sky = makeSky(scene);
-  player = new Player(scene, SPAWN.x, SPAWN.z, SPAWN.heading);
+  // The uid is passed EXPLICITLY even though Player defaults to localUid(),
+  // because it is the whole identity contract in one line: this same string
+  // picks our jacket here, picks the dot in the co-op HUD, and is what every
+  // other client hashes to dress our avatar. One function, one uid, one look —
+  // "the blue one is me" used to be true on four screens at once.
+  player = new Player(scene, SPAWN.x, SPAWN.z, SPAWN.heading, localUid());
   vehicles = new Vehicles(scene);
   traffic = new Traffic(city, vehicles);
+  // ---- the peers' vehicles (F8/F9) ----
+  // Built even in single player: the fleet is empty, update() is a no-op over
+  // an empty Map, and every `ghosts?.` site below then has one shape instead
+  // of two. `world` is not optional — without it a ghost drives along y = 0,
+  // i.e. through the riverbed under the Labe bridges.
+  ghosts = makeGhostCars(vehicles);
+  ghosts.world = world;
+  // The vehicles WE own and already draw. A remote passenger whose reported
+  // position sits on one of these rides it instead of having a duplicate car
+  // built around him — which is what stops a friend in your passenger seat
+  // from being wrapped in a second, z-fighting copy of your own Octavia.
+  ghosts.localVehicles = () => {
+    const l = [];
+    if (game.car) l.push(game.car);
+    if (player?.inCar && player.inCar !== game.car) l.push(player.inCar);
+    for (const h of helis) l.push(h);
+    return l;
+  };
   minimap = new Minimap($id('minimap'), city);
   trains = new Trains(scene, city);
   worldMap = new WorldMap(city, minimap);
@@ -1623,7 +1785,11 @@ function engineLoad(car, gas) {
 function stepGame(dt) {
   if (game.mode !== 'play') return;
 
-  game.tod = (game.tod + dt / DAY_LENGTH) % 1;
+  // The day used to be integrated right here. It is now read, never written —
+  // see the note on `game.tod`. Nothing replaced this line because nothing has
+  // to: worldclock derives the hour from the shared wall clock on demand, so a
+  // dropped frame, a backgrounded tab and a slow machine all land on the same
+  // afternoon as everybody else instead of each keeping their own.
 
   // world streams around whoever leads the view. `onFoot` is what gates the
   // interior streamer: rooms only matter to somebody who can walk into them,
@@ -1707,6 +1873,12 @@ function stepGame(dt) {
     player.update(dt, { input, camYaw, world });
   }
   vehicles.update(dt);
+  // The peers' cars move BEFORE anything that reads them this frame: the AI
+  // traffic brakes for them (traffic.actors), the seat resolver hangs remote
+  // avatars off them (remoteSeatAnchor, called from inside net.update), and
+  // both want this frame's pose rather than last frame's.
+  pumpGhosts(dt);
+  traffic.actors = updateActors();
   traffic.update(dt, player.pos, game.car);
   // ragdoll physics needs to know what can hit a pedestrian: every AI car
   // plus whatever the player is driving, refreshed per frame because the
@@ -1727,8 +1899,12 @@ function stepGame(dt) {
   updateAim(dt);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
   if (traffic) {
+    // Shared clock in, shared fleet out. No per-player place factor any more
+    // (see the note above trafficTimeK) — this product must be computable from
+    // facts both clients hold, and "how built-up it is where I am standing" is
+    // not one of them.
     const base = getSettings().traffic ?? 60;
-    traffic.maxCars = Math.round(base * trafficTimeK(game.tod) * trafficPlaceK(dt, focus));
+    traffic.maxCars = Math.round(base * trafficTimeK(tod()));
   }
   updateNavigation(dt);
   updateHorizon(dt);
@@ -1758,7 +1934,7 @@ function stepGame(dt) {
 
   updateCamera(dt);
   placeReticle();          // after the camera: a lagging sight reads as drift
-  updateSky(sky, game.tod, camera, scene);
+  updateSky(sky, tod(), camera, scene);
   updateHud(dt);
 
   // ---- net: server co-op pump (menu → Multiplayer only; null in single) ----
@@ -1770,8 +1946,106 @@ function stepGame(dt) {
   // off view distance, and passing it explicitly beats netcity's
   // window.__atc.camera fallback. In single player `net` is null and no
   // NameTags is ever constructed — nobody to label, nothing to draw.
-  if (net) net.update(dt, { scene, player, game, weapons, world, camera,
-    cars: _crashList(), peds });
+  //
+  // `trains` is in the context because netcity derives the vehicle descriptor
+  // from it: a train ride leaves player.inCar null, so before this a commuter
+  // appeared to every other client as a man sprinting down the rails at 140.
+  // netcity falls back to window.__atc.trains without it; passing it properly
+  // is the difference between a contract and a global.
+  if (net) {
+    if (_myHeliClaim >= 0) {
+      // Re-announce, so a player who joined after take-off still knows the
+      // machine is taken. An event, not a lease: nobody has to answer.
+      _heliClaimT -= dt;
+      if (_heliClaimT <= 0) {
+        _heliClaimT = CLAIM_REANNOUNCE_S;
+        queueEvent('heli_claim', { i: _myHeliClaim, on: 1 });
+      }
+    }
+    if (_myParkClaim >= 0) {
+      _parkClaimT -= dt;
+      if (_parkClaimT <= 0) {
+        _parkClaimT = CLAIM_REANNOUNCE_S;
+        queueEvent('park_claim', { i: _myParkClaim, on: 1 });
+      }
+    }
+    net.update(dt, { scene, player, game, weapons, world, camera, trains,
+      cars: _crashList(), peds });
+  }
+}
+
+// ---------- the peers' vehicles, one frame's worth ------------------------
+// netcity does not know netvehicles exists (deliberately: one owns the wire,
+// the other owns meshes), so main.js is the joint. Two rules make it correct:
+//
+//  1. sync() is called ONLY on a new packet. netcity replaces r.state — and
+//     with it r.state.veh — wholesale for every packet, so comparing the veh
+//     object by IDENTITY is an exact "is this new?" test. Calling sync() every
+//     frame would work, but it resets the ghost's dead-reckoning age, which
+//     silently turns off extrapolation and parks every peer's car a couple of
+//     metres behind where its driver actually is.
+//  2. A peer who stepped out sends veh:null, which sync() reads as "drop" —
+//     so getting out of a car is handled by the same path as leaving the room,
+//     and neither leaves an abandoned Škoda idling in the street.
+
+// A car derives its own altitude from the road under it, so the wire does not
+// carry one. A HELICOPTER cannot: the wire descriptor netcity builds has no `y`
+// field at all, so a ghost machine would fly at y = 0 — i.e. a friend crossing
+// the Labe at 200 m appears to slide along the ground, and the seat anchor
+// built on that ghost drags his avatar down with it.
+//
+// The altitude is already in the packet, just not in the descriptor: player.js
+// sets `this.y = this.inCar.y` for a seated rider, so the state's own `y` IS
+// the helicopter's y, to the metre. Patched in here rather than in netcity
+// because netcity is not mine to edit — see the request list; the day the
+// descriptor carries `y`, this function becomes a no-op on its own.
+function heliAltitude(veh, state) {
+  if (!veh || veh.k !== 'heli' || Number.isFinite(veh.y)) return veh;
+  if (!Number.isFinite(state?.y)) return veh;
+  return { ...veh, y: state.y };
+}
+
+function pumpGhosts(dt) {
+  if (!ghosts) return;
+  if (net) {
+    for (const [uid, r] of net.remotes) {
+      const veh = r.state?.veh ?? null;
+      if (veh === _ghostVeh.get(uid)) continue;
+      // The ORIGINAL object is what the dedupe remembers, even when what we
+      // hand to sync() is a patched copy — otherwise the patch itself looks
+      // like a new packet every frame.
+      _ghostVeh.set(uid, veh);
+      ghosts.sync(uid, heliAltitude(veh, r.state));
+    }
+    // Reap anyone netcity has already forgotten (a leave, or the 30 s silence
+    // reap). ghosts has its own 35 s backstop, but a friend who says goodbye
+    // should not leave his car standing in the road for half a minute.
+    //
+    // Deliberately NOT gated on `_ghostVeh.size > net.remotes.size`: one player
+    // leaving while another joins in the same frame leaves the sizes equal and
+    // the departed car parked in the street forever. The scan is over a map
+    // that holds at most a roomful of entries.
+    for (const uid of [..._ghostVeh.keys()]) {
+      if (net.remotes.has(uid)) continue;
+      _ghostVeh.delete(uid);
+      // Release BEFORE dropping the ghost, not after: setParkClaim's whole job
+      // is to stand the car where the driver left it, and it reads that spot
+      // from ghosts.pose(uid) — which drop() has just deleted. Getting this
+      // backwards is not a crash, it is the car silently teleporting back to
+      // its spawn bay every time somebody's connection dies.
+      const pk = _parkClaims.get(uid);
+      if (pk !== undefined) setParkClaim(uid, pk, false);
+      ghosts.drop(uid);
+      if (_heliClaims.delete(uid)) applyHeliVisibility();
+    }
+  } else if (_ghostVeh.size) {
+    // the session ended under us — let go of every proxy
+    for (const uid of [..._parkClaims.keys()]) setParkClaim(uid, _parkClaims.get(uid), false);
+    for (const uid of _ghostVeh.keys()) ghosts.drop(uid);
+    _ghostVeh.clear();
+    if (_heliClaims.size) { _heliClaims.clear(); applyHeliVisibility(); }
+  }
+  ghosts.update(dt);
 }
 
 // ---------- menu gate ----------
@@ -1783,33 +2057,106 @@ function stepGame(dt) {
 // we fall back to single player rather than to a dead screen.
 let net = null;   // NetGame from netcity.js, or null — single player stays null
 
-// The seating hook netcity leaves open. A peer's state carries only
-// {k, id, seat} — a KIND and a colour hash, not an object reference — so this
-// resolves that id against the vehicles actually alive here (the same car
-// exists on both clients because traffic spawns are relayed, and the player's
-// own car is in `parked` or `traffic.cars`). Found: put the avatar on the real
-// seat anchor, so a passenger rides in the seat beside you and turns with the
-// car. Not found (their car hasn't streamed in on our side yet): return null
-// and netcity falls back to standing them at the reported position.
+// ---------- F8: where a remote player's body goes ---------------------------
+// THE OLD CODE, AND WHY IT COULD NOT WORK. A peer's state carried {k, id, seat}
+// where id = hash(kind + ':' + colour), and this function looked that id up in
+// OUR parked/traffic pools. The comment above it claimed "the same car exists
+// on both clients because traffic spawns are relayed" — traffic spawns were
+// never relayed, and even now that traffic is a shared SCHEDULE, a car the peer
+// stole and drove away is not in our pools under any identity, because the
+// object he is sitting in is his client's object. Worse, that id is a TYPE, not
+// an identity: ~90 live cars collapse onto ~35 distinct ids, so the lookup
+// usually SUCCEEDED — against an unrelated Fabia half a district away. The
+// avatar was then glued to a stranger's car and drove off on its own.
+//
+// THE FIX IS TO STOP LOOKING ANYTHING UP. netvehicles.js builds one proxy per
+// uid from the wire fields, positioned by the one client that actually
+// simulates that vehicle, and hands back a real seat on it. A passenger riding
+// something we already draw (our own car, or another peer's ghost) binds to it
+// instead of getting a duplicate built around him — that is netvehicles' job,
+// not ours, and `ghosts.localVehicles` in boot() is what tells it about ours.
+//
+// Returns the world-space CUSHION TOP; netcity subtracts its own SIT_DROP to
+// get the citizen group's feet. null means "we cannot place them" and netcity
+// leaves them standing at the position they reported, which already mirrors
+// their vehicle — the correct degradation, and the one a train rider gets
+// (netvehicles refuses k:'train' by design).
 function remoteSeatAnchor(uid, veh) {
-  if (!veh) return null;
-  if (veh.k === 'heli') return heli ? worldSeatAnchor(heli, veh.seat ?? 1) : null;
-  const want = veh.id;
-  const pools = [parked, traffic ? traffic.cars : null];
-  for (const pool of pools) {
-    if (!pool) continue;
-    for (const c of pool) {
-      if (netVehId(c) !== want) continue;
-      const a = worldSeatAnchor(c, veh.seat ?? 1);
-      a.heading = c.heading;              // ride facing the way the car faces
-      return a;
-    }
-  }
-  return null;
+  if (!veh || !ghosts) return null;
+  return ghosts.seatAnchor(uid, veh.st ?? veh.seat ?? 0);
 }
+
+// ---------- inbound one-shot events ---------------------------------------
+// netcity owns `boom` (a peer's rocket) inside its own handler. Everything
+// else in the room's event vocabulary is main.js's business, because it is
+// about objects main.js owns: walls, helicopters, traffic slots.
+//
+// This CHAINS the existing handler rather than replacing it. netcity registers
+// its own on construction and exposes no "add a listener" seam, so the previous
+// one is captured and called first — replacing it outright would silently stop
+// every peer's rocket from going off in our world. See the request list.
+function installEventHandler() {
+  const prev = CityNetWS._handlers?.event ?? null;
+  CityNetWS.onEvent((ev) => {
+    try { prev?.(ev); } catch (err) { console.error(err); }
+    try { onNetEvent(ev); } catch (err) { console.error(err); }
+  });
+  // The damage a peer's CAR does to a wall (F20). vehicles.js emits through a
+  // sink rather than importing the net layer, so single player and the tests
+  // keep working with no netcity in the build at all; the sink is a rate-
+  // limited token bucket at the source, because every event we send becomes a
+  // demolition on every other machine in the room.
+  setVehicleEventSink((type, data) => queueEvent(type, data));
+  // A late joiner inherits the wreckage. Only the authority answers, so twenty
+  // people in the room do not all reply to one arrival with a 15 KB snapshot.
+  CityNetWS.onPeer((m) => {
+    if (m?.event !== 'join' || CityNetWS.role !== 'host') return;
+    if (world?.hitLog?.length) CityNetWS.sendSnap(world.hitLog);
+  });
+  CityNetWS.onSnap((snap) => { world?.applyHits?.(snap); });
+}
+
+function onNetEvent(ev) {
+  if (!ev || typeof ev !== 'object') return;
+  switch (ev.type) {
+    // A peer rammed a wall. NOT weapons.detonate: a car hitting a shopfront is
+    // not a rocket — no shake, no fireball, no scattered burning debris, just
+    // the same hole in the same wall. applyHit is the one door for that, and it
+    // queues the damage against onTileLoaded if the tile has not streamed in
+    // here yet, so a hit two districts away still lands when you drive there.
+    case 'vhit':
+      world?.applyHit?.({ x: ev.x, y: ev.y, z: ev.z, r: ev.r, id: ev.id });
+      break;
+    // F22 — somebody took (or released) a helicopter.
+    case 'heli_claim':
+      if (typeof ev.from === 'string') setHeliClaim(ev.from, ev.i, !!ev.on);
+      break;
+    // A peer yanked open the door of an AI car. Our copy of that schedule slot
+    // has to die, or we keep driving a phantom of the car he is now sitting in
+    // — through him, on the road he is on. claimSlot works even for a slot we
+    // never built (he may be beyond our streaming frontier).
+    case 'steal':
+      if (typeof ev.key === 'string') traffic?.claimSlot?.(ev.key);
+      break;
+    default: break;
+  }
+}
+
 async function start() {
   initSettings(applySettings);
+  // The clock is anchored to THIS machine until a server tells us otherwise.
+  // Explicit rather than implicit: worldclock defaults here anyway, but the
+  // call is the documented reset and it is where the server anchor belongs the
+  // day WELCOME starts carrying a timestamp (see the request list — it does
+  // not today, and PONG carries nothing either, so co-op currently relies on
+  // both machines having NTP, which is a far smaller error than the per-tab
+  // accumulator this replaces).
+  setEpoch(null);
+  // The HUD comes up BEFORE the socket, because the thing it most needs to be
+  // able to say is that the socket did not come up.
+  ui = makeNetUI();
   const choice = await showMenu();
+  ui.setSelf({ name: choice.name || getPlayerName(), uid: localUid() });
   if (choice.mode === 'server') {
     try {
       // The nickname goes in BEFORE the socket, not after: connectCity arms it
@@ -1822,10 +2169,33 @@ async function start() {
       // one before it, and none of them is the one that matters.
       net = await connectCity(choice.name);
       net.onRemoteVehicle = remoteSeatAnchor;
+      net.onStatus((s) => ui.setStatus(s));
+      net.onClose((info) => {
+        // A dead socket used to change NOTHING on screen: the avatars simply
+        // stopped moving and the player carried on driving round a city they
+        // believed was shared. Now it says so, and keeps saying so.
+        ui.setStatus({ online: false, count: 0, names: [] });
+        if (!info?.expected) ui.toast('Server spadl — pokračuješ sám', 'error');
+        // every proxy dies with the session; pumpGhosts finishes the job on
+        // the next frame once `net` goes null, this covers the socket dropping
+        // while the session object is still alive
+        for (const uid of _ghostVeh.keys()) ghosts?.drop(uid);
+        _ghostVeh.clear();
+        if (_heliClaims.size) { _heliClaims.clear(); applyHeliVisibility(); }
+      });
+      installEventHandler();
+      // showNames/nameDist are applied by boot()'s own applySettings() a moment
+      // from now, which is the only place that call has to exist.
     } catch (err) {
+      // A banner, not a console line. "Multiplayer nefunguje" was the single
+      // most common report, and the reason was always visible in a console
+      // nobody had open — the game simply started, in silence, alone.
       console.error('Multiplayer: připojení selhalo — spouštím jednohráčovku.', err);
+      net = null;
+      ui.toast('Server je nedostupný — hraješ sám', 'error');
     }
   }
+  if (!net) ui.setStatus({ online: null });   // single player: no LED, no lie
   await boot();
 }
 // Leaving the tab is the ordinary way a session ends here, so say goodbye
@@ -1838,7 +2208,25 @@ async function start() {
 window.addEventListener('pagehide', () => {
   if (!net) return;
   const n = net; net = null;
+  // Let go of our helicopter on the way out, so the machine is not left locked
+  // to a uid that will never speak again. It rides in the same BYE flush.
+  // Sent straight down the transport, not through queueEvent: the outbox is
+  // drained by NetGame.update() and there is no next frame from here.
+  try {
+    if (_myHeliClaim >= 0) CityNetWS.sendEvent({ type: 'heli_claim', i: _myHeliClaim, on: 0 });
+  } catch {}
+  _myHeliClaim = -1;
+  // The sink outlives the session object (it is module state in vehicles.js),
+  // so unhook it or every wall a car hits after this queues into an outbox
+  // nobody drains.
+  try { setVehicleEventSink(null); } catch {}
   try { n.dispose(); } catch {}
+  // drop the proxies but keep the fleet itself alive: bfcache can restore this
+  // page, and a disposed ghost API would be a broken game rather than a lonely
+  // one. pumpGhosts sees `net === null` next frame and finishes the cleanup.
+  for (const uid of _ghostVeh.keys()) { try { ghosts?.drop(uid); } catch {} }
+  _ghostVeh.clear();
+  if (_heliClaims.size) { _heliClaims.clear(); try { applyHeliVisibility(); } catch {} }
 });
 
 start().catch(err => {
@@ -1850,7 +2238,7 @@ tick();
 // dev/debug handle — lets an automated harness (or the console) inspect and
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
-  build: 'v15-cabin-names-gears',   // bump on risky changes — which code a tab runs
+  build: 'v16-coop-shared-world',   // bump on risky changes — which code a tab runs
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   // `cabin` is the graft's live truth, not a copy of fpView: a harness can
@@ -1865,7 +2253,12 @@ window.__atc = {
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
   get parked() { return parked; }, get peds() { return peds; },
   get trains() { return trains; }, get worldMap() { return worldMap; },
-  // multiplayer session (null in single player) — the sibling seat work fills
-  // net.onRemoteVehicle here to sit remote players in their vehicles
+  // multiplayer session (null in single player). net.onRemoteVehicle is wired
+  // to the ghost fleet: a harness asserting "my friend is in a car" should ask
+  // __atc.ghosts.pose(uid), not go looking for the car in traffic.
   get net() { return net; },
+  get ghosts() { return ghosts; }, get ui() { return ui; },
+  get uid() { return localUid(); },
+  // the shared clock, so a harness can prove two tabs agree on the hour
+  get tod() { return tod(); }, get heliClaims() { return [..._heliClaims]; },
 };

@@ -34,7 +34,13 @@ const PLACES_URL = 'data/places.json';
 const OVERVIEW_URL = 'data/overview.json';
 const TAU = Math.PI * 2;
 
-const ZOOM_MIN = 1, ZOOM_MAX = 12;
+// ZOOM_MAX was 12 when the world was the 30×38 km agglomeration, where 12×
+// meant a 2.5 km view — street scale. v8 stretched the world to 144 km across,
+// which quietly turned the SAME number into a 12 km view: a 100 m street is
+// 2 px long there, so no street name could ever fit its street and the labels
+// below would have been a feature you cannot see. The range now reaches the
+// scale it always described.
+const ZOOM_MIN = 1, ZOOM_MAX = 40;
 // Bitmap budget. 4096 px is the safe texture-ish ceiling for a 2D canvas on
 // weak GPUs; the pixel cap is the memory one (9 Mpx ≈ 36 MB of backing store).
 const OFF_MAX_SIDE = 4096;
@@ -57,6 +63,32 @@ const RANK_FONT = [16, 13.5, 12, 11, 11, 10];   // CSS px, scaled by DPR
 const RANK_DOT = [4.4, 3.4, 2.6, 2.2, 2.0, 1.7]; // CSS px radius, ditto
 const RANK_BOLD = [1, 1, 0, 0, 0, 0];
 
+// ---- street labels ------------------------------------------------------
+// The same idea the minimap runs at HUD scale: a road's name is written ALONG
+// the road, on the longest straight run of it that is actually in view, and
+// only when the name is narrower than that run is wide on screen. A name that
+// does not fit its own street is pointing at the wrong street, so it is not
+// drawn at all — which is also what keeps a city centre from turning into a
+// wall of text as you zoom in.
+//
+// Rank orders the candidates (motorway first) and gates the quiet classes.
+// Anything not in this table — service aisles, footways, links — never gets a
+// name: at map scale they are the noise you zoom past, not the road you drive.
+const ST_RANK = {
+  motorway: 0, trunk: 0, primary: 1, secondary: 1, tertiary: 2,
+  unclassified: 3, residential: 3, living_street: 4, pedestrian: 4,
+};
+const STREET_ZOOM = 3;     // contract: names on the asphalt from 3× in
+const STREET_MAX = 60;     // names placed per frame…
+const STREET_CAND = 320;   // …chosen from this many candidates per render
+const STREET_TURN = 0.28;  // rad a run may bend and still be laid out as a chord
+const STREET_PAD = 6;      // CSS px of road demanded past each end of the name
+const STREET_REPEAT = 260; // CSS px — a long avenue may say its name again here
+const STREET_FONT = 11.5;  // CSS px
+const ST_RANK_M = 0.18;    // score bonus per rank, as a FRACTION of the view
+                           // width — one number that means the same thing at
+                           // every zoom, unlike a fixed number of metres
+
 // Road classes: nominal width in metres (the data's own `w` varies per way and
 // is invisible at map scale, so one number per class lets every road of a class
 // share a single stroke), a floor in bitmap px so a motorway never vanishes,
@@ -75,13 +107,31 @@ const ROAD_STYLE = {
   footway: { w: 2, min: 0.45, k: 0.95, foot: true },
   path: { w: 2, min: 0.45, k: 0.95, foot: true },
   steps: { w: 2, min: 0.45, k: 0.95, foot: true },
+  // aeroways: real width, and bright — a 3 km runway is the single most
+  // recognisable shape on a region map
+  runway: { w: 45, min: 2.6, k: 1.5 }, taxiway: { w: 23, min: 1.2, k: 1.35 },
+  taxilane: { w: 15, min: 0.9, k: 1.3 }, airstrip: { w: 20, min: 1.0, k: 1.2 },
 };
 // DRAW order — quiet ways first so a motorway always crosses on top, mirroring
 // the 3D layering. Anything the data throws at us that is not in this list is
 // bucketed as `residential` (the same fallback minimap.js uses).
 const ROAD_ORDER = ['steps', 'path', 'footway', 'cycleway', 'track', 'pedestrian',
   'service', 'living_street', 'residential', 'unclassified', 'tertiary',
-  'secondary', 'primary', 'trunk', 'motorway'];
+  'secondary', 'primary', 'trunk', 'motorway',
+  'taxilane', 'taxiway', 'airstrip', 'runway'];
+
+// A co-op player with no colour of their own. Peers are normally painted in
+// their JACKET colour — the very number identity.js hands their avatar — so
+// the dot here, the dot on the minimap, the name over their head and the
+// figure you can see through the windscreen are one colour by construction.
+const PEER_FALLBACK = '#7fd8ff';
+// CSS px kept clear of the canvas edge, where an off-view peer's chevron is
+// pinned. Shared by the drawing and the hit test — see _peerScreen.
+const PEER_INSET = 14;
+// A colour off the wire goes straight into a canvas fillStyle, and an
+// unparsable one does NOT throw — it silently keeps whatever fill was set
+// last, which would paint a peer in the waypoint's yellow. So validate.
+const SAFE_CSS_COLOR = /^#[0-9a-f]{3,8}$|^rgba?\([\d\s.,%/]+\)$|^hsla?\([\d\s.,%/]+\)$/i;
 
 const DASH = [7, 7];         // the waypoint thread — allocated once, never per frame
 // The flag yellow, shared verbatim with minimap.js: the HUD map and this one
@@ -106,6 +156,17 @@ function css(c, k = 1) {
 }
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+function peerCss(c) {
+  if (typeof c === 'number' && Number.isFinite(c)) return css(c >>> 0);
+  if (typeof c === 'string' && SAFE_CSS_COLOR.test(c.trim())) return c.trim();
+  return PEER_FALLBACK;
+}
+
+// Czech head count for the status line — "2 hráči", "5 hráčů".
+function czPlayers(n) {
+  return n === 1 ? '1 hráč' : n < 5 ? n + ' hráči' : n + ' hráčů';
+}
 
 const MAP_BG = css(COLORS.groundBase, 0.92);   // the minimap's own base colour
 const VOID_BG = css(COLORS.groundBase, 0.38);  // past the loaded region: dead ground
@@ -211,6 +272,16 @@ export class WorldMap {
     this.city = city;
     this.minimap = minimap;
     this.waypoint = null;         // {x,z} | null — main.js drives the HUD arrow
+    this._peers = null;           // co-op roster for THIS frame, by reference
+    // Click a friend and the waypoint FOLLOWS them: uid of the peer being
+    // chased, or null. A static flag on the spot where somebody stood two
+    // minutes ago is not navigation in a world this size — by the time you
+    // arrive they are a kilometre further on.
+    this.followUid = null;
+    this.followName = '';
+    // Reused by _peerScreen — the peer loop runs every frame the map is open
+    // and must not allocate a point object per peer per frame.
+    this._ps = { sx: 0, sy: 0, off: false };
     this.places = [];             // filled asynchronously; [] = no labels, fine
     this.ov = null;               // …and the world base layer; null = streamed only
 
@@ -229,14 +300,38 @@ export class WorldMap {
     this._open = false;
     this._justOpened = false;
     this._rt = 0;                 // pending debounced render timer
-    this._dpr = 1;
+    // 0, not 1: _layout() only rebuilds the font strings when the DPR CHANGES,
+    // so seeding this with a plausible DPR meant that on any ordinary 1× display
+    // the comparison matched on the very first layout and the fonts stayed empty
+    // strings — `g.font = ''` is ignored by the canvas, and every settlement
+    // label silently fell back to the browser default 10px. No real device ever
+    // reports 0, so this always fires once.
+    this._dpr = 0;
     this._fonts = RANK_FONT.map(() => '');
+    this._pfont = 'bold 12.5px system-ui, sans-serif';   // peer labels, rebuilt per DPR
     // Collision boxes for the current frame, flat and preallocated: labels are
     // the one per-frame loop that could allocate, and a Float64Array of
     // [x0,y0,x1,y1]×N costs nothing after construction.
-    this._boxes = new Float64Array(MAX_LABELS * 4);
+    // Settlements fill it first and street names continue in the SAME array,
+    // which is the whole reason places win every contested pixel: a street can
+    // only take a box no town wanted. Hence the extra room at the end rather
+    // than a second array — one array, one rule, no way for the two passes to
+    // disagree about what is already occupied.
+    this._boxes = new Float64Array((MAX_LABELS + STREET_MAX) * 4);
+    // ---- street-label state (see _collectStreets / _drawStreets) ----
+    this._stN = 0;                                  // live candidates
+    this._stRoad = new Array(STREET_CAND).fill(null);
+    this._st = new Float64Array(STREET_CAND * 4);   // mx, mz, angle, visible m
+    this._stScore = new Float64Array(STREET_CAND);
+    this._slName = new Array(STREET_MAX).fill('');  // names drawn THIS frame…
+    this._slPos = new Float64Array(STREET_MAX * 2); // …and where, for the repeat rule
+    this._sfont = '';
     this._buckets = new Map();    // reused across renders: key → feature array
-    this._zr = -1; this._dr = -1; // last status numbers (strings only on change)
+    // last status values — the head line is rebuilt only when one of them
+    // changes. _fk starts null rather than '' so the very first _status()
+    // cannot compare equal to "not following anybody" and skip its paint.
+    this._zr = -1; this._dr = -1; this._pr = -1; this._fk = null;
+    this._followBefore = null;    // the chase a double-click has to put back
 
     this._buildDom();
     loadPlaces().then(list => { this.places = list; });
@@ -290,8 +385,26 @@ export class WorldMap {
   // so the arrow only ever needs the player — `car` is taken as an override
   // because main updates it after the player in the same frame, and `heli` is
   // here for the machine's own icon whether it is parked or being flown.
-  update(player, car, heli) {
-    if (!this._open) return;
+  //
+  // `peers` is the co-op roster: an array of { uid, name, x, z, color }. It is
+  // held BY REFERENCE and read inside the very same call (update → _draw is
+  // synchronous), so the caller is free to hand over one array it rewrites
+  // every frame — this module allocates nothing for it. Omit it and the map
+  // behaves exactly as it did in single player.
+  update(player, car, heli, peers = null) {
+    const roster = Array.isArray(peers) && peers.length ? peers : null;
+    // Chasing a friend has to keep working with the map CLOSED — that is the
+    // whole point of it, since the map is shut while you actually drive there.
+    // So the follow step runs BEFORE the open check.
+    //
+    // `peers === null` means the caller reported nothing this frame; an ARRAY
+    // means it reported, and a peer missing from that array has genuinely
+    // gone. Only the second cancels the chase. Collapsing the two would mean a
+    // caller that passes the roster only while the map is open silently drops
+    // your destination the moment you close the map to drive to it.
+    if (this.followUid && Array.isArray(peers)) this._followPeer(roster);
+    if (!this._open) { this._peers = null; return; }
+    this._peers = roster;
     if (car) { this._px = car.x; this._pz = car.z; this._ph = car.heading; }
     else if (player) {
       this._px = player.pos.x; this._pz = player.pos.z; this._ph = player.heading;
@@ -333,9 +446,13 @@ export class WorldMap {
           ${this._key(css(COLORS.road.primary, 1.55), 'Silnice')}
           ${this._key(css(COLORS.rail, 1.6), 'Železnice')}
           ${this._key(BLD_FILL, 'Zástavba')}
+          ${this._key(PEER_FALLBACK, 'Hráči')}
+          <!-- "dvojklik na hráče" used to mean YOURSELF, which stopped being an
+               unambiguous phrase the moment other players appeared on the map. -->
           <span class="atc-map-hint"><b>táhni</b> posun · <b>kolečko</b> přiblížení ·
-            <b>klik</b> cíl cesty · <b>pravý klik</b> zrušit ·
-            <b>dvojklik</b> na hráče · <b>M</b>/<b>Esc</b> zavřít</span>
+            <b>klik</b> cíl cesty · <b>klik na kamaráda</b> sledovat ·
+            <b>pravý klik</b> zrušit · <b>dvojklik</b> na sebe ·
+            <b>M</b>/<b>Esc</b> zavřít</span>
         </div>
       </div>`;
     document.body.appendChild(root);
@@ -407,6 +524,11 @@ export class WorldMap {
       for (let r = 0; r < RANK_FONT.length; r++)
         this._fonts[r] = (RANK_BOLD[r] ? 'bold ' : '') +
           (RANK_FONT[r] * dpr).toFixed(1) + 'px system-ui, sans-serif';
+      this._pfont = 'bold ' + (12.5 * dpr).toFixed(1) + 'px system-ui, sans-serif';
+      // Street names sit a weight under the settlements on purpose: a town is
+      // an answer to "where am I", a street is only an answer to "which one is
+      // this", and the hierarchy has to be legible before the words are.
+      this._sfont = '600 ' + (STREET_FONT * dpr).toFixed(1) + 'px system-ui, sans-serif';
       for (const p of this.places) p._wmF = '';  // measured widths are dpr-bound
     }
     // zoom 1 = the whole region inside the canvas
@@ -535,7 +657,9 @@ export class WorldMap {
 
   _onDown(e) {
     e.stopPropagation();
-    if (e.button === 2) { this._setWaypoint(null); return; }   // right = zrušit cíl
+    // right = zrušit cíl. Stop the chase FIRST: clearing only the flag would
+    // let _followPeer put it straight back on the next frame.
+    if (e.button === 2) { this.stopFollow(); this._setWaypoint(null); return; }
     if (e.button !== 0) return;
     e.preventDefault();
     const r = this.cv.getBoundingClientRect();
@@ -577,9 +701,22 @@ export class WorldMap {
     // click starts a fresh gesture — a double-click sends two clicks and its
     // undo (see _onDbl) must restore the state from before the first of them.
     const now = performance.now();
-    if (now - (this._lastClickT ?? -1e9) > 400) this._wpBefore = this.waypoint;
+    if (now - (this._lastClickT ?? -1e9) > 400) {
+      this._wpBefore = this.waypoint;
+      this._followBefore = this.followUid;
+    }
     this._lastClickT = now;
-    this._setWaypoint(wx, wz);
+    // A click that landed on a friend means "take me to THEM", and them is a
+    // moving target — anywhere else is an ordinary flag on the ground.
+    const hit = this._peerHit(this._evX(e), this._evY(e));
+    this.stopFollow();
+    if (hit) {
+      this.followUid = hit.uid;
+      this.followName = typeof hit.name === 'string' ? hit.name : '';
+      this._setWaypoint(hit.x, hit.z);
+    } else {
+      this._setWaypoint(wx, wz);
+    }
   }
 
   _endDrag() {
@@ -595,7 +732,14 @@ export class WorldMap {
     e.stopPropagation();
     e.preventDefault();
     const before = this._wpBefore ?? null;
+    this.stopFollow();
     this._setWaypoint(before ? before.x : null, before ? before.z : 0);
+    // …and restore the chase the first click cancelled, so a double-click on
+    // empty map does not quietly stop you following a friend.
+    if (this._followBefore) {
+      this.followUid = this._followBefore;
+      this.followName = '';        // refreshed by the next _followPeer
+    }
     this._centerOnPlayer();
   }
 
@@ -621,6 +765,86 @@ export class WorldMap {
     this.cz = wz - (sy - cv.height / 2) / kNew;
     this._clampView();
     this._schedule(RENDER_MS);
+  }
+
+  // ---- following a friend ----------------------------------------------
+  // Re-point the waypoint at the peer we are chasing. Called every frame,
+  // open or closed, so the HUD compass in main.js tracks a moving target.
+  _followPeer(roster) {
+    let p = null;
+    if (roster) for (const q of roster) if (q && q.uid === this.followUid) { p = q; break; }
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) {
+      // They are not in a roster the caller DID report, i.e. they left. Stop
+      // chasing — but LEAVE the flag where they were last seen. Deleting the
+      // player's destination out from under them is worse than a stale one,
+      // and "last seen here" is still the only lead there is.
+      this.stopFollow();
+      return;
+    }
+    if (typeof p.name === 'string') this.followName = p.name;
+    const wp = this.waypoint;
+    // Only when they have actually moved: _setWaypoint REPLACES the object
+    // (the minimap holds it by reference and a mutation would be invisible to
+    // it), so an ungated follow allocates a waypoint every frame for a peer
+    // who is standing still.
+    if (wp && Math.abs(wp.x - p.x) < 1.5 && Math.abs(wp.z - p.z) < 1.5) return;
+    this._setWaypoint(p.x, p.z);
+  }
+
+  // Stop chasing, keep the flag. Public because the moment main.js grows a
+  // "cancel destination" key it needs to clear the chase too, or the waypoint
+  // would reappear on the very next frame.
+  // No repaint is scheduled here on purpose: the chase ring lives in the
+  // per-frame OVERLAY (_draw), not in the cached bitmap (_render), so it comes
+  // off by itself on the next frame. Scheduling would rasterize the whole
+  // region window again for a 2 px circle.
+  stopFollow() {
+    if (!this.followUid) return;
+    this.followUid = null;
+    this.followName = '';
+  }
+
+  // Where a peer's ICON sits on the canvas — the dot when they are inside the
+  // view, the clamped rim chevron when they are not. One function so the hit
+  // test can never disagree with what was drawn: a chevron you can see and
+  // cannot click is worse than no chevron. Writes into a reused point.
+  _peerScreen(p, W, H, k, inset) {
+    const o = this._ps;
+    let sx = W / 2 + (p.x - this.cx) * k, sy = H / 2 + (p.z - this.cz) * k;
+    o.off = sx < inset || sx > W - inset || sy < inset || sy > H - inset;
+    if (o.off) {
+      // Slide along the ray from the view centre until it meets the inset
+      // rectangle: t is the smaller of the two axis-wise hits, which is the
+      // edge the ray actually crosses first.
+      const vx = sx - W / 2, vy = sy - H / 2;
+      const tx = vx ? (W / 2 - inset) / Math.abs(vx) : Infinity;
+      const ty = vy ? (H / 2 - inset) / Math.abs(vy) : Infinity;
+      const t = Math.min(tx, ty);
+      if (!Number.isFinite(t)) return null;   // dead centre AND off-view: impossible
+      sx = W / 2 + vx * t; sy = H / 2 + vy * t;
+    }
+    o.sx = sx; o.sy = sy;
+    return o;
+  }
+
+  // The peer whose icon is under (sx, sy), or null. The grab radius is a
+  // finger, not a pixel — this canvas takes touch input too.
+  _peerHit(sx, sy) {
+    const peers = this._peers;
+    if (!peers) return null;
+    const k = this.k0 * this.zoom;
+    if (!k) return null;
+    const W = this.cv.width, H = this.cv.height;
+    const inset = PEER_INSET * this._dpr, grab = 18 * this._dpr;
+    let best = null, bestD2 = grab * grab;
+    for (const p of peers) {
+      if (!p || !p.uid || !Number.isFinite(p.x) || !Number.isFinite(p.z)) continue;
+      const s = this._peerScreen(p, W, H, k, inset);
+      if (!s) continue;
+      const d2 = (s.sx - sx) * (s.sx - sx) + (s.sy - sy) * (s.sy - sy);
+      if (d2 <= bestD2) { bestD2 = d2; best = p; }
+    }
+    return best;
   }
 
   _setWaypoint(x, z) {
@@ -731,6 +955,12 @@ export class WorldMap {
     if (any) g.stroke();
 
     this._roads(g, city, x0, z0, s);
+    // Street-label candidates are picked HERE, with the geometry, and not per
+    // frame: the region holds hundreds of thousands of ways and the frame loop
+    // may only ever touch the few hundred that survive this pass. They are
+    // clipped to the BITMAP window rather than the view, so the small pans and
+    // the one zoom step the bitmap already absorbs keep their names too.
+    this._collectStreets(city, x0, z0, x1, z1, k);
     this._zr = -1;               // force the status line to repaint the zoom
   }
 
@@ -920,7 +1150,9 @@ export class WorldMap {
           (x0 - sx) * f, (y0 - sy) * f, (x1 - x0) * f, (y1 - y0) * f);
     }
 
-    this._drawLabels(g, W, H, k);
+    // Settlements first, streets into the boxes they left over, markers on top
+    // of both — the priority the map is read in.
+    this._drawStreets(g, W, H, k, this._drawLabels(g, W, H, k));
     this._drawMarkers(g, W, H, k);
     this._status();
   }
@@ -931,9 +1163,13 @@ export class WorldMap {
   // into the space that frees up. Text widths are memoised per place (the font
   // only changes with the DPR), which keeps measureText out of the steady
   // state — it is the one call in this loop that would allocate every frame.
+  //
+  // Returns how many boxes were reserved: the street pass continues in the
+  // same array from there, which is what makes a town name beat a street name
+  // for the same pixels without either pass knowing about the other.
   _drawLabels(g, W, H, k) {
     const places = this.places;
-    if (!places.length) return;
+    if (!places.length) return 0;
     const dpr = this._dpr, boxes = this._boxes;
     let n = 0;
     g.textAlign = 'center';
@@ -981,6 +1217,170 @@ export class WorldMap {
       g.strokeText(p.n, sx, by1);
       g.fillStyle = r <= 1 ? '#fff3d6' : '#f2f4f8';
       g.fillText(p.n, sx, by1);
+    }
+    return n;
+  }
+
+  // ---- street labels ----------------------------------------------------
+
+  // Pick the named roads worth a label for the frames until the next render.
+  // For each one: the longest straight RUN of its polyline, clipped to the
+  // bitmap window, kept best-first by a bounded insertion so the frame loop
+  // can stop at the first STREET_MAX that fit and know it stopped on the most
+  // important ones. Nothing here allocates — the candidate arrays were built
+  // once and are rewritten in place.
+  _collectStreets(city, x0, z0, x1, z1, k) {
+    this._stN = 0;
+    if (this.zoom < STREET_ZOOM) return;         // contract: from 3× in
+    const list = city.roads;
+    if (!list || !list.length) return;
+    // Cheap pre-filter before the run scan: a name is roughly half its font
+    // size per character wide, so a road with no straight run near that length
+    // cannot possibly be labelled and does not deserve the polyline walk.
+    const emK = STREET_FONT * this._dpr * 0.45 / k;   // metres per character
+    const bonus = ((x1 - x0) / OFF_PAD) * ST_RANK_M;  // one rank, in metres
+    for (const f of list) {
+      if (!f.n) continue;                        // 77 % of ways leave here
+      const rank = ST_RANK[f.t];
+      if (rank === undefined) continue;
+      const bb = this._bb(f, f.p);
+      if (!bb || !this._visBB(bb)) continue;
+      const needM = f.n.length * emK;
+      // No chord of a polyline is longer than its bounding box's diagonal, so
+      // this rejects a road that could not hold its own name before we walk a
+      // single segment of it. It is the whole reason a wide zoom is cheap: at
+      // 6× a ten-letter name wants 700 m of straight road and this throws away
+      // 13 000 of Prague's 13 200 named ways on four subtractions each.
+      const bw = bb[2] - bb[0], bh = bb[3] - bb[1];
+      if (bw * bw + bh * bh < needM * needM) continue;
+      this._considerStreet(f, rank, x0, z0, x1, z1, needM, bonus);
+    }
+  }
+
+  // The best placement for ONE road. Consecutive segments whose bearing stays
+  // within STREET_TURN of the run's first are ONE run — OSM chops a street at
+  // every driveway, so a single segment would fit almost no names (measured
+  // over the real tiles: the longest single segment of a named way is 45–69 m
+  // at the median, the longest straight run 58–114 m). At 0.28 rad the arc's
+  // bulge away from its own chord is under 4 % of the chord, which is inside
+  // the stroke of the road the name is written on.
+  _considerStreet(f, rank, x0, z0, x1, z1, needM, bonus) {
+    const p = f.p, n = p.length;
+    if (n < 2) return;
+    let bestL = 0, bmx = 0, bmz = 0, bang = 0;
+    for (let i = 0; i < n - 1;) {
+      const ax = p[i][0], az = p[i][1];
+      const a0 = Math.atan2(p[i + 1][1] - az, p[i + 1][0] - ax);
+      let j = i + 1;
+      while (j < n - 1) {
+        let d = Math.atan2(p[j + 1][1] - p[j][1], p[j + 1][0] - p[j][0]) - a0;
+        if (d > Math.PI) d -= TAU; else if (d < -Math.PI) d += TAU;
+        if (d > STREET_TURN || d < -STREET_TURN) break;
+        j++;
+      }
+      const bx = p[j][0], bz = p[j][1];
+      if (clipRect(ax, az, bx, bz, x0, z0, x1, z1)) {
+        const dx = bx - ax, dz = bz - az;
+        const L = Math.sqrt(dx * dx + dz * dz) * (_clip.t1 - _clip.t0);
+        if (L > bestL) {
+          bestL = L;
+          const t = (_clip.t0 + _clip.t1) / 2;   // centre of the VISIBLE part
+          bmx = ax + dx * t; bmz = az + dz * t;
+          // Never upside down: mirroring the direction turns the same line
+          // through 180°, which leaves the text lying on the road but the
+          // right way up. atan2 of a non-negative x is always within ±90°.
+          bang = dx < 0 ? Math.atan2(-dz, -dx) : Math.atan2(dz, dx);
+        }
+      }
+      i = j > i + 1 ? j : i + 1;                 // runs share their joint
+    }
+    if (bestL < needM) return;                   // hopeless before we measure
+    // Class beats length, but only by one view-width fraction of it: a
+    // residential street you can see all of still outranks a motorway
+    // showing 40 m in the corner.
+    const score = bestL + (4 - rank) * bonus;
+    const cand = this._st, sc = this._stScore;
+    let at = this._stN;
+    if (at >= STREET_CAND) {
+      if (score <= sc[STREET_CAND - 1]) return;
+      at = STREET_CAND - 1;
+    } else this._stN++;
+    while (at > 0 && sc[at - 1] < score) {       // shift the weaker ones down
+      sc[at] = sc[at - 1];
+      this._stRoad[at] = this._stRoad[at - 1];
+      cand[at * 4] = cand[at * 4 - 4]; cand[at * 4 + 1] = cand[at * 4 - 3];
+      cand[at * 4 + 2] = cand[at * 4 - 2]; cand[at * 4 + 3] = cand[at * 4 - 1];
+      at--;
+    }
+    sc[at] = score;
+    this._stRoad[at] = f;
+    cand[at * 4] = bmx; cand[at * 4 + 1] = bmz;
+    cand[at * 4 + 2] = bang; cand[at * 4 + 3] = bestL;
+  }
+
+  // Lay the surviving names along their streets, continuing the settlement
+  // pass's collision boxes at index `n0`. Four rejections in cheapest-first
+  // order: the name must FIT the drawn run (measureText — memoised per road
+  // per font, the one call here that would otherwise allocate every frame),
+  // it must not repeat a name already written nearby, its box must be wholly
+  // on the canvas, and it must not touch a box already placed — including
+  // every town's, which is how places win.
+  _drawStreets(g, W, H, k, n0) {
+    if (this.zoom < STREET_ZOOM || !this._stN) return;
+    const st = this._st, boxes = this._boxes, dpr = this._dpr;
+    const font = this._sfont, hh = STREET_FONT * dpr * 0.62;
+    const pad = STREET_PAD * dpr, rep = STREET_REPEAT * dpr;
+    const names = this._slName, pos = this._slPos;
+    let n = n0, drawn = 0;
+    g.font = font;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.lineJoin = 'round';
+    for (let i = 0; i < this._stN && drawn < STREET_MAX && n < MAX_LABELS + STREET_MAX; i++) {
+      const f = this._stRoad[i], b = i * 4;
+      // memo keys are world-map-private: the minimap measures the SAME roads
+      // at its own font, and one shared cache would make the two thrash
+      if (f._wmLF !== font) { f._wmLW = g.measureText(f.n).width; f._wmLF = font; }
+      const w = f._wmLW;
+      if (w + pad * 2 > st[b + 3] * k) continue;      // longer than its street
+      const sx = W / 2 + (st[b] - this.cx) * k, sy = H / 2 + (st[b + 1] - this.cz) * k;
+      // One street is a dozen OSM ways, so the same name would otherwise land
+      // five times in a row down one avenue. It may say itself again, but only
+      // once you have travelled far enough along that the first is no help.
+      let dup = false;
+      for (let q = 0; q < drawn; q++) {
+        if (names[q] !== f.n) continue;
+        const ddx = pos[q * 2] - sx, ddy = pos[q * 2 + 1] - sy;
+        if (ddx * ddx + ddy * ddy < rep * rep) { dup = true; break; }
+      }
+      if (dup) continue;
+      const ang = st[b + 2], ca = Math.cos(ang), sa = Math.sin(ang);
+      // AABB of the ROTATED box — conservative on both tests below, which is
+      // the right way round: it never lets a name overlap or overhang.
+      const ex = Math.abs(ca) * w / 2 + Math.abs(sa) * hh;
+      const ey = Math.abs(sa) * w / 2 + Math.abs(ca) * hh;
+      const bx0 = sx - ex, bx1 = sx + ex, by0 = sy - ey, by1 = sy + ey;
+      if (bx0 < 2 || bx1 > W - 2 || by0 < 2 || by1 > H - 2) continue;
+      let hit = false;
+      for (let q = 0, e = n * 4; q < e; q += 4)
+        if (bx0 < boxes[q + 2] && bx1 > boxes[q] && by0 < boxes[q + 3] && by1 > boxes[q + 1]) {
+          hit = true; break;
+        }
+      if (hit) continue;
+      boxes[n * 4] = bx0; boxes[n * 4 + 1] = by0;
+      boxes[n * 4 + 2] = bx1; boxes[n * 4 + 3] = by1;
+      n++;
+      names[drawn] = f.n; pos[drawn * 2] = sx; pos[drawn * 2 + 1] = sy;
+      drawn++;
+      g.save();
+      g.translate(sx, sy);
+      g.rotate(ang);
+      g.lineWidth = 3 * dpr;
+      g.strokeStyle = 'rgba(8,11,16,0.82)';      // the dark case, as the towns
+      g.strokeText(f.n, 0, 0);
+      g.fillStyle = '#dde4ef';
+      g.fillText(f.n, 0, 0);
+      g.restore();
     }
   }
 
@@ -1050,6 +1450,10 @@ export class WorldMap {
       }
     }
 
+    // co-op players, under our own arrow (ours is the one that must never be
+    // covered) but over everything else on the map
+    if (this._peers) this._drawPeers(g, W, H, k);
+
     // the player: a heading arrow on a soft halo. North stays up, so the arrow
     // does the turning — rotate(−heading), the minimap's own convention.
     if (!hasP) return;
@@ -1077,6 +1481,95 @@ export class WorldMap {
     g.restore();
   }
 
+  // Co-op players, drawn the way the helicopter is (dark outline pass, icon
+  // over it) so they read as chrome and not as map data. Two states, and the
+  // second one is the one that matters in a 134 km world: a peer who is not on
+  // the visible rectangle becomes a chevron clamped to the canvas edge on the
+  // bearing to them, with the distance beside it — otherwise a friend two
+  // villages away is simply absent from the only navigation the game has, and
+  // zooming out to find them means losing the detail you zoomed in for.
+  _drawPeers(g, W, H, k) {
+    const dpr = this._dpr;
+    const inset = PEER_INSET * dpr;
+    const px = this._px, pz = this._pz, hasP = px !== undefined;
+    g.textAlign = 'center';
+    g.textBaseline = 'alphabetic';
+    g.lineJoin = 'round';
+    g.font = this._pfont;
+    for (const p of this._peers) {
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) continue;
+      const s = this._peerScreen(p, W, H, k, inset);
+      if (!s) continue;
+      const sx = s.sx, sy = s.sy;
+      const col = peerCss(p.color);
+      const chased = !!p.uid && p.uid === this.followUid;
+      const name = typeof p.name === 'string' ? p.name.slice(0, 14) : '';
+      if (s.off) {
+        const a = 7 * dpr;
+        g.save();
+        g.translate(sx, sy);
+        // local +x points at the peer: the chevron is aimed along the bearing
+        g.rotate(Math.atan2(sy - H / 2, sx - W / 2));
+        g.beginPath();
+        g.moveTo(a, 0);
+        g.lineTo(-a * 0.6, a * 0.72);
+        g.lineTo(-a * 0.2, 0);
+        g.lineTo(-a * 0.6, -a * 0.72);
+        g.closePath();
+        g.lineWidth = 3.4 * dpr;
+        g.strokeStyle = chased ? WP_COLOR : 'rgba(8,11,16,0.85)';
+        g.stroke();
+        g.fillStyle = col;
+        g.fill();
+        g.restore();
+        continue;
+      }
+      const r = 5 * dpr;
+      g.beginPath();
+      g.arc(sx, sy, r * 1.9, 0, TAU);
+      g.fillStyle = 'rgba(10,14,20,0.35)';       // halo, so a dot over a white
+      g.fill();                                  // building still reads as a marker
+      // the chase ring, in the waypoint's own yellow: the flag on the ground
+      // and the person it is stuck to are the same destination, and they have
+      // to look like it
+      if (chased) {
+        g.beginPath();
+        g.arc(sx, sy, r * 2.5, 0, TAU);
+        g.lineWidth = 2.2 * dpr;
+        g.strokeStyle = WP_COLOR;
+        g.stroke();
+      }
+      g.beginPath();
+      g.arc(sx, sy, r, 0, TAU);
+      g.fillStyle = col;
+      g.fill();
+      g.lineWidth = 1.8 * dpr;
+      g.strokeStyle = 'rgba(8,11,16,0.9)';
+      g.stroke();
+      if (!name) continue;
+      // The nickname arrives already filtered — netcity.sanitizeName runs on
+      // receive, and it is the same body as nametags.clean. This module does
+      // NOT re-run it: importing nametags.cleanName would drag three.js into a
+      // canvas-only module that is otherwise headless-testable, and a fourth
+      // hand-copied regex is exactly the drift nametags warns about. It goes
+      // to strokeText, never to innerHTML.
+      //
+      // name above the dot, plus how far away they are — the number is what
+      // turns "there they are" into "I can get there"
+      let label = name;
+      if (hasP) {
+        const d = Math.hypot(p.x - px, p.z - pz);
+        label += d >= 1000 ? '  ' + (d / 1000).toFixed(1) + ' km' : '  ' + Math.round(d) + ' m';
+      }
+      const ty2 = sy - r - 4 * dpr;
+      g.lineWidth = 3.2 * dpr;
+      g.strokeStyle = 'rgba(8,11,16,0.88)';
+      g.strokeText(label, sx, ty2);
+      g.fillStyle = '#f2f5fb';
+      g.fillText(label, sx, ty2);
+    }
+  }
+
   // Head line: zoom and the distance to the waypoint. Both are rebuilt ONLY
   // when their rounded value changes — string building is an allocation, and
   // this runs every frame the map is open.
@@ -1085,18 +1578,51 @@ export class WorldMap {
     let dr = -1;
     if (this.waypoint && this._px !== undefined)
       dr = Math.round(Math.hypot(this.waypoint.x - this._px, this.waypoint.z - this._pz) / 10);
-    if (zr === this._zr && dr === this._dr) return;
-    this._zr = zr; this._dr = dr;
+    const pn = this._peers ? this._peers.length : 0;
+    // The chase is part of the memo key, or picking a friend to follow would
+    // leave the head line advertising the previous destination until the
+    // distance happened to tick over.
+    const fk = this.followUid ? this.followUid + '|' + this.followName : '';
+    if (zr === this._zr && dr === this._dr && pn === this._pr && fk === this._fk) return;
+    this._zr = zr; this._dr = dr; this._pr = pn; this._fk = fk;
     let txt = this.bs > 0 ? 'přiblížení ' + (zr / 10).toFixed(1) + '×' : 'vykresluji mapu…';
     if (dr >= 0) {
       const m = dr * 10;
-      txt += ' · cíl ' + (m >= 1000 ? (m / 1000).toFixed(1) + ' km' : m + ' m');
+      // While chasing, the destination has a name — "cíl 2.4 km" says nothing
+      // about the fact that the 2.4 km is walking away from you.
+      txt += ' · ' + (this.followUid ? 'sleduješ ' + (this.followName || 'hráče') + ' ' : 'cíl ')
+        + (m >= 1000 ? (m / 1000).toFixed(1) + ' km' : m + ' m');
     }
+    // the head count belongs on the map itself: this is where a player looks
+    // to find out where everyone is, so it is also where "everyone" is counted
+    if (pn > 0) txt += ' · ' + czPlayers(pn) + ' na mapě';
     this.stat.textContent = txt;
   }
 }
 
 const EMPTY_DASH = [];   // setLineDash([]) every frame would allocate; this does not
+
+// Segment A→B clipped to a world rectangle (Liang–Barsky), as the parameter
+// range that survives. The answer goes into a module-level scratch because
+// this runs once per straight run of every named road in the window and a
+// returned {t0,t1} would be an allocation per call.
+const _clip = { t0: 0, t1: 0 };
+function clipRect(ax, az, bx, bz, x0, z0, x1, z1) {
+  let t0 = 0, t1 = 1;
+  const dx = bx - ax, dz = bz - az;
+  for (let e = 0; e < 4; e++) {
+    // p = the outward rate along this edge's normal, q = how far inside we start
+    const p = e === 0 ? -dx : e === 1 ? dx : e === 2 ? -dz : dz;
+    const q = e === 0 ? ax - x0 : e === 1 ? x1 - ax : e === 2 ? az - z0 : z1 - az;
+    if (p === 0) { if (q < 0) return false; continue; }   // parallel and outside
+    const r = q / p;
+    if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+    else { if (r < t0) return false; if (r < t1) t1 = r; }
+  }
+  if (t1 <= t0) return false;
+  _clip.t0 = t0; _clip.t1 = t1;
+  return true;
+}
 
 // Signed area of a ring (shoelace). Only its SIGN is used — to force a
 // consistent winding before batched nonzero fills.
