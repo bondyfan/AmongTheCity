@@ -60,12 +60,37 @@ export function distPointToSegment(px, pz, ax, az, bx, bz, out) {
   return Math.hypot(px - cx, pz - cz);
 }
 
-// Bridge decks run FLAT at BRIDGE_Y — the river below them is what's sunken
-// (WATER_Y), which is how real Pardubice bridges read. Only a short blend at
-// each way end eases the curb-height step onto the approach street.
+// Legacy relative bridge lift, retained for callers that do not have terrain.
 export function bridgeElevation(dist, totalLen) {
   const edge = Math.min(dist, totalLen - dist);
   return Math.max(0, Math.min(BRIDGE_Y, (edge / BRIDGE_RAMP) * BRIDGE_Y));
+}
+
+// Absolute bridge-deck height. Adding bridgeElevation() to the terrain at
+// every point makes a road faithfully copy the river valley below it. A real
+// bridge holds one level across the full OSM bridge way. Its tagged endpoints
+// are often already inside the bare-earth river trench, so blending back to
+// their sampled heights would create a steep artificial hump at each bank.
+// The higher endpoint owns the level so the deck never dives into either side.
+export function bridgeDeckHeight(way, dist, terrain) {
+  const total = way?._len ?? polylineLength(way?.p ?? []);
+  if (!terrain || !way?.p?.length) return bridgeElevation(dist, total);
+
+  let profile = way._bridgeProfile;
+  if (!profile || profile.terrain !== terrain) {
+    const first = way.p[0], last = way.p[way.p.length - 1];
+    const start = terrain.heightAt(first[0], first[1]);
+    const end = terrain.heightAt(last[0], last[1]);
+    profile = { terrain, start, end, deck: Math.max(start, end) + BRIDGE_Y };
+    // Terrain answers 0 while a height tile is still on the way. Remember the
+    // profile only after both approaches are authoritative; the arriving tile
+    // then rebuilds the chunk and gets a fresh, correct level.
+    const ready = !terrain.ready
+      || (terrain.ready(first[0], first[1]) && terrain.ready(last[0], last[1]));
+    if (ready) way._bridgeProfile = profile;
+  }
+
+  return profile.deck;
 }
 
 export function polylineLength(p) {
@@ -223,7 +248,10 @@ export async function loadCity(url) {
   // everything else still resident). A failed fetch rolls back to its previous
   // state so the next ensureTiles pass retries — the network hiccuped, or the
   // region download may still be filling the server; either way we self-heal.
-  const tiles = data.tiles.map((t, i) => ({ tx: t.tx, tz: t.tz, f: t.f, state: 0, slot: i + 1, heavy: null }));
+  const tiles = data.tiles.map((t, i) => ({
+    tx: t.tx, tz: t.tz, f: t.f, wb: t.wb,
+    state: 0, slot: i + 1, heavy: null,
+  }));
   // The world map needs the region's EXTENT before any of it has streamed —
   // fitting to the loaded arrays alone showed Pardubice and hid 400 villages.
   city.manifestTiles = tiles;
@@ -231,6 +259,12 @@ export async function loadCity(url) {
   const distSqTo = (t, x, z) => {
     const dx = Math.max(t.tx * T - x, 0, x - (t.tx + 1) * T);
     const dz = Math.max(t.tz * T - z, 0, z - (t.tz + 1) * T);
+    return dx * dx + dz * dz;
+  };
+  const distSqToBounds = (b, x, z) => {
+    if (!b || b.length !== 4) return Infinity;
+    const dx = Math.max(b[0] - x, 0, x - b[2]);
+    const dz = Math.max(b[1] - z, 0, z - b[3]);
     return dx * dx + dz * dz;
   };
   const loadTile = async (t, back) => {
@@ -264,7 +298,15 @@ export async function loadCity(url) {
     let batch = null;
     for (const t of tiles) {
       if (t.state === 1 || t.state === 2) continue;   // in flight, or already full
-      if (distSqTo(t, x, z) > TILE_REACH * TILE_REACH) continue;
+      const ownerNear = distSqTo(t, x, z) <= TILE_REACH * TILE_REACH;
+      // State 0 has no resident layers yet, so a long river reaching this
+      // location may pull in its distant owner tile. State 3 already retained
+      // water/roads/rails; only proximity to the owner should re-fetch its
+      // evicted buildings and trees, otherwise a long river would cause an
+      // endless load → slim → load loop.
+      const waterNear = t.state === 0
+        && distSqToBounds(t.wb, x, z) <= TILE_REACH * TILE_REACH;
+      if (!ownerNear && !waterNear) continue;
       const back = t.state;                            // 0 = never seen, 3 = slim
       t.state = 1;
       (batch ??= []).push(loadTile(t, back));

@@ -128,14 +128,15 @@ function padGeom() {
   return (_padGeo = { apron, ring, bar, cross, lamp });
 }
 
-// makeHelipad(x, z) → a static THREE.Group parked at (x, 0, z). Nothing about
+// makeHelipad(x, z, y) → a static THREE.Group parked on the local ground.
+// Nothing about
 // it animates, so it is safe to add once and forget; group.userData carries
 // the radius (main.js uses it for the "press F to board" proximity test) and
 // the light material for a dusk sweep.
-export function makeHelipad(x, z) {
+export function makeHelipad(x, z, y = 0) {
   const g = padGeom();
   const group = new THREE.Group();
-  group.position.set(x, 0, z);
+  group.position.set(x, y, z);
 
   const apron = new THREE.Mesh(g.apron, new THREE.MeshLambertMaterial({ color: 0x35383c }));
   apron.position.y = PAD_Y;
@@ -301,7 +302,7 @@ const _pt = { x: 0, z: 0 };            // scratch for world.collide, reused fore
 const _col = { aboveY: 0 };            // …and its options object
 
 export class Helicopter {
-  constructor(scene, x, z, heading = 0) {
+  constructor(scene, x, z, heading = 0, world = null) {
     this.scene = scene;
     const m = makeHeliMesh();
     this.mesh = m.group;
@@ -311,7 +312,12 @@ export class Helicopter {
     this._disc = m.disc;
     this._tail = m.tail;
 
-    this.x = x; this.y = 0; this.z = z;
+    this.x = x;
+    // Terrain is stored in absolute metres above sea level. Spawning at the
+    // old hard-coded y=0 hid the helicopter under every real Czech height map
+    // until a later physics frame happened to rescue it.
+    this.y = world?.heightAt?.(x, z) ?? 0;
+    this.z = z;
     this.heading = heading;
     this.rotorSpeed = 0;               // cold — the pad-leap guard lives here
     this.airborne = false;
@@ -321,7 +327,7 @@ export class Helicopter {
     this.pitch = 0; this.roll = 0;     // BODY angles in mesh sign convention
     this.yawRate = 0;
 
-    this.mesh.position.set(x, 0, z);
+    this.mesh.position.set(x, this.y, z);
     this.mesh.rotation.y = heading;
     scene.add(this.mesh);
   }
@@ -412,8 +418,13 @@ export class Helicopter {
     // descending onto a block of flats lands on it while flying past its
     // fifteenth floor still leaves the wall in the way (see the collide call
     // below, which now ignores anything shorter than we are).
-    const gy = world.roofY ? world.roofY(this.x, this.z, this.y)
-      : world.heightAt(this.x, this.z);
+    // A roof query is ADDITIVE to the ground, never a replacement for it.
+    // roofY() intentionally returns 0 when there is no building below us; the
+    // old ternary therefore made a freshly spawned helicopter at y≈220 fall
+    // all the way to sea level, under the terrain, while its pad stayed put.
+    const terrainY = world.heightAt(this.x, this.z);
+    const roofY = world.roofY ? world.roofY(this.x, this.z, this.y) : terrainY;
+    const gy = Math.max(terrainY, roofY);
     if (this.y < gy) { this.y = gy; if (this.vy < 0) this.vy = 0; }
     const agl = this.y - gy;
     if (this.vy > 0.05 && agl > 0.02) {

@@ -349,6 +349,10 @@ function processRoads(els, owns) {
     if (t.aeroway === 'runway' && t.ref) r.ref = t.ref;
     if (t.oneway === 'yes' || t.oneway === '1' || t.junction === 'roundabout') r.ow = 1;
     else if (t.oneway === '-1') { r.p.reverse(); r.ow = 1; }
+    // Keep the vertical topology. Without this flag every regional road bridge
+    // is indistinguishable from an ordinary road at runtime and gets draped
+    // over the riverbed terrain, even though the raw OSM way says bridge=yes.
+    if (t.bridge && t.bridge !== 'no') r.br = 1;
     // ownership AFTER the oneway=-1 reverse — runtime _home reads the STORED p[0]
     if (!owns(r.p[0])) continue;
     const lanes = parseInt(t.lanes);
@@ -621,6 +625,19 @@ const totals = { buildings: 0, roads: 0, rails: 0, water: 0, waterways: 0,
   green: 0, paved: 0, trees: 0, pois: 0, signals: 0 };
 let emitted = 0, empty = 0, bytes = 0;
 
+// Some rivers are single OSM multipolygons tens of kilometres long. They live
+// in the raw tile owning their first vertex, but the runtime must also know
+// that the feature reaches other tiles or it will show only the aerial photo
+// there. Store the actual water extent in the tiny manifest for that purpose.
+function waterBounds(water) {
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const f of water) for (const [x, z] of f.o ?? []) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (z < z0) z0 = z; if (z > z1) z1 = z;
+  }
+  return Number.isFinite(x0) ? [x0, z0, x1, z1] : null;
+}
+
 const rawTiles = readdirSync(RAW_DIR)
   .map(f => /^(-?\d+)_(-?\d+)\.json$/.exec(f))
   .filter(Boolean)
@@ -655,7 +672,8 @@ const rawTiles = readdirSync(RAW_DIR)
     collectOverview(tile);
     const json = JSON.stringify(tile);
     writeFileSync(`${OUT_DIR}/tiles/${tx}_${tz}.json`, json);
-    manifestTiles.push({ tx, tz, f: `data/tiles/${tx}_${tz}.json`, n });
+    const wb = waterBounds(tile.water);
+    manifestTiles.push({ tx, tz, f: `data/tiles/${tx}_${tz}.json`, n, ...(wb ? { wb } : {}) });
     bytes += json.length;
     emitted++;
   }

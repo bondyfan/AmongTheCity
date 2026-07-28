@@ -183,6 +183,18 @@ const SOUNDS = [
     'Sustained rushing airflow heard from inside a fast-moving aircraft: a broad, '
     + 'steady wind roar with a slight buffeting flutter, no engine, no music, no '
     + 'voice. Seamless loop', 6.0, { loop: true }],
+  // The wind you hear with the window down at 140 km/h. It is NOT the jet's:
+  // that one is a cockpit roar heard through a canopy, and played at car speeds
+  // it reads as a fan — which is exactly what it was called. The brief here is a
+  // microphone left out in a gale: gusting, irregular, with the low buffeting
+  // thud of pressure on the diaphragm. The gusting is the whole point; steady
+  // broadband noise is what a fan sounds like, and the ear knows.
+  ['car_wind',
+    'Real wind blowing across a microphone outdoors in a strong gale: a deep gusting roar '
+    + 'that swells and dies away irregularly, heavy low-frequency buffeting and rumble '
+    + 'thudding against the microphone windscreen, with a rushing airy edge on top. Recorded '
+    + 'on an exposed hillside, raw and natural, constantly changing. No fan, no motor, no '
+    + 'electrical hum, no whistling tone, no music, no voice. Seamless loop', 9.0, { loop: true }],
   ['jet_brake',
     'A fighter jet decelerating hard on a runway after touchdown: tyres scrubbing '
     + 'on concrete, wheel brakes grinding and squealing, rumbling down to a stop. '

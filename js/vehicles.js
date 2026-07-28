@@ -30,7 +30,7 @@
 
 import * as THREE from 'three';
 import { CAR, CAR_COLORS } from './config.js';
-import { crash } from './audio.js';   // no-ops headless — safe for node --check/tests
+import { crash, sfxAt } from './audio.js';   // no-ops headless — safe for node --check/tests
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 
@@ -1048,7 +1048,13 @@ export class Vehicles {
         }
       }
       m.position.set(car.x, car.y, car.z);
-      m.rotation.y = car.heading;
+      // YXZ, the aircraft order: yaw outermost, then pitch about the car's own
+      // lateral axis, then roll about its nose. Plain XYZ would pitch about
+      // world X, which tilts a car driving east sideways. With pitch and roll
+      // at zero the two orders are identical, so nothing that only writes
+      // heading (the traffic AI, the net layer) notices.
+      m.rotation.order = 'YXZ';
+      m.rotation.set(car._gp ?? 0, car.heading, car._gr ?? 0);
       const spin = car.speed * dt / m.userData.wheelR;
       for (let i = 0; i < 4; i++) {
         const w = car.wheels[i];
@@ -1082,6 +1088,24 @@ export class Vehicles {
       //   · every combustion car near the focus breathes faint exhaust
       //     (teslas have no pipe and stay clean).
       if (this.dust) {
+        // ---- landing ----
+        // suspension() sets _thump on the frame the wheels come back down. All
+        // four corners shove dust, the tyres bark, and a really hard arrival
+        // (the springs bottoming out) adds the crunch of the floorpan.
+        if (car._thump) {
+          const t = car._thump; car._thump = 0;
+          const fx3 = -Math.sin(car.heading), fz3 = -Math.cos(car.heading);
+          const rx3 = -fz3, rz3 = fx3;
+          for (const [a, b2] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+            this.dust.puff(
+              car.x + fx3 * a * car.len * 0.36 + rx3 * b2 * car.wid * 0.5, car.y + 0.12,
+              car.z + fz3 * a * car.len * 0.36 + rz3 * b2 * car.wid * 0.5,
+              0.2 + t * 0.3, 1.0 + t, 0.9, 0.4, 0xa9a196,
+              rx3 * b2 * 1.4, 0.9 + t, rz3 * b2 * 1.4);
+          }
+          sfxAt('tyre_touchdown', 0.35 + t * 0.5, car.x, car.z, 90);
+          if (t > 0.7) crash(t * 0.45);
+        }
         car._smokeT = (car._smokeT ?? 0) - dt;
         if (car._smokeT <= 0) {
           const fx2 = -Math.sin(car.heading), fz2 = -Math.cos(car.heading);
@@ -1106,7 +1130,8 @@ export class Vehicles {
       // crash damage shows: the shell sags and takes a permanent list — cheap,
       // and it reads as "that car has had a day" from any distance
       const dmgK = Math.min(1, car.damage ?? 0);
-      b.position.y = -0.055 * dmgK;
+      // …and the springs compress under a landing, then push back out
+      b.position.y = -0.055 * dmgK - 0.14 * (car._sag ?? 0);
       b.rotation.z = car._roll + bumpR + (car._crushR ?? 0);  // +z roll lifts the right flank
       b.rotation.x = car._pitch;         // +x pitch lifts the nose
     }
@@ -1376,7 +1401,7 @@ export function driveStep(car, ctl, dt, world, others) {
   if (world.surfaceY) {
     const s = world.surfaceY(car.x, car.z);
     car.offroad += ((s.road ? 0 : 1) - (car.offroad ?? 0)) * Math.min(1, dt * 3.5);
-    car.y = s.y;
+    suspension(car, s.y, dt, world);
     if (car.offroad > 0.05 && Math.abs(car.speed) > 0.5) {
       // Rolling resistance of a field, not of glue — solved, not guessed: an
       // Octavia's curve gives a = 7·(1 − v/64)^1.3, which at 25 m/s (90 km/h)
@@ -1390,8 +1415,108 @@ export function driveStep(car, ctl, dt, world, others) {
       car.speed -= Math.sign(car.speed) * Math.min(v, drag * dt);
     }
   } else {
-    car.y = world.heightAt(car.x, car.z);  // tests stub heightAt only
+    suspension(car, world.heightAt(car.x, car.z), dt, world);
   }
+}
+
+// ---- suspension(car, surf, dt, world): the wheels stop being glued down -----
+// Until this existed, `car.y = surfaceY(x, z)` — the car was a decal on the
+// terrain. It could not leave the ground, so a crest was a shrug and a drop-off
+// was a slide, and on a 10 % grade the body stayed dead level while the world
+// tilted underneath it.
+//
+// The model is the smallest honest one: a single vertical degree of freedom
+// plus an attitude read off the ground under the wheelbase.
+//
+//   · GROUNDED, the car's vertical speed is not free — it IS whatever rate the
+//     ground is lifting the wheels, which is (slope × speed). Carrying that
+//     number is the entire trick: at a crest the ground stops climbing but the
+//     car's +vy does not vanish, so it keeps going up. That is a jump, and it
+//     falls out of the physics rather than being special-cased.
+//   · AIRBORNE, only gravity acts. Touchdown is y falling back through the
+//     surface; the overshoot velocity is the impact.
+//
+// The launch slope is sampled over the REAR half of the car (back axle →
+// centre), not the whole wheelbase. On a ramp lip the front wheels are already
+// over the edge while the rear is still climbing — averaging the two would read
+// "flat" at the exact instant a real car is being thrown into the air.
+const GRAV = 9.81;
+const AIR_EPS = 0.05;      // m of clearance before we call it flying
+const VY_MAX = 9;          // m/s of launch — past this it is data, not a ramp
+const JUMP_V = 4;          // m/s ground speed below which nothing takes off
+const STEP_FLOOR = 0.4;    // m of surface change a STANDING car may be handed
+const STEP_SLOPE = 2;      // …plus this × the distance it actually travelled
+function suspension(car, surf, dt, world) {
+  const y0 = car.y ?? surf;
+  const at = world.surfaceY
+    ? (x, z) => world.surfaceY(x, z).y
+    : (x, z) => world.heightAt(x, z);
+
+  // A height map arriving (or a respawn) moves the ground by tens of metres
+  // between two frames, and dropping the car down that hole would be a bug
+  // wearing physics as a disguise. What separates it from a real drop-off is
+  // that terrain can only change as fast as the car DRIVES INTO it: a 200 %
+  // grade — steeper than anything DMR 5G resolves at 20 m spacing — is 2 m of
+  // fall per metre travelled. Anything past that budget is a data change, so
+  // re-seat rather than fall. A standing car gets a small allowance for a kerb
+  // or a bridge deck appearing under it and nothing more.
+  const budget = STEP_FLOOR + STEP_SLOPE * Math.abs(car.speed) * dt;
+  const jumped = Math.abs(surf - (car._surf ?? surf)) > budget;
+  car._surf = surf;
+  if (jumped) {
+    car.y = surf; car._vy = 0; car.air = 0; car._sag = 0;
+    car._gp = 0; car._gr = 0;
+    return;
+  }
+
+  const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
+  const rx = -fz, rz = fx;                       // right of forward, x east / z south
+  const hl = car.len * 0.5, hw = car.wid * 0.5;
+  const yF = at(car.x + fx * hl, car.z + fz * hl);
+  const yB = at(car.x - fx * hl, car.z - fz * hl);
+
+  let vy = (car._vy ?? 0) - GRAV * dt;
+  let y = y0 + vy * dt;
+  const flying = y > surf + AIR_EPS;
+  if (flying) {
+    car.air = (car.air ?? 0) + dt;
+  } else {
+    // touchdown, or simply still rolling
+    const impact = Math.max(0, -vy);
+    if ((car.air ?? 0) > 0.12 && impact > 2) {
+      // The springs eat it: a visible squat that decays, and a number the
+      // caller can turn into a thump and a puff of dust.
+      car._sag = Math.min(1, impact / 9);
+      car._thump = Math.min(1, impact / 9);
+    }
+    car.air = 0;
+    y = surf;
+    // The wheels are down, so the ground writes the vertical speed. Below a
+    // walking pace nothing may launch — otherwise terrain noise makes a parked
+    // car hover a centimetre off its own driveway.
+    const climb = ((surf - yB) / hl) * car.speed;
+    vy = Math.abs(car.speed) < JUMP_V ? Math.min(0, climb)
+      : Math.max(-VY_MAX, Math.min(VY_MAX, climb));
+  }
+  car.y = y;
+  car._vy = vy;
+  car._sag = Math.max(0, (car._sag ?? 0) - dt * 3.5);
+
+  // ---- attitude ----
+  // On the ground the body lies along the hill. In the air it follows its own
+  // trajectory, which is what makes a drop-off read as a drop-off: nose down on
+  // the way to the landing, exactly as the user asked for.
+  const gp = flying
+    ? Math.atan2(vy, Math.max(6, Math.abs(car.speed)))
+    : Math.atan2(yF - yB, car.len);
+  const gr = flying ? (car._gr ?? 0) * 0.94
+    : Math.atan2(at(car.x + rx * hw, car.z + rz * hw)
+               - at(car.x - rx * hw, car.z - rz * hw), car.wid);
+  // Faster in the air than on the ground: a launch has to look sudden, while a
+  // road that is merely bumpy should not make the body strobe.
+  const k = Math.min(1, dt * (flying ? 7 : 4));
+  car._gp = (car._gp ?? 0) + (clamp(gp, -0.7, 0.7) - (car._gp ?? 0)) * k;
+  car._gr = (car._gr ?? 0) + (clamp(gr, -0.5, 0.5) - (car._gr ?? 0)) * k;
 }
 
 // ---- seatAnchor(car, i) → LOCAL-space seat point { x, y, z } -------------

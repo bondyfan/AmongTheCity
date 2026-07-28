@@ -8,7 +8,7 @@
 
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
-import { chunkKey, pointInPolygon, distPointToSegment, bridgeElevation } from './geo.js';
+import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain } from './terrain.js';
@@ -266,7 +266,9 @@ export class CityWorld {
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
         if (d < half) {
           const s = along + Math.hypot(_closest.x - ax, _closest.z - az);
-          const y = ground + LAYER_Y.road + (r.br ? bridgeElevation(s, r._len) : 0);
+          const y = r.br
+            ? bridgeDeckHeight(r, s, this.terrain) + LAYER_Y.road
+            : ground + LAYER_Y.road;
           if (y > best) best = y;
         }
         along += Math.hypot(bx - ax, bz - az);
@@ -283,14 +285,10 @@ export class CityWorld {
     return _surf;
   }
 
-  // Ground height. Pardubice is flat (y=0) — the only relief is bridge decks:
-  // standing on a bridge road means standing on its deck. Nearest drivable or
-  // walkable bridge way within half its width owns the point.
+  // Ground height plus bridge decks: standing on a bridge road means standing
+  // on its level span, not on the river valley sampled underneath it. Nearest
+  // drivable or walkable bridge way within half its width owns the point.
   heightAt(x, z) {
-    // The ground itself. Bridges then ride ABOVE it: bridgeElevation returns a
-    // lift over the surrounding surface, not an absolute height, so the two
-    // simply add — which is what keeps a bridge deck the right distance over a
-    // river that is now at 185 m rather than at zero.
     const ground = this.terrain.heightAt(x, z);
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
     if (!cell) return ground;
@@ -303,7 +301,7 @@ export class CityWorld {
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
         if (d < r.w / 2 + 1.5) {
           const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
-          y = Math.max(y, ground + bridgeElevation(along, r._len));
+          y = Math.max(y, bridgeDeckHeight(r, along, this.terrain));
         }
         dist += Math.hypot(bx - ax, bz - az);
       }

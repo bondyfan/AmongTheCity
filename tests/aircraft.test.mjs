@@ -17,7 +17,9 @@ import { register } from 'node:module';
 
 register(new URL('./three-alias.mjs', import.meta.url));
 
-const { Fighter, seatAnchor } = await import('../js/aircraft.js');
+const THREE = await import('three');
+const { Fighter, makeFighterMesh, seatAnchor } = await import('../js/aircraft.js');
+const { Helicopter } = await import('../js/helicopter.js');
 
 const DT = 1 / 60;
 const scene = { add() {}, remove() {} };
@@ -155,4 +157,45 @@ test('the pilot sits in the cockpit, not on the wing', () => {
   assert.equal(a.x, 0, 'a single-seat jet seats the pilot on the centreline');
   assert.ok(a.z < -2 && a.z > -5, `seat at z=${a.z} is not under the canopy`);
   assert.ok(a.y > 0 && a.y < 1);
+});
+
+test('the upper wing skin is front-facing from above', () => {
+  const { group } = makeFighterMesh();
+  group.updateMatrixWorld(true);
+  const ray = new THREE.Raycaster(
+    new THREE.Vector3(3, 10, 4.5),
+    new THREE.Vector3(0, -1, 0),
+  );
+  assert.ok(ray.intersectObject(group, true).length > 0,
+    'a ray from the chase camera passed through the upper wing');
+});
+
+test('the fighter is closed from the side and has both canards', () => {
+  const { group } = makeFighterMesh();
+  group.updateMatrixWorld(true);
+  const side = new THREE.Raycaster(
+    new THREE.Vector3(10, 0, 0),
+    new THREE.Vector3(-1, 0, 0),
+  );
+  assert.ok(side.intersectObject(group, true).length > 0,
+    'a side ray passed through the fuselage wall');
+  const leftCanard = new THREE.Raycaster(
+    new THREE.Vector3(-1.5, 10, -3),
+    new THREE.Vector3(0, -1, 0),
+  );
+  assert.ok(leftCanard.intersectObject(group, true).length > 0,
+    'the left canard is missing');
+});
+
+test('spawned aircraft start on the absolute terrain height', () => {
+  const highWorld = { heightAt: () => 221, roofY: () => 0, collide: () => false };
+  const heli = new Helicopter(scene, 10, 20, 0, highWorld);
+  const jet = new Fighter(scene, 10, 20, 0, highWorld);
+  assert.equal(heli.y, 221);
+  assert.equal(heli.mesh.position.y, 221);
+  assert.ok(jet.y > 222 && jet.y < 223, `fighter centreline spawned at y=${jet.y}`);
+  assert.equal(jet.mesh.position.y, jet.y);
+  for (let i = 0; i < 10 * 60; i++)
+    heli.update(DT, { lift: 0, pitch: 0, roll: 0, yaw: 0 }, highWorld);
+  assert.equal(heli.y, 221, 'a parked helicopter fell through absolute terrain');
 });

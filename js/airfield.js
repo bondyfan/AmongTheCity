@@ -57,12 +57,13 @@ export const AIRFIELDS = [
  * The arrays are flat and in AIRFIELDS order; main.js only ever asks "what am
  * I standing next to", so it never needs to know which field it is at.
  */
-export function buildAirfields(scene) {
+export function buildAirfields(scene, world = null) {
   const helis = [], fighters = [];
   for (const f of AIRFIELDS) {
-    scene.add(makeHelipad(f.heli.x, f.heli.z));
-    helis.push(new Helicopter(scene, f.heli.x, f.heli.z, f.heli.h));
-    for (const j of f.jets) fighters.push(new Fighter(scene, j.x, j.z, j.h));
+    const ground = world?.heightAt?.(f.heli.x, f.heli.z) ?? 0;
+    scene.add(makeHelipad(f.heli.x, f.heli.z, ground));
+    helis.push(new Helicopter(scene, f.heli.x, f.heli.z, f.heli.h, world));
+    for (const j of f.jets) fighters.push(new Fighter(scene, j.x, j.z, j.h, world));
   }
   return { helis, fighters };
 }

@@ -29,8 +29,8 @@
 import * as THREE from 'three';
 import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
-  WATER_Y, BANK_DEPTH } from './config.js';
-import { bridgeElevation, polygonArea, pointInPolygon, chunkKey } from './geo.js';
+  WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
+import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
@@ -46,7 +46,23 @@ const RAILING_H = 0.9, RAILING_COL = 0x2b2d31;       // bridge parapet strips
 const TRENCH_D = 1.2;                                // a stream sits this far under its banks
 const BANK_TOP = 0.05, BANK_COL = 0x6b5f4c;          // river bank walls: curb lip → just under water
 const SKIRT_MAX = 30;                                // bank wall piece length — keeps chunk ownership local
-const DASH_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary']);
+// A centre line means "this road has two lanes", so it belongs on any street
+// wide enough to have them — which in a Czech town is most of them. It used to
+// stop at 'tertiary', which left every residential street in Pardubice as a
+// featureless grey strip.
+const DASH_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary',
+  'residential', 'unclassified', 'living_street']);
+// …and the EDGE lines, which nothing drew at all. Real roads are bounded by
+// paint, not by where the asphalt happens to stop, and their absence is most of
+// why the streets read as extruded polygons rather than as roads. Solid, both
+// sides, inset from the kerb: 12 cm of paint 30 cm in, which is what the
+// Czech standard actually specifies (V4, 0.125 m).
+const EDGE_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary',
+  'residential', 'unclassified', 'living_street', 'motorway_link', 'trunk_link',
+  'primary_link', 'secondary_link', 'tertiary_link']);
+const EDGE_INSET = 0.30, EDGE_HW = 0.0625;   // m from the kerb, half-width of the stripe
+const EDGE_MIN_W = 4.0;                      // narrower than this and paint would meet in the middle
+const EDGE_END = 5;                          // m of bare asphalt at each end, for the junction
 const FOOT_CLASSES = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestrian', 'track']);
 
 // facade rhythm: one window bay per 2.7 m of wall, one atlas row per storey.
@@ -94,12 +110,102 @@ function hashStr(s) {
   return h >>> 0;
 }
 
+function makeWaterMaterial() {
+  // Water is deliberately its own draw call. A vertex-coloured Lambert patch
+  // can only ever read as blue asphalt; this surface has moving geometry,
+  // two crossing ripple scales, view-angle reflection and a tight sun glint.
+  return new THREE.ShaderMaterial({
+    // ShaderMaterial does not inject the standard fog uniforms merely because
+    // `fog: true` is set. WebGLRenderer nevertheless tries to refresh them,
+    // so omitting this block crashes on uniforms.fogColor.value before the
+    // first water frame can render.
+    uniforms: THREE.UniformsUtils.merge([
+      THREE.UniformsLib.fog,
+      { uTime: { value: 0 } },
+    ]),
+    fog: true,
+    side: THREE.DoubleSide,
+    vertexShader: `
+      uniform float uTime;
+      varying vec3 vWorld;
+      varying vec3 vWaveNormal;
+      #include <fog_pars_vertex>
+
+      void main() {
+        vec4 baseWorld = modelMatrix * vec4(position, 1.0);
+        vec3 p = position;
+        float t = uTime;
+        // World coordinates keep the phase continuous across 120 m chunks.
+        // Local coordinates would restart every tile and draw a visible seam
+        // down the middle of a river.
+        float a = baseWorld.x * 0.115 + baseWorld.z * 0.071 + t * 1.15;
+        float b = baseWorld.x * -0.047 + baseWorld.z * 0.132 - t * 0.82;
+        float c = baseWorld.x * 0.31 + baseWorld.z * -0.18 + t * 1.9;
+        p.y += sin(a) * 0.070 + sin(b) * 0.045 + sin(c) * 0.012;
+
+        float dx = cos(a) * 0.070 * 0.115
+          + cos(b) * 0.045 * -0.047 + cos(c) * 0.012 * 0.31;
+        float dz = cos(a) * 0.070 * 0.071
+          + cos(b) * 0.045 * 0.132 + cos(c) * 0.012 * -0.18;
+        vWaveNormal = normalize(mat3(modelMatrix) * vec3(-dx, 1.0, -dz));
+
+        vec4 world = modelMatrix * vec4(p, 1.0);
+        vWorld = world.xyz;
+        vec4 mvPosition = viewMatrix * world;
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      varying vec3 vWorld;
+      varying vec3 vWaveNormal;
+      #include <fog_pars_fragment>
+
+      void main() {
+        vec3 n = normalize(gl_FrontFacing ? vWaveNormal : -vWaveNormal);
+        vec3 viewDir = normalize(cameraPosition - vWorld);
+        vec3 sunDir = normalize(vec3(-0.38, 0.82, -0.27));
+
+        float fresnel = pow(1.0 - max(dot(n, viewDir), 0.0), 4.0);
+        float bands = sin(vWorld.x * 0.19 + vWorld.z * 0.13 + uTime * 1.3)
+          * sin(vWorld.x * -0.09 + vWorld.z * 0.23 - uTime * 0.9);
+        vec3 deep = vec3(0.012, 0.075, 0.105);
+        vec3 clearWater = vec3(0.025, 0.19, 0.255);
+        vec3 reflectedSky = vec3(0.16, 0.29, 0.40);
+        vec3 colour = mix(deep, clearWater, 0.52 + bands * 0.08);
+        colour = mix(colour, reflectedSky, 0.15 + fresnel * 0.45);
+
+        // Narrow, gently curved ripple lines. Crossing two sine fields made a
+        // regular grid of bright dots; one phase warped by a slow second wave
+        // reads as wind travelling across a continuous river surface.
+        float ripplePhase = vWorld.x * 5.2 + vWorld.z * 3.1 + uTime * 3.2
+          + sin(vWorld.x * 0.41 - vWorld.z * 0.37 - uTime * 0.7) * 0.8;
+        float crests = pow(max(sin(ripplePhase), 0.0), 24.0);
+        colour += vec3(0.035, 0.055, 0.07) * crests;
+
+        vec3 halfDir = normalize(sunDir + viewDir);
+        float glint = pow(max(dot(n, halfDir), 0.0), 150.0) * 1.15
+          + pow(max(dot(n, halfDir), 0.0), 34.0) * 0.07;
+        colour += vec3(1.0, 0.91, 0.67) * glint;
+        colour += vec3(0.035, 0.055, 0.06) * max(dot(n, sunDir), 0.0);
+
+        gl_FragColor = vec4(colour, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }
+    `,
+  });
+}
+
 export function makeMaterials() {
   // callers may attach mats.ortho (manager from ortho.js) and mats.facades
   // (bool) after the fact — buildChunkMeshes reads both, and lazily caches a
   // textured wall material as mats._facadeMat so the atlas is built once
   return {
     flat: new THREE.MeshLambertMaterial({ vertexColors: true }),
+    water: makeWaterMaterial(),
     building: new THREE.MeshLambertMaterial({ vertexColors: true }),
     trunk: new THREE.MeshLambertMaterial({ color: COLORS.treeTrunk }),
     // far tier fallback when a chunk has no aerial tile yet: plain terrain
@@ -268,6 +374,197 @@ function terrainQuad(x0, z0, terrain, hex, y = 0) {
   g.setIndex(idx);
   g.computeVertexNormals();
   return colorize(g, hex);
+}
+
+// ---- following the ground along a line -----------------------------------
+// A road ribbon has vertices only where OSM put them, and OSM puts them where
+// the road BENDS — a straight is two points however long it is. Measured on
+// Pardubice: the median segment is 17 m but 45 % are longer than the terrain's
+// own 20 m spacing and the longest is 615 m. Draping such a segment moves its
+// two ends onto the ground and leaves everything between them on the straight
+// line joining them, so the road sails over every dip and buries itself in
+// every rise — which is how a car ends up hidden UNDER the road it is on.
+//
+// So the line is resampled first, and adaptively: split a segment only while
+// the ground at its midpoint disagrees with the chord by more than TOL. Flat
+// country adds no points at all and pays nothing; a hillside gets as many as
+// its shape actually needs.
+const TERRAIN_TOL = 0.25;     // m of sag we accept between two road vertices
+const TERRAIN_MIN = 4;        // …and the shortest segment worth splitting further
+const TERRAIN_STEP = 10;      // …but no vertex is ever further than this from the next
+function terrainResample(pts, terrain) {
+  if (!terrain || pts.length < 2) return pts;
+  const out = [pts[0]];
+  // Adaptive refinement ON TOP of the uniform pass: a 10 m chord can still
+  // bridge a kerb-height ridge, and where it does this finds it. It can only
+  // ever ADD points, so it cannot undo the guarantee above.
+  const split = (ax, az, ay, bx, bz, by, depth) => {
+    const mx = (ax + bx) / 2, mz = (az + bz) / 2;
+    if (depth > 0 && Math.hypot(bx - ax, bz - az) > TERRAIN_MIN) {
+      const my = terrain.heightAt(mx, mz);
+      if (Math.abs(my - (ay + by) / 2) > TERRAIN_TOL) {
+        split(ax, az, ay, mx, mz, my, depth - 1);
+        out.push([mx, mz]);
+        split(mx, mz, my, bx, bz, by, depth - 1);
+        return;
+      }
+    }
+  };
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
+    // The UNIFORM pass first, and it is not an optimisation — it is the whole
+    // correctness argument. Testing a segment's midpoint and stopping when it
+    // looks flat is blind by construction: a dip that is symmetric about the
+    // middle reads as perfectly straight there, so one lucky sample cancelled
+    // all subdivision. That is not hypothetical — it left a 126 m road quad
+    // over a Pardubice hollow whose three corners each sat exactly 0.20 m above
+    // the ground while its middle floated a metre over it, and a car driving
+    // through was inside the tarmac.
+    //
+    // So: chop every segment to TERRAIN_STEP first, unconditionally. At 10 m
+    // that is half the height map's own 20 m sample spacing, which bounds the
+    // error by the terrain's curvature within a single cell rather than by
+    // whatever a midpoint probe happened to find.
+    const L = Math.hypot(bx - ax, bz - az);
+    const n = Math.max(1, Math.ceil(L / TERRAIN_STEP));
+    let px = ax, pz = az, py = terrain.heightAt(ax, az);
+    for (let k = 1; k <= n; k++) {
+      const t = k / n;
+      const qx = ax + (bx - ax) * t, qz = az + (bz - az) * t;
+      const qy = terrain.heightAt(qx, qz);
+      split(px, pz, py, qx, qz, qy, 4);
+      // the last piece ends on the original vertex — push that, not a copy
+      out.push(k === n ? pts[i + 1] : [qx, qz]);
+      px = qx; pz = qz; py = qy;
+    }
+  }
+  return out;
+}
+
+// OSM commonly stores a long bridge as only two endpoints. Split that chord so
+// its deck, fascia, parapet and lane paint remain well-conditioned geometry
+// after clipping and rebasing instead of one enormous pair of triangles.
+export function bridgeResample(pts) {
+  if (pts.length < 2) return pts;
+  const step = Math.max(1, BRIDGE_RAMP / 2);
+  const out = [pts[0]];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
+    const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+    for (let k = 1; k <= n; k++) {
+      const t = k / n;
+      out.push(k === n ? pts[i + 1] : [ax + (bx - ax) * t, az + (bz - az) * t]);
+    }
+  }
+  return out;
+}
+
+// ---- terrainTess: give a flat polygon enough vertices to BE a hillside ------
+// shapePoly() triangulates a ring with earcut, so the only vertices it produces
+// are the ring's own corners. drape() then lifts each of them onto the ground —
+// which is exactly right for a 6 m traffic island and a lie for a 300 m park,
+// because between four lifted corners lies one enormous flat plane that the
+// terrain wanders in and out of. That plane is what you see cutting under the
+// road at a kerb, and standing proud of the grass on the far side.
+//
+// The cure is vertices. This bisects the longest edge of every triangle until
+// none is longer than `edge`, which is half the height map's 20 m sample
+// spacing — past that point extra vertices buy nothing, because the height map
+// has nothing more to say. No terrain sampling happens here: at this stage y is
+// still the constant LAYER_Y offset, and drape() does the lifting afterwards.
+//
+// The colour is read from the first vertex and reused, which is exact for these
+// fills (colorize paints one hex across the whole geometry) and is why the
+// output can be rebuilt as a plain triangle soup.
+const TESS_EDGE = 10;
+const TESS_MAX = 6000;      // triangles per polygon — a runaway backstop
+
+/**
+ * Triangle soup in, finer triangle soup out: bisect the longest edge until none
+ * is longer than `edge`. Longest-edge bisection terminates, and unlike splitting
+ * toward the centroid it does not manufacture slivers.
+ *
+ * Positions only. The two callers want opposite things from the extra vertices —
+ * terrainTess() repeats one flat colour, carveOrtho() recomputes UVs from x/z —
+ * and both are cheaper to derive from the finished positions than to interpolate
+ * through the recursion.
+ */
+function tessTriangles(src, triCount, edge) {
+  const out = [];
+  const stack = [];
+  for (let i = 0; i < triCount; i++) {
+    const o = i * 9;
+    stack.push([src[o], src[o + 1], src[o + 2], src[o + 3], src[o + 4],
+      src[o + 5], src[o + 6], src[o + 7], src[o + 8]]);
+  }
+  const e2 = edge * edge;
+  let budget = TESS_MAX;
+  while (stack.length) {
+    const t = stack.pop();
+    // longest edge measured in the GROUND plane: y here is a constant layer
+    // offset (or zero), so it says nothing about how big the triangle is
+    const d = [0, 1, 2].map((k) => {
+      const a = k * 3, b = ((k + 1) % 3) * 3;
+      return (t[b] - t[a]) ** 2 + (t[b + 2] - t[a + 2]) ** 2;
+    });
+    const k = d[0] >= d[1] && d[0] >= d[2] ? 0 : d[1] >= d[2] ? 1 : 2;
+    if (d[k] <= e2 || budget <= 0) { out.push(t); continue; }
+    budget--;
+    const a = k * 3, b = ((k + 1) % 3) * 3, c = ((k + 2) % 3) * 3;
+    const mx = (t[a] + t[b]) / 2, my = (t[a + 1] + t[b + 1]) / 2, mz = (t[a + 2] + t[b + 2]) / 2;
+    stack.push([t[a], t[a + 1], t[a + 2], mx, my, mz, t[c], t[c + 1], t[c + 2]]);
+    stack.push([mx, my, mz, t[b], t[b + 1], t[b + 2], t[c], t[c + 1], t[c + 2]]);
+  }
+  const p = new Float32Array(out.length * 9);
+  for (let i = 0; i < out.length; i++) p.set(out[i], i * 9);
+  return p;
+}
+
+function terrainTess(geo, edge = TESS_EDGE) {
+  if (!geo) return geo;
+  // ShapeGeometry is indexed (a four-corner quad has four positions plus six
+  // indices), while the splitter below consumes an explicit triangle list.
+  // Treating those four positions as if they were six produced undefined
+  // vertices and, eventually, NaNs in large parks and water polygons.
+  const work = geo.index ? geo.toNonIndexed() : geo;
+  if (work !== geo) geo.dispose();
+  const pos = work.attributes.position;
+  const n = pos.count;
+  if (n < 3) return work;
+  const cSrc = work.attributes.color?.array;
+  const p = tessTriangles(pos.array, n / 3, edge);
+  if (p.length === n * 3) {
+    // Flat/water shaders do not use ShapeGeometry's UVs. Removing them keeps
+    // this unsplit result merge-compatible with split results and TriSink,
+    // which both intentionally carry only position/normal/colour.
+    work.deleteAttribute('uv');
+    return work;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  if (cSrc) {
+    const col = new Float32Array(p.length);
+    for (let i = 0; i < col.length; i += 3) { col[i] = cSrc[0]; col[i + 1] = cSrc[1]; col[i + 2] = cSrc[2]; }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  }
+  g.computeVertexNormals();
+  work.dispose();
+  return g;
+}
+
+// Ground recipes mix ShapeGeometry (indexed, with UVs), terrain grids
+// (indexed) and TriSink (non-indexed, no UVs). BufferGeometryUtils correctly
+// refuses to merge that mismatch, so normalize the three sources at the one
+// boundary where they become a shared flat/water draw call.
+function mergeSurfaceGeometries(geometries) {
+  const normalized = [];
+  for (const source of geometries) {
+    const g = source.index ? source.toNonIndexed() : source;
+    if (g !== source) source.dispose();
+    g.deleteAttribute('uv');
+    normalized.push(g);
+  }
+  return mergeGeometries(normalized, false);
 }
 
 // Polyline frame for ribbon extrusion: deduped points, cumulative distance,
@@ -466,7 +763,7 @@ function wwBuckets(city) {
 // ground carve, sunken surface, and bank walls facing the centreline. End
 // caps only where the stream truly begins/ends — chunk-border cuts stay open
 // so the neighbour's piece continues seamlessly.
-function emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1, terrain) {
+function emitTrench(sink, water, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1, terrain) {
   const n = run.length, ring = [];
   for (let i = 0; i < n; i++) ring.push([run[i].x + run[i].px * hw, run[i].z + run[i].pz * hw]);
   for (let i = n - 1; i >= 0; i--) ring.push([run[i].x - run[i].px * hw, run[i].z - run[i].pz * hw]);
@@ -479,8 +776,8 @@ function emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1
     // downhill with the land. So its surface is a fixed depth BELOW the ground
     // it crosses, which drape() produces for free — and which is what lets a
     // brook descend a hillside instead of pooling at one absolute height.
-    const g = drape(shapePoly(clip, null, -TRENCH_D, COLORS.water), terrain);
-    if (g) flat.push(g);
+    const g = drape(terrainTess(shapePoly(clip, null, -TRENCH_D, COLORS.water), 8), terrain);
+    if (g) water.push(g);
   }
   for (let i = 0; i < n - 1; i++) {
     const a = run[i], b = run[i + 1], fx = -(a.px + b.px), fz = -(a.pz + b.pz);
@@ -506,14 +803,14 @@ function emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1
 // drop legs already inside a mapped water polygon (double-carved overlapping
 // holes are the one thing earcut genuinely hates, and mid-river trench walls
 // would look absurd), and stitch surviving stretches into runs.
-function trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, terrain) {
+function trenchInto(sink, water, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, terrain) {
   const fr = (f._fr ??= ribbonFrame(f.p));
   if (!fr) return;
   const { q, per } = fr;
   const hw = Math.max(0.5, (f.w ?? 2) / 2);
   let run = null;
   const flush = (cap1) => {
-    if (run && run.length > 1) emitTrench(sink, flat, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1, terrain);
+    if (run && run.length > 1) emitTrench(sink, water, holes, run, hw, x0, z0, x1, z1, kr, kg, kb, cap1, terrain);
     run = null;
   };
   for (let i = 0; i < q.length - 1; i++) {
@@ -549,23 +846,22 @@ function trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, terr
 
 // ---- roads: mitered ribbon + caps + bridge fascia/parapets + dashes ----
 function roadRibbon(sink, f, terrain) {
-  const fr = ribbonFrame(f.p);
+  // a bridge is straight by definition and its deck is level, so it
+  // gains nothing from following ground it is not touching
+  const fr = ribbonFrame(f.br ? bridgeResample(f.p) : terrainResample(f.p, terrain));
   if (!fr) return;
   const { q, per, along, len } = fr;
   const hw = Math.max(0.8, (f.w ?? 3) / 2);
   const baseY = FOOT_CLASSES.has(f.t) ? LAYER_Y.footway : LAYER_Y.road;
   // A bridge is the one road that does NOT follow the ground: it leaves one
-  // bank and arrives at the other, straight and level. Its deck height is
-  // therefore interpolated between the terrain at its two ENDS and resolved
-  // right here, and the range is flagged so the chunk-wide drape leaves it
-  // alone — otherwise Karlův most would sink into the Vltava and climb out on
-  // the far side.
+  // bank and arrives at the other, straight and level. Its absolute deck
+  // height is resolved from the two approaches right here, and the range is
+  // flagged so the chunk-wide drape leaves it alone — otherwise Karlův most
+  // would sink into the Vltava and climb out on the far side.
   const bridge = !!f.br && !!terrain;
-  const bStart = bridge ? terrain.heightAt(q[0][0], q[0][1]) : 0;
-  const bEnd = bridge ? terrain.heightAt(q[q.length - 1][0], q[q.length - 1][1]) : 0;
   const mark = bridge ? sink.mark() : -1;
   const elev = (d) => (f.br
-    ? bridgeElevation(d, len) + (bridge ? bStart + (bEnd - bStart) * (len ? d / len : 0) : 0)
+    ? (bridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len))
     : 0);
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
   const cr = _c.r, cg = _c.g, cb = _c.b;
@@ -598,7 +894,37 @@ function roadRibbon(sink, f, terrain) {
   }
   capDisc(sink, q[0][0], baseY + elev(0), q[0][1], hw, cr, cg, cb);
   capDisc(sink, q[q.length - 1][0], baseY + elev(len), q[q.length - 1][1], hw, cr, cg, cb);
-  if (f.d && (f.w ?? 0) >= 6 && DASH_CLASSES.has(f.t)) {
+  // ---- edge lines ----
+  // Emitted from the SAME mitred frame as the deck, so they follow every bend
+  // and every terrain split the ribbon does, and they sit at LAYER_Y.marking —
+  // above the asphalt, below nothing. A bridge gets them too: its deck is paint
+  // like any other, and `elev` already carries the span height.
+  if (f.d && (f.w ?? 0) >= EDGE_MIN_W && EDGE_CLASSES.has(f.t)) {
+    _c.setHex(COLORS.marking);
+    const er = _c.r, eg = _c.g, eb = _c.b;
+    const off = hw - EDGE_INSET;
+    for (const side of [-1, 1]) {
+      for (let i = 0; i < q.length - 1; i++) {
+        // Break the line short of each end. OSM splits a way at every junction,
+        // so a stripe run right to the last vertex would meet the cross street's
+        // stripe head-on and paint a white lattice over the intersection. Real
+        // edge lines stop at the give-way line for the same reason.
+        if (along[i] < EDGE_END || along[i + 1] > len - EDGE_END) continue;
+        const ya = LAYER_Y.marking + elev(along[i]);
+        const yb = LAYER_Y.marking + elev(along[i + 1]);
+        const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
+        const ax = q[i][0] + pax * off * side, az = q[i][1] + paz * off * side;
+        const bx = q[i + 1][0] + pbx * off * side, bz = q[i + 1][1] + pbz * off * side;
+        // the stripe's own width runs along the same perpendicular as the inset
+        sink.quad(
+          ax - pax * EDGE_HW, ya, az - paz * EDGE_HW,
+          bx - pbx * EDGE_HW, yb, bz - pbz * EDGE_HW,
+          bx + pbx * EDGE_HW, yb, bz + pbz * EDGE_HW,
+          ax + pax * EDGE_HW, ya, az + paz * EDGE_HW, er, eg, eb);
+      }
+    }
+  }
+  if (f.d && (f.w ?? 0) >= 5.5 && DASH_CLASSES.has(f.t)) {
     _c.setHex(COLORS.marking);
     const mr = _c.r, mg = _c.g, mb = _c.b;
     for (let s = 1.2; s + DASH_LEN < len - 1.2; s += DASH_LEN + DASH_GAP) {
@@ -675,8 +1001,8 @@ function taxiPaint(sink, fr) {
 }
 
 // ---- rails: two steel ribbons on the shared frame + sleeper quads ----
-function railWay(sink, f) {
-  const fr = ribbonFrame(f.p);
+function railWay(sink, f, terrain) {
+  const fr = ribbonFrame(f.br ? f.p : terrainResample(f.p, terrain));
   if (!fr) return;
   const { q, per, along, len } = fr;
   const tram = f.t === 'tram';
@@ -1547,15 +1873,28 @@ function ridgePrism(sink, ring, topY, r, g, b) {
 // The original quad's planar uv mapping is recovered as an affine (x,z)→(u,v)
 // fit from its first three vertices (in world space, in case ortho.js baked
 // its placement into mesh.position), then re-applied to the carved outline.
-function carveOrtho(mesh, x0, z0, x1, z1, holes) {
+export function carveOrtho(mesh, x0, z0, x1, z1, holes, terrain = null) {
   const p = mesh.geometry.attributes.position, uv = mesh.geometry.attributes.uv;
   if (!p || !uv || p.count < 3) return;
   mesh.updateMatrix();
   const V = [];
-  for (let i = 0; i < 3; i++) {
+  // PlaneGeometry is a 6×6 terrain grid. Its first three vertices all belong
+  // to the same row, so fitting an affine map from exactly [0,1,2] has a zero
+  // determinant and used to abort every carve. Pick the first three points
+  // that actually span an area instead.
+  for (let i = 0; i < p.count && V.length < 3; i++) {
     _v.fromBufferAttribute(p, i).applyMatrix4(mesh.matrix);
-    V.push([_v.x, _v.z, uv.getX(i), uv.getY(i)]);
+    const q = [_v.x, _v.z, uv.getX(i), uv.getY(i)];
+    if (!V.length) { V.push(q); continue; }
+    if (V.length === 1) {
+      if (Math.hypot(q[0] - V[0][0], q[1] - V[0][1]) > 1e-6) V.push(q);
+      continue;
+    }
+    const cross = (V[1][0] - V[0][0]) * (q[1] - V[0][1])
+      - (q[0] - V[0][0]) * (V[1][1] - V[0][1]);
+    if (Math.abs(cross) > 1e-6) V.push(q);
   }
+  if (V.length < 3) return;
   const d1x = V[1][0] - V[0][0], d1z = V[1][1] - V[0][1];
   const d2x = V[2][0] - V[0][0], d2z = V[2][1] - V[0][1];
   const det = d1x * d2z - d2x * d1z;
@@ -1565,12 +1904,40 @@ function carveOrtho(mesh, x0, z0, x1, z1, holes) {
   const au = (du1 * d2z - du2 * d1z) / det, bu = (d1x * du2 - d2x * du1) / det;
   const av = (dv1 * d2z - dv2 * d1z) / det, bv = (d1x * dv2 - d2x * dv1) / det;
   const rect = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
-  const ng = new THREE.ShapeGeometry(ringShape(rect, holes)).rotateX(-Math.PI / 2);
+  let ng = new THREE.ShapeGeometry(ringShape(rect, holes)).rotateX(-Math.PI / 2);
+  // The carve throws away the 6×6 grid ortho.js handed us — including the fact
+  // that it had been DISPLACED onto the terrain — and replaces it with a fresh
+  // outline triangulation at y = 0. For the whole life of the terrain that was
+  // the end of it: every chunk a river ran through had its photographic ground
+  // left at sea level, which in Pardubice is 221 m below the road you are
+  // driving on and in Prague up to 380. The ground did not go missing, it went
+  // to the bottom of the world.
+  //
+  // So the carved outline is re-tessellated (it has only its corners, and a
+  // 120 m triangle cannot follow a hillside) and then lifted, exactly as
+  // ortho.js lifts the uncarved quad. UVs are derived from x/z through the
+  // affine map, so they must be computed AFTER the split and BEFORE the lift.
+  if (terrain) {
+    const nonIdx = ng.index ? ng.toNonIndexed() : ng;
+    if (nonIdx !== ng) ng.dispose();
+    const src = nonIdx.attributes.position;
+    const p = tessTriangles(src.array, src.count / 3, TESS_EDGE);
+    ng = new THREE.BufferGeometry();
+    ng.setAttribute('position', new THREE.BufferAttribute(p, 3));
+    ng.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((p.length / 3) * 2), 2));
+    nonIdx.dispose();
+  }
   const np = ng.attributes.position, nuv = ng.attributes.uv;
   for (let i = 0; i < np.count; i++) {
     const dx = np.getX(i) - V[0][0], dz = np.getZ(i) - V[0][1];
     nuv.setXY(i, V[0][2] + au * dx + bu * dz, V[0][3] + av * dx + bv * dz);
   }
+  if (terrain) {
+    const a2 = np.array;
+    for (let i = 0; i < a2.length; i += 3) a2[i + 1] = terrain.heightAt(a2[i], a2[i + 2]);
+    np.needsUpdate = true;
+  }
+  ng.computeVertexNormals();
   mesh.geometry = ng; // the quad geometry may be an ortho.js cache — leave it undisposed
   mesh.position.set(0, 0, 0); mesh.rotation.set(0, 0, 0); mesh.scale.set(1, 1, 1);
   mesh.updateMatrix();
@@ -1835,7 +2202,7 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
     group.add(q);
     return done();
   }
-  const flat = [], sink = new TriSink();
+  const flat = [], water = [], sink = new TriSink();
 
   // -- water first: it decides the holes the ground must be carved with --
   const holes = [];
@@ -1864,8 +2231,8 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
       else holes.push(clip);
       const iClip = (f.i ?? []).map((h) => clipRingToRect(h, x0, z0, x1, z1)).filter(Boolean);
       wet.push({ o: clip, i: iClip, wy });
-      const surf = shapePoly(clip, iClip, wy, COLORS.water);
-      if (surf) flat.push(surf);
+      const surf = terrainTess(shapePoly(clip, iClip, wy, COLORS.water), 8);
+      if (surf) water.push(surf);
       // islands are land: give them a lid just under the green-fill layer,
       // their outline already grows a skirt facing out into the water below
       for (const h of iClip) {
@@ -1881,7 +2248,7 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   }
   if (mats.terrain) sink.fixFrom(bankMark);   // bank skirts resolved absolutely
   const ww = wwBuckets(city).get(key);
-  if (ww) for (const f of ww) trenchInto(sink, flat, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, mats.terrain);
+  if (ww) for (const f of ww) trenchInto(sink, water, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, mats.terrain);
 
   // -- ground: aerial photo when the ortho manager has the tile, flat quad
   // otherwise — both carved with the water holes; a fully flooded cell needs
@@ -1892,7 +2259,7 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
     if (orthoGround) {
       // carving replaces the unit quad with a world-space ShapeGeometry and
       // zeroes .position, so only the UNcarved tile is still local
-      if (holes.length) carveOrtho(orthoGround, x0, z0, x1, z1, holes);
+      if (holes.length) carveOrtho(orthoGround, x0, z0, x1, z1, holes, mats.terrain);
       else orthoGround.userData.localGeom = true;
       orthoGround.receiveShadow = true;
       group.add(orthoGround);
@@ -1904,7 +2271,7 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
       // riverbank, which is where the flat WATER surface is the shape that
       // matters anyway.
       const g = holes.length
-        ? drape(shapePoly([[x0, z0], [x1, z0], [x1, z1], [x0, z1]], holes, 0, COLORS.groundBase), mats.terrain)
+        ? drape(terrainTess(shapePoly([[x0, z0], [x1, z0], [x1, z1], [x0, z1]], holes, 0, COLORS.groundBase)), mats.terrain)
         : terrainQuad(x0, z0, mats.terrain, COLORS.groundBase);
       if (g) flat.push(g);
     }
@@ -1926,14 +2293,14 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
     ];
     for (const [list, y, pick] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;
-      const g = drape(shapePoly(f.o, f.i, y, pick(f)), mats.terrain);
+      const g = drape(terrainTess(shapePoly(f.o, f.i, y, pick(f))), mats.terrain);
       if (g) flat.push(g);
     }
   }
 
   // -- roads + rails ribbons into the same sink, merged with everything --
   for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f, mats.terrain);
-  for (const f of cell.rails) if (f._home === key) railWay(sink, f);
+  for (const f of cell.rails) if (f._home === key) railWay(sink, f, mats.terrain);
   // Roads, rails, kerbs, lane paint, bank skirts and bridge parapets all land
   // in this one sink, and every one of them is authored as a height ABOVE the
   // ground — so draping the finished buffer once puts the whole lot on the
@@ -1942,8 +2309,16 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   // Bridges keep working for the same reason: their deck is already a lift.
   const sg = sink.geo();
   if (sg) flat.push(drape(sg, mats.terrain, sink.fixed));
+  if (water.length) {
+    const waterMesh = new THREE.Mesh(mergeSurfaceGeometries(water), mats.water);
+    waterMesh.receiveShadow = true;
+    waterMesh.onBeforeRender = () => {
+      mats.water.uniforms.uTime.value = performance.now() * 0.001;
+    };
+    group.add(waterMesh);
+  }
   if (flat.length) {
-    const flatMesh = new THREE.Mesh(mergeGeometries(flat, false), mats.flat);
+    const flatMesh = new THREE.Mesh(mergeSurfaceGeometries(flat), mats.flat);
     flatMesh.receiveShadow = true;              // ground catches, never casts
     group.add(flatMesh);
   }

@@ -60,6 +60,24 @@ test('tod is worldT folded by DAY_LENGTH with START_TOD as the phase', async () 
   assert.ok(Math.abs(START_TOD - 10.5 / 24) < 1e-12);
 });
 
+test('a fresh solo game can start at 06:00 and keeps running', async () => {
+  const c = await client();
+  c.setSoloTime(6 / 24);
+  assert.ok(!c.isSynced(), 'a private clock must not impersonate the server');
+  assert.ok(Math.abs(c.tod() - 6 / 24) < 0.0001, `started at ${c.tod() * 24}`);
+  const before = c.worldT();
+  await sleep(20);
+  assert.ok(c.worldT() > before, 'the dawn clock was frozen');
+});
+
+test('server time replaces a private 06:00 phase on multiplayer join', async () => {
+  const c = await client();
+  c.setSoloTime(6 / 24);
+  c.setEpoch(Date.now(), 20);
+  assert.ok(c.isSynced());
+  assert.ok(Math.abs(c.nowMs() - Date.now()) < 100, 'solo offset survived server sync');
+});
+
 test('a seven-hour-wrong clock is fixed by one WELCOME timestamp', async () => {
   const SKEW = 7 * 3600 * 1000;
   const good = await client();

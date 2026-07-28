@@ -18,7 +18,7 @@ import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
 import { initAudio, sfx, sfxAt, engineStart, engineStop, engineSet, tireSet, setVolume,
   heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
-  windStart, windStop, windSet, windLoad,
+  windStart, windStop, windSet, windLoad, roadWindSet, roadWindStop,
   ambientStart, nearbyTrafficHum } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
@@ -42,7 +42,7 @@ import { connectCity, queueEvent, getPlayerName, CityNetWS } from './netcity.js'
 // netvehicles: PROXY cars for the peers, the only honest answer to "which car
 //   is he in" — see F8 below.
 // netui:      the HUD that can say "you are alone now" out loud.
-import { tod, setEpoch } from './worldclock.js';
+import { tod, setEpoch, setSoloTime } from './worldclock.js';
 import { localUid, strHash } from './identity.js';
 import { makeGhostCars } from './netvehicles.js';
 import { makeNetUI } from './netui.js';
@@ -594,7 +594,16 @@ function motionBlurAmount() {
 // slotKey() is the canonical question rather than car.ai.ghost: it is the
 // public method whose documented contract is exactly "null = the peer has no
 // such car", and it also covers a car whose schedule has been torn off.
-function isGhostCar(c) { return traffic ? traffic.slotKey(c) === null : false; }
+// A ghost is a car the shared schedule has finished with but that is still on
+// screen, so it keeps driving locally with no shared identity. Excluding it
+// from the door and from the crash list is right ONLY when there is a peer:
+// the whole reason is that on his machine there is nothing there, so boarding
+// it or bouncing off it would desync two cities.
+//
+// In single player there is no other machine, and the exclusion turns into the
+// bug the user reported — a car appears in front of you that you cannot get
+// into and that your bumper passes straight through. So: no session, no ghosts.
+function isGhostCar(c) { return net && traffic ? traffic.slotKey(c) === null : false; }
 
 // The AI fleet minus the ghosts — every car both clients agree exists.
 // Rebuilt per call: traffic.cars churns every frame and callers hold the
@@ -858,6 +867,7 @@ input.onKey('KeyE', () => {
     hideCarName();
     engineStop();
     tireSet(0, 0);
+    roadWindStop();
     sfx('door_open', 0.7);
     player.beginExit({ onOut: () => sfx('door_close', 0.8) });
   } else if (game.jet) {
@@ -1339,12 +1349,13 @@ async function initDev() {
           const sx = player.pos.x - Math.sin(h0) * d;
           const sz = player.pos.z - Math.cos(h0) * d;
           if (kind === 'heli') {
-            scene.add(makeHelipad(sx, sz));
-            const h = new Helicopter(scene, sx, sz, h0 + Math.PI);
+            const ground = world.heightAt(sx, sz);
+            scene.add(makeHelipad(sx, sz, ground));
+            const h = new Helicopter(scene, sx, sz, h0 + Math.PI, world);
             helis.push(h);
             ui_hint?.('🚁 vrtulník před tebou');
           } else {
-            fighters.push(new Fighter(scene, sx, sz, h0 + Math.PI));
+            fighters.push(new Fighter(scene, sx, sz, h0 + Math.PI, world));
             ui_hint?.('✈️ Gripen před tebou');
           }
           return;
@@ -1921,7 +1932,7 @@ async function boot() {
   // Flying machines live at airports now, not on the station forecourt:
   // Pardubice (LKPD) and Václav Havel Prague (LKPR), each with a pad, a
   // helicopter and a pair of Gripens on the apron. airfield.js owns the where.
-  ({ helis, fighters } = buildAirfields(scene));
+  ({ helis, fighters } = buildAirfields(scene, world));
   heli = helis[0] ?? null;
   // the pod shares the interior manager's dust pool: one set of sprites does
   // rocket smoke, blast plume and the dust off a collapsing floor alike
@@ -2178,6 +2189,10 @@ function stepGame(dt) {
     // as loud as it should get in the mix; a Tesla at 250 km/h does not need
     // to be 1.8× louder than a van at 130, it needs the same wall of noise.
     tireSet(Math.min(1, Math.abs(game.car.speed) / 40), game.car.offroad ?? 0);
+    // …and over the top of both, the air. Fed raw m/s: audio.js owns where the
+    // wind starts (47 km/h) and where it is everything (223), because those are
+    // properties of moving through air rather than of this car.
+    roadWindSet(Math.abs(game.car.speed));
   } else {
     player.update(dt, { input, camYaw, world });
   }
@@ -2479,13 +2494,8 @@ function onNetEvent(ev) {
 async function start() {
   initSettings(applySettings);
   initDev();                 // ?devmode only — attaches to that panel
-  // The clock is anchored to THIS machine until a server tells us otherwise.
-  // Explicit rather than implicit: worldclock defaults here anyway, but the
-  // call is the documented reset and it is where the server anchor belongs the
-  // day WELCOME starts carrying a timestamp (see the request list — it does
-  // not today, and PONG carries nothing either, so co-op currently relies on
-  // both machines having NTP, which is a far smaller error than the per-tab
-  // accumulator this replaces).
+  // Begin from the local clock while the menu is open. Multiplayer replaces
+  // this with the server epoch; single player is phased to 06:00 below.
   setEpoch(null);
   // The HUD comes up BEFORE the socket, because the thing it most needs to be
   // able to say is that the socket did not come up.
@@ -2531,8 +2541,19 @@ async function start() {
       ui.toast('Server je nedostupný — hraješ sám', 'error');
     }
   }
-  if (!net) ui.setStatus({ online: null });   // single player: no LED, no lie
+  if (!net) {
+    // Every fresh single-player world starts at dawn. This is applied only
+    // after the menu choice (and also after a failed server connection), so it
+    // cannot disturb the shared multiplayer clock. Setting it before boot
+    // also makes every deterministic subsystem initialise against dawn.
+    setSoloTime(6 / 24);
+    ui.setStatus({ online: null });   // single player: no LED, no lie
+  }
   await boot();
+  // Loading terrain can take several real seconds, which are several in-game
+  // minutes in a 24-minute day. Re-anchor once the world is actually ready so
+  // the first playable frame—not merely the start of loading—reads 06:00.
+  if (!net) setSoloTime(6 / 24);
 }
 // Leaving the tab is the ordinary way a session ends here, so say goodbye
 // properly: net.dispose() drops every remote avatar (and with it every name

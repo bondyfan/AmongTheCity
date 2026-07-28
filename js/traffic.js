@@ -207,7 +207,7 @@
 
 import * as THREE from 'three';
 import { TRAFFIC, CAR_COLORS } from './config.js';
-import { bridgeElevation, distPointToSegment } from './geo.js';
+import { bridgeDeckHeight, distPointToSegment } from './geo.js';
 import { LAYER_Y } from './config.js';
 // namespace import on purpose: pickCarColor is a newer export and a named
 // import of something a stale vehicles.js doesn't have is a hard link error —
@@ -396,6 +396,8 @@ const RING_W = 72;                     // width of the in-cone attach band. Wide
 const NOTICE_R = 240;
 const ATTACH_R_MAX = Math.max(TRAFFIC.spawnR, HIDE_R_MAX + RING_W);
 const GHOST_MAX = 120;                 // s a locally-retired car may linger in view
+const LOOK_BACK = 6;                   // s a car stays protected after leaving the cone —
+                                       // long enough to survive a head turn and a glance back
 const GHOST_LEG = 320;                 // m of extra route granted to a ghost that
                                        // runs out of itinerary while still watched
 // Worst case only, for the reader: the live bound is _phantomR(), which
@@ -671,7 +673,7 @@ function redWait(jn, bucket, t) {
 // were transcribed into tests/traffic-view.test.mjs as literals and went stale
 // the moment either moved, which is a silent way to turn a real assertion into
 // a tautology — so they travel with the file instead.
-export const VIEW_TUNING = { NOTICE_R, GHOST_MAX };
+export const VIEW_TUNING = { NOTICE_R, GHOST_MAX, LOOK_BACK };
 
 export class Traffic {
   constructor(city, vehicles, world = null) {
@@ -799,6 +801,28 @@ export class Traffic {
     const d2 = dx * dx + dz * dz;
     if (d2 >= v.hideR * v.hideR) return false;  // out past the fog wall
     return this._inCone(x, z);
+  }
+
+  /**
+   * The same question, asked the way RETIREMENT has to ask it: not "is it in
+   * the cone right now" but "could the player still be holding it in mind".
+   *
+   * The instantaneous test is exactly right for deciding where to ATTACH a
+   * mesh, and exactly wrong for deciding when to destroy one, because looking
+   * away is not the same as forgetting. Turn your head at a junction and every
+   * car you were just looking at leaves the cone; with the raw test they are
+   * all destroyed that frame, and turning back gives you an empty street. That
+   * is the "vidím auto, otočím se a otočím se zpět a ono už tam není" report,
+   * and it is not a pop in the usual sense — nothing vanishes ON screen, the
+   * world merely rearranges itself behind your back.
+   *
+   * So a car stays protected for LOOK_BACK seconds after it was last seen. The
+   * cost is a handful of extra live cars for a few seconds; against GHOST_MAX
+   * (120 s) it is noise.
+   */
+  _heldVisible(p) {
+    if (this._visible(p.sx, p.sz)) { p._seenT = this._t ?? 0; return true; }
+    return (this._t ?? 0) - (p._seenT ?? -1e9) < LOOK_BACK;
   }
 
   // The same question, asked the way ATTACHING has to ask it. Two reasons the
@@ -1613,7 +1637,7 @@ export class Traffic {
   // ghost until it is out of sight. See the v9 header for why the slot is
   // released rather than held as a tombstone.
   _retire(p) {
-    if (p.car && !p.stolen && this._visible(p.sx, p.sz)) { this._toGhost(p); return; }
+    if (p.car && !p.stolen && this._heldVisible(p)) { this._toGhost(p); return; }
     this._reap(p);
   }
 
@@ -1637,7 +1661,7 @@ export class Traffic {
     for (const p of this._ghosts) {
       if (!p.car) { this._ghosts.delete(p); continue; }   // stolen, or hard-capped away
       p.ghostT += dt;
-      if (p.ghostT > GHOST_MAX || !this._visible(p.sx, p.sz)) {
+      if (p.ghostT > GHOST_MAX || !this._heldVisible(p)) {
         this._detach(p);
         this._ghosts.delete(p);
       }
@@ -1689,8 +1713,10 @@ export class Traffic {
     // directly (it never goes through driveStep), so it is the one place that
     // has to add the terrain itself — without it the whole city's traffic
     // drove 220 m under Pardubice, invisible but perfectly well behaved.
-    p.sy = p.py = this._groundAt(p.sx, p.sz) + LAYER_Y.road
-      + (e.road.br ? bridgeElevation(e.off0 + e.offSign * p.s, e.road._len) : 0);
+    const bridgeY = e.road.br
+      ? bridgeDeckHeight(e.road, e.off0 + e.offSign * p.s, this.world?.terrain)
+      : this._groundAt(p.sx, p.sz);
+    p.sy = p.py = bridgeY + LAYER_Y.road;
     const car = this.vehicles.add(kind, p.sx, p.sz, heading, color);
     car.vK = p.vK;
     car.speed = this._nomV(p);
@@ -1743,6 +1769,7 @@ export class Traffic {
   // whatever viewer was last set alone; passing `null` clears it.
   update(dt, playerPos, playerCar, viewer) {
     if (viewer !== undefined) this.setViewer(viewer);
+    this._t = (this._t ?? 0) + dt;      // monotonic seconds, for _heldVisible
     if (!this.edges.length || !playerPos) return;
     const wt = this._wt = this.now();
     if (this._junctions.length) this._tickSignals(wt);
@@ -1803,7 +1830,7 @@ export class Traffic {
         // Visible cars are simply not candidates; if the whole overflow is
         // visible we leave the fleet over budget for a moment rather than
         // delete something from the middle of the screen.
-        if (this._visible(p.sx, p.sz)) continue;
+        if (this._heldVisible(p)) continue;
         const d = (car.x - px) ** 2 + (car.z - pz) ** 2;
         if (d > wd) { wd = d; worst = car; }
       }
@@ -2187,8 +2214,10 @@ export class Traffic {
     p.sz = pose.z + hx * p.laneOff;
     // off0 + offSign·s = meters from the WAY start (not the edge), which is
     // what the shared ramp math wants — decks rise only near the way's ends.
-    p.sy = this._groundAt(p.sx, p.sz) + LAYER_Y.road
-      + (re.road.br ? bridgeElevation(re.off0 + re.offSign * p.s, re.road._len) : 0);
+    const bridgeY = re.road.br
+      ? bridgeDeckHeight(re.road, re.off0 + re.offSign * p.s, this.world?.terrain)
+      : this._groundAt(p.sx, p.sz);
+    p.sy = bridgeY + LAYER_Y.road;
   }
 
   /** Ground under a point. 0 for the bare {roads:[…]} fixtures the tests use. */

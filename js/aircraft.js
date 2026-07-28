@@ -98,14 +98,36 @@ function fighterGeom() {
       const [x, z] = pts[i];
       pos.push(x, -thick / 2, z);               // bottom ring
     }
-    for (let i = 1; i < n - 1; i++) {           // caps (fan)
-      idx.push(0, i, i + 1);
-      idx.push(n, n + i + 1, n + i);
+    // ShapeUtils handles the concave neck between the Gripen's two delta
+    // wings. A triangle fan crossed that hollow with bogus faces and made the
+    // airframe look folded/disconnected from oblique angles.
+    const faces = THREE.ShapeUtils.triangulateShape(
+      pts.map(([x, z]) => new THREE.Vector2(x, z)), []);
+    for (const [a, b, c] of faces) {
+      const [ax, az] = pts[a], [bx, bz] = pts[b], [cx, cz] = pts[c];
+      const ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
+      if (ny > 0) {
+        idx.push(a, b, c);
+        idx.push(n + a, n + c, n + b);
+      } else {
+        idx.push(a, c, b);
+        idx.push(n + a, n + b, n + c);
+      }
+    }
+    let area = 0;
+    for (let i = 0; i < n; i++) {
+      const [ax, az] = pts[i], [bx, bz] = pts[(i + 1) % n];
+      area += ax * bz - bx * az;
     }
     for (let i = 0; i < n; i++) {               // side wall
       const j = (i + 1) % n;
-      idx.push(i, n + i, j);
-      idx.push(j, n + i, n + j);
+      if (area > 0) {
+        idx.push(i, j, n + i);
+        idx.push(j, n + j, n + i);
+      } else {
+        idx.push(i, n + i, j);
+        idx.push(j, n + i, n + j);
+      }
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -131,6 +153,7 @@ function fighterGeom() {
   // Canards: the giveaway of the type. Small, high, and well forward.
   const canard = slab([
     [0.5, -4.5], [2.35, -3.1], [2.35, -2.35], [0.5, -3.0],
+    [-0.5, -3.0], [-2.35, -2.35], [-2.35, -3.1], [-0.5, -4.5],
   ], 0.20);
 
   // Fin: single, swept, with the rudder implied by the trailing kink.
@@ -154,7 +177,7 @@ function fighterGeom() {
     nose: new THREE.ConeGeometry(0.42, 2.4, 8).rotateX(-Math.PI / 2).translate(0, 0, -8.1),
     canopy: new THREE.SphereGeometry(0.52, 10, 6, 0, TAU, 0, Math.PI / 2)
       .scale(1, 0.72, 2.5).translate(0, 0.62, -3.6),
-    intake: new THREE.BoxGeometry(0.52, 0.78, 2.6),
+    intake: new THREE.BoxGeometry(0.42, 0.50, 1.8),
     nozzle: new THREE.CylinderGeometry(0.52, 0.62, 1.0, 10).rotateX(Math.PI / 2).translate(0, 0, 6.6),
     flame: new THREE.ConeGeometry(0.44, 3.4, 8).rotateX(Math.PI / 2).translate(0, 0, 8.6),
     // open end aft, apex forward at the nose — the cone the shock actually makes
@@ -171,11 +194,11 @@ function fighterGeom() {
 }
 
 // Czech Air Force grey, with the red of the roundel as the only warm note.
-const skinMat = new THREE.MeshLambertMaterial({ color: 0x6e747a, flatShading: true });
-const skinDark = new THREE.MeshLambertMaterial({ color: 0x5c6167, flatShading: true });
-const glassMat = new THREE.MeshLambertMaterial({ color: 0x2b3a46, flatShading: true,
-  transparent: true, opacity: 0.72 });
-const metalMat = new THREE.MeshLambertMaterial({ color: 0x3d4045, flatShading: true });
+const skinMat = new THREE.MeshLambertMaterial({ color: 0x89939d, flatShading: true });
+const skinDark = new THREE.MeshLambertMaterial({ color: 0x626d78, flatShading: true });
+const glassMat = new THREE.MeshPhongMaterial({ color: 0x173149, shininess: 90,
+  transparent: true, opacity: 0.88 });
+const metalMat = new THREE.MeshLambertMaterial({ color: 0x444a51, flatShading: true });
 const roundelMat = new THREE.MeshBasicMaterial({ color: 0xb03a3a, toneMapped: false });
 const flameMat = new THREE.MeshBasicMaterial({ color: 0xffb454, transparent: true,
   opacity: 0.85, toneMapped: false, depthWrite: false });
@@ -274,7 +297,7 @@ export function seatAnchor(jet, i = 0) {
 }
 
 export class Fighter {
-  constructor(scene, x, z, heading = 0) {
+  constructor(scene, x, z, heading = 0, world = null) {
     this.scene = scene;
     const m = makeFighterMesh();
     this.mesh = m.group;
@@ -286,7 +309,9 @@ export class Fighter {
     this.shockT = 0;                   // seconds left of the vapour cone
     this.gLoad = 0;                    // how hard the wing is working, 0..1
 
-    this.x = x; this.y = 0; this.z = z;
+    this.x = x;
+    this.y = (world?.heightAt?.(x, z) ?? 0) + GEAR_H;
+    this.z = z;
     this.heading = heading;
     this.pitch = 0; this.roll = 0;     // BODY angles, mesh sign convention
     this.speed = 0;                    // m/s along the nose — a jet does not
@@ -302,7 +327,7 @@ export class Fighter {
     this.wid = 2.4; this.len = 14.1;
     this.seats = [];                   // the boarding registry, like every vehicle
 
-    this.mesh.position.set(x, GEAR_H, z);
+    this.mesh.position.set(x, this.y, z);
     this.mesh.rotation.y = heading;
     scene.add(this.mesh);
   }

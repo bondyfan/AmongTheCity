@@ -1488,9 +1488,13 @@ function rubble(t, v) {
 // rises and brightens with speed, plus a low gravel rumble that fades in as
 // the wheels leave the tarmac. One noise source, two filter paths, all moves
 // on setTargetAtTime — silent at rest, self-starting on the first call.
+// Pulled down and darkened once roadWindSet() existed: this layer used to be
+// the ONLY thing that got louder with speed, so it had to carry the wind too,
+// and a 2600 Hz noise sweep carrying that job is what the wind ended up sounding
+// like. With real air on top of it, this can go back to being rubber.
 const TIRE = {
-  vol: 0.16,            // ceiling at full speed on asphalt
-  hissLo: 420, hissHi: 2600,   // bandpass sweep across speed01
+  vol: 0.13,            // ceiling at full speed on asphalt
+  hissLo: 380, hissHi: 1800,   // bandpass sweep across speed01
   gravel: 0.22,         // extra rumble ceiling when fully offroad
   gravelF: 140,
   tau: 0.12,
@@ -1524,6 +1528,99 @@ export function tireSet(speed01, offroad01 = 0) {
   tire.bp.frequency.setTargetAtTime(TIRE.hissLo + (TIRE.hissHi - TIRE.hissLo) * s, t, TIRE.tau);
   // gravel rumble scales with BOTH how offroad and how fast
   tire.gg.gain.setTargetAtTime(TIRE.gravel * o * Math.min(1, s * 2.2), t, TIRE.tau);
+}
+
+// ---- the wind at the window ------------------------------------------------
+// What made the old "wind at speed" sound like a desk fan was that it WAS one:
+// tireSet's bandpassed noise is perfectly steady, and steady broadband noise is
+// the definition of a fan. Real wind is never steady — it swells, drops, and
+// thuds against the microphone. So this layer is a recording (car_wind.mp3: a
+// mic left out in a gale) rather than a filter, and on top of the recording sit
+// two slow oscillators that keep pushing the level around, because a nine
+// second loop played for ten minutes must not settle into a rhythm the ear can
+// learn.
+//
+// Deliberately NOT the jet's slipstream: that one is gated from 90 m/s and is
+// the roar of a canopy at Mach 1. A car is a different range and a different
+// sound, so it gets its own instance rather than a rescaled one.
+const RWIND = {
+  from: 13,          // m/s (47 km/h) — under this the engine owns the mix
+  full: 62,          // m/s (223 km/h) — everything the car has
+  vol: 0.52,
+  cutLo: 460, cutHi: 5000,
+  gust: 0.3,         // ± this fraction of level, wandering
+  tau: 0.18,
+};
+let rwind = null, rwindPending = false, rwindLvl = 0;
+
+function rwindBuild() {
+  if (!ctx || ctx.state !== 'running' || rwind || rwindPending) return;
+  rwindPending = true;
+  loadBuffer('car_wind').then((buf) => {
+    rwindPending = false;
+    if (rwind || !ctx || ctx.state !== 'running') return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    // No sample (no API key at build time, or a 404): fall back to noise, but
+    // keep the gusting — a fan with weather in it still beats a fan.
+    src.buffer = buf || noiseBuffer();
+    src.loop = true;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = RWIND.cutLo; lp.Q.value = 0.5;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 90; hp.Q.value = 0.4;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    // The gusts: two incommensurate LFOs summed into the gain's own parameter.
+    // An AudioParam adds its connected inputs to its scheduled value, so the
+    // speed ramp below and this wander compose without fighting each other.
+    const depth = ctx.createGain(); depth.gain.value = 0;
+    for (const [f, a] of [[0.13, 0.62], [0.31, 0.38]]) {
+      const o = ctx.createOscillator();
+      o.type = 'sine'; o.frequency.value = f;
+      const og = ctx.createGain(); og.gain.value = a;
+      o.connect(og); og.connect(depth);
+      o.start(t + Math.random() * 3);       // out of phase with each other
+    }
+    depth.connect(gain.gain);
+    src.connect(hp); hp.connect(lp); lp.connect(gain); gain.connect(master);
+    src.start(t, Math.random() * src.buffer.duration);
+    rwind = { src, lp, gain, depth };
+    if (rwindLvl > 0) roadWindSet(-1);      // catch up to the speed we are at
+  });
+}
+
+/**
+ * speed in m/s. Self-starting like tireSet: the first call above the gate
+ * builds the graph, and there is nothing to tear down when the car stops —
+ * the level simply falls to zero. Pass −1 to re-apply the last level.
+ */
+export function roadWindSet(speed) {
+  if (!ctx || ctx.state !== 'running') return;
+  if (speed >= 0) {
+    const v = Math.abs(speed);
+    rwindLvl = v <= RWIND.from ? 0
+      : Math.min(1, (v - RWIND.from) / (RWIND.full - RWIND.from));
+  }
+  if (!rwind) { if (rwindLvl > 0) rwindBuild(); return; }
+  const t = ctx.currentTime;
+  // squared, same reasoning as the jet: the bottom of the range stays a
+  // whisper so the wind ARRIVING is an event rather than a constant
+  const lvl = RWIND.vol * rwindLvl * rwindLvl;
+  rwind.gain.gain.setTargetAtTime(lvl, t, RWIND.tau);
+  rwind.depth.gain.setTargetAtTime(lvl * RWIND.gust, t, RWIND.tau);
+  rwind.lp.frequency.setTargetAtTime(
+    RWIND.cutLo + (RWIND.cutHi - RWIND.cutLo) * rwindLvl, t, RWIND.tau);
+}
+
+/** Getting out of the car: silence it now rather than waiting for the ramp. */
+export function roadWindStop() {
+  rwindLvl = 0;
+  if (!rwind) return;
+  const t = ctx.currentTime;
+  rwind.gain.gain.cancelScheduledValues(t);
+  rwind.gain.gain.setTargetAtTime(0, t, 0.12);
+  rwind.depth.gain.setTargetAtTime(0, t, 0.12);
 }
 
 // ---- crash -----------------------------------------------------------------

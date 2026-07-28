@@ -141,6 +141,33 @@ export function setEpoch(serverNowMs, rttMs = null) {
   return _offsetMs;
 }
 
+// Start a private world at a chosen hour without pretending that its clock is
+// server-synchronised. The offset shifts worldT() itself, not only the sky, so
+// traffic lights, traffic density, pedestrians and lighting all begin in the
+// same 06:00 world. A later multiplayer WELCOME is still accepted as the first
+// server sample and replaces this private phase immediately.
+export function setSoloTime(tod01) {
+  const wanted = Number(tod01);
+  if (!Number.isFinite(wanted)) return;
+
+  const t = mono();
+  _reanchor(t); _slew(t);
+  const local = _wallAnchor + (t - _monoAnchor);
+  const worldSeconds = (local - WORLD_EPOCH_MS) / 1000;
+  const current = START_TOD + worldSeconds / DAY_LENGTH;
+  const current01 = current - Math.floor(current);
+  const wanted01 = wanted - Math.floor(wanted);
+  // Choose the nearest equivalent day so worldT stays numerically close to
+  // real wall time; only the phase within the 24-minute cycle matters.
+  let cycles = wanted01 - current01;
+  cycles -= Math.round(cycles);
+
+  _offsetMs = _targetMs = cycles * DAY_LENGTH * 1000;
+  _slewAt = t;
+  _bestRtt = Infinity;
+  _synced = false;
+}
+
 // Shared wall clock in ms — the same value on every client in the room.
 // Use it for timestamps that cross the wire (snapshot ages, lag readouts);
 // use worldT() for anything the simulation integrates.
