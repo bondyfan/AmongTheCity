@@ -93,6 +93,16 @@ test('the clusters are spread over the whole torus, not piled in a corner', () =
 // draw distance
 // ---------------------------------------------------------------------------
 
+test('every range shows cloud low enough to reach the horizon', () => {
+  // A base 1350 m up seen over a 2.6 km field is cloud only above 27° — a patch
+  // overhead and a bare horizon. Each range must put its lowest cloud under 20°.
+  const BASE = 1350;
+  for (const [name, r] of Object.entries(CLOUD_RANGES)) {
+    const elev = Math.atan(BASE / r.range) * 180 / Math.PI;
+    assert.ok(elev < 20, `${name}: lowest cloud sits ${elev.toFixed(0)}° up — the horizon is empty`);
+  }
+});
+
 test('each range is wider than the last and holds its cloud density', () => {
   const order = ['medium', 'far', 'furthest'];
   let prev = 0, prevDens = Infinity;
@@ -102,7 +112,9 @@ test('each range is wider than the last and holds its cloud density', () => {
     prev = r.range;
     // bodies per km² of torus — the sky must not thin out as it grows
     const dens = r.n / ((r.field * 2 / 1000) ** 2);
-    assert.ok(dens > 1.8, `${k} sky is ${dens.toFixed(1)} clouds/km² — too empty`);
+    // it is allowed to THIN with range — that is where the cost lives — but a
+    // sky you can see through is not a sky
+    assert.ok(dens > 1.4, `${k} sky is ${dens.toFixed(1)} clouds/km² — too empty`);
     assert.ok(dens <= prevDens + 0.01, `${k} got DENSER, which is a cost surprise`);
     prevDens = dens;
   }

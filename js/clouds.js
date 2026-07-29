@@ -45,12 +45,18 @@ import * as THREE from 'three';
 //           by more than a puff's reach, or a cluster would still be visible
 //           at the moment it teleports to the other side
 //   n       cluster count, chosen to hold the sky's DENSITY roughly constant
-//           (2.9 → 2.4 bodies per km² across the three) — sprites are one draw
-//           call each, so this is where the setting actually costs something
+//           (2.5 → 1.7 bodies per km² across the three; it thins deliberately,
+//           because a sprite is one draw call and the visible count grows with
+//           the square of the range — 1700, 3200 and 5200 puffs on screen)
+//
+// The ranges are set by the CEILING, not by taste. With a base 1350 m up, a
+// 2.6 km field would only show cloud steeper than 27° above the horizon — a
+// patch overhead and a bare horizon, which is not what a sky looks like. These
+// three put the lowest cloud at 19°, 13° and 9°.
 export const CLOUD_RANGES = {
-  medium:   { range: 2600, field: 3200, n: 120 },
-  far:      { range: 4200, field: 4800, n: 240 },
-  furthest: { range: 6000, field: 6600, n: 420 },
+  medium:   { range: 4000, field: 4600, n: 210 },
+  far:      { range: 6000, field: 6600, n: 360 },
+  furthest: { range: 8500, field: 9100, n: 560 },
 };
 export const CLOUD_DIST_DEFAULT = 'medium';
 // A real cumulus is a pile of many lobes, not six blobs — more puffs per body
