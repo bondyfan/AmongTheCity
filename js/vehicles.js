@@ -1047,6 +1047,41 @@ export class Vehicles {
           car._grounded = true;
         }
       }
+      // ---- the AI's cars lie along the hill too ----
+      // traffic.js writes a pose every frame and has never had an opinion about
+      // ATTITUDE, so a van climbing out of the Dřevnice valley drove up a 15 %
+      // grade perfectly level while the player's own car beside it pitched
+      // correctly. Four terrain samples each — and only for the ones close
+      // enough to read, because at 250 m a 9° pitch is two pixels.
+      if (car.ai && this.world?.terrain) {
+        const dx = this.focus ? car.x - this.focus.x : 0;
+        const dz = this.focus ? car.z - this.focus.z : 0;
+        if (!this.focus || dx * dx + dz * dz < TILT_R2) {
+          const T = this.world.terrain;
+          const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
+          const hl = car.len * 0.5, hw = car.wid * 0.5;
+          const gp = Math.atan2(
+            T.heightAt(car.x + fx * hl, car.z + fz * hl)
+            - T.heightAt(car.x - fx * hl, car.z - fz * hl), car.len);
+          const gr = Math.atan2(
+            T.heightAt(car.x - fz * hw, car.z + fx * hw)
+            - T.heightAt(car.x + fz * hw, car.z - fx * hw), car.wid);
+          const kt = Math.min(1, dt * 5);
+          car._gp = (car._gp ?? 0) + (clamp(gp, -0.5, 0.5) - (car._gp ?? 0)) * kt;
+          car._gr = (car._gr ?? 0) + (clamp(gr, -0.4, 0.4) - (car._gr ?? 0)) * kt;
+        }
+        // …and they can be HEARD. nearbyTrafficHum carries the mass of the
+        // traffic as one bed; a car going past you is not mass, it is an event,
+        // and an event has a position. sfxAt's own per-name cooldown keeps a
+        // busy junction from becoming a machine gun.
+        if (this.focus && Math.abs(car.speed) > 8) {
+          car._passCd = (car._passCd ?? Math.random() * PASS_CD) - dt;
+          if (car._passCd <= 0 && dx * dx + dz * dz < PASS_R2) {
+            car._passCd = PASS_CD + Math.random() * PASS_CD;
+            sfxAt('traffic_pass', 0.55, car.x, car.z, PASS_MAX, 0.45);
+          }
+        }
+      }
       m.position.set(car.x, car.y, car.z);
       // YXZ, the aircraft order: yaw outermost, then pitch about the car's own
       // lateral axis, then roll about its nose. Plain XYZ would pitch about
@@ -1418,6 +1453,11 @@ export function driveStep(car, ctl, dt, world, others) {
     suspension(car, world.heightAt(car.x, car.z), dt, world);
   }
 }
+
+const TILT_R2 = 250 * 250;   // m² — past this an AI car's attitude is invisible
+const PASS_R2 = 55 * 55;     // …and past this its pass-by is inaudible anyway
+const PASS_MAX = 80;         // m — where sfxAt fades the pass-by to nothing
+const PASS_CD = 5;           // s between one car's own pass-bys
 
 // ---- suspension(car, surf, dt, world): the wheels stop being glued down -----
 // Until this existed, `car.y = surfaceY(x, z)` — the car was a decal on the

@@ -124,6 +124,70 @@ export function bridgeDeckHeight(way, dist, terrain) {
   return profile.deck;
 }
 
+// ---- roads are curves, and OSM stores them as corners ----------------------
+// A mapper puts a vertex where the road changes direction, not where it is
+// changing direction — so a sweeping bend arrives as three or four points with a
+// 30° kink at each. Everything downstream inherits that: the ribbon renders a
+// faceted corner, and the traffic AI, which takes its heading from the segment
+// it is on, snaps a car through 30° in a single frame. That is the "roboticky,
+// nereálně a fakt rychle" turn, and it is the same defect as the visible one.
+//
+// So the corners are ROUNDED once, here, before anything reads them — the mesh,
+// the AI's rails, surfaceY and the minimap all see the same line, which is the
+// whole reason to do it at load rather than in the renderer.
+//
+// A fillet, not a spline. The obvious move is Catmull-Rom through the existing
+// points, and it is wrong: uniform Catmull-Rom overshoots wildly when segment
+// lengths are uneven, and OSM road geometry is nothing but uneven. Measured
+// over three tiles it threw a service road 75 m off its own right-of-way. A
+// quadratic Bézier tucked into each corner cannot do that — it lives strictly
+// inside the triangle formed by the two cut points and the corner, so the
+// deviation is bounded by the cut, by construction rather than by luck.
+//
+// The first and last joints are never rounded: those are junctions, and a
+// junction that moves comes apart from the road it joins.
+const BEND_MIN = 0.22;      // rad (~13°) — below this a joint reads as straight,
+                            // and rounding it would double the road vertex count for
+                            // corners nobody can see
+const BEND_CUT = 0.4;       // at most this fraction of a segment goes into a corner
+const BEND_MAX_CUT = 9;     // m — and no more than this, however long the road
+const BEND_MAX_PTS = 600;   // a motorway interchange is not worth ten thousand points
+function smoothBends(p, isBridge) {
+  // A bridge is a straight deck by definition and its height is interpolated
+  // between the two abutments; rounding it would fight that.
+  if (isBridge || !p || p.length < 3 || p.length > BEND_MAX_PTS) return p;
+  const out = [p[0]];
+  let any = false;
+  for (let i = 1; i < p.length - 1; i++) {
+    const a = p[i - 1], b = p[i], c = p[i + 1];
+    const ax = b[0] - a[0], az = b[1] - a[1];
+    const cx = c[0] - b[0], cz = c[1] - b[1];
+    const la = Math.hypot(ax, az), lc = Math.hypot(cx, cz);
+    if (la < 1 || lc < 1) { out.push(b); continue; }
+    const turn = Math.acos(Math.max(-1, Math.min(1,
+      (ax * cx + az * cz) / (la * lc))));
+    if (turn < BEND_MIN) { out.push(b); continue; }
+    // Never more than BEND_CUT of either neighbour, so two adjacent corners
+    // cannot eat into each other however short the segment between them is.
+    const cut = Math.min(la * BEND_CUT, lc * BEND_CUT, BEND_MAX_CUT);
+    if (cut < 0.5) { out.push(b); continue; }
+    const s0 = [b[0] - (ax / la) * cut, b[1] - (az / la) * cut];
+    const s2 = [b[0] + (cx / lc) * cut, b[1] + (cz / lc) * cut];
+    // pieces follow how far it turns: 9° is two, a right angle is five
+    const n = Math.max(2, Math.min(6, 2 + Math.round(turn / 0.45)));
+    out.push(s0);
+    for (let k = 1; k < n; k++) {
+      const t = k / n, u = 1 - t, w0 = u * u, w1 = 2 * u * t, w2 = t * t;
+      out.push([w0 * s0[0] + w1 * b[0] + w2 * s2[0],
+        w0 * s0[1] + w1 * b[1] + w2 * s2[1]]);
+    }
+    out.push(s2);
+    any = true;
+  }
+  out.push(p[p.length - 1]);
+  return any ? out : p;
+}
+
 export function polylineLength(p) {
   let L = 0;
   for (let i = 0; i < p.length - 1; i++) L += Math.hypot(p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1]);
@@ -200,7 +264,8 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   // ids for the resident layers continue past the heavy ones in the same slot
   const roads = stamp(data.roads), rails = stamp(data.rails),
     water = stamp(data.water), green = stamp(data.green), paved = stamp(data.paved);
-  for (const r of roads) r._len = polylineLength(r.p);
+  for (const r of roads) { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); }
+  for (const r of rails) r.p = smoothBends(r.p, r.br);
   bucketize(city.chunkIndex, roads, 'roads', touched);
   bucketize(city.chunkIndex, rails, 'rails', touched);
   bucketize(city.chunkIndex, water, 'water', touched);
