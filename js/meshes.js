@@ -1951,8 +1951,16 @@ export function carveOrtho(mesh, x0, z0, x1, z1, holes, terrain = null) {
 // front door can be aimed at the street (entranceOf caches the answer, so the
 // scan happens once per building for the life of the session).
 // mesh.name = 'buildings' is how city.js finds the old one to swap out.
-const SHELL_MIN_AREA = 220;      // m² of footprint bbox
-const SHELL_MIN_H = 9;           // …or this tall, and it is kept regardless
+// Garden sheds and garages, and nothing more. The first pass at this was
+// 220 m² / 9 m, which sounded like "only the skyline survives" and turned out to
+// mean "the village does not exist": measured over 900 m of Březůvky it threw
+// away 57 % of the buildings, and over a Pardubice suburb — 185 of whose
+// buildings are garages — 85 %. A Czech village IS its small houses; the median
+// footprint in Březůvky is 148 m². 60 m² and 5 m keeps 96 % there and 68 % in
+// the suburb, which is the garages and the sheds and nothing that reads as a
+// house from the air.
+const SHELL_MIN_AREA = 60;       // m² of footprint bbox
+const SHELL_MIN_H = 5;           // …or this tall, and it is kept regardless
 function bboxArea(ring) {
   if (!ring || ring.length < 3) return 0;
   let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
