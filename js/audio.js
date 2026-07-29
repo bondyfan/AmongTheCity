@@ -148,9 +148,19 @@ function hornLegacy(scale = 1) {
 // sfxAt is unattenuated: better a loud cue than a silently swallowed one. `cooldown` (seconds, per name) is for the
 // cues that fire in bursts — one collapse must not become eight rumbles.
 let lisX = 0, lisZ = 0, lisSet = false;
+// …and which way the ears point, for the traffic voices' stereo panning. North
+// until somebody says otherwise, so a caller that only knows a position still
+// gets sane (if unrotated) stereo rather than NaN.
+let lisDx = 0, lisDz = -1;
 const sfxLast = new Map();     // name → ctx.currentTime of last cooldown play
 
-export function setListener(x, z) { lisX = x; lisZ = z; lisSet = true; }
+export function setListener(x, z, dx, dz) {
+  lisX = x; lisZ = z; lisSet = true;
+  if (dx !== undefined) {
+    const L = Math.hypot(dx, dz) || 1;
+    lisDx = dx / L; lisDz = dz / L;
+  }
+}
 
 // Sound pressure falls as 1/r, not linearly. The old linear taper made a car
 // horn at 50 m play at 81 % of full — which is why every honk in the city
@@ -701,7 +711,7 @@ export function engineStart(kind = 'octavia') {
 // engineStop() never has to know which of the two graph shapes it is killing.
 function engNodes(e, ...n) { for (const x of n) e.nodes.push(x); return e; }
 
-function buildPiston(P, id) {
+function buildPiston(P, id, dest = master) {
   const t = ctx.currentTime;
   const f0 = P.rpmIdle / 120;                 // Hz of the whole 720° cycle
   const fire = engineWaveFor(id, P.cyl, P.alpha, P.beta, 'fire');
@@ -784,7 +794,7 @@ function buildPiston(P, id) {
   noise.connect(inBp); inBp.connect(inGain); inGain.connect(out);
   noise.connect(kBp); kBp.connect(kGate); kGate.connect(kLevel); kLevel.connect(out);
   kOsc.connect(kDepth); kDepth.connect(kGate.gain);
-  out.connect(master);
+  out.connect(dest);
 
   const e = {
     ev: 0, P, out, osc, kOsc, drive, fb, damp, lp, inBp, inGain, kLevel,
@@ -810,7 +820,7 @@ function buildPiston(P, id) {
     const tBp = ctx.createBiquadFilter();
     tBp.type = 'bandpass'; tBp.frequency.value = 1600; tBp.Q.value = 3;
     const tGain = ctx.createGain(); tGain.gain.value = 0;
-    tOsc.connect(tBp); tBp.connect(tGain); tGain.connect(master);
+    tOsc.connect(tBp); tBp.connect(tGain); tGain.connect(dest);
     e.tOsc = tOsc; e.tBp = tBp; e.tGain = tGain;
     e.srcs.push(tOsc); engNodes(e, tOsc, tBp, tGain);
   }
@@ -827,7 +837,7 @@ function buildPiston(P, id) {
 // nothing is proportional to "revs". No pulse train, no exhaust, no intake,
 // no gearbox, and no idle — standing still it is silent, and the graph just
 // sits at zero rather than being built and torn down.
-function buildEV(P) {
+function buildEV(P, dest = master) {
   const t = ctx.currentTime;
   const wave = ctx.createPeriodicWave(EV_REAL, EV_IMAG);
   const whine = ctx.createOscillator();
@@ -857,7 +867,7 @@ function buildEV(P) {
   humOsc.connect(humGain); humGain.connect(lp);
   pwm.connect(ring); pwmLfo.connect(pwmDepth); pwmDepth.connect(ring.gain);
   ring.connect(lp);
-  lp.connect(out); out.connect(master);
+  lp.connect(out); out.connect(dest);
   whine.start(t); whine2.start(t); humOsc.start(t); pwm.start(t); pwmLfo.start(t);
 
   const e = {
@@ -878,6 +888,13 @@ export function engineStop() {
   const e = eng;
   eng = null;                          // engineSet() goes inert immediately
   duckDrive = 0; duckUpdate();         // out of the car → the street comes back
+  engineStopGraph(e);
+}
+
+/** Fade one engine graph out and tear it down. The player's and every traffic
+ *  voice's are the same shape, so they die the same way. */
+function engineStopGraph(e) {
+  if (!e || !ctx) return;
   const t = ctx.currentTime;
   e.out.gain.cancelScheduledValues(t);
   e.out.gain.setTargetAtTime(0, t, 0.05);
@@ -924,7 +941,13 @@ function exhaustPop(t0, level) {
 //             function — see SPEED_REF. engineStart() was told the kind, so
 //             the normalizing happens here where the kind's vmax is known.
 //   throttle01  0..1 engine LOAD from main.js engineLoad(), not |gas|.
-export function engineSet(speedMS, throttle01) {
+/**
+ * The player's own engine. Everything below is per-INSTANCE now (engineStep),
+ * because the same synthesis drives the traffic — see engineVoices().
+ */
+export function engineSet(speedMS, throttle01) { engineStep(eng, speedMS, throttle01); }
+
+function engineStep(eng, speedMS, throttle01) {
   if (!eng) return;
   // written ">0 ? … : 0" rather than "<0 ? 0 : …" so a NaN speed (one bad
   // physics frame) clamps to zero instead of poisoning every AudioParam in
@@ -936,7 +959,7 @@ export function engineSet(speedMS, throttle01) {
   const th = throttle01 > 0 ? (throttle01 > 1 ? 1 : throttle01) : 0;
   const t = ctx.currentTime, tau = ENGINE.tau;
 
-  if (eng.ev) { evSet(v, th, t, tau); return; }
+  if (eng.ev) { evSet(eng, v, th, t, tau); return; }
 
   // --- pick the gear: hop bands only once v clears the edge by the
   // hysteresis; the do/while lets hard braking drop several gears in one
@@ -1070,7 +1093,7 @@ function duckSpeed(v) {
 // a single reduction gear leaves nothing else to be a function of. th only
 // controls the inverter tone — that one is proportional to TORQUE, which is
 // why you hear it accelerating and not cruising.
-function evSet(v, th, t, tau) {
+function evSet(eng, v, th, t, tau) {
   // v is m/s straight from the caller now. It used to be reconstructed as
   // s·SPEED_REF from a number main.js had already clamped at 1, so every tone
   // in here — whine, second stage, motor hum, inverter sidebands, the regen
@@ -1556,6 +1579,113 @@ export function tireSet(speed01, offroad01 = 0) {
   tire.bp.frequency.setTargetAtTime(TIRE.hissLo + (TIRE.hissHi - TIRE.hissLo) * s, t, TIRE.tau);
   // gravel rumble scales with BOTH how offroad and how fast
   tire.gg.gain.setTargetAtTime(TIRE.gravel * o * Math.min(1, s * 2.2), t, TIRE.tau);
+}
+
+// ---- every car has an engine, not just yours -------------------------------
+// The traffic used to be one bed of filtered noise (nearbyTrafficHum) plus, as
+// of recently, a pass-by one-shot. That is a crowd, not cars — and the thing
+// that makes a street sound alive is that the van beside you is a rattly
+// three-cylinder while the thing that just overtook it is a straight six.
+//
+// The synthesis for that already existed, tuned, for exactly ONE car: the
+// player's. ENG_KINDS carries per-kind cylinder count, firing order, idle and
+// redline; buildPiston turns the firing order into a PeriodicWave so the
+// harmonics land where a real engine's do; engineStep picks a gear and drives
+// it. None of that needed rewriting — it needed to stop being a singleton.
+//
+// So: a POOL of the same graph. Each voice is one full engine routed through
+// its own gain, a lowpass and a stereo panner instead of straight to the bus.
+//   · gain     — inverse-distance, the same law as gainAt()
+//   · lowpass  — air absorbs treble with distance, and this is most of why a
+//                distant car reads as distant rather than as quiet
+//   · panner   — left/right from the bearing to the listener
+//
+// The pool is small on purpose. Six voices is about what a street corner has
+// going on that you can actually pick apart, and each is ~20 nodes; past that
+// the hum bed does a better job of "there is a lot of traffic" than six more
+// oscillators would. Voices are handed to the nearest cars and stolen from the
+// furthest when something closer turns up.
+const VOICES = 6;
+const VOICE_MAX = 95;        // m — past this a car gets the hum and nothing else
+const VOICE_REF = 12;        // m — inside this it is simply "close"
+const VOICE_LP = [900, 12000];   // Hz of lowpass at max range and at zero
+let voices = null;
+
+function voicePool() {
+  if (voices || !ctx || ctx.state !== 'running') return voices;
+  voices = [];
+  for (let i = 0; i < VOICES; i++) {
+    const gain = ctx.createGain(); gain.gain.value = 0;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = VOICE_LP[1]; lp.Q.value = 0.5;
+    const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    gain.connect(lp);
+    if (pan) { lp.connect(pan); pan.connect(master); } else lp.connect(master);
+    voices.push({ gain, lp, pan, dest: gain, id: null, kind: null, e: null });
+  }
+  return voices;
+}
+
+function voiceRelease(v) {
+  if (v.e) { engineStopGraph(v.e); v.e = null; }
+  v.id = null; v.kind = null;
+  v.gain.gain.cancelScheduledValues(ctx.currentTime);
+  v.gain.gain.value = 0;
+}
+
+/**
+ * cars: [{ id, kind, x, z, speed, load }] — the caller hands over whichever
+ * cars it thinks are worth hearing, nearest first is not required. Everything
+ * else (which get voices, which get stolen, panning, distance) happens here.
+ * Call it every frame; it allocates only when a voice changes owner.
+ */
+export function engineVoices(cars) {
+  const pool = voicePool();
+  if (!pool) return;
+  const t = ctx.currentTime;
+  // rank by distance to the listener; anything past VOICE_MAX is not a
+  // candidate at all, so a quiet street releases its voices rather than
+  // holding them for cars a kilometre away
+  const near = [];
+  for (const c of cars ?? []) {
+    const d = lisSet ? Math.hypot(c.x - lisX, c.z - lisZ) : 0;
+    if (d < VOICE_MAX) near.push({ c, d });
+  }
+  near.sort((a, b) => a.d - b.d);
+  const want = near.slice(0, VOICES);
+  const keep = new Set(want.map((w) => w.c.id));
+  for (const v of pool) if (v.id !== null && !keep.has(v.id)) voiceRelease(v);
+  for (const { c, d } of want) {
+    let v = pool.find((q) => q.id === c.id);
+    if (!v) {
+      v = pool.find((q) => q.id === null);
+      if (!v) continue;                       // every voice busy with a nearer car
+      const key = ENG_KINDS[c.kind] ? c.kind : (ENG_ALIAS[c.kind] ?? 'octavia');
+      const P = ENG_KINDS[key];
+      v.e = P.ev ? buildEV(P, v.dest) : buildPiston(P, key, v.dest);
+      v.id = c.id; v.kind = key;
+    }
+    engineStep(v.e, c.speed, c.load ?? 0.3);
+    const g = (VOICE_REF / Math.max(VOICE_REF, d)) * (1 - d / VOICE_MAX);
+    v.gain.gain.setTargetAtTime(g, t, 0.10);
+    v.lp.frequency.setTargetAtTime(
+      VOICE_LP[0] + (VOICE_LP[1] - VOICE_LP[0]) * (1 - d / VOICE_MAX) ** 2, t, 0.12);
+    if (v.pan && lisSet) {
+      // -1..1 across the listener's own left/right, from the bearing only —
+      // a full HRTF for a car forty metres away is not worth its CPU
+      const dx = c.x - lisX, dz = c.z - lisZ;
+      const L = Math.hypot(dx, dz) || 1;
+      const rx = -lisDz, rz = lisDx;          // the listener's right vector
+      v.pan.pan.setTargetAtTime(
+        Math.max(-1, Math.min(1, (dx * rx + dz * rz) / L)), t, 0.10);
+    }
+  }
+}
+
+/** Silence every traffic voice — leaving a car, opening the menu. */
+export function engineVoicesStop() {
+  if (!voices) return;
+  for (const v of voices) voiceRelease(v);
 }
 
 // ---- the wind at the window ------------------------------------------------

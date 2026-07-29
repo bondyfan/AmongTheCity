@@ -16,7 +16,8 @@ import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
-import { initAudio, sfx, sfxAt, setListener, engineStart, engineStop, engineSet, tireSet, setVolume,
+import { initAudio, sfx, sfxAt, setListener, engineVoices, engineVoicesStop,
+  engineStart, engineStop, engineSet, tireSet, setVolume,
   heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
   windStart, windStop, windSet, windLoad, roadWindSet, roadWindStop,
   ambientStart, nearbyTrafficHum } from './audio.js';
@@ -92,6 +93,10 @@ let world = null, player = null, vehicles = null, traffic = null, sky = null, mi
 let peds = null;
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
 let clouds = null;                // the sky to fly the machines through
+const _earDir = new THREE.Vector3();
+const _voiceCars = [];            // reused every frame — the pool never keeps it
+const VOICE_SCAN2 = 140 * 140;    // m² — wider than the pool's own 95 m cutoff,
+                                  // so a car arriving fast is already a candidate
 // Every machine parked at Pardubice and at Prague. `heli` stays as the one
 // the player last had business with, because a lot of code below asks about
 // "the helicopter" and only ever means the one within arm's reach.
@@ -2253,7 +2258,25 @@ function stepGame(dt) {
   // switching interiors off in the settings silently made the whole city play
   // at full volume regardless of distance.
   const ears = game.car ?? game.heli ?? game.jet ?? player.pos;
-  setListener(ears.x, ears.z);
+  camera.getWorldDirection(_earDir);
+  setListener(ears.x, ears.z, _earDir.x, _earDir.z);
+  // …and the engines of whatever is close enough to pick out of the traffic.
+  // The pool takes the nearest few and steals from the furthest, so handing it
+  // everything within a couple of hundred metres is both cheap and correct —
+  // it does the ranking, because it is the one that knows how many voices it
+  // has. Off the road entirely (in the air, in a menu) they all stop.
+  if (game.mode === 'play' && traffic && !game.jet && !game.heli) {
+    _voiceCars.length = 0;
+    for (const c of traffic.cars) {
+      if (c === game.car) continue;                 // that one is engineSet's
+      const dx = c.x - ears.x, dz = c.z - ears.z;
+      if (dx * dx + dz * dz < VOICE_SCAN2) {
+        _voiceCars.push({ id: c._id ?? c.uid ?? c, kind: c.kind,
+          x: c.x, z: c.z, speed: Math.abs(c.speed), load: engineLoad(c, 0.35) });
+      }
+    }
+    engineVoices(_voiceCars);
+  } else engineVoicesStop();
   vehicles.update(dt);
   // The peers' cars move BEFORE anything that reads them this frame: the AI
   // traffic brakes for them (traffic.actors), the seat resolver hangs remote
