@@ -36,18 +36,60 @@ import * as THREE from 'three';
 // the camera, which is why the sky looked empty. A real cumulus field is far
 // busier, so: many more bodies, and a field only wide enough that the ones you
 // can actually SEE are dense.
-const CLUSTERS = 120;            // drifting cloud bodies alive at once
+// ---- draw distance -------------------------------------------------------
+// One knob with three notches, and every other number here follows from it, so
+// the wrap invariant below cannot be broken by picking a bigger sky.
+//
+//   range   how far a cloud is still drawn
+//   field   half-width of the torus the field tiles with; must exceed `range`
+//           by more than a puff's reach, or a cluster would still be visible
+//           at the moment it teleports to the other side
+//   n       cluster count, chosen to hold the sky's DENSITY roughly constant
+//           (2.9 → 2.4 bodies per km² across the three) — sprites are one draw
+//           call each, so this is where the setting actually costs something
+export const CLOUD_RANGES = {
+  medium:   { range: 2600, field: 3200, n: 120 },
+  far:      { range: 4200, field: 4800, n: 240 },
+  furthest: { range: 6000, field: 6600, n: 420 },
+};
+export const CLOUD_DIST_DEFAULT = 'medium';
 // A real cumulus is a pile of many lobes, not six blobs — more puffs per body
 // is what turns a smudge into cauliflower with an actual silhouette.
 const PUFFS = [11, 16];          // sprites per cluster (inclusive range)
-const FIELD = 2600;              // half-width of the field
-const PERIOD = FIELD * 2;        // the torus the clusters tile the sky with
-// Sit the deck low enough that it fills the sky ABOVE THE HORIZON from the
-// ground (the chase camera pitches down, so anything directly overhead is out
-// of frame) and low enough that the helicopter can climb into and above it.
-// Two decks, like a real sky: fair-weather cumulus low down that the
-// helicopter can climb through, and a thinner, wider layer above them.
-const ALT = [230, 620];          // cluster altitude band, meters
+
+// ---- how high a cloud actually is ----------------------------------------
+// A cloud is where rising air got cold enough to condense. Air lifted off the
+// ground cools at about 9.8 °C per km; the dew point it carries falls at only
+// ~1.8 °C per km, so the two converge, and the height where they meet is the
+// LIFTING CONDENSATION LEVEL — the cloud base. The pilot's rule of thumb is
+//
+//     base ≈ 125 m × (temperature − dew point), in °C
+//
+// so a Czech summer afternoon at 24 °C with a dew point of 12 °C puts fair-
+// weather cumulus about 1500 m up. Below that height the air is simply not
+// cold enough to hold a cloud, which is why you never walk through one.
+//
+// The part that matters for a world with hills in it: temperature and dew
+// point are properties of the AIR MASS, not of the ground under it. So the
+// condensation level sits at a nearly constant altitude ABOVE SEA LEVEL across
+// a whole region — pilots call it the ceiling and mean it literally, a flat lid
+// every cumulus in sight shares. It does not rise with the terrain, which is
+// exactly why clouds appear to sit on ridges and swallow mountain tops: the
+// ridge climbs into the lid.
+//
+// So these are METRES ABOVE SEA LEVEL, the same y everything else in the world
+// now uses. They were 230–620 back when the ground was a plane at zero and the
+// two were the same thing; on real terrain that put the whole sky underground
+// in Pardubice (221 m) and 130 m below the ridges above Zlín.
+//
+// Genera, for the record, and roughly what this builds:
+//   low    cumulus, stratocumulus     base   0–2000 m   ← deck 1
+//   middle altocumulus, altostratus   base 2000–7000 m  ← deck 2
+//   high   cirrus (ice)               base 5000–13000 m ← not modelled
+const BASE_LOW = 1350;           // m MSL — the fair-weather cumulus ceiling
+const BASE_MID = 2650;           // m MSL — a thinner stratocumulus deck above
+const BASE_JITTER = 55;          // the lid is flat, not laser-levelled
+const MID_SHARE = 0.28;          // how many clusters belong to the upper deck
 const SPREAD_H = 210;            // puff scatter around the cluster axis, meters
 const SPREAD_V = 88;             // …and vertically: flat base, towering top
 // Real fair-weather cumulus run 0.5–2 km across. At 155–255 m these read as
@@ -79,14 +121,34 @@ const OPACITY = 0.82;            // master alpha; puffs jitter ±18 % around it
 // A sprite's four corners share their centre's view-space depth (three builds
 // the quad in view space), so a sprite does not clip gradually — it would
 // vanish WHOLE the instant its centre crossed camera.far. Hence the far fade
-// must reach zero strictly inside it: 0.89·far, capped at FADE_CAP.
-// FADE_CAP exists to keep the wrap invisible. At the wrap boundary a cluster
-// centre sits |offset| = 1800 m away, and no puff is further than
-// hypot(SPREAD_H, SPREAD_V) ≈ 120 m from its centre, so EVERY puff that wraps
-// is at least 1680 m out — 180 m beyond the widest fade we will ever use.
-// Its opacity is therefore exactly 0 on both sides of the jump: the recentre
-// moves geometry that is not on screen, whatever the camera is doing.
-const FADE_FAR_K = 0.89, FADE_CAP = 4200, FADE_IN_K = 0.72;
+// must reach zero strictly inside it: 0.89·far, capped at the chosen `range`.
+//
+// That cap is what keeps the WRAP invisible, and it is the one invariant this
+// module has to hold. At the wrap boundary a cluster centre sits `field` metres
+// away, and no puff's visible edge is further than PUFF_REACH from its centre,
+// so every puff that wraps is at least (field − PUFF_REACH) out. Require
+//
+//     range ≤ field − PUFF_REACH
+//
+// and a wrapping puff's opacity is exactly 0 on both sides of the jump: the
+// recentre moves geometry that is not on screen, whatever the camera is doing.
+// CLOUD_RANGES is asserted against this on load, because the old version was a
+// hand-computed constant (4200) describing a field that had since grown to
+// 2600 — so the proof in this comment had quietly stopped being true.
+// PUFF_REACH is that "puff's reach": how far a sprite's visible edge can sit
+// from its cluster's centre. The old constant was a hand-computed 4200 that
+// silently stopped matching the field when it grew, so the wrap was no longer
+// provably invisible; it is now derived, and the range table above is checked
+// against it.
+const FADE_FAR_K = 0.89, FADE_IN_K = 0.72;
+// centre offset (SPREAD_H wide, SPREAD_V tall) plus the sprite's own half-width
+const PUFF_REACH = Math.hypot(SPREAD_H, SPREAD_V) + PUFF_D[1] / 2;
+for (const [name, r] of Object.entries(CLOUD_RANGES)) {
+  if (r.range > r.field - PUFF_REACH) {
+    throw new Error(`clouds: ${name} range ${r.range} exceeds field ${r.field} `
+      + `less puff reach ${PUFF_REACH.toFixed(0)} — the wrap would be visible`);
+  }
+}
 // NEAR: a puff you fly into would otherwise fill the screen with one flat
 // smear and then blink out the instant the camera crossed its centre (a
 // point sprite behind the eye is simply gone). Fading it over its own radius
@@ -171,33 +233,67 @@ function makePuffTextureHeadless() {
 const _lit = new THREE.Color(), _shade = new THREE.Color();
 
 export class Clouds {
-  constructor(scene) {
+  constructor(scene, dist = CLOUD_DIST_DEFAULT) {
     this.scene = scene;
     this.tex = makePuffTexture();
     this.group = new THREE.Group();
     this.group.matrixAutoUpdate = false; // stays at the origin; sprites carry world pos
     this.clusters = [];
     this.puffCount = 0;
+    this._build(dist);
+  }
+
+  /** Swap the draw distance. Rebuilds the field, which is a fresh set of
+   *  sprites — cheap enough for a settings panel and never for a frame. */
+  setDist(dist) {
+    if (dist === this.dist || !CLOUD_RANGES[dist]) return;
+    this._build(dist);
+  }
+
+  _build(dist) {
+    const cfg = CLOUD_RANGES[dist] ?? CLOUD_RANGES[CLOUD_DIST_DEFAULT];
+    this.dist = CLOUD_RANGES[dist] ? dist : CLOUD_DIST_DEFAULT;
+    // tear the old sky down before building the new one
+    for (const cl of this.clusters) {
+      for (const p of cl.puffs) { this.group.remove(p.sprite); p.mat.dispose(); }
+    }
+    this.clusters = [];
+    this.puffCount = 0;
+    this.range = cfg.range;
+    this.field = cfg.field;
+    this.period = cfg.field * 2;
+    const CLUSTERS = cfg.n, FIELD = cfg.field, PERIOD = this.period;
     const rnd = mulberry32(0xC10D5);
 
-    // Stratified placement: 16 cells of a 4×4 grid over the torus, shuffled,
-    // 14 taken. Pure random over 3.6 km would regularly leave a whole quadrant
-    // of sky empty and pile four clusters into one corner — with only 14 bodies
-    // covering the horizon, that reads as a bug rather than as weather.
+    // Stratified placement over a G×G grid of the torus, shuffled. Pure random
+    // would regularly leave a whole quadrant of sky empty and pile four
+    // clusters into one corner, which reads as a bug rather than as weather.
+    //
+    // G is derived from the cluster count, and that is not a tidy-up: the grid
+    // was a fixed 4×4 = 16 cells from when the field held 14 bodies, and when
+    // the count grew to 120 nothing grew with it. `cells[c]` was undefined for
+    // every cluster past the sixteenth, so gx was NaN and 104 of 120 clouds
+    // were built at coordinate NaN — present in the scene, counted in the
+    // budget, and never drawn.
+    const G = Math.ceil(Math.sqrt(CLUSTERS));
     const cells = [];
-    for (let i = 0; i < 16; i++) cells.push(i);
+    for (let i = 0; i < G * G; i++) cells.push(i);
     for (let i = cells.length - 1; i > 0; i--) {
       const j = (rnd() * (i + 1)) | 0;
       [cells[i], cells[j]] = [cells[j], cells[i]];
     }
-    const cell = PERIOD / 4;
+    const cell = PERIOD / G;
     for (let c = 0; c < CLUSTERS; c++) {
-      const gx = cells[c] % 4, gz = (cells[c] / 4) | 0;
+      const gx = cells[c] % G, gz = (cells[c] / G) | 0;
       const cl = {
         // absolute world position; wind moves it, the wrap only affects drawing
         x: -FIELD + (gx + 0.5) * cell + (rnd() - 0.5) * cell * 0.84,
         z: -FIELD + (gz + 0.5) * cell + (rnd() - 0.5) * cell * 0.84,
-        y: ALT[0] + rnd() * (ALT[1] - ALT[0]),
+        // Two DECKS with flat bases, not one uniform smear between two numbers.
+        // A shared base is the strongest thing the eye reads about a cumulus
+        // field, and drawing altitudes uniformly across a 400 m band destroys
+        // exactly that.
+        y: (rnd() < MID_SHARE ? BASE_MID : BASE_LOW) + (rnd() - 0.5) * 2 * BASE_JITTER,
         puffs: [],
       };
       const n = PUFFS[0] + ((rnd() * (PUFFS[1] - PUFFS[0] + 1)) | 0);
@@ -245,7 +341,9 @@ export class Clouds {
       }
       this.clusters.push(cl);
     }
-    scene.add(this.group);
+    // the group is added once and reused across rebuilds — setDist() swaps the
+    // sprites inside it, not the group itself
+    if (this.group.parent !== this.scene) this.scene.add(this.group);
   }
 
   // dt seconds; camera drives the recentre; sunDir/nightK come straight from
@@ -281,7 +379,7 @@ export class Clouds {
     const master = OPACITY * (1 - 0.18 * nk); // night thins them so the moon reads
 
     // ---- fade band, re-derived each frame in case camera.far ever changes ----
-    const farOut = Math.min((camera.far || 1400) * FADE_FAR_K, FADE_CAP);
+    const farOut = Math.min((camera.far || 1400) * FADE_FAR_K, this.range);
     const farIn = farOut * FADE_IN_K;
     const invFar = 1 / Math.max(1, farOut - farIn);
 
@@ -294,6 +392,7 @@ export class Clouds {
       // a save load, the helicopter crossing a tile boundary at 62 m/s) — there
       // is no accumulated state to get out of step with the camera.
       let dx = cl.x - cx, dz = cl.z - cz;
+      const PERIOD = this.period;
       dx -= PERIOD * Math.round(dx / PERIOD);
       dz -= PERIOD * Math.round(dz / PERIOD);
       const dy = cl.y - cy;   // altitude never wraps: you can climb above the deck

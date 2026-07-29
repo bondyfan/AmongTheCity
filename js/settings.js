@@ -19,13 +19,16 @@ const LS_KEY = 'atc-settings';
 const PRESETS = {
   low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 60,
             ortho: false, facades: false, trees: true, peds: 12, bloom: false, rays: false,
-            interiors: false, buildingR: 80, mblur: false, flare: false },
+            interiors: false, buildingR: 80, mblur: false, flare: false,
+            cloudDist: 'medium' },
   medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 240,
             ortho: true,  facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
-            interiors: true, buildingR: 160, mblur: true, flare: true },
+            interiors: true, buildingR: 160, mblur: true, flare: true,
+            cloudDist: 'medium' },
   high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
             ortho: true,  facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
-            interiors: true, buildingR: 280, mblur: true, flare: true },
+            interiors: true, buildingR: 280, mblur: true, flare: true,
+            cloudDist: 'far' },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
 // showNames / nameDist are co-op preferences, not performance knobs: a name
@@ -210,6 +213,11 @@ export function initSettings(apply) {
       [5, 'Daleká'], [6, 'Nejdelší']]),
     // how far out the box shells (real window reveals, brand signage) exist —
     // this is what keeps a Kaufland reading KAUFLAND from across the car park
+    // Clouds sit 1.1–2.4 km above the ground, so the whole sky is in view from
+    // anywhere — this is the one draw distance you can always see the effect of.
+    // Each puff is its own draw call, which is where the cost lives.
+    selectRow('cloudDist', 'Dohlednost mraků', [['medium', 'Střední'],
+      ['far', 'Daleko'], ['furthest', 'Nejdál']]),
     selectRow('buildingR', 'Dohlednost budov (interiéry)', [[80, 'Krátká'],
       [160, 'Střední'], [280, 'Daleká'], [450, 'Extrémní']]),
     selectRow('traffic', 'Hustota provozu', [[0, 'Žádná'], [60, 'Řídká'],

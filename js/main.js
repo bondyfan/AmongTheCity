@@ -1306,7 +1306,11 @@ function updateHorizon(dt) {
   // every frame BEFORE updateCamera, so it clipped them back off as fast as
   // the camera set 0.14. The near plane is now the camera mode's business
   // (applyLens) and this only reads the value it chose.
-  const wantFar = Math.max(radius * 1.7, 5200);
+  // The far plane serves the sky as well as the city, and the cloud fade is
+  // clamped to 0.89·far — so a far plane short of the chosen cloud range would
+  // quietly cancel the setting the player just paid for.
+  const cloudFar = clouds ? clouds.range / 0.89 + 400 : 5200;
+  const wantFar = Math.max(radius * 1.7, 5200, cloudFar);
   if (Math.abs(camera.far - wantFar) > 50 || camera.near !== camNear) {
     camera.far = wantFar;
     camera.near = camNear;
@@ -1831,6 +1835,8 @@ function applySettings(s, key) {
     world.interiors.enabled = s.interiors !== false;
     world.interiors.drawR = s.buildingR ?? 160;
   }
+  // …and how much sky. setDist rebuilds the field, so it no-ops on a repeat.
+  clouds?.setDist?.(s.cloudDist ?? 'medium');
   if (sky) {
     const sun = sky.sun;
     if (renderer.shadowMap.enabled !== !!s.shadows) {
@@ -1926,7 +1932,7 @@ async function boot() {
       Math.min(1, 0.5 + v * 0.05), p.x, p.z, 180, 0.25);
   };
   peds.onPedKilled = (p) => sfxAt('crowd_panic', 0.7, p.x, p.z, 200, 4);
-  clouds = new Clouds(scene);
+  clouds = new Clouds(scene, getSettings().cloudDist);
   // The world beyond the streamed chunks used to be bare sky, so from the air
   // the built area showed as a hard-edged square floating in blue. This apron
   // is a single huge quad at ground level in the fog's own colour: distance
