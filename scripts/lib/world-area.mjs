@@ -140,21 +140,37 @@ function nearLine(tx, tz) {
   return false;
 }
 
-export function tileWanted(tx, tz) {
+function tileWantedRaw(tx, tz) {
   const x0 = tx * TILE, x1 = x0 + TILE, z0 = tz * TILE, z1 = z0 + TILE;
   for (const r of RECTS) if (x1 > r.x0 && x0 < r.x1 && z1 > r.z0 && z0 < r.z1) return true;
   return nearLine(tx, tz);
 }
 
+// The world's shape never changes at run time, so every answer below is a pure
+// function of a tile index and worth remembering. The reason it MATTERS: the
+// test sweeps nine points of the tile against every segment of three
+// polylines, which is ~350 distance solves, and the splitter asks it once per
+// feature across seven extracts.
+const _wantMemo = new Map();
+export function tileWanted(tx, tz) {
+  const k = tx + ',' + tz;
+  let v = _wantMemo.get(k);
+  if (v === undefined) { v = tileWantedRaw(tx, tz); _wantMemo.set(k, v); }
+  return v;
+}
+
 // Every wanted tile, ordered by distance from the origin so a downloader or a
 // builder that is interrupted has already done the tiles nearest the spawn.
+let _wanted = null;
 export function wantedTiles() {
+  if (_wanted) return _wanted;
   const txMin = Math.floor(xOf(ENVELOPE.lonW) / TILE), txMax = Math.floor(xOf(ENVELOPE.lonE) / TILE);
   const tzMin = Math.floor(zOf(ENVELOPE.latN) / TILE), tzMax = Math.floor(zOf(ENVELOPE.latS) / TILE);
   const out = [];
   for (let tz = tzMin; tz <= tzMax; tz++)
     for (let tx = txMin; tx <= txMax; tx++) if (tileWanted(tx, tz)) out.push([tx, tz]);
   out.sort((a, b) => (a[0] ** 2 + a[1] ** 2) - (b[0] ** 2 + b[1] ** 2));
+  _wanted = out;
   return out;
 }
 
@@ -213,13 +229,25 @@ export function nodeWanted(lat, lon) {
 // The wanted tile nearest a point, for parking a feature whose own tile is
 // outside the world (a river arriving from beyond the envelope). Deterministic:
 // same feature, same tile, every run.
+// Memoised for the same reason, and more urgently: this ran a full scan of the
+// world PER FEATURE that fell outside it. With the envelope now 145 × 275 km
+// that is 2 508 tiles × ~350 distance solves, ~880 000 operations, for every
+// river and railway that reaches in from beyond the border — and there are
+// hundreds of thousands of them. Measured on the Zlín rebuild: Prague, which
+// lies entirely INSIDE the world and so never reached this function, split in
+// 3.9 seconds; Královéhradecký, which does not, took 983.
+const _nearMemo = new Map();
 export function nearestWanted(x, z) {
   const tx = Math.floor(x / TILE), tz = Math.floor(z / TILE);
   if (tileWanted(tx, tz)) return [tx, tz];
+  const k = tx + ',' + tz;
+  const hit = _nearMemo.get(k);
+  if (hit) return hit;
   let best = null, bestD = Infinity;
   for (const [wx, wz] of wantedTiles()) {
     const d = (wx - tx) ** 2 + (wz - tz) ** 2;
     if (d < bestD) { bestD = d; best = [wx, wz]; }
   }
+  _nearMemo.set(k, best);
   return best;
 }
