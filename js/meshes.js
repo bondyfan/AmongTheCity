@@ -30,7 +30,8 @@ import * as THREE from 'three';
 import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
-import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey } from './geo.js';
+import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
+  junctionsIn } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
@@ -848,7 +849,9 @@ function trenchInto(sink, water, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, ter
 function roadRibbon(sink, f, terrain) {
   // a bridge is straight by definition and its deck is level, so it
   // gains nothing from following ground it is not touching
-  const fr = ribbonFrame(f.br ? bridgeResample(f.p) : terrainResample(f.p, terrain));
+  const pts = trimEnds(f.p, f._j0, f._j1);
+  if (!pts) return;                       // eaten entirely by its own junctions
+  const fr = ribbonFrame(f.br ? bridgeResample(pts) : terrainResample(pts, terrain));
   if (!fr) return;
   const { q, per, along, len } = fr;
   const hw = Math.max(0.8, (f.w ?? 3) / 2);
@@ -939,6 +942,90 @@ function roadRibbon(sink, f, terrain) {
   // everything this bridge emitted — deck, fascia, parapets, lane paint — is
   // already at its absolute height
   if (bridge) sink.fixFrom(mark);
+}
+
+/**
+ * Pull a polyline back from one or both ends by a distance, walking the real
+ * geometry rather than moving the endpoint along the chord — a road that bends
+ * in its last ten metres would otherwise be cut in the wrong direction.
+ * Returns null if there is nothing left worth drawing.
+ */
+function trimEnds(p, t0 = 0, t1 = 0) {
+  if (!t0 && !t1) return p;
+  const walk = (pts, d) => {                 // trim `d` off the START of pts
+    if (d <= 0) return pts;
+    let left = d;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const L = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]);
+      if (L < left) { left -= L; continue; }
+      const t = left / L;
+      return [[pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t,
+        pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t], ...pts.slice(i + 1)];
+    }
+    return null;
+  };
+  let q = walk(p, t0);
+  if (!q) return null;
+  if (t1) { q = walk(q.slice().reverse(), t1); if (!q) return null; q.reverse(); }
+  return q.length >= 2 ? q : null;
+}
+
+// ---- junction pads --------------------------------------------------------
+// The surface a junction actually has. Its arms have been pulled back (geo.js
+// marks the trim), leaving a hole; this fills it with ONE polygon built from
+// the arms themselves rather than from a circle, so a crossroads comes out
+// square-ish and a fork comes out like a fork.
+//
+// Convex hull of the arm mouths: for each arm, the two corners of its cross
+// section at the pad radius. That is guaranteed simple — no self-intersection
+// to check, no inset that can fold — and it covers every arm by construction
+// because each arm's own corners are vertices of it.
+function junctionPad(sink, j, terrain) {
+  const pts = [];
+  for (const a of j.arms) {
+    const p = a.r.p;
+    // direction AWAY from the node, taken a little way along the arm so a
+    // rounded corner right at the mouth does not skew it
+    const i = a.i;
+    const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
+    let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
+    if (!a.end) {                            // through-road: use the local tangent
+      const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
+      dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
+    }
+    const L = Math.hypot(dx, dz) || 1;
+    const ux = dx / L, uz = dz / L, hw = (a.r.w ?? 3) / 2;
+    for (const side of [-1, 1]) {
+      // both directions for a through-road, so the pad spans it
+      for (const dir of a.end ? [1] : [1, -1]) {
+        pts.push([j.x + ux * dir * j.pad - uz * side * hw,
+          j.z + uz * dir * j.pad + ux * side * hw]);
+      }
+    }
+  }
+  if (pts.length < 3) return;
+  const ring = convexHull(pts);
+  if (!ring || ring.length < 3) return;
+  _c.setHex(COLORS.road.residential);
+  // a hair above the ribbons so the two never fight for the same pixel
+  capInto(sink, ring, null, LAYER_Y.road + 0.012, true, _c.r, _c.g, _c.b);
+}
+
+/** Andrew's monotone chain. Small inputs (≤ 16 points), so the sort is free. */
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (p.length < 3) return null;
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (src) => {
+    const h = [];
+    for (const q of src) {
+      while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop();
+      h.push(q);
+    }
+    h.pop();
+    return h;
+  };
+  return [...half(p), ...half(p.slice().reverse())];
 }
 
 // ---- runway paint ---------------------------------------------------------
@@ -2389,6 +2476,9 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   if (!shell) {
     for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f, mats.terrain);
     for (const f of cell.rails) if (f._home === key) railWay(sink, f, mats.terrain);
+    // …and the surfaces where they meet, filling what the trims left behind
+    const js = junctionsIn(key);
+    if (js) for (const j of js) junctionPad(sink, j, mats.terrain);
   }
   // Roads, rails, kerbs, lane paint, bank skirts and bridge parapets all land
   // in this one sink, and every one of them is authored as a height ABOVE the

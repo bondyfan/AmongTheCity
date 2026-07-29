@@ -188,6 +188,64 @@ function smoothBends(p, isBridge) {
   return any ? out : p;
 }
 
+// ---- junctions are places, not accidents of overlap -----------------------
+// Every OSM way is drawn as its own ribbon, so where three of them meet, three
+// ribbons lie across each other at three angles, each with a rounded cap on its
+// end. What you see is the seams between them and the caps poking out of the
+// tarmac — the roads "bulging into each other".
+//
+// A real junction is one surface. So: the ways that END at a shared node are
+// pulled BACK from it, far enough to clear the widest road there, and the hole
+// they leave is filled with a single pad built from the arms themselves. A way
+// that merely PASSES THROUGH the node (the top of a T) is not touched — it is
+// already continuous, and the pad only has to fill the corners beside it, which
+// is exactly what a real junction looks like from above.
+//
+// Nodes are found by exact coincidence. OSM ways share a node by identity, the
+// pipeline converts every one of them through the same projection, and
+// smoothBends() never moves a first or last point — so the coordinates are
+// equal to the bit, and a 2 cm hash is generous.
+const J_KEY = (x, z) => Math.round(x * 50) + ',' + Math.round(z * 50);
+const J_MIN_ARMS = 3;       // two ways meeting is a way that was split, not a junction
+const J_MAX_TRIM = 0.35;    // never eat more than this fraction of a short road
+function indexJunctions(roads) {
+  const at = new Map();
+  for (const r of roads) {
+    if (!r.d || !r.p || r.p.length < 2) continue;
+    for (let i = 0; i < r.p.length; i++) {
+      const k = J_KEY(r.p[i][0], r.p[i][1]);
+      let e = at.get(k);
+      if (!e) at.set(k, e = { x: r.p[i][0], z: r.p[i][1], arms: [] });
+      e.arms.push({ r, i, end: i === 0 || i === r.p.length - 1 });
+    }
+  }
+  for (const e of at.values()) {
+    if (e.arms.length < J_MIN_ARMS) continue;
+    // the pad has to clear the widest road that meets here
+    let wMax = 0;
+    for (const a of e.arms) wMax = Math.max(wMax, (a.r.w ?? 3) / 2);
+    e.pad = wMax + 0.6;
+    for (const a of e.arms) {
+      if (!a.end) continue;                       // a through-road runs straight on
+      const trim = Math.min(e.pad, a.r._len * J_MAX_TRIM);
+      if (trim < 0.4) continue;
+      if (a.i === 0) a.r._j0 = Math.max(a.r._j0 ?? 0, trim);
+      else a.r._j1 = Math.max(a.r._j1 ?? 0, trim);
+    }
+    // Bucketed by the chunk that holds the CENTRE, so a junction straddling a
+    // chunk border is drawn once. A chunk build then costs one map lookup
+    // rather than a scan of every junction in the world.
+    const k = chunkKey(e.x, e.z);
+    let list = JUNCTIONS.get(k);
+    if (!list) JUNCTIONS.set(k, list = []);
+    if (!list.some((o) => o.x === e.x && o.z === e.z)) list.push(e);
+  }
+}
+
+/** Junction pads, bucketed by chunk key. meshes.js asks for its own. */
+export const JUNCTIONS = new Map();
+export function junctionsIn(chunkK) { return JUNCTIONS.get(chunkK) ?? null; }
+
 export function polylineLength(p) {
   let L = 0;
   for (let i = 0; i < p.length - 1; i++) L += Math.hypot(p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1]);
@@ -265,6 +323,7 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   const roads = stamp(data.roads), rails = stamp(data.rails),
     water = stamp(data.water), green = stamp(data.green), paved = stamp(data.paved);
   for (const r of roads) { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); }
+  indexJunctions(roads);
   for (const r of rails) r.p = smoothBends(r.p, r.br);
   bucketize(city.chunkIndex, roads, 'roads', touched);
   bucketize(city.chunkIndex, rails, 'rails', touched);
