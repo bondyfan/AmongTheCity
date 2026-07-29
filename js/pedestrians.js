@@ -1120,9 +1120,14 @@ export class Pedestrians {
     if (s <= HIT_MIN_SPEED) return false;
     const dx = p.x - car.x, dz = p.z - car.z;
     if (Math.abs(dx) > car.len || Math.abs(dz) > car.len) return false;
-    // a car on a bridge deck (LAYER_Y.road + BRIDGE_Y ≈ 1.05) must not squash
-    // the walker on the riverside path BELOW it; street cars sit at y ≈ 0.2
-    if (Math.abs((car.y || 0) - p.y) > 0.9) return false;
+    // A car on a bridge deck must not squash the walker on the riverside path
+    // BELOW it — but the two heights have to be in the same frame to say so.
+    // car.y became an ABSOLUTE altitude the day the terrain landed; p.y never
+    // did, it is still the walker's height ABOVE THE GROUND (0 on foot, lifted
+    // mid-flight). So this compared 221 against 0 in Pardubice and threw away
+    // every hit in the city: the whole ragdoll, blood and run-over system was
+    // wired, tested and correct, and unreachable behind one line.
+    if (Math.abs((car.y || 0) - (this._gy(p.x, p.z) + p.y)) > 0.9) return false;
     const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
     const rx = -fz, rz = fx;                     // right of travel
     const hl = car.len / 2, hw = car.wid / 2;

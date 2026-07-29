@@ -38,6 +38,12 @@
 //   dir(h) = (−sin h, −cos h), mesh.rotation.y = heading, h = atan2(−dx, −dz).
 
 import { WALK, PLAYER_SCALE, INTERIOR } from './config.js';
+
+/** 0 while walking, 1 at a full sprint — how much RUN is in the gait. */
+const runBlend = (v) => {
+  const k = (v - WALK.runFrom) / (WALK.sprint - WALK.runFrom);
+  return k < 0 ? 0 : k > 1 ? 1 : k;
+};
 import { makeCitizen } from './citizen.js';
 import { localUid, baseUid, lookForUid } from './identity.js';
 import { seatAnchor as carSeatAnchor } from './vehicles.js';
@@ -218,7 +224,10 @@ export class Player {
     // --- place + animate ---
     this.mesh.position.set(this.pos.x, this.y, this.pos.z);
     this.mesh.rotation.y = this.heading;
-    this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog));
+    // Cadence saturates (a faster run is longer strides, not blurred legs) and
+    // the RUN blend takes over above WALK.runFrom, so the figure walks at a
+    // walk, runs flat out at a sprint, and visibly changes gait between.
+    this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog), runBlend(this.speed));
   }
 
   // ---- boarding ----------------------------------------------------------
@@ -298,7 +307,10 @@ export class Player {
         this.speed = mv / Math.max(dt, 1e-4);
         this.mesh.position.set(this.pos.x, this.y, this.pos.z);
         this.mesh.rotation.y = this.heading;
-        this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog));
+        // Cadence saturates (a faster run is longer strides, not blurred legs) and
+    // the RUN blend takes over above WALK.runFrom, so the figure walks at a
+    // walk, runs flat out at a sprint, and visibly changes gait between.
+    this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog), runBlend(this.speed));
         return;
       }
       // at the door: remember where we stand IN THE VEHICLE'S FRAME so the

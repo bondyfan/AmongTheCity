@@ -226,6 +226,36 @@ const CORNER_LOOK = 16;       // meters of polyline scanned ahead for curves
 const LAT_GATE = 2.0;         // half-width of the follow corridor (m) — an
                               // oncoming car in the opposite lane sits wider
 const HEAD_GATE = 0.61;       // ±35° same-direction test for AI-AI following
+// ---- and the rigid body the follow model is not ----------------------------
+// The rule above is a CAR-FOLLOWING model and it is right to be: it only looks
+// at cars going roughly the same way, because treating the oncoming lane as a
+// leader gridlocks every street. But that means two cars on CROSSING rails —
+// the whole point of a junction — never see each other at all, and drive
+// straight through one another.
+//
+// So a second, heading-agnostic test runs beside it: if the paths of two cars
+// are about to put them in the same place, one of them stops. Predicting a
+// short way ahead rather than testing the current overlap is what makes it a
+// yield instead of a collision report — by the time two rectangles intersect
+// it is already too late to brake.
+//
+// Right-hand priority breaks the tie. It is the Czech rule, it needs no shared
+// state, and it is antisymmetric, so of any two cars exactly one yields.
+// The conflict horizon has to be a BRAKING distance, not a constant: a fixed
+// 13 m is 0.7 s of travel at 65 km/h, and stopping from 18 m/s under BRAKE_HARD
+// needs 11.6 m plus the frame it takes to notice. So it scales with whichever
+// car is moving faster — 8 m standing, 16 m at 65 km/h, which leaves 4.5 m of
+// margin on the braking distance.
+//
+// Not further. At 0.9 m per m/s the reach reaches 24 m and cars start yielding
+// to conflicts that resolve themselves, which shows up somewhere unexpected:
+// a car held at a junction stays in view longer, so more retirements are
+// deferred, and tests/traffic-view.test.mjs caught the ghost population going
+// from under its cap to 28. Braking distance plus a margin is the right size;
+// generosity past that leaks.
+const CROSS_R0 = 8, CROSS_RV = 0.45;
+const CROSS_T = 1.1;          // s of travel to look ahead when predicting
+const CROSS_CLEAR = 4.2;      // m between centres that counts as "the same place"
 const STRAIGHT = Math.PI / 6; // ±30° reads as "carrying straight on"
 // (v8's RAMP_K lived here: a flat surcharge for the time a car loses slowing
 // to a corner. v9's pieceTime() models the accel/brake ramps explicitly, so
@@ -2119,8 +2149,32 @@ export class Traffic {
       const rx = o.sx - p.sx, rz = o.sz - p.sz;
       const fwd = rx * fx + rz * fz;
       if (fwd <= 0 || fwd > TRAFFIC.lookAhead) continue;
-      if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
-      if (Math.abs(angWrap(o.sh - p.sh)) > HEAD_GATE) continue;
+      const lat = fx * rz - fz * rx;
+      if (Math.abs(lat) > LAT_GATE || Math.abs(angWrap(o.sh - p.sh)) > HEAD_GATE) {
+        // Not a leader — but possibly a collision. Only pairs the follow model
+        // has ALREADY discarded reach here, so the two rules never fight.
+        const d2 = rx * rx + rz * rz;
+        const reach = CROSS_R0 + Math.max(car.speed, other.speed) * CROSS_RV;
+        if (d2 < reach * reach) {
+          const ofx = -Math.sin(o.sh), ofz = -Math.cos(o.sh);
+          const vs = car.speed, vo = other.speed;
+          const px = p.sx + fx * vs * CROSS_T, pz = p.sz + fz * vs * CROSS_T;
+          const qx = o.sx + ofx * vo * CROSS_T, qz = o.sz + ofz * vo * CROSS_T;
+          if ((px - qx) ** 2 + (pz - qz) ** 2 < CROSS_CLEAR * CROSS_CLEAR) {
+            // Give way to the right — but "to the right" is not antisymmetric
+            // between two cars on different headings, and both reading the
+            // other as being on their LEFT is exactly the case where neither
+            // yields and they drive through each other. So each car also works
+            // out where IT sits in the other's frame, and yields unless the
+            // other one is going to. Ties yield on both sides: two cars both
+            // stopping is a moment of hesitation, two cars both continuing is
+            // the bug.
+            const olat = ofx * -rz - ofz * -rx;
+            if (lat > 0 || olat <= 0) { tgt = 0; hard = true; held = true; }
+          }
+        }
+        continue;
+      }
       const gap = fwd - 3.9;                      // center distance → bumpers
       if (fwd < leadD) { leadD = fwd; leader = o; }
       if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; }

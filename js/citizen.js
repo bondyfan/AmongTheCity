@@ -133,13 +133,27 @@ export function makeCitizen(look = {}) {
   // rotation.x swings a hanging limb toward −z = forward, so legs lead and the
   // opposite arm counter-swings, like people do. The bob runs at DOUBLE the
   // stride frequency — the body dips at each footfall, not each full cycle.
-  const walk = (walkT, speedK) => {
+  // `runK` (0..1) turns a walk into a RUN, and the difference is not just
+  // cadence — a sprinter's stride is longer, the arms drive rather than swing,
+  // the body pitches forward into it and the whole figure leaves the ground
+  // between steps. Blending rather than switching means the change happens
+  // where the player feels it, over the metre or two of acceleration, instead
+  // of snapping at a threshold.
+  const walk = (walkT, speedK, runK = 0) => {
+    const r = runK < 0 ? 0 : runK > 1 ? 1 : runK;
     const s = Math.sin(walkT) * speedK;
-    legL.rotation.x = s * 0.55;
-    legR.rotation.x = -s * 0.55;
-    armL.rotation.x = -s * 0.42;
-    armR.rotation.x = s * 0.42;
-    body.position.y = Math.abs(Math.cos(walkT)) * 0.045 * Math.min(1, speedK);
+    const leg = 0.55 + 0.55 * r;              // stride opens up
+    const arm = 0.42 + 0.55 * r;              // …and the arms drive
+    legL.rotation.x = s * leg;
+    legR.rotation.x = -s * leg;
+    // elbows come up as the run builds: the model has no elbow, so the whole
+    // arm carries a constant forward bias on top of its swing
+    armL.rotation.x = -s * arm - 0.45 * r;
+    armR.rotation.x = s * arm - 0.45 * r;
+    body.rotation.x = 0.30 * r;               // pitch into it
+    // the bob doubles and stops touching down — a run has a flight phase
+    body.position.y = Math.abs(Math.cos(walkT)) * (0.045 + 0.075 * r)
+      * Math.min(1, speedK) + 0.05 * r;
   };
 
   // Thrown by a car: splay the limbs ONCE at launch — arms flung out sideways,
@@ -147,6 +161,7 @@ export function makeCitizen(look = {}) {
   // group. Randomized per call so no two victims fold the same way. walk()
   // only drives rotation.x, so the z-splay set here survives until standPose.
   const ragdollPose = () => {
+    body.rotation.x = 0;
     const r = Math.random;
     armL.rotation.set(-0.4 - r() * 0.9, 0, -(0.9 + r() * 1.0));
     armR.rotation.set(-0.4 - r() * 0.9, 0, 0.9 + r() * 1.0);

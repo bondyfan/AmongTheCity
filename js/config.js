@@ -126,7 +126,16 @@ export const TRAFFIC = {
 export const PLAYER_SCALE = 0.9;
 
 // walk speeds
-export const WALK = { jog: 4.2, sprint: 7.0, accel: 14, turn: 12, radius: 0.38 };
+// jog was 4.2 m/s (15 km/h) and sprint 7.0 (25). The walk now sits between the
+// two old speeds, because a city this size is tedious at a jog and the old
+// sprint was the pace the game actually wanted; and the sprint is twice the old
+// one, which is a comic-book run and is meant to be — it is the difference
+// between crossing Pardubice and giving up. `runFrom` is where the animation
+// starts turning from a walk into a run.
+export const WALK = {
+  jog: 5.6, sprint: 14.0, runFrom: 6.5,
+  accel: 14, turn: 12, radius: 0.38,
+};
 
 // ---- v5: interiors ----
 // Every roof in the city has rooms under it. The numbers here are the ones a
