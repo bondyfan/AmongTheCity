@@ -33,7 +33,7 @@ import { groundFor } from './terrain.js';
 import { CHUNK, INTERIOR, PLAYER_SCALE } from './config.js';
 import { buildingPlan, hasInterior, entranceOf, planToWorld } from './interiors.js';
 import { BuildingModel, Debris, Dust } from './destructible.js';
-import { buildingWallHex, facadeCells } from './meshes.js';
+import { buildingWallHex, facadeCells, roofGeometry } from './meshes.js';
 import { makeCitizen } from './citizen.js';
 import { sfxAt } from './audio.js';   // safe headless — no-op without an AudioContext
 
@@ -248,6 +248,9 @@ export class Interiors {
     // building IS, never what it looks like. The facade quads in the chunk mesh
     // step aside for as long as this model exists.
     m.addShell();
+    // …and the roof the chunk mesh would have built, since the shell is about to
+    // stop that mesh drawing this building at all.
+    m.addRoof(roofGeometry(f, plan.top, plan.wallHex));
     this.hidden.add(f._id);
     this._dirtyChunk(f);
     return m;

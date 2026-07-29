@@ -1717,6 +1717,31 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) 
   }
 }
 
+/**
+ * The roof of ONE building as a standalone geometry, in world space, using the
+ * same two shapes the chunk mesh uses — a ridge prism for a village house, an
+ * inward-offset cap for anything big enough to turn a corner.
+ *
+ * It exists because interiorsim REPLACES a nearby building with its box shell,
+ * and the shell's roof was a flat slab with a parapet. So every building you
+ * actually walked up to lost its roof and became an office block, however
+ * carefully the chunk mesh had built one 450 m further away. The model owns
+ * this geometry, so it dies with the model and a blast takes the roof off.
+ *
+ * Returns null for a building that has no pitched roof to build.
+ */
+export function roofGeometry(f, topY, wallHex) {
+  if (!f?.r || f.r === 'flat' || !f.o?.length) return null;
+  _c.setHex(wallHex ?? 0xb0a89c);
+  const r = _c.r * ROOF_DARKEN, g = _c.g * ROOF_DARKEN, b = _c.b * ROOF_DARKEN;
+  const sink = new TriSink();
+  const a = Math.abs(polygonArea(f.o));
+  if (f.r === 'gabled' && a < 300) ridgePrism(sink, f.o, topY, r, g, b);
+  else if (a >= 300 && PITCHED.has(f.r)) roofCap(sink, f.o, topY, a, r, g, b);
+  else return null;
+  return sink.geo();
+}
+
 // Roof shapes worth building a cap for. Everything else in the OSM/IPR domain
 // (dome, onion, sawtooth…) stays flat: 108 domes in Prague are not worth a
 // geometry path that could go wrong on the other 78 000.

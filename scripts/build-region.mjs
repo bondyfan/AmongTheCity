@@ -179,6 +179,37 @@ function buildingHeight(t) {
   return (TYPE_LEVELS[t.building] ?? 2) * LEVEL_H + 1.2;
 }
 
+// ---------- roofs where nobody wrote one down ----------
+// The engine has built pitched roofs all along — ridgePrism for a village house,
+// roofCap for anything big enough to turn a corner — but only when the feature
+// carries `r`, and `r` came from OSM's roof:shape or from Prague's IPR survey.
+// Outside the big cities roof:shape is essentially unmapped: of 1 104 buildings
+// in the Březůvky tile, ZERO have it. So the whole of Moravia was built as
+// flat-topped boxes, and a village hotel with a steep gable came out looking
+// like an office block.
+//
+// Almost every building in this country has a pitched roof; flat is the
+// exception and the exceptions are identifiable. Industrial halls, supermarkets
+// and warehouses are flat by type. Paneláks are flat, and five storeys is what
+// separates one from a house. Anything with a really large footprint is a hall
+// of some kind whatever it is tagged. Everything else gets a ridge.
+//
+// This is a GUESS and it is allowed to be, because the alternative is not "no
+// guess" — it is the flat roof, which is also a guess and is wrong far more
+// often.
+const FLAT_TYPES = new Set(['industrial', 'warehouse', 'retail', 'commercial',
+  'supermarket', 'garages', 'roof', 'carport', 'hangar', 'service', 'parking',
+  'construction', 'silo', 'storage_tank', 'transformer_tower', 'water_tower',
+  'office', 'kiosk', 'container', 'bunker']);
+const FLAT_LEVELS = 5;       // …at or above this many storeys, assume a block
+const FLAT_AREA = 2500;      // m² — past this it is a hall, a mall or a factory
+function defaultRoof(kind, area, levels) {
+  if (FLAT_TYPES.has(kind)) return null;
+  if (levels >= FLAT_LEVELS) return null;
+  if (area > FLAT_AREA) return null;
+  return 'gabled';
+}
+
 // ---------- Prague: real storeys and roofs from IPR ----------
 // OSM has a height for barely half of Prague's 447 000 footprints; the rest get
 // the two-storey guess, which flattens Staré Město into a village. IPR Praha's
@@ -268,7 +299,8 @@ function processBuildings(els, owns) {
       const kind = t.building === 'yes' ? (t.amenity ?? t.shop ? 'commercial' : 'yes') : t.building;
       b.t = kind;
       if (t.name) b.n = t.name;
-      if (t['roof:shape'] && t['roof:shape'] !== 'flat') b.r = t['roof:shape'];
+      let roofKnown = false;
+      if (t['roof:shape']) { roofKnown = true; if (t['roof:shape'] !== 'flat') b.r = t['roof:shape']; }
       // …then let Prague's own survey correct the guess. An explicit OSM
       // `height` is a measurement and outranks it; everything else does not.
       const m = !(parseFloat(t.height ?? t['building:height']) > 0) && IPR?.match(o);
@@ -278,9 +310,14 @@ function processBuildings(els, owns) {
         // path — the pitched roof above it is geometry meshes.js builds from
         // `r`, so adding a ridge allowance here as well would count it twice.
         b.h = +(m.st * LEVEL_H + 1.2).toFixed(1);
-        if (m.roof === 1) b.r ??= 'gabled';
-        else if (m.roof === 2) b.r ??= 'dome';
-        else if (m.roof === 3) delete b.r;      // surveyed flat: no ridge
+        if (m.roof === 1) { b.r ??= 'gabled'; roofKnown = true; }
+        else if (m.roof === 2) { b.r ??= 'dome'; roofKnown = true; }
+        else if (m.roof === 3) { delete b.r; roofKnown = true; }   // surveyed flat
+      }
+      // …and only now, where neither OSM nor the survey has an opinion.
+      if (!roofKnown) {
+        const r = defaultRoof(kind, Math.abs(area(o)), b.lv ?? TYPE_LEVELS[kind] ?? 2);
+        if (r) b.r = r;
       }
       const mh = parseFloat(t.min_height ?? t['building:min_level'] * LEVEL_H);
       if (mh > 0) b.y = +mh.toFixed(1);

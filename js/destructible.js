@@ -34,6 +34,13 @@ import { DESTRUCTION, INTERIOR } from './config.js';
 import { interiorPieces, shellPieces } from './pieces.js';
 import { sfxAt } from './audio.js';   // safe headless — no-ops without an AudioContext
 
+// One material for every model's roof: the geometry carries its own colours, so
+// the only thing that varies between buildings is already in the vertices.
+let _roofMat = null;
+function roofMaterial() {
+  return (_roofMat ??= new THREE.MeshLambertMaterial({ vertexColors: true }));
+}
+
 const D = DESTRUCTION;
 const CELL = 4;                                  // spatial-hash cell, meters
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -544,6 +551,28 @@ export class BuildingModel {
   // tier. The thin interior lining (if the rooms exist yet) is retired in the
   // same breath: both leaves put their inner face at the same depth, so the
   // swap moves no surface the player can see or stand against.
+  /**
+   * The pitched roof, as one mesh rather than as a pile of boxes. A gable made
+   * of tiles would be a staircase; this is the same geometry the chunk mesh
+   * builds, handed over so the shell that REPLACES that mesh does not throw the
+   * roof away with it. Removed the moment the building takes damage — a wrecked
+   * house with an immaculate roof floating over it is worse than a flat one.
+   */
+  addRoof(geo) {
+    if (this._roof || !geo) return;
+    this._roof = new THREE.Mesh(geo, roofMaterial());
+    this._roof.castShadow = this._roof.receiveShadow = true;
+    this._roof.frustumCulled = false;
+    this.group.add(this._roof);
+  }
+
+  dropRoof() {
+    if (!this._roof) return;
+    this.group.remove(this._roof);
+    this._roof.geometry.dispose();
+    this._roof = null;
+  }
+
   addShell() {
     if (this.shelled) return;
     // NOTE: shelled ≠ damaged. Every activated building gets its outer wall as
@@ -793,6 +822,8 @@ export class BuildingModel {
    * no longer connected to the ground. Returns the number of pieces lost.
    */
   blast(x, y, z, r, power = 1) {
+    // the roof comes off first, before anything under it can be reached
+    this.dropRoof();
     // a rocket must always reveal rooms — a shell-tier building grows its
     // inside on the same frame the hole is made, never a hollow box
     this.ensureInterior();
@@ -932,6 +963,7 @@ export class BuildingModel {
   }
 
   dispose() {
+    this.dropRoof();
     this.scene.remove(this.group);
     for (const m of [this._solid, this._glass, this._shell, this._sign,
       ...(this._words ?? [])]) {
