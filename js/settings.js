@@ -79,6 +79,32 @@ const el = (tag, cls, html) => {
 // follow the city HUD (slate blue) but the shapes — rounded opt rows, 2-col grid, ✕ in a
 // bordered square — mirror the Woods settings panel players are used to.
 const CSS = `
+/* ---- tabs ---- */
+.atc-set-tabs {
+  display: flex; gap: 4px; padding: 0 14px; border-bottom: 1px solid #2a3550;
+}
+.atc-set-tab {
+  appearance: none; cursor: pointer; background: none; border: 0;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  padding: 9px 12px; font: 600 13px system-ui, sans-serif; color: #8ea3c0;
+}
+.atc-set-tab:hover { color: #cfe0f5; }
+.atc-set-tab.on { color: #ffb454; border-bottom-color: #ffb454; }
+.atc-set-page { display: none; }
+.atc-set-page.on { display: block; }
+/* the dev page's live pose readout */
+#atc-dev-pose {
+  font: 500 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #cfe0f5; background: #0f1725; border: 1px solid #2a3550;
+  border-radius: 8px; padding: 9px 11px; white-space: pre; margin-bottom: 8px;
+}
+#atc-dev-copy {
+  width: 100%; cursor: pointer; margin-bottom: 12px;
+  font: 600 12.5px system-ui, sans-serif; color: #0b111b; background: #ffb454;
+  border: 0; border-radius: 7px; padding: 8px;
+}
+#atc-dev-copy:active { transform: translateY(1px); }
+#atc-dev-copy.ok { background: #7fd18a; }
 #atc-gear {
   position: fixed; top: 44px; right: 12px; z-index: 20; pointer-events: auto;
   width: 38px; height: 38px; font-size: 19px; line-height: 1; cursor: pointer;
@@ -193,13 +219,37 @@ export function initSettings(apply) {
     return row;
   }
 
-  // ---- panel DOM: head + two labelled sections, Woods layout with Czech labels ----
+  // ---- panel DOM ----
+  // Three TABS rather than one long scroll: the graphics list has grown to
+  // sixteen rows and the game options were falling off the bottom of it, and
+  // the dev tools have no business being in the same list as the volume
+  // slider. Tabs also give the dev section somewhere to put a live readout
+  // without it hovering over the game.
   const panel = el('div'); panel.id = 'atc-set';
   const head = el('div', 'atc-set-head', '<h2>Nastavení</h2>');
   const closeBtn = el('button', 'atc-set-close', '✕');
   head.appendChild(closeBtn);
+  const tabs = el('div', 'atc-set-tabs');
   const body = el('div', 'atc-set-body');
-  body.appendChild(el('h3', 'atc-set-h3', 'Grafika'));
+  const pages = {};
+  function page(id, label) {
+    const b = el('button', 'atc-set-tab', label);
+    b.type = 'button'; b.dataset.tab = id;
+    tabs.appendChild(b);
+    const d = el('div', 'atc-set-page');
+    d.dataset.tab = id;
+    body.appendChild(d);
+    pages[id] = d;
+    b.addEventListener('click', () => showTab(id));
+    return d;
+  }
+  function showTab(id) {
+    for (const b of tabs.children) b.classList.toggle('on', b.dataset.tab === id);
+    for (const k of Object.keys(pages)) pages[k].classList.toggle('on', k === id);
+  }
+
+  const gPage = page('gfx', 'Grafika');
+  const hPage = page('game', 'Hra');
   const gGrid = el('div', 'atc-set-grid');
   gGrid.append(
     selectRow('preset', '⚡ Kvalita', [['low', 'Nízká (rychlá)'], ['medium', 'Střední'],
@@ -235,8 +285,7 @@ export function initSettings(apply) {
     // this is the switch that removes it. Wrecked buildings stay wrecked.
     toggleRow('interiors', 'Interiéry budov'),
   );
-  body.appendChild(gGrid);
-  body.appendChild(el('h3', 'atc-set-h3', 'Hra'));
+  gPage.appendChild(gGrid);
   const hGrid = el('div', 'atc-set-grid');
   hGrid.append(
     toggleRow('showFps', 'Zobrazit FPS'),
@@ -250,10 +299,14 @@ export function initSettings(apply) {
       [NAME_RANGES[3], 'Přes celé město (2 km)']]),
     sliderRow('volume', 'Hlasitost'),
   );
-  body.appendChild(hGrid);
-  body.appendChild(el('p', 'atc-set-note', 'Změna pokročilé volby přepne kvalitu na '
+  hPage.appendChild(hGrid);
+  gPage.appendChild(el('p', 'atc-set-note', 'Změna pokročilé volby přepne kvalitu na '
     + '„Vlastní“. Největší dopad na plynulost mají rozlišení obrazu, stíny a dohlednost.'));
-  panel.append(head, body);
+  // The dev page exists only behind ?devmode; devmode.js fills it, so this
+  // module needs to know nothing about teleports or spawners.
+  if (/(^|[?&])devmode(=|&|$)/.test(location.search)) page('dev', '🛠 Dev');
+  panel.append(head, tabs, body);
+  showTab('gfx');
 
   const gear = el('button', '', '⚙️'); gear.id = 'atc-gear'; gear.title = 'Nastavení';
   document.body.append(gear, panel);

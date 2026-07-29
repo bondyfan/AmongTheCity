@@ -1383,6 +1383,30 @@ async function initDev() {
         camInit = false;              // stop the chase cam sliding 100 km
         ui_hint?.('📍 ' + p.n);
       },
+      // Everything a bug report needs to be reproducible: where, which way, in
+      // what, and the lat/lon that means something outside this project.
+      pose() {
+        if (!world || !player) return null;
+        const ride = game.car ?? game.heli ?? game.jet ?? null;
+        const x = ride ? ride.x : player.pos.x;
+        const z = ride ? ride.z : player.pos.z;
+        const y = ride ? ride.y : player.y;
+        camera.getWorldDirection(_earDir);
+        const T = world.city.tile ?? 4800;
+        return {
+          x, y, z,
+          lat: world.city.origin.lat - z / world.city.mPerLat,
+          lon: world.city.origin.lon + x / world.city.mPerLon,
+          // the camera's own bearing, not the player's — "what I see" is the
+          // question a screenshot raises, and the chase camera is what took it
+          headingDeg: (Math.atan2(-_earDir.x, -_earDir.z) * 180 / Math.PI + 360) % 360,
+          pitchDeg: Math.asin(Math.max(-1, Math.min(1, _earDir.y))) * 180 / Math.PI,
+          tile: Math.floor(x / T) + ',' + Math.floor(z / T),
+          chunk: Math.floor(x / 120) + ',' + Math.floor(z / 120),
+          ride: game.jet ? 'gripen' : game.heli ? 'heli' : game.car ? game.car.kind : null,
+          place: placeFinder ? [placeFinder.town, placeFinder.street].filter(Boolean).join(' · ') : '',
+        };
+      },
       spawnCar(kind) {
         if (!world || !player || !vehicles) return;
         // A helicopter or a jet needs room the road in front of you does not

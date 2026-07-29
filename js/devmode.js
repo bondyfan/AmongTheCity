@@ -71,6 +71,7 @@ const CSS = `
 }
 .atc-dev-row .atc-dev-btn { width: auto; flex: 0 0 auto; }
 .atc-set-h3.atc-dev-h3 { color: #ffb454; }
+
 `.replace('#2a3purple', '#2a3550');
 
 let styled = false;
@@ -82,10 +83,78 @@ function injectCss() {
   document.head.appendChild(s);
 }
 
+// ---- the pose readout ------------------------------------------------------
+// Debugging this world by description does not work. "There is a beige strip
+// across the road near the hotel" costs a round trip and a guess; the same
+// report with the exact spot and the exact heading is a teleport away from
+// being reproduced. So devmode carries a live readout of where the player is
+// and which way they are looking, and one button that puts all of it on the
+// clipboard in a form that can be pasted straight into a message.
+//
+// lat/lon is in there deliberately: it is the one coordinate that means
+// something OUTSIDE this project, so a report can be checked against the
+// aerial photo, the cadastre or OSM without anyone converting anything.
+function poseBlock(p) {
+  if (!p) return 'no pose';
+  const n = (v, d = 1) => (v === undefined || v === null ? '?' : v.toFixed(d));
+  return [
+    `x ${n(p.x)}  z ${n(p.z)}  y ${n(p.y)}`,
+    `lat ${n(p.lat, 6)}  lon ${n(p.lon, 6)}`,
+    `heading ${n(p.headingDeg, 0)}°  pitch ${n(p.pitchDeg, 0)}°`,
+    `tile ${p.tile}  chunk ${p.chunk}`,
+    `in ${p.ride ?? 'on foot'}${p.place ? '  ·  ' + p.place : ''}`,
+  ].join('\n');
+}
+
+function mountPose(actions, host) {
+  if (document.getElementById('atc-dev-pose')) return;
+  const txt = document.createElement('div');
+  txt.id = 'atc-dev-pose';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'atc-dev-copy';
+  btn.textContent = '⧉ Kopírovat pozici a pohled';
+  host.append(txt, btn);
+
+  // A timer, not requestAnimationFrame: rAF does not fire in a background tab,
+  // and a readout that goes blank the moment you alt-tab is exactly the readout
+  // you wanted to read. Ten hertz is plenty for numbers a human types out.
+  let last = null;
+  setInterval(() => {
+    last = actions.pose?.() ?? null;
+    txt.textContent = poseBlock(last);
+  }, 100);
+
+  btn.addEventListener('click', async () => {
+    const p = last;
+    if (!p) return;
+    const text = poseBlock(p);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // clipboard refused (insecure origin, no permission) — fall back to a
+      // selection the player can copy by hand rather than silently doing nothing
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch {}
+      ta.remove();
+    }
+    btn.textContent = '✓ zkopírováno';
+    btn.classList.add('ok');
+    setTimeout(() => {
+      btn.textContent = '⧉ Kopírovat pozici a pohled';
+      btn.classList.remove('ok');
+    }, 1200);
+  });
+}
+
 /**
  * actions: {
  *   teleport(place) — place is one of DEV_PLACES
  *   spawnCar(kind)  — kind is a CAR_KINDS entry
+ *   pose()          — { x, y, z, lat, lon, headingDeg, pitchDeg, tile, chunk,
+ *                       ride, place } for the readout
  * }
  * Safe to call repeatedly; it re-attaches only when the section is missing.
  */
@@ -94,10 +163,17 @@ export function initDevMode(actions) {
   injectCss();
 
   const attach = () => {
-    const body = document.querySelector('#atc-set .atc-set-body')
-      ?? document.querySelector('#atc-set > div')
+    // settings.js gives the dev tools a TAB of their own behind ?devmode; older
+    // markup without tabs still works, the tools just land at the bottom of the
+    // one page there is.
+    const body = document.querySelector('#atc-set .atc-set-page[data-tab="dev"]')
+      ?? document.querySelector('#atc-set .atc-set-body')
       ?? document.getElementById('atc-set');
     if (!body || document.getElementById('atc-dev-grid')) return !!body;
+
+    // where you are and what you are looking at, first: it is the thing you
+    // open this tab for while something is going wrong
+    mountPose(actions, body);
 
     const h = document.createElement('h3');
     h.className = 'atc-set-h3 atc-dev-h3';
