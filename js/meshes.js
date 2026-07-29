@@ -899,11 +899,23 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // samples, so the path pokes through the asphalt in pale diagonal bands.
   // Epsilon cannot fix that; not drawing it there can.
   const foot = FOOT_CLASSES.has(f.t) && cell;
+  // Sampling the segment's MIDPOINT alone is not enough and the arithmetic says
+  // why: a path segment is up to 10 m long after terrainResample and a
+  // residential road is 5.5 m wide, so a segment can cross the carriageway with
+  // its midpoint comfortably outside it. Five samples put the spacing at 2.5 m
+  // against a 6 m band, which cannot be stepped over.
+  const crossesRoad = (ax, az, bx, bz) => {
+    for (let k = 0; k <= 4; k++) {
+      const t = k / 4;
+      if (onCarriageway(cell, f, ax + (bx - ax) * t, az + (bz - az) * t, 0.3)) return true;
+    }
+    return false;
+  };
   for (let i = 0; i < q.length - 1; i++) {
     const y0 = baseY + elev(along[i]), y1 = baseY + elev(along[i + 1]);
     const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
     const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
-    if (foot && onCarriageway(cell, f, (ax + bx) / 2, (az + bz) / 2, 0.3)) continue;
+    if (foot && crossesRoad(ax, az, bx, bz)) continue;
     sink.quad(
       ax - pax * hw, y0, az - paz * hw, bx - pbx * hw, y1, bz - pbz * hw,
       bx + pbx * hw, y1, bz + pbz * hw, ax + pax * hw, y0, az + paz * hw, cr, cg, cb);
