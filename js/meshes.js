@@ -390,61 +390,77 @@ function terrainQuad(x0, z0, terrain, hex, y = 0) {
 // the ground at its midpoint disagrees with the chord by more than TOL. Flat
 // country adds no points at all and pays nothing; a hillside gets as many as
 // its shape actually needs.
-const TERRAIN_TOL = 0.25;     // m of sag we accept between two road vertices
-const TERRAIN_MIN = 4;        // …and the shortest segment worth splitting further
-const TERRAIN_STEP = 10;      // …but no vertex is ever further than this from the next
+// ---- roads follow the ground EXACTLY, by cutting where the ground bends -----
+// A road ribbon is straight between its vertices; the terrain is two flat
+// triangles per 20 m cell. Those disagree wherever a road segment crosses a
+// break line, and the road is only lifted 20 cm, so where the disagreement
+// exceeds that the ground comes through the tarmac and you are looking at an
+// aerial photograph of a field laid across your lane.
+//
+// The first attempt was a uniform 10 m split, which narrows the gap without
+// closing it: measured on real height maps, a 10 m chord still broke through at
+// 0.34 % of points in Pardubice and 0.90 % in the Zlín hills, by up to 1.32 m.
+// Halving the step again would have halved the number and kept the class.
+//
+// So: cut the road WHERE THE GROUND BENDS, not at a step that hopes to be
+// smaller. Terrain.heightAt is planar inside one triangle, so a segment that
+// lies inside one triangle is planar too, and road = ground + LAYER holds
+// exactly. The break lines are three families of parallel lines —
+//
+//     x = k·RES        the cell edges running north–south
+//     z = k·RES        the cell edges running east–west
+//     x + z = k·RES    the diagonal each cell is split on (fx + fz = 1)
+//
+// — so the split points are just the crossings of a segment with three rulings.
+// At most six per 10 m of road, and after them the ribbon cannot break through
+// the ground anywhere, by construction rather than by tolerance.
+const TERRAIN_MAXSTEP = 12;   // …plus a ceiling, for the far side of a NoData hole
 function terrainResample(pts, terrain) {
   if (!terrain || pts.length < 2) return pts;
+  const R = terrain.res || 20;
   const out = [pts[0]];
-  // Adaptive refinement ON TOP of the uniform pass: a 10 m chord can still
-  // bridge a kerb-height ridge, and where it does this finds it. It can only
-  // ever ADD points, so it cannot undo the guarantee above.
-  const split = (ax, az, ay, bx, bz, by, depth) => {
-    const mx = (ax + bx) / 2, mz = (az + bz) / 2;
-    if (depth > 0 && Math.hypot(bx - ax, bz - az) > TERRAIN_MIN) {
-      const my = terrain.heightAt(mx, mz);
-      if (Math.abs(my - (ay + by) / 2) > TERRAIN_TOL) {
-        split(ax, az, ay, mx, mz, my, depth - 1);
-        out.push([mx, mz]);
-        split(mx, mz, my, bx, bz, by, depth - 1);
-        return;
-      }
-    }
-  };
+  const ts = [];
   for (let i = 0; i < pts.length - 1; i++) {
     const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
-    // The UNIFORM pass first, and it is not an optimisation — it is the whole
-    // correctness argument. Testing a segment's midpoint and stopping when it
-    // looks flat is blind by construction: a dip that is symmetric about the
-    // middle reads as perfectly straight there, so one lucky sample cancelled
-    // all subdivision. That is not hypothetical — it left a 126 m road quad
-    // over a Pardubice hollow whose three corners each sat exactly 0.20 m above
-    // the ground while its middle floated a metre over it, and a car driving
-    // through was inside the tarmac.
-    //
-    // So: chop every segment to TERRAIN_STEP first, unconditionally. At 10 m
-    // that is half the height map's own 20 m sample spacing, which bounds the
-    // error by the terrain's curvature within a single cell rather than by
-    // whatever a midpoint probe happened to find.
-    const L = Math.hypot(bx - ax, bz - az);
-    const n = Math.max(1, Math.ceil(L / TERRAIN_STEP));
-    let px = ax, pz = az, py = terrain.heightAt(ax, az);
-    for (let k = 1; k <= n; k++) {
-      const t = k / n;
-      const qx = ax + (bx - ax) * t, qz = az + (bz - az) * t;
-      const qy = terrain.heightAt(qx, qz);
-      split(px, pz, py, qx, qz, qy, 4);
-      // the last piece ends on the original vertex — push that, not a copy
-      out.push(k === n ? pts[i + 1] : [qx, qz]);
-      px = qx; pz = qz; py = qy;
+    const dx = bx - ax, dz = bz - az;
+    const L = Math.hypot(dx, dz);
+    ts.length = 0;
+    // where this segment crosses each family of break lines
+    const rule = (v0, dv) => {
+      if (Math.abs(dv) < 1e-9) return;
+      const k0 = Math.floor(v0 / R), k1 = Math.floor((v0 + dv) / R);
+      const lo = Math.min(k0, k1), hi = Math.max(k0, k1);
+      for (let k = lo; k <= hi + 1; k++) {
+        const t = (k * R - v0) / dv;
+        if (t > 1e-6 && t < 1 - 1e-6) ts.push(t);
+      }
+    };
+    rule(ax, dx);
+    rule(az, dz);
+    rule(ax + az, dx + dz);
+    // …and a ceiling, so a segment running exactly along a cell edge — which
+    // crosses nothing — still gets vertices for the drape to work with
+    if (L > TERRAIN_MAXSTEP) {
+      const n = Math.ceil(L / TERRAIN_MAXSTEP);
+      for (let k = 1; k < n; k++) ts.push(k / n);
     }
+    ts.sort((p, q) => p - q);
+    let prev = 0;
+    for (const t of ts) {
+      if (t - prev < 1e-4) continue;         // two rulings crossing at a corner
+      prev = t;
+      out.push([ax + dx * t, az + dz * t]);
+    }
+    out.push(pts[i + 1]);
   }
   return out;
 }
 
-// OSM commonly stores a long bridge as only two endpoints. Split that chord so
-// its deck, fascia, parapet and lane paint remain well-conditioned geometry
-// after clipping and rebasing instead of one enormous pair of triangles.
+// A bridge deck is straight and level by definition, so it needs no break-line
+// cutting — but it still needs VERTICES, because its fascia and parapet are
+// extruded per segment and a 200 m span rendered as one quad has nowhere to
+// hang them. A fixed step is exactly right here, and it is the ramp length that
+// sets it: half a ramp is the longest piece that can still describe the climb.
 export function bridgeResample(pts) {
   if (pts.length < 2) return pts;
   const step = Math.max(1, BRIDGE_RAMP / 2);

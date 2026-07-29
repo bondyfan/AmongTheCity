@@ -109,7 +109,7 @@ export class Terrain {
   }
 
   /**
-   * Metres above sea level at (x, z), bilinearly interpolated.
+   * Metres above sea level at (x, z), on the ground as it is DRAWN.
    *
    * Where no height map is loaded the answer is the NEAREST KNOWN GROUND, not
    * zero. Zero was a catastrophe dressed as a default: this world sits 170 to
@@ -155,9 +155,26 @@ export class Terrain {
       for (const h of [h00, h10, h01, h11]) if (h !== NO_DATA) { sum += h; k++; }
       return k ? sum / k / 10 : 0;
     }
-    const a = h00 + (h10 - h00) * fx;
-    const b = h01 + (h11 - h01) * fx;
-    return (a + (b - a) * fz) / 10;
+    // THE SAME TRIANGLE THE GROUND IS DRAWN AS, not a bilinear patch through the
+    // same four corners. Those are different surfaces: bilinear over a cell is a
+    // hyperbolic paraboloid and the drawn cell is two flat triangles, and they
+    // part company by a quarter of the cell's twist. Measured over tile −1,−1:
+    // the drawn ground stands ABOVE the bilinear answer by up to 1.82 m, and by
+    // more than LAYER_Y.road (0.20 m) across 0.82 % of the tile. Everywhere in
+    // that 0.82 % the road was laid 20 cm above a surface the renderer then drew
+    // higher still, so the aerial photograph covered the tarmac — "terén jde
+    // přes silnici", and it was the ground, not a path.
+    //
+    // Both grids split a cell on the SAME diagonal — meshes.js terrainQuad
+    // pushes (a, c, b) and ortho.js's PlaneGeometry comes out with its first
+    // triangle at (i,j), (i,j+1), (i+1,j) — so one test picks the right one:
+    // fx + fz ≤ 1 is the h00 corner's triangle.
+    //
+    // Now heightAt answers for the surface that EXISTS. Roads, cars, buildings
+    // and the ground agree by construction rather than to within a tolerance.
+    return (fx + fz <= 1
+      ? h00 + (h10 - h00) * fx + (h01 - h00) * fz
+      : h11 + (h01 - h11) * (1 - fx) + (h10 - h11) * (1 - fz)) / 10;
   }
 
   /**
