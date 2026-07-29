@@ -1643,7 +1643,15 @@ function updateHud(dt) {
       const inside = world?.interiors?.labelAt(player.pos.x, player.pos.z);
       const car = nearestEnterableCar();
       if (inside) {
-        const fl = player.y > 1.5 ? ` · ${Math.max(1, Math.round(player.y / 3) + 1)}. patro` : '';
+        // Storeys are counted from the GROUND under your feet, not from sea
+        // level. player.y is an absolute altitude now, so dividing it by a
+        // storey height put the ground floor of Zlaté jablko in Zlín on the
+        // 76th storey — 226 m of Moravia divided by three metres of ceiling.
+        // The bare terrain is the right datum: inside a building it is that
+        // building's ground to within the fall across its own footprint, which
+        // is less than half a storey.
+        const agl = player.y - (world?.terrain?.heightAt(player.pos.x, player.pos.z) ?? 0);
+        const fl = agl > 1.5 ? ` · ${Math.max(1, Math.round(agl / 3) + 1)}. patro` : '';
         hint.innerHTML = `🏠 ${inside}${fl}`;
         hint.classList.remove('hidden');
       } else if (car) { hint.innerHTML = '<kbd>E</kbd> nastoupit'; hint.classList.remove('hidden'); }

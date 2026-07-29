@@ -33,7 +33,10 @@ export const DEV_PLACES = [
   // Gripen and two hours in an Octavia, so it needs a door of its own.
   { n: 'Olomouc — Horní nám.', x: 107101, z: 48709, h: Math.PI },
   { n: 'Otrokovice', x: 127335, z: 91433, h: 0 },
-  { n: 'Zlín — nám. Míru', x: 136989, z: 89579, h: Math.PI },
+  // …on třída Tomáše Bati rather than on the square itself: náměstí Míru is
+  // roofed by OC Zlaté jablko, and arriving inside a shopping centre is not a
+  // useful teleport (the same reason the station entry is its forecourt).
+  { n: 'Zlín — tř. T. Bati', x: 136864, z: 89742, h: Math.PI / 2 },
   { n: 'Kudlov', x: 135947, z: 92122, h: 0 },
   { n: 'Březůvky', x: 140461, z: 97194, h: 0 },
 ];
