@@ -12,6 +12,10 @@ import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight } from '
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain, groundFor } from './terrain.js';
+
+// how much of a chunk each tier builds, poorest first — the streamer compares
+// these to decide whether a cell it already has is good enough
+const LOD_RANK = { ground: 0, shell: 1, full: 2 };
 import { stampFranchises } from './interiors.js';
 
 const _closest = { x: 0, z: 0, t: 0 };
@@ -60,8 +64,13 @@ export class CityWorld {
     // eat. At 60 fps a frame is 16.7 ms and the renderer needs most of it, so
     // 7 ms of streaming is a chunk or two of Prague, or a dozen of open field.
     this.buildBudgetMs = 7;
-    this.farChunks = 0;         // ground-only ring BEYOND viewChunks (flight)
-    this._detail = new Map();   // key -> true when built at full detail
+    // Three rings, not two. viewChunks is everything; shellChunks adds the
+    // GROUND AND THE BUILDINGS and nothing else; farChunks is the aerial photo
+    // alone. The middle one exists because from a helicopter the old two-tier
+    // world ended in a village whose houses were only in the photograph.
+    this.shellChunks = 0;       // buildings-on-photo ring (flight)
+    this.farChunks = 0;         // ground-only ring beyond that
+    this._detail = new Map();   // key -> the LOD it was built at ('full'|'shell'|'ground')
     this._hadTerrain = new Map(); // key -> was the ground known when it was built
     this._tileT = 0;            // ensureTiles throttle — 1 Hz, fetches run km ahead
     // Region tiles can land AFTER their chunks were already built: the boot
@@ -107,7 +116,7 @@ export class CityWorld {
       this.terrain.ensure(focus.x, focus.z, 6000);
     }
     const fx = Math.floor(focus.x / CHUNK), fz = Math.floor(focus.z / CHUNK);
-    const outer = this.viewChunks + this.farChunks;
+    const outer = this.viewChunks + this.shellChunks + this.farChunks;
     // enqueue missing cells in view, nearest first. Cells inside viewChunks
     // want full detail; the ring beyond wants the cheap ground-only tier, and
     // a cell already built at the WRONG level is re-queued so flying low over
@@ -116,9 +125,11 @@ export class CityWorld {
       for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue; // ring only
         const key = (fx + dx) + ',' + (fz + dz);
-        const wantFull = r <= this.viewChunks;
         const have = this.built.has(key);
-        const stale = have && wantFull && this._detail.get(key) === false;
+        // A cell already built at a LOWER tier than it now deserves is
+        // re-queued, so flying down toward a distant suburb fills it in rather
+        // than leaving a photograph.
+        const stale = have && LOD_RANK[this._lodAt(r)] > LOD_RANK[this._detail.get(key)];
         if ((!have || stale) && !this._queued.has(key)) {
           this.queue.push(key);
           this._queued.add(key);
@@ -143,14 +154,14 @@ export class CityWorld {
       const [cx, cz] = key.split(',').map(Number);
       const ring = Math.max(Math.abs(cx - fx), Math.abs(cz - fz));
       if (ring > outer) continue;               // drifted out while queued
-      const full = ring <= this.viewChunks;
+      const lod = this._lodAt(ring);
       const prev = this.built.get(key);         // upgrading a far tile in place
       if (prev) { this.scene.remove(prev); prev.traverse(o => o.geometry?.dispose?.()); }
       const hadTerrain = this.terrain.ready(cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2);
-      const group = buildChunkMeshes(this.city, cx, cz, this.mats, !full);
+      const group = buildChunkMeshes(this.city, cx, cz, this.mats, lod);
       if (group) this.scene.add(group);
       this.built.set(key, group ?? null);
-      this._detail.set(key, full);
+      this._detail.set(key, lod);
       // The centre having ground is necessary but not sufficient: buildChunkMeshes
       // reports whether ANY vertex it placed was sampled against a height map
       // that had not arrived. Either way the chunk is a guess and must rebuild.
@@ -194,6 +205,13 @@ export class CityWorld {
 
   // Every built chunk inside one world tile, dropped so the streamer rebuilds
   // it — used when a height map lands after its ground was already meshed flat.
+  /** Which tier a cell `ring` rings out deserves. */
+  _lodAt(ring) {
+    if (ring <= this.viewChunks) return 'full';
+    if (ring <= this.viewChunks + this.shellChunks) return 'shell';
+    return 'ground';
+  }
+
   _dropGuessedChunks() {
     const keys = [];
     for (const key of this.built.keys()) {

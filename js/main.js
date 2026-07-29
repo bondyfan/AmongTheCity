@@ -16,7 +16,7 @@ import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
 import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
-import { initAudio, sfx, sfxAt, engineStart, engineStop, engineSet, tireSet, setVolume,
+import { initAudio, sfx, sfxAt, setListener, engineStart, engineStop, engineSet, tireSet, setVolume,
   heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
   windStart, windStop, windSet, windLoad, roadWindSet, roadWindStop,
   ambientStart, nearbyTrafficHum } from './audio.js';
@@ -614,13 +614,27 @@ function sharedCars() {
   return out;
 }
 
+// ---- how high is the aircraft, really ----------------------------------
+// ABOVE GROUND, not above the sea. `flier.y` became an absolute altitude the
+// day the terrain landed, and every reader of it kept treating it as height —
+// so a helicopter PARKED in Pardubice reported 221 m and one on the Kudlov
+// ridge above Zlín 385. The streamer read that as "we are flying" and opened
+// every ring to its cap before the rotor had turned: 3 249 chunks built while
+// standing still, and the frame rate that goes with them. The lens flare
+// believed it too, and burned at altitude strength on the ground.
+function aglOf(flier) {
+  if (!flier) return 0;
+  const g = world?.terrain?.heightAt(flier.x, flier.z) ?? 0;
+  return Math.max(0, flier.y - g);
+}
+
 // How much lens flare. On the ground the sun is fighting haze, buildings and
 // trees, so it is a hint; in the air there is nothing between the lens and it,
 // which is exactly when a flare sells the altitude. It also needs the sun to
 // actually be UP — postfx already refuses when it is behind the camera.
 function flareAmount() {
   const flier = game.jet ?? game.heli;
-  const alt = flier ? Math.max(0, flier.y) : 0;
+  const alt = aglOf(flier);
   const air = Math.min(1, alt / 900);           // full effect by ~900 m
   return 0.16 + 0.75 * air;
 }
@@ -1255,14 +1269,21 @@ function updateActors() {
 //   2. The fog wall must always end INSIDE that radius. It sat at 900 m while
 //      the city was only built to 720 m, so the world visibly stopped against
 //      bare sky — exactly the "blue plane where nothing is loaded" report.
-const GROUND_CHUNKS = 6, AIR_CHUNKS_MAX = 10, AIR_FAR_MAX = 20;
+// Three rings in the air. AIR_CHUNKS_MAX is FULL detail; AIR_SHELL_MAX adds a
+// ring of ground-and-buildings beyond it; AIR_FAR_MAX is the photo alone. At
+// 121 m over a village the old two-ring world put buildings out to 720 m and
+// then a kilometre of bare photograph — houses plainly there in the aerial
+// image with nothing standing on them, which is the "dost budov není ve světě"
+// report. The shell ring is cheap enough to be wide: no facade atlas, no
+// roads (the photo has better ones), no lamps, no trees.
+const GROUND_CHUNKS = 6, AIR_CHUNKS_MAX = 10, AIR_SHELL_MAX = 10, AIR_FAR_MAX = 14;
 function updateHorizon(dt) {
   if (!world || !sky) return;
   const gs = getSettings();
   const base = gs.viewChunks ?? GROUND_CHUNKS;
   // altitude drives the horizon whichever machine is up there
   const flier = game.heli ?? game.jet;
-  const alt = flier ? Math.max(0, flier.y) : 0;
+  const alt = aglOf(flier);
   // Altitude is one reason to see further; SPEED is the other, and the jet has
   // it at any height. A Gripen on the deck at Mach 1 crosses the whole 720 m
   // ground-setting radius in two seconds, so it needs the wide horizon just as
@@ -1277,6 +1298,11 @@ function updateHorizon(dt) {
   // textured quad per cell, so it costs almost nothing, and since the aerial
   // photo already contains the roads and roofs it reads as real city out to
   // kilometres — which is what stops the world ending in mid-air.
+  // The shell ring opens FASTER than the others (√climb, not climb). Altitude
+  // is not what makes you see far — angle is. At 120 m over a village you are
+  // already looking a kilometre and a half down the valley, and that is exactly
+  // the height at which the missing houses were reported.
+  world.shellChunks = Math.round(AIR_SHELL_MAX * Math.sqrt(climb));
   world.farChunks = Math.round(AIR_FAR_MAX * climb);
   // Keep the edge ahead of the nose. These are CAPS, not targets: city.js
   // spends a millisecond budget and stops, so a high number costs nothing over
@@ -2221,6 +2247,13 @@ function stepGame(dt) {
   } else {
     player.update(dt, { input, camYaw, world });
   }
+  // WHERE THE EARS ARE. Positioned one-shots (horns, crashes, debris, screams)
+  // attenuate against this, and it must be set every frame from something that
+  // always exists — it used to be forwarded by the interiors streamer, so
+  // switching interiors off in the settings silently made the whole city play
+  // at full volume regardless of distance.
+  const ears = game.car ?? game.heli ?? game.jet ?? player.pos;
+  setListener(ears.x, ears.z);
   vehicles.update(dt);
   // The peers' cars move BEFORE anything that reads them this frame: the AI
   // traffic brakes for them (traffic.actors), the seat resolver hangs remote

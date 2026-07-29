@@ -1951,6 +1951,18 @@ export function carveOrtho(mesh, x0, z0, x1, z1, holes, terrain = null) {
 // front door can be aimed at the street (entranceOf caches the answer, so the
 // scan happens once per building for the life of the session).
 // mesh.name = 'buildings' is how city.js finds the old one to swap out.
+const SHELL_MIN_AREA = 220;      // m² of footprint bbox
+const SHELL_MIN_H = 9;           // …or this tall, and it is kept regardless
+function bboxArea(ring) {
+  if (!ring || ring.length < 3) return 0;
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const [x, z] of ring) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (z < z0) z0 = z; if (z > z1) z1 = z;
+  }
+  return (x1 - x0) * (z1 - z0);
+}
+
 export function buildBuildingsMesh(city, cx, cz, mats) {
   const key = cx + ',' + cz;
   const cell = city.chunkIndex.get(key);
@@ -1965,9 +1977,19 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   // a cell holding a Lidl and two Kauflands adds two meshes, not six.
   const trim = new TriSink(), sign = new TriSink();
   const marks = new Map();
+  // SHELL tier drops the small stuff. From 300 m up a garden shed is two pixels,
+  // and a Czech village is mostly garden sheds: skipping everything under
+  // SHELL_MIN_AREA that is also shorter than SHELL_MIN_H keeps the skyline —
+  // the church, the school, the blocks, the barns — for a fraction of the
+  // triangles. Without it the shell ring is 83 % of full detail, which is not
+  // a level of detail at all.
+  const small = mats.shellLod
+    ? (f) => bboxArea(f.o) < SHELL_MIN_AREA && (f.h ?? 6) < SHELL_MIN_H
+    : () => false;
   for (const f of cell.buildings) {
     if (f._home !== key) continue;
     if (hidden && hidden.has(f._id)) continue;   // now made of boxes instead
+    if (small(f)) continue;
     buildingInto(f, bGeos, bSink, facades, cell, trim, sign, marks, mats.terrain);
   }
   const pg = bSink.geo();
@@ -2175,7 +2197,22 @@ export function rebase(obj, bx, bz) {
 }
 export const chunkBase = (cx, cz) => [cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2];
 
-export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
+/**
+ * `lod` picks how much of a chunk gets built:
+ *   'full'   everything — roads, paint, kerbs, green, buildings with facades,
+ *            street lamps, trees. What you walk and drive through.
+ *   'shell'  the ground and the BUILDINGS, nothing else. From the air this is
+ *            what the world is: the aerial photo already draws the roads, the
+ *            lawns and the parking lots perfectly well, and at 700 m nobody
+ *            reads a lamp post — but a village with no houses on it reads as a
+ *            missing world, which is exactly the report this tier answers.
+ *   'ground' the photo alone, for the far ring.
+ * `true` and `false` still mean 'ground' and 'full', because the streamer used
+ * to pass a boolean and the tests still do.
+ */
+export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
+  const groundOnly = lod === true || lod === 'ground';
+  const shell = lod === 'shell';
   // Terrain.heightAt raises `missed` whenever it is asked about ground it does
   // not have. Clearing it here and reading it back at the end is how a chunk
   // learns that it was built on a guess — which matters because a feature is
@@ -2293,8 +2330,8 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
 
   // -- green/paved fills: only on the flat ground — the photo already shows
   // every lawn and parking lot, painting solid color on top would undo it --
-  const scatter = mats.trees !== false;
-  if (!orthoGround) {
+  const scatter = mats.trees !== false && !shell;
+  if (!orthoGround && !shell) {
     // A wood keeps its fill (the trees don't close ranks, and a bare base plane
     // between the trunks would be worse) but it goes to forest-floor tone —
     // meadow green glowing through a canopy is exactly what made these read as
@@ -2313,8 +2350,13 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   }
 
   // -- roads + rails ribbons into the same sink, merged with everything --
-  for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f, mats.terrain);
-  for (const f of cell.rails) if (f._home === key) railWay(sink, f, mats.terrain);
+  // The shell tier skips them: from a helicopter the photo underneath already
+  // has every road in it, at better fidelity than the ribbon, and the ribbon is
+  // the single most expensive thing in a rural chunk.
+  if (!shell) {
+    for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f, mats.terrain);
+    for (const f of cell.rails) if (f._home === key) railWay(sink, f, mats.terrain);
+  }
   // Roads, rails, kerbs, lane paint, bank skirts and bridge parapets all land
   // in this one sink, and every one of them is authored as a height ABOVE the
   // ground — so draping the finished buffer once puts the whole lot on the
@@ -2338,11 +2380,14 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   }
 
   // -- buildings: facade walls or v1 extrudes, one casting mesh either way --
-  const bm = buildBuildingsMesh(city, cx, cz, mats);
+  // Shells get the plain extrude: a window atlas costs a texture bind and a
+  // second material for detail nobody can resolve from 700 m up.
+  const bm = buildBuildingsMesh(city, cx, cz,
+    shell ? { ...mats, facades: false, shellLod: true } : mats);
   if (bm) group.add(bm);
 
   // -- street lamps along the wider drivable roads --
-  if (mats.lamps !== false) {
+  if (mats.lamps !== false && !shell) {
     const spots = [];
     for (const r of cell.roads) {
       if (!r.d || r.w < LAMP_MIN_W || r._home !== key) continue;

@@ -35,7 +35,7 @@ import { buildingPlan, hasInterior, entranceOf, planToWorld } from './interiors.
 import { BuildingModel, Debris, Dust } from './destructible.js';
 import { buildingWallHex, facadeCells } from './meshes.js';
 import { makeCitizen } from './citizen.js';
-import { sfxAt, setListener } from './audio.js';   // safe headless — no-op without an AudioContext
+import { sfxAt } from './audio.js';   // safe headless — no-op without an AudioContext
 
 const I = INTERIOR;
 const MAX_OCCUPANTS = 90;       // citizens indoors across the whole city
@@ -80,11 +80,13 @@ export class Interiors {
   // ---- streaming ---------------------------------------------------------
   update(dt, focus, onFoot) {
     this._clock += dt;
-    // audio's positioned one-shots (sfxAt: debris, screams) attenuate against
-    // the last listener position. main.js is not ours to edit, so THIS is the
-    // per-frame hook that owns the player position — feed it from here.
-    setListener?.(focus.x, focus.z);
-    // …and the same position is the only honest answer to "is anyone looking at
+    // The listener used to be set from here, on the reasoning that this is the
+    // one module handed the focus every frame. It was the wrong owner: turning
+    // interiors OFF in the graphics settings also turned distance attenuation
+    // off, and every horn, crash and scream in the city then played at full
+    // volume wherever it happened. main.js sets it now, unconditionally.
+    //
+    // The focus is still the only honest answer to "is anyone looking at
     // this building", which weapons.js and _pruneWrecks both need.
     (this.focus ??= { x: 0, z: 0 }).x = focus.x;
     this.focus.z = focus.z;

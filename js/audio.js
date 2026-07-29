@@ -104,49 +104,77 @@ function loadBuffer(name) {
 // one car with a stutter. Volume jitters too. On a bare checkout the old path
 // takes over: the horn_far/horn_angry samples if those exist, else the
 // synthesized dyad in hornBeep() — a honk always sounds, whatever is on disk.
-// Callers (traffic AI, the player's key) never choose — the mix decides.
+// Callers (traffic AI, the player's key) never choose which honk — the mix
+// decides. They DO say where it came from: `horn(x, z)` is a car somewhere in
+// the city and attenuates with distance, `horn()` with no arguments is your own
+// steering wheel and is always at full volume. It used to be unpanned in every
+// case, so the traffic AI had to hide the problem by refusing to honk beyond
+// 110 m — which only meant a horn at 109 m was as loud as one at two.
 const CAR_HORNS = ['car_horn_short', 'car_horn_long', 'car_horn_double'];
-export function horn() {
+const HORN_MAX = 220;                              // m — a car horn is loud
+export function horn(x, z) {
   if (!ctx || ctx.state !== 'running') return;
   const name = Math.random() < 0.08 ? 'truck_horn'
     : CAR_HORNS[(Math.random() * CAR_HORNS.length) | 0];
   const rate = 0.94 + Math.random() * 0.12;        // ±6 % — a different car each time
-  const vol = (name === 'truck_horn' ? 0.8 : 0.65) * (0.85 + Math.random() * 0.3);
+  let vol = (name === 'truck_horn' ? 0.8 : 0.65) * (0.85 + Math.random() * 0.3);
+  if (x !== undefined) {
+    vol = gainAt(vol, x, z, HORN_MAX);
+    if (vol < 0.015) return;
+  }
   const buf = buffers.get(name);
   if (buf) { playBuffer(buf, vol, rate); return; }
-  if (buf === null) { hornLegacy(); return; }      // known missing → old mix
-  loadBuffer(name).then(b => b ? playBuffer(b, vol, rate) : hornLegacy());
+  if (buf === null) { hornLegacy(vol); return; }   // known missing → old mix
+  loadBuffer(name).then(b => b ? playBuffer(b, vol, rate) : hornLegacy(vol));
 }
 
 // The pre-v7 horn: two generated horns picked per honk, themselves falling
 // back to the synthesized dyad via fallback() when those files are missing too.
-function hornLegacy() {
+function hornLegacy(scale = 1) {
   const angry = Math.random() < 0.4;   // most honks are the mild one
-  sfx(angry ? 'horn_angry' : 'horn_far', (angry ? 0.75 : 0.6) * (0.88 + Math.random() * 0.24));
+  sfx(angry ? 'horn_angry' : 'horn_far',
+    scale * (angry ? 0.75 : 0.6) * (0.88 + Math.random() * 0.24));
 }
 
 // ---- positioned one-shots ------------------------------------------------
 // The cheap spatializer for debris, screams and other world events: a plain
 // linear falloff against the last known listener position — no PannerNode, no
-// per-source graph, just a volume. main.js is NOT a caller we own, so nothing
-// pushes the camera in from the top of the frame; instead interiorsim.update()
-// — which receives the focus point every frame anyway — forwards it through
-// setListener(). Until the first call, sfxAt plays unattenuated: better a loud
-// cue than a silently swallowed one. `cooldown` (seconds, per name) is for the
+// per-source graph, just a volume. main.js pushes the listener in every frame
+// from wherever the player's ears are — the car they are driving, or their own
+// feet. It used to be forwarded by interiorsim.update() instead, as a side
+// effect of the building-streaming scan, which meant that turning interiors OFF
+// in the graphics settings silently turned distance attenuation off with them
+// and every sound in the city played at full volume. Until the first call
+// sfxAt is unattenuated: better a loud cue than a silently swallowed one. `cooldown` (seconds, per name) is for the
 // cues that fire in bursts — one collapse must not become eight rumbles.
 let lisX = 0, lisZ = 0, lisSet = false;
 const sfxLast = new Map();     // name → ctx.currentTime of last cooldown play
 
 export function setListener(x, z) { lisX = x; lisZ = z; lisSet = true; }
 
+// Sound pressure falls as 1/r, not linearly. The old linear taper made a car
+// horn at 50 m play at 81 % of full — which is why every honk in the city
+// sounded like it was coming from the passenger seat. REF is the distance
+// inside which a source is simply "close" and stops getting louder; past it the
+// inverse law takes over, and a linear factor drags the last of it to exactly
+// zero at maxDist so nothing ever clicks off mid-tail.
+//
+//   distance     old      now
+//        10 m   0.96     0.96
+//        30 m   0.88     0.29
+//        50 m   0.81     0.16
+//       110 m   0.58     0.05
+const REF = 10;
+export function gainAt(vol, x, z, maxDist) {
+  if (!lisSet) return vol;
+  const d = Math.hypot(x - lisX, z - lisZ);
+  if (d >= maxDist) return 0;
+  return vol * (REF / Math.max(REF, d)) * (1 - d / maxDist);
+}
+
 export function sfxAt(name, vol, x, z, maxDist = 260, cooldown = 0) {
   if (!ctx || ctx.state !== 'running') return;
-  let g = vol;
-  if (lisSet) {
-    const d = Math.hypot(x - lisX, z - lisZ);
-    if (d >= maxDist) return;
-    g = vol * (1 - d / maxDist);
-  }
+  const g = gainAt(vol, x, z, maxDist);
   if (g < 0.015) return;                     // inaudible — don't burn the cooldown
   if (cooldown > 0) {
     const last = sfxLast.get(name);

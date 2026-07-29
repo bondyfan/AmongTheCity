@@ -258,8 +258,13 @@ const HONK_HELD = 6;          // …for this long. 2.5 s honked at ordinary flow
 const HONK_CD_MIN = 25, HONK_CD_VAR = 30; // personal cooldown 25–55 s
 const HONK_RATE = 0.35, HONK_POOL = 1;    // global budget ≈ one honk every ~3 s max —
                                           // a horn is an EVENT, not a soundtrack
-const HONK_R = 110;           // m — horn() is an unpanned global one-shot, so only
-                              // cars close enough to be plausibly audible get to use it
+const HONK_R = 190;           // m — how far away a car may still decide to honk.
+                              // This used to be 110 because horn() was UNPANNED:
+                              // beyond that a honk was simply implausible at full
+                              // volume, which is the only volume there was. Now it
+                              // attenuates, so the radius is about the honk BUDGET
+                              // (one every ~3 s) being spent on cars you can hear —
+                              // audio.js fades the last of it out at 220 m.
 
 // ---- traffic-light tuning ----
 const SIG_CLUSTER = 30;       // signal points within 30 m share one junction controller
@@ -1949,7 +1954,7 @@ export class Traffic {
       if (this._hornPool >= 1) {
         this._hornPool -= 1;
         car._hornCd = HONK_CD_MIN + rnd01(hash32(p.seed, 9)) * HONK_CD_VAR;
-        horn();
+        horn(car.x, car.z);
       }
     }
     car._rammedT -= dt;
@@ -2138,7 +2143,7 @@ export class Traffic {
     // — the player, mostly — leans on it. Personal 6–16 s cooldown so no one
     // machine-guns, the global pool caps the whole city at ~2/s, red lights
     // are exempt (sigHeld — you honk at the idiot ignoring a green, not at the
-    // light), and horn() being an unpanned one-shot, only cars near enough to
+    // light), and the honk budget being global, only cars near enough to
     // be plausibly audible fire it. Deliberately NOT deterministic across
     // clients: a horn is a reaction to a local player and there is no reason
     // for two people to hear the same one.
@@ -2154,7 +2159,7 @@ export class Traffic {
       this._hornPool -= 1;
       car._hornCd = HONK_CD_MIN + Math.random() * HONK_CD_VAR;
       p.heldT = 0;                                // re-arm: the next honk waits its 2.5 s again
-      horn();
+      horn(p.sx, p.sz);
     }
 
     // ---- integrate speed, advance along the rail, then CLAMP against the

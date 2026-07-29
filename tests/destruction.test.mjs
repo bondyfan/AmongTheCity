@@ -288,3 +288,55 @@ test('the same building in Zlín is 130 m higher and still hittable', () => {
   assert.equal(w.buildingHitAt(10, groundY + 8, 10), b);
   assert.equal(w.buildingHitAt(10, 229, 10), null, 'a Pardubice altitude hit a Zlín building');
 });
+
+// ---------------------------------------------------------------------------
+// chunk detail tiers
+// ---------------------------------------------------------------------------
+
+// From a helicopter the world used to end in a village whose houses were only
+// in the photograph: 'full' chunks reached ~700 m and everything beyond was the
+// aerial image alone. 'shell' is the tier in between — the ground and the
+// BUILDINGS, without the facade atlas, the road ribbons (the photo has better
+// ones), the street lamps or the trees.
+const { buildChunkMeshes } = await import('../js/meshes.js');
+const { makeMaterials } = await import('../js/meshes.js');
+
+function tinyCity() {
+  // one chunk, one big building and one shed
+  const big = { _id: 1, _home: '0,0', h: 18, y: 0,
+    o: [[10, 10], [40, 10], [40, 40], [10, 40]] };
+  const shed = { _id: 2, _home: '0,0', h: 3, y: 0,
+    o: [[60, 60], [66, 60], [66, 66], [60, 66]] };
+  const road = { _id: 3, _home: '0,0', d: 1, t: 'residential', w: 7,
+    p: [[0, 80], [120, 80]] };
+  return { chunkIndex: new Map([['0,0', { buildings: [big, shed], roads: [road],
+    rails: [], water: [], waterways: [], green: [], paved: [], trees: [], pois: [] }]]) };
+}
+
+const countMeshes = (g) => { let n = 0; g?.traverse((o) => { if (o.isMesh) n++; }); return n; };
+
+test('the shell tier keeps the buildings and drops the street furniture', () => {
+  const city = tinyCity();
+  const mats = makeMaterials({});
+  const full = buildChunkMeshes(city, 0, 0, mats, 'full');
+  const shell = buildChunkMeshes(city, 0, 0, mats, 'shell');
+  assert.ok(full && shell, 'a tier built nothing at all');
+  assert.ok(countMeshes(shell) < countMeshes(full),
+    'shell is as heavy as full — it is not a level of detail');
+  // the big building survives in both; the 18 m² shed is dropped from the shell
+  const named = (g) => { const s = []; g.traverse((o) => { if (o.name) s.push(o.name); }); return s; };
+  assert.ok(named(full).includes('buildings'), 'full lost its buildings');
+  assert.ok(named(shell).includes('buildings'), 'shell has no buildings — the whole point of it');
+});
+
+test('true and false still mean ground and full, because the tests pass booleans', () => {
+  const city = tinyCity();
+  const mats = makeMaterials({});
+  const a = countMeshes(buildChunkMeshes(city, 0, 0, mats, false));
+  const b = countMeshes(buildChunkMeshes(city, 0, 0, mats, 'full'));
+  assert.equal(a, b);
+  // ground-only is one quad: the aerial photo when the WMS has it, a flat
+  // terrain grid when it does not
+  assert.equal(countMeshes(buildChunkMeshes(city, 0, 0, mats, true)), 1);
+  assert.equal(countMeshes(buildChunkMeshes(city, 0, 0, mats, 'ground')), 1);
+});

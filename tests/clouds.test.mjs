@@ -25,9 +25,10 @@ const { Clouds, CLOUD_RANGES, CLOUD_DIST_DEFAULT } = await import('../js/clouds.
 const build = (dist) => new Clouds(new THREE.Scene(), dist);
 
 test('every cloud is above the highest ground in the world', () => {
-  // The world runs from 169 m in the Polabí to 540 m in the hills east of
-  // Prague; nothing may be built below the top of that.
-  const WORLD_HI = 540;
+  // The world runs from 175 m in the Polabí to 752 m in the Vysočina hills the
+  // I/35 crosses on its way to Zlín; nothing may be built below the top of that.
+  // (fetch-terrain prints the range on every rebuild — keep this in step.)
+  const WORLD_HI = 752;
   const c = build();
   let lowest = Infinity;
   for (const cl of c.clusters) for (const p of cl.puffs) lowest = Math.min(lowest, cl.y + p.oy);
