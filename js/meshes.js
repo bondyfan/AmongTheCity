@@ -846,7 +846,7 @@ function trenchInto(sink, water, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, ter
 }
 
 // ---- roads: mitered ribbon + caps + bridge fascia/parapets + dashes ----
-function roadRibbon(sink, f, terrain) {
+function roadRibbon(sink, f, terrain, cell, key) {
   // a bridge is straight by definition and its deck is level, so it
   // gains nothing from following ground it is not touching
   const pts = trimEnds(f.p, f._j0, f._j1);
@@ -906,6 +906,33 @@ function roadRibbon(sink, f, terrain) {
     _c.setHex(COLORS.marking);
     const er = _c.r, eg = _c.g, eb = _c.b;
     const off = hw - EDGE_INSET;
+    // Everything this line must NOT be painted over. OSM maps a dual
+    // carriageway as two ways, a slip road as a third and the service road
+    // beside it as a fourth, and every one of them used to lay down its own two
+    // white lines — measured, 20 % of road midpoints in a Pardubice tile have
+    // another drivable road lying across them, some of them five. Overlapping
+    // TARMAC is harmless: it is the same colour at the same height and reads as
+    // a wider road. Overlapping white LINES are a lattice, because a line is the
+    // highest-contrast thing on the surface.
+    const others = cell.roads.filter((o) => o !== f && o.d && (o.w ?? 0) >= 3);
+    const js = junctionsIn(key);
+    const covered = (x, z) => {
+      for (const o of others) {
+        const half = (o.w ?? 3) / 2 - 0.4;      // inside its kerb, not up to it
+        if (half <= 0) continue;
+        const bb = bboxOfLine(o);
+        if (x < bb[0] - half || x > bb[2] + half || z < bb[1] - half || z > bb[3] + half) continue;
+        for (let k = 0; k < o.p.length - 1; k++) {
+          if (distPointToSegment(x, z, o.p[k][0], o.p[k][1], o.p[k + 1][0], o.p[k + 1][1], null) < half) return true;
+        }
+      }
+      // …and a road running THROUGH a junction stops its lines there, the way a
+      // real one stops at the give-way line rather than painting over the box.
+      if (js) for (const j of js) {
+        if ((x - j.x) ** 2 + (z - j.z) ** 2 < (j.pad + 1.5) ** 2) return true;
+      }
+      return false;
+    };
     for (const side of [-1, 1]) {
       for (let i = 0; i < q.length - 1; i++) {
         // Break the line short of each end. OSM splits a way at every junction,
@@ -918,6 +945,7 @@ function roadRibbon(sink, f, terrain) {
         const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
         const ax = q[i][0] + pax * off * side, az = q[i][1] + paz * off * side;
         const bx = q[i + 1][0] + pbx * off * side, bz = q[i + 1][1] + pbz * off * side;
+        if (covered((ax + bx) / 2, (az + bz) / 2)) continue;
         // the stripe's own width runs along the same perpendicular as the inset
         sink.quad(
           ax - pax * EDGE_HW, ya, az - paz * EDGE_HW,
@@ -930,8 +958,11 @@ function roadRibbon(sink, f, terrain) {
   if (f.d && (f.w ?? 0) >= 5.5 && DASH_CLASSES.has(f.t)) {
     _c.setHex(COLORS.marking);
     const mr = _c.r, mg = _c.g, mb = _c.b;
+    const js2 = junctionsIn(key);
     for (let s = 1.2; s + DASH_LEN < len - 1.2; s += DASH_LEN + DASH_GAP) {
       walkAt(fr, s, _WA); walkAt(fr, s + DASH_LEN, _WB);
+      // a centre line does not run through a junction either
+      if (js2 && js2.some((j) => (_WA.x - j.x) ** 2 + (_WA.z - j.z) ** 2 < (j.pad + 1.5) ** 2)) continue;
       const ya = LAYER_Y.marking + elev(s), yb = LAYER_Y.marking + elev(s + DASH_LEN);
       const px = _WA.dz * DASH_HW, pz = -_WA.dx * DASH_HW;
       sink.quad(_WA.x - px, ya, _WA.z - pz, _WB.x - px, yb, _WB.z - pz,
@@ -2560,7 +2591,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // has every road in it, at better fidelity than the ribbon, and the ribbon is
   // the single most expensive thing in a rural chunk.
   if (!shell) {
-    for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f, mats.terrain);
+    for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f, mats.terrain, cell, key);
     for (const f of cell.rails) if (f._home === key) railWay(sink, f, mats.terrain);
     // …and the surfaces where they meet, filling what the trims left behind
     const js = junctionsIn(key);
