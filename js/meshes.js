@@ -2176,6 +2176,15 @@ export function rebase(obj, bx, bz) {
 export const chunkBase = (cx, cz) => [cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2];
 
 export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
+  // Terrain.heightAt raises `missed` whenever it is asked about ground it does
+  // not have. Clearing it here and reading it back at the end is how a chunk
+  // learns that it was built on a guess — which matters because a feature is
+  // drawn WHOLE from its home chunk, so a forest or a river polygon routinely
+  // samples ground several tiles away that has not arrived yet. Without this,
+  // "was the ground known?" was answered from the chunk's own centre, and a
+  // chunk whose centre was fine but whose geometry reached into nothing was
+  // never rebuilt — it kept its guess for the rest of the session.
+  if (mats.terrain) mats.terrain.missed = false;
   const key = cx + ',' + cz;
   const cell = city.chunkIndex.get(key);
   // A GROUND-ONLY cell needs nothing from the city — it is an aerial photo and
@@ -2189,7 +2198,12 @@ export function buildChunkMeshes(city, cx, cz, mats, groundOnly = false) {
   group.name = 'chunk:' + key;
   const x0 = cx * CHUNK, z0 = cz * CHUNK, x1 = x0 + CHUNK, z1 = z0 + CHUNK;
   const [bx, bz] = chunkBase(cx, cz);
-  const done = () => { rebase(group, bx, bz); group.position.set(bx, 0, bz); return group; };
+  const done = () => {
+    rebase(group, bx, bz); group.position.set(bx, 0, bz);
+    // …read AFTER every vertex has been placed, which is the point
+    group.userData.guessedGround = !!mats.terrain?.missed;
+    return group;
+  };
   if (groundOnly) {
     const g = mats.ortho?.orthoGroundMesh?.(cx, cz);
     if (g) { g.userData.localGeom = true; group.add(g); return done(); }

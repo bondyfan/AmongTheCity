@@ -47,7 +47,7 @@ export class CityWorld {
     // A height map landing changes the SHAPE of ground that has already been
     // meshed, so the chunks over it have to be rebuilt — the same treatment a
     // feature tile gets when it arrives late.
-    this.terrain.onTileLoaded(({ tx, tz }) => this._dropTileChunks(tx, tz));
+    this.terrain.onTileLoaded(() => this._dropGuessedChunks());
     this.interiors = new Interiors(scene, city, this);
     this.mats.hidden = this.interiors.hidden;
     this.built = new Map();     // key -> Group (or null for empty cells)
@@ -151,7 +151,10 @@ export class CityWorld {
       if (group) this.scene.add(group);
       this.built.set(key, group ?? null);
       this._detail.set(key, full);
-      this._hadTerrain.set(key, hadTerrain);
+      // The centre having ground is necessary but not sufficient: buildChunkMeshes
+      // reports whether ANY vertex it placed was sampled against a height map
+      // that had not arrived. Either way the chunk is a guess and must rebuild.
+      this._hadTerrain.set(key, hadTerrain && !group?.userData.guessedGround);
     }
     // drop cells far behind us (hysteresis +2 so the edge doesn't flicker)
     for (const [key, group] of this.built) {
@@ -191,19 +194,22 @@ export class CityWorld {
 
   // Every built chunk inside one world tile, dropped so the streamer rebuilds
   // it — used when a height map lands after its ground was already meshed flat.
-  _dropTileChunks(tx, tz) {
-    const T = this.city.tile ?? 4800, per = T / CHUNK;
-    const c0x = tx * per, c0z = tz * per;
+  _dropGuessedChunks() {
     const keys = [];
     for (const key of this.built.keys()) {
-      const c = key.indexOf(',');
-      const cx = +key.slice(0, c), cz = +key.slice(c + 1);
-      if (cx < c0x || cx >= c0x + per || cz < c0z || cz >= c0z + per) continue;
-      // ONLY the chunks that were meshed on flat ground. A world tile is 40×40
-      // chunks, so dropping the lot on every height map that lands means the
-      // whole visible world rebuilds several times over during a normal drive —
-      // measured as a fall from 60 fps to 18. A chunk built when the ground was
-      // already known is already correct and must be left alone.
+      // ONLY the chunks that were meshed on ground somebody had to GUESS. A
+      // world tile is 40×40 chunks, so dropping the lot on every height map
+      // that lands means the whole visible world rebuilds several times over
+      // during a normal drive — measured as a fall from 60 fps to 18. A chunk
+      // built when the ground was already known is correct and must be left
+      // alone.
+      //
+      // Not restricted to the arriving tile's own chunks, and that is the
+      // point: a feature is drawn WHOLE from its home chunk, so the chunk that
+      // guessed is routinely in a different tile from the height map that
+      // settles the question. buildChunkMeshes records the guess per chunk
+      // (userData.guessedGround), so this can simply ask every chunk whether it
+      // is still waiting for ground — wherever that ground turned out to be.
       if (this._hadTerrain.get(key)) continue;
       keys.push(key);
     }

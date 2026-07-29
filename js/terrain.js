@@ -45,6 +45,29 @@ export class Terrain {
   /** cb({ tx, tz }) after a height map is indexed — city.js rebuilds its chunks */
   onTileLoaded(cb) { this._listeners.push(cb); }
 
+  /**
+   * The nearest tile that HAS a height map, searched outward from (tx, tz).
+   * Two rings is nine kilometres and is far more than streaming ever needs;
+   * past that the honest answer is "no idea".
+   */
+  _nearestGrid(tx, tz) {
+    const memo = this._nearMemo ??= new Map();
+    const key = tx + ',' + tz;
+    if (memo.has(key)) return memo.get(key);
+    let found = null;
+    for (let r = 1; r <= 2 && !found; r++) {
+      for (let dx = -r; dx <= r && !found; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          const g = this.grids.get((tx + dx) + ',' + (tz + dz));
+          if (g) { found = { g, tx: tx + dx, tz: tz + dz }; break; }
+        }
+      }
+    }
+    memo.set(key, found);
+    return found;
+  }
+
   /** True once the tile covering (x, z) has its height map. */
   ready(x, z) {
     return !!this.grids.get(Math.floor(x / this.tile) + ',' + Math.floor(z / this.tile));
@@ -71,6 +94,7 @@ export class Terrain {
             if (ab.byteLength < want) throw new Error(`short: ${ab.byteLength} < ${want}`);
             this.grids.set(key, new Int16Array(ab, 0, this.n * this.n));
             this._pending.delete(key);
+            this._nearMemo?.clear();          // a miss may now have a better answer
             for (const cb of this._listeners) cb({ tx, tz });
           })
           .catch(() => {
@@ -85,15 +109,33 @@ export class Terrain {
   }
 
   /**
-   * Metres above sea level at (x, z), bilinearly interpolated. Returns 0 where
-   * no height map is loaded — callers get a flat world there rather than a
-   * hole, and the chunk rebuilds when the data lands.
+   * Metres above sea level at (x, z), bilinearly interpolated.
+   *
+   * Where no height map is loaded the answer is the NEAREST KNOWN GROUND, not
+   * zero. Zero was a catastrophe dressed as a default: this world sits 170 to
+   * 540 m above the sea, so every consumer that sampled unloaded ground got a
+   * number four hundred metres wrong and believed it. A forest or park polygon
+   * reaching across the boundary had half its vertices on the hillside and
+   * half at sea level, and the triangles between them made a sheer wall of
+   * stretched photograph hundreds of metres tall — the "jiná dimenze" report.
+   * Continuing the nearest known ground flat is wrong too, but it is wrong by
+   * the local relief rather than by the altitude of the entire country, and it
+   * is invisible where the real fix does its work: `missed` is raised, the
+   * chunk is marked incomplete, and it rebuilds when the height map lands.
    */
   heightAt(x, z) {
     const T = this.tile, R = this.res, n = this.n;
-    const tx = Math.floor(x / T), tz = Math.floor(z / T);
-    const g = this.grids.get(tx + ',' + tz);
-    if (!g) return 0;
+    let tx = Math.floor(x / T), tz = Math.floor(z / T);
+    let g = this.grids.get(tx + ',' + tz);
+    if (!g) {
+      this.missed = true;
+      const near = this._nearestGrid(tx, tz);
+      if (!near) return 0;                    // nothing within 9 km: flat world
+      g = near.g; tx = near.tx; tz = near.tz;
+      // clamp the query into that tile, so the answer is its closest edge
+      x = Math.min(Math.max(x, tx * T), tx * T + T);
+      z = Math.min(Math.max(z, tz * T), tz * T + T);
+    }
     // position within the tile, in sample units
     const u = (x - tx * T) / R, v = (z - tz * T) / R;
     let i = Math.floor(u), j = Math.floor(v);

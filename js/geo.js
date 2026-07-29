@@ -66,12 +66,31 @@ export function bridgeElevation(dist, totalLen) {
   return Math.max(0, Math.min(BRIDGE_Y, (edge / BRIDGE_RAMP) * BRIDGE_Y));
 }
 
-// Absolute bridge-deck height. Adding bridgeElevation() to the terrain at
-// every point makes a road faithfully copy the river valley below it. A real
-// bridge holds one level across the full OSM bridge way. Its tagged endpoints
-// are often already inside the bare-earth river trench, so blending back to
-// their sampled heights would create a steep artificial hump at each bank.
-// The higher endpoint owns the level so the deck never dives into either side.
+// Absolute bridge-deck height. Adding bridgeElevation() to the terrain at every
+// point makes a road faithfully copy the river valley below it, so the span
+// holds ONE level across the middle of the OSM bridge way — the higher bank
+// owns it, and the deck never dives into either side.
+//
+// But a level that runs edge to edge does not touch the ground at either end,
+// and the approach road does: it is a separate OSM way, it drapes onto the
+// terrain, and the two meet at a shared node. The difference is the abutment
+// step — BRIDGE_Y at the high bank and the whole bank-to-bank drop plus
+// BRIDGE_Y at the low one — and it is visible as a bridge floating clear of
+// the road with daylight under the join.
+//
+// So the deck RAMPS: it leaves the ground at exactly the height the approach
+// road has there, climbs to the span level, holds it, and comes back down. The
+// endpoints are the one place the two ways are guaranteed to agree, because
+// both are the same terrain sample at the same coordinate — even in the case
+// the old comment worried about, an endpoint tagged out over the water, where
+// the approach road dips to meet it just the same and no gap can open.
+//
+// The ramp is as long as the climb needs rather than a fixed 6 m: a 4 m rise
+// over 6 m is a 66 % wall. Two fifths of the span is the ceiling, so a short
+// bridge keeps a level middle instead of becoming two ramps that meet — and
+// when the two limits fight, the length wins. A steep approach is a bridge you
+// drive up; a vertical step is the gap this exists to close.
+const BRIDGE_GRADE = 0.25;             // steepest approach ramp we will build
 export function bridgeDeckHeight(way, dist, terrain) {
   const total = way?._len ?? polylineLength(way?.p ?? []);
   if (!terrain || !way?.p?.length) return bridgeElevation(dist, total);
@@ -81,7 +100,11 @@ export function bridgeDeckHeight(way, dist, terrain) {
     const first = way.p[0], last = way.p[way.p.length - 1];
     const start = terrain.heightAt(first[0], first[1]);
     const end = terrain.heightAt(last[0], last[1]);
-    profile = { terrain, start, end, deck: Math.max(start, end) + BRIDGE_Y };
+    const deck = Math.max(start, end) + BRIDGE_Y;
+    const rampFor = (rise) => Math.min(total * 0.4,
+      Math.max(BRIDGE_RAMP, Math.abs(rise) / BRIDGE_GRADE));
+    profile = { terrain, start, end, deck,
+      r0: rampFor(deck - start), r1: rampFor(deck - end) };
     // Terrain answers 0 while a height tile is still on the way. Remember the
     // profile only after both approaches are authoritative; the arriving tile
     // then rebuilds the chunk and gets a fresh, correct level.
@@ -90,6 +113,14 @@ export function bridgeDeckHeight(way, dist, terrain) {
     if (ready) way._bridgeProfile = profile;
   }
 
+  const d = Math.max(0, Math.min(total, dist));
+  if (d < profile.r0 && profile.r0 > 0) {
+    return profile.start + (profile.deck - profile.start) * (d / profile.r0);
+  }
+  const back = total - d;
+  if (back < profile.r1 && profile.r1 > 0) {
+    return profile.end + (profile.deck - profile.end) * (back / profile.r1);
+  }
   return profile.deck;
 }
 
