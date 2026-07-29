@@ -77,6 +77,7 @@ export class CityWorld {
     this.shellChunks = 0;       // buildings-on-photo ring (flight)
     this.farChunks = 0;         // ground-only ring beyond that
     this._detail = new Map();   // key -> the LOD it was built at ('full'|'shell'|'ground')
+    this._px = new Map();       // key -> the ortho detail tier it was built with
     this._hadTerrain = new Map(); // key -> was the ground known when it was built
     this._tileT = 0;            // ensureTiles throttle — 1 Hz, fetches run km ahead
     // Region tiles can land AFTER their chunks were already built: the boot
@@ -138,7 +139,12 @@ export class CityWorld {
         // A cell already built at a LOWER tier than it now deserves is
         // re-queued, so flying down toward a distant suburb fills it in rather
         // than leaving a photograph.
-        const stale = have && LOD_RANK[this._lodAt(r)] > LOD_RANK[this._detail.get(key)];
+        // Stale for either reason: it deserves more GEOMETRY than it has, or a
+        // sharper PHOTOGRAPH than it has. The second one is what stops a chunk
+        // keeping the coarse aerial tile it happened to be built with.
+        const px = this.mats.ortho?.tierOf?.(fx + dx, fz + dz);
+        const stale = have && (LOD_RANK[this._lodAt(r)] > LOD_RANK[this._detail.get(key)]
+          || (px !== undefined && this._px.get(key) !== undefined && px > this._px.get(key)));
         if ((!have || stale) && !this._queued.has(key)) {
           this.queue.push(key);
           this._queued.add(key);
@@ -171,6 +177,7 @@ export class CityWorld {
       if (group) this.scene.add(group);
       this.built.set(key, group ?? null);
       this._detail.set(key, lod);
+      this._px.set(key, this.mats.ortho?.tierOf?.(cx, cz));
       // The centre having ground is necessary but not sufficient: buildChunkMeshes
       // reports whether ANY vertex it placed was sampled against a height map
       // that had not arrived. Either way the chunk is a guess and must rebuild.
@@ -186,6 +193,7 @@ export class CityWorld {
         }
         this.built.delete(key);
         this._detail.delete(key);
+        this._px.delete(key);
         this._hadTerrain.delete(key);
       }
     }

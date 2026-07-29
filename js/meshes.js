@@ -846,6 +846,28 @@ function trenchInto(sink, water, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, ter
 }
 
 // ---- roads: mitered ribbon + caps + bridge fascia/parapets + dashes ----
+/**
+ * Is (x, z) on some OTHER drivable road's carriageway? `grow` widens or narrows
+ * the test against each road's own half-width.
+ *
+ * Two callers, one question. Edge lines use it so four overlapping ways do not
+ * paint four sets of white lines on the same tarmac; footpaths use it because a
+ * path crossing a road is a CROSSING, not a beige strip laid over the asphalt.
+ */
+function onCarriageway(cell, self, x, z, grow = 0) {
+  for (const o of cell.roads) {
+    if (o === self || !o.d) continue;
+    const half = (o.w ?? 3) / 2 + grow;
+    if (half <= 0) continue;
+    const bb = bboxOfLine(o);
+    if (x < bb[0] - half || x > bb[2] + half || z < bb[1] - half || z > bb[3] + half) continue;
+    for (let k = 0; k < o.p.length - 1; k++) {
+      if (distPointToSegment(x, z, o.p[k][0], o.p[k][1], o.p[k + 1][0], o.p[k + 1][1], null) < half) return true;
+    }
+  }
+  return false;
+}
+
 function roadRibbon(sink, f, terrain, cell, key) {
   // a bridge is straight by definition and its deck is level, so it
   // gains nothing from following ground it is not touching
@@ -870,10 +892,18 @@ function roadRibbon(sink, f, terrain, cell, key) {
   const cr = _c.r, cg = _c.g, cb = _c.b;
   _c.setHex(RAILING_COL);
   const lr = _c.r, lg = _c.g, lb = _c.b;
+  // A footpath crossing a road is a crossing, not a strip of gravel laid over
+  // the tarmac. It sits 4 cm under the carriageway (LAYER_Y), which sounds like
+  // enough until you remember both surfaces are draped independently onto real
+  // terrain sampled every 10 m — the ground moves more than 4 cm between two
+  // samples, so the path pokes through the asphalt in pale diagonal bands.
+  // Epsilon cannot fix that; not drawing it there can.
+  const foot = FOOT_CLASSES.has(f.t) && cell;
   for (let i = 0; i < q.length - 1; i++) {
     const y0 = baseY + elev(along[i]), y1 = baseY + elev(along[i + 1]);
     const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
     const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
+    if (foot && onCarriageway(cell, f, (ax + bx) / 2, (az + bz) / 2, 0.3)) continue;
     sink.quad(
       ax - pax * hw, y0, az - paz * hw, bx - pbx * hw, y1, bz - pbz * hw,
       bx + pbx * hw, y1, bz + pbz * hw, ax + pax * hw, y0, az + paz * hw, cr, cg, cb);
@@ -914,25 +944,11 @@ function roadRibbon(sink, f, terrain, cell, key) {
     // TARMAC is harmless: it is the same colour at the same height and reads as
     // a wider road. Overlapping white LINES are a lattice, because a line is the
     // highest-contrast thing on the surface.
-    const others = cell.roads.filter((o) => o !== f && o.d && (o.w ?? 0) >= 3);
     const js = junctionsIn(key);
-    const covered = (x, z) => {
-      for (const o of others) {
-        const half = (o.w ?? 3) / 2 - 0.4;      // inside its kerb, not up to it
-        if (half <= 0) continue;
-        const bb = bboxOfLine(o);
-        if (x < bb[0] - half || x > bb[2] + half || z < bb[1] - half || z > bb[3] + half) continue;
-        for (let k = 0; k < o.p.length - 1; k++) {
-          if (distPointToSegment(x, z, o.p[k][0], o.p[k][1], o.p[k + 1][0], o.p[k + 1][1], null) < half) return true;
-        }
-      }
+    const covered = (x, z) => onCarriageway(cell, f, x, z, -0.4)
       // …and a road running THROUGH a junction stops its lines there, the way a
       // real one stops at the give-way line rather than painting over the box.
-      if (js) for (const j of js) {
-        if ((x - j.x) ** 2 + (z - j.z) ** 2 < (j.pad + 1.5) ** 2) return true;
-      }
-      return false;
-    };
+      || !!(js && js.some((j) => (x - j.x) ** 2 + (z - j.z) ** 2 < (j.pad + 1.5) ** 2));
     for (const side of [-1, 1]) {
       for (let i = 0; i < q.length - 1; i++) {
         // Break the line short of each end. OSM splits a way at every junction,

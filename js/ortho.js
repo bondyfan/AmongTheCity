@@ -231,5 +231,19 @@ export function initOrtho(terrain = null) {
   // than the world origin — which is the whole point.
   function setFocus(x, z) { fx = x; fz = z; }
 
-  return { orthoGroundMesh, setFocus };
+  /**
+   * Which detail tier chunk (cx, cz) would get RIGHT NOW. city.js compares this
+   * to the tier a chunk was actually built with and rebuilds when they differ —
+   * without that a chunk built while its supertile was far away kept the coarse
+   * photograph for the rest of the session, however close you drove. That is
+   * the "texture is not at full quality compared to its surroundings" seam:
+   * two neighbouring supertiles, one upgraded because it happened to be rebuilt
+   * for some other reason and one not.
+   */
+  function tierOf(cx, cz) {
+    const S2 = ORTHO.tile / CHUNK;
+    return pxFor(Math.floor(cx / S2), Math.floor(cz / S2));
+  }
+
+  return { orthoGroundMesh, setFocus, tierOf };
 }
