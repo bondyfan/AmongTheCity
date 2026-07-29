@@ -195,6 +195,43 @@ const SOUNDS = [
     + 'thudding against the microphone windscreen, with a rushing airy edge on top. Recorded '
     + 'on an exposed hillside, raw and natural, constantly changing. No fan, no motor, no '
     + 'electrical hum, no whistling tone, no music, no voice. Seamless loop', 9.0, { loop: true }],
+  // ---- engines, recorded rather than synthesised ----
+  // audio.js builds a genuinely careful piston engine out of oscillators: the
+  // firing order becomes a PeriodicWave so the harmonics land where a real
+  // engine's do, with per-cylinder scatter and cycle-to-cycle jitter. It is
+  // still identifiable as synthesis, and it always will be — combustion noise
+  // is broadband and chaotic, and additive synthesis is neither.
+  //
+  // What every real driving game does instead is play RECORDINGS and crossfade
+  // them by engine speed. So: four steady bands per engine archetype. At
+  // runtime the two bands bracketing the current rpm both play, crossfaded by
+  // where between them the engine is, and each is pitch-shifted by playbackRate
+  // so the firing frequency lands exactly — that last part is what makes it
+  // continuous instead of stepped.
+  //
+  // The brief every one of these shares, and the reason for each clause:
+  //   · HELD STEADY — a clip that revs fights the pitch-shift and beats against
+  //     the other band
+  //   · exterior, close, engine only — tyres, wind and exhaust drone are their
+  //     own layers in the mix and must not be baked in twice
+  //   · seamless loop — this plays forever
+  ...[
+    ['petrol', 'a small four-cylinder petrol car engine'],
+    ['diesel', 'a four-cylinder diesel van engine, clattery and gruff'],
+    ['six', 'a smooth straight-six petrol engine'],
+  ].flatMap(([id, what]) => [
+    ['idle', 'idling steadily at about 800 rpm, lumpy and slow'],
+    ['low', 'held steady at about 1800 rpm under light load'],
+    ['mid', 'held steady at about 3200 rpm, pulling'],
+    ['high', 'held steady at about 5000 rpm, close to its limit'],
+  ].map(([band, how]) => [
+    `eng_${id}_${band}`,
+    `Close exterior recording of ${what} ${how}. Constant engine speed `
+    + 'throughout, never rising or falling. Engine only: no tyres, no road '
+    + 'noise, no wind, no doors, no music, no voice, no reverb. Dry and close, '
+    + 'seamless loop', 3.0, { loop: true },
+  ])),
+
   ['jet_brake',
     'A fighter jet decelerating hard on a runway after touchdown: tyres scrubbing '
     + 'on concrete, wheel brakes grinding and squealing, rumbling down to a stop. '

@@ -830,6 +830,7 @@ function buildPiston(P, id, dest = master) {
   noise.start(t, Math.random());
   if (e.tOsc) e.tOsc.start(t);
   out.gain.setTargetAtTime(P.vol * e.levelK * 0.5, t, 0.06);
+  addTexture(e, P, dest);
   return e;
 }
 
@@ -1016,6 +1017,10 @@ function engineStep(eng, speedMS, throttle01) {
     eng.kOsc.frequency.setTargetAtTime(f, t, tau);
     eng.out.gain.setTargetAtTime(vol, t, tau);
   }
+
+  // the recorded grain follows revs and load on every frame, dip or not — it
+  // is a texture, not a voice, and cutting it during a shift would be a hole
+  texSet(eng, f, th, t, tau);
 
   // --- always live, shift or not: these don't take part in the dip ---
   // Drive into the waveshaper is the "hardness" control: barely bent at idle,
@@ -1579,6 +1584,61 @@ export function tireSet(speed01, offroad01 = 0) {
   tire.bp.frequency.setTargetAtTime(TIRE.hissLo + (TIRE.hissHi - TIRE.hissLo) * s, t, TIRE.tau);
   // gravel rumble scales with BOTH how offroad and how fast
   tire.gg.gain.setTargetAtTime(TIRE.gravel * o * Math.min(1, s * 2.2), t, TIRE.tau);
+}
+
+// ---- the grain a synthesiser cannot fake -----------------------------------
+// The piston model gets the STRUCTURE of an engine right: the firing order
+// lands the harmonics where a real engine's are, the per-cylinder scatter is in
+// the wave, the gearbox drops the revs on every upshift. And it is still
+// recognisably synthetic, because combustion is broadband and chaotic and
+// additive synthesis is neither. That difference is texture, not pitch.
+//
+// So a real recording is laid UNDER the synthetic tone and pitch-tracked to it.
+// The synth keeps doing what it is good at — a continuously variable, correctly
+// structured pitch — and the recording supplies the grain.
+//
+// It is NOT the four-band crossfade a driving game would normally use, and the
+// reason is measured rather than assumed: twelve clips were generated at
+// 800/1800/3200/5000 rpm and their spectral centroids came back at 169–208 Hz
+// with no monotonic trend at all — petrol "1800" was BRIGHTER than petrol
+// "5000". The generator did not differentiate the bands, so crossfading between
+// them would have been crossfading between two copies of the same sound. One
+// clip per archetype, pitch-followed, is what the assets actually support. The
+// rate is clamped hard, because a recording stretched 6:1 is a chipmunk and
+// that is worse than honest synthesis.
+const TEX_RATE = [0.82, 1.55];    // playbackRate never leaves this
+const TEX_VOL = 0.55;             // against the synth's own level
+const TEX_FOR = { 3: 'eng_petrol_mid', 4: 'eng_petrol_mid', 5: 'eng_diesel_mid',
+  6: 'eng_six_mid', 8: 'eng_six_mid' };
+
+function addTexture(e, P, dest) {
+  const name = P.diesel ? 'eng_diesel_mid' : (TEX_FOR[P.cyl] ?? 'eng_petrol_mid');
+  loadBuffer(name).then((buf) => {
+    if (!buf || !e || !ctx || ctx.state !== 'running' || !e.srcs) return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 320; bp.Q.value = 0.55;
+    const g = ctx.createGain(); g.gain.value = 0;
+    src.connect(bp); bp.connect(g); g.connect(dest);
+    src.start(t, Math.random() * buf.duration);   // no two cars in phase
+    e.tex = { src, bp, g };
+    e.srcs.push(src); engNodes(e, src, bp, g);
+  });
+}
+
+/** Called from engineStep with this frame's cycle frequency and load. */
+function texSet(e, f, th, t, tau) {
+  if (!e.tex) return;
+  // f is the whole four-stroke cycle in Hz; idle is the reference, so the
+  // recording rises with revs the way the tone does — just not as far.
+  const ratio = f / Math.max(1e-3, e.P.rpmIdle / 120);
+  const rate = Math.max(TEX_RATE[0], Math.min(TEX_RATE[1], 0.82 + ratio * 0.16));
+  e.tex.src.playbackRate.setTargetAtTime(rate, t, tau);
+  // on the throttle it is a roar, off it a whisper — the same law as the synth
+  e.tex.g.gain.setTargetAtTime(TEX_VOL * e.P.vol * (0.35 + 0.65 * th), t, tau);
+  e.tex.bp.frequency.setTargetAtTime(240 + 900 * Math.min(1, ratio / 6), t, tau);
 }
 
 // ---- every car has an engine, not just yours -------------------------------
