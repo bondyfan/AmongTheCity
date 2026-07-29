@@ -31,7 +31,7 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
 import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
-  junctionsIn } from './geo.js';
+  junctionsIn, distPointToSegment } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
@@ -2166,6 +2166,11 @@ function lampTemplates() {
 // ---- trees: shared low-poly template, CLONED per chunk (chunk unload
 // disposes geometries; a shared template would lose its GPU buffers) ----
 let _tTrunk = null, _tCrown = null;
+// How tall the template stands at scale 1: the crown sits at 7.4 m with a 3.2 m
+// radius, so its top is 10.6. scatterCanopy divides a MEASURED canopy height by
+// this to get the scale, which is the whole reason the number is written down
+// rather than left implicit in two geometry calls.
+const TREE_H = 10.6;
 function treeTemplates() {
   if (!_tTrunk) {
     // A mature tree is a BUILDING-sized object: a Czech boulevard lime runs
@@ -2236,6 +2241,86 @@ function woodedGreen(f) {
 // the real tiles. Sutherland–Hodgman leaves the inside/outside answer exact
 // for points within the rect (all of ours are, by the half-open test below)
 // and hands back a ring that is usually a handful of vertices.
+// ---- trees where NOBODY drew a polygon -------------------------------------
+// scatterForest plants into OSM's landuse, and OSM's landuse is half the story:
+// over two 4.8 km tiles beside Pardubice, 51–52 % of the ground carrying real
+// canopy above 3 m has no green polygon on it at all. This is the other half,
+// and it is measured rather than guessed — js/canopy.js holds ČÚZK's surface
+// model minus its bare-earth model, so every sample says how tall the thing
+// standing there is.
+//
+// Same lattice, same jitter, same half-open ownership as scatterForest, so a
+// tree OSM knows about and one it does not land on the same grid and the two
+// can never fight over a cell. Only the GATE differs: measured height instead
+// of point-in-polygon.
+//
+// The raster does not know a spruce from a chimney, so four things are excluded
+// by hand. Buildings, because a house is eight metres tall and reads exactly
+// like a tree. Roads, because a trunk in the carriageway is worse than a
+// missing wood. Water. And anything a green polygon already covers, because
+// scatterForest has planted it.
+const CANOPY_MIN = 3.5;                   // m — a hedge, and below that a bush
+const CANOPY_ROAD = 1.2;                  // m of clearance beyond the kerb
+function scatterCanopy(cell, x0, z0, x1, z1, waters, canopy, out) {
+  if (!canopy) return;
+  // Same contract as Terrain.missed: a chunk that wanted the canopy and did not
+  // have it is a GUESS, and city.js rebuilds it when the raster lands. Without
+  // this the woods would appear only where a chunk happened to be built late.
+  if (!canopy.ready(x0 + 1, z0 + 1)) { canopy.missed = true; return; }
+  const greens = (cell.green ?? []).filter(woodedGreen);
+  const roads = (cell.roads ?? []).filter((r) => r.d);
+  const gi0 = Math.floor(x0 / FOREST_STEP), gj0 = Math.floor(z0 / FOREST_STEP);
+  let n = 0;
+  for (let gi = gi0; gi * FOREST_STEP < x1; gi++) {
+    for (let gj = gj0; gj * FOREST_STEP < z1; gj++) {
+      if (n >= FOREST_CAP) return;
+      // a salt of its own, so this lattice is independent of any polygon id
+      const seed = forestSeed(0x9E3779B1, gi, gj);
+      const x = (gi + FOREST_INSET + FOREST_JIT * rnd(seed, 1)) * FOREST_STEP;
+      const z = (gj + FOREST_INSET + FOREST_JIT * rnd(seed, 2)) * FOREST_STEP;
+      if (x < x0 || x >= x1 || z < z0 || z >= z1) continue;
+      const h = canopy.heightAt(x, z);
+      if (h < CANOPY_MIN) continue;
+      let ok = true;
+      for (const g of greens) if (pointInPolygon(x, z, g.o)) { ok = false; break; }
+      if (ok) for (const b of cell.buildings ?? []) {
+        const bb = bboxOfRing(b);
+        if (x < bb[0] || x > bb[2] || z < bb[1] || z > bb[3]) continue;
+        if (pointInPolygon(x, z, b.o)) { ok = false; break; }
+      }
+      if (ok) for (const r of roads) {
+        const half = (r.w ?? 3) / 2 + CANOPY_ROAD;
+        const bb = bboxOfLine(r);
+        if (x < bb[0] - half || x > bb[2] + half || z < bb[1] - half || z > bb[3] + half) continue;
+        for (let i = 0; i < r.p.length - 1 && ok; i++) {
+          if (distPointToSegment(x, z, r.p[i][0], r.p[i][1], r.p[i + 1][0], r.p[i + 1][1], null) < half) ok = false;
+        }
+        if (!ok) break;
+      }
+      if (ok && waters.length && inWater(x, z, waters)) ok = false;
+      if (!ok) continue;
+      // the measured height IS the tree's height — no more guessing a scale
+      out.push({ x, z, seed, forest: true, h });
+      n++;
+    }
+  }
+}
+
+// bbox caches of their own: `_mmbb` belongs to the maps and holds a different
+// shape, and recomputing a ring per candidate is what makes a scatter quadratic
+function bboxOfRing(f) {
+  if (f._sbb) return f._sbb;
+  let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
+  for (const [x, z] of f.o) { if (x < a) a = x; if (z < b) b = z; if (x > c) c = x; if (z > d) d = z; }
+  return (f._sbb = [a, b, c, d]);
+}
+function bboxOfLine(f) {
+  if (f._sbb) return f._sbb;
+  let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
+  for (const [x, z] of f.p) { if (x < a) a = x; if (z < b) b = z; if (x > c) c = x; if (z > d) d = z; }
+  return (f._sbb = [a, b, c, d]);
+}
+
 function scatterForest(f, x0, z0, x1, z1, waters, out) {
   if (!woodedGreen(f)) return;
   const ring = clipRingToRect(f.o, x0, z0, x1, z1);
@@ -2342,6 +2427,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // chunk whose centre was fine but whose geometry reached into nothing was
   // never rebuilt — it kept its guess for the rest of the session.
   if (mats.terrain) mats.terrain.missed = false;
+  if (mats.canopy) mats.canopy.missed = false;
   const key = cx + ',' + cz;
   const cell = city.chunkIndex.get(key);
   // A GROUND-ONLY cell needs nothing from the city — it is an aerial photo and
@@ -2358,7 +2444,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   const done = () => {
     rebase(group, bx, bz); group.position.set(bx, 0, bz);
     // …read AFTER every vertex has been placed, which is the point
-    group.userData.guessedGround = !!mats.terrain?.missed;
+    group.userData.guessedGround = !!mats.terrain?.missed || !!mats.canopy?.missed;
     return group;
   };
   if (groundOnly) {
@@ -2563,6 +2649,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     for (const t of cell.trees) if (t._home === key)
       trees.push({ x: t.p[0][0], z: t.p[0][1], seed: t._id, forest: false });
     for (const f of cell.green) scatterForest(f, x0, z0, x1, z1, wet, trees);
+    scatterCanopy(cell, x0, z0, x1, z1, wet, mats.canopy, trees);
   }
   if (trees.length) {
     const [tg, cg] = treeTemplates();
@@ -2573,8 +2660,13 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // forest stock grows taller and leaner than the pruned boulevard rows
       // (≈11–25 m against 7–12 m) and its crowns go deeper, darker green —
       // a canopy that shades itself, not a line of park lollipops
-      const s = t.forest ? 1.05 + rnd(id, 4) * 0.70 : 0.70 + rnd(id, 4) * 0.42;
-      const yk = t.forest ? 1.0 + rnd(id, 6) * 0.45 : 0.88 + rnd(id, 6) * 0.30;
+      // …unless the height was MEASURED. scatterCanopy carries the surface
+      // model's own reading, so a 25 m spruce stand comes out 25 m and a 4 m
+      // hedgerow comes out 4, instead of both being a random draw. The template
+      // is TREE_H metres tall at scale 1, so the scale is just the ratio.
+      const s = t.h ? Math.max(0.45, Math.min(2.4, t.h / TREE_H))
+        : t.forest ? 1.05 + rnd(id, 4) * 0.70 : 0.70 + rnd(id, 4) * 0.42;
+      const yk = t.h ? 1 : t.forest ? 1.0 + rnd(id, 6) * 0.45 : 0.88 + rnd(id, 6) * 0.30;
       _v.set(t.x, mats.terrain ? mats.terrain.heightAt(t.x, t.z) : 0, t.z);
       _q.setFromAxisAngle(_up, rnd(id, 5) * Math.PI * 2);
       _s.set(s, s * yk, s);

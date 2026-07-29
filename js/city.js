@@ -12,6 +12,7 @@ import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight } from '
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain, groundFor } from './terrain.js';
+import { Canopy } from './canopy.js';
 
 // how much of a chunk each tier builds, poorest first — the streamer compares
 // these to decide whether a cell it already has is good enough
@@ -52,6 +53,11 @@ export class CityWorld {
     // meshed, so the chunks over it have to be rebuilt — the same treatment a
     // feature tile gets when it arrives late.
     this.terrain.onTileLoaded(() => this._dropGuessedChunks());
+    // …and how tall whatever stands on it is, which is where half the trees in
+    // this world come from — OSM's landuse misses the other half entirely.
+    this.canopy = new Canopy(city.tile ?? 4800, 10);
+    this.mats.canopy = this.canopy;
+    this.canopy.onTileLoaded(() => this._dropGuessedChunks());
     this.interiors = new Interiors(scene, city, this);
     this.mats.hidden = this.interiors.hidden;
     this.built = new Map();     // key -> Group (or null for empty cells)
@@ -114,6 +120,9 @@ export class CityWorld {
       // 116 KB against a feature tile's several megabytes, and terrain that
       // arrives late means a chunk gets built flat and then rebuilt.
       this.terrain.ensure(focus.x, focus.z, 6000);
+      // Trees are only scattered inside the built radius, so the canopy needs
+      // far less reach than the ground — and it is four times the samples.
+      this.canopy.ensure(focus.x, focus.z, 2000);
     }
     const fx = Math.floor(focus.x / CHUNK), fz = Math.floor(focus.z / CHUNK);
     const outer = this.viewChunks + this.shellChunks + this.farChunks;
