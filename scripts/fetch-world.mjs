@@ -28,11 +28,16 @@ import { pipeline } from 'node:stream/promises';
 
 const OSM_DIR = 'data/raw-osm';
 const UA = 'AmongTheCity-dev/0.5 (three.js game prototype; contact: bondyfanfrankwild@gmail.com)';
-// Which extracts the world needs. Praha and Středočeský carry the corridor and
-// the capital; Královéhradecký and Pardubický carry the home ground. Together
-// they cover the whole envelope in scripts/lib/world-area.mjs with room to
-// spare — a way crossing a region border is complete in both files.
-const REGIONS = ['praha', 'stredocesky', 'kralovehradecky', 'pardubicky'];
+// Which extracts the world needs. Praha and Středočeský carry the D11 corridor
+// and the capital; Královéhradecký and Pardubický carry the home ground and the
+// first third of the road east; Vysočina, Olomoucký and Zlínský carry the rest
+// of it — Svitavy, Mohelnice, Olomouc, Přerov, Otrokovice and Zlín itself.
+// Together they cover the whole envelope in scripts/lib/world-area.mjs with room
+// to spare — a way crossing a region border is complete in both files, which is
+// why Vysočina is here at all: the I/35 runs within a few kilometres of its
+// border for 40 km and the ways that cross it must resolve their nodes.
+const REGIONS = ['praha', 'stredocesky', 'kralovehradecky', 'pardubicky',
+  'vysocina', 'olomoucky', 'zlinsky'];
 const BASE = 'https://download.geofabrik.de/europe/czech-republic';
 
 const refresh = process.argv.includes('--refresh');
@@ -50,13 +55,32 @@ async function download(region) {
   // redirects by default. A partial file left behind by a dropped connection
   // would break the parser in a confusing way, so write to a temp name and
   // only move it into place once the body is complete.
+  //
+  // And it RATE-LIMITS: seven extracts back to back earned a 503 on the last
+  // one, which killed the whole pipeline after twenty minutes of downloads that
+  // had already succeeded. A 503 is the server asking us to wait, so wait —
+  // four tries with a widening gap, and only a real failure is fatal.
   const tmp = `${file}.part`;
-  const res = await fetch(url, { headers: { 'User-Agent': UA } });
-  if (!res.ok) throw new Error(`${region}: HTTP ${res.status}`);
-  await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
-  const { renameSync } = await import('node:fs');
-  renameSync(tmp, file);
-  console.log(`${(statSync(file).size / 1e6).toFixed(0)} MB`);
+  const { renameSync, existsSync: exists } = await import('node:fs');
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': UA } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
+      renameSync(tmp, file);
+      console.log(`${(statSync(file).size / 1e6).toFixed(0)} MB`);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (exists(tmp)) unlinkSync(tmp);
+      if (attempt === 4) break;
+      const wait = attempt * 20;
+      process.stdout.write(`${err.message}, retrying in ${wait}s … `);
+      await new Promise((r) => setTimeout(r, wait * 1000));
+    }
+  }
+  throw new Error(`${region}: ${lastErr.message} after 4 tries`);
 }
 
 console.log('extracts:');

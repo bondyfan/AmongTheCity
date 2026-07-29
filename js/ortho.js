@@ -68,7 +68,15 @@ const pxBytes = (px) => px * px * 4 * 1.33;   // RGBA + the mip chain
 // now a bound on the DATA, not on the old 30 km region: past this the WMS would
 // be asked for photos of places the game has no map for. ČÚZK covers the whole
 // country, so the only cost of being generous here is a wasted request.
-const SANITY = { x0: -125000, x1: 30000, z0: -35000, z1: 25000 };
+// A clamp so a nonsense chunk index never becomes a WMS request. It has to
+// cover the WHOLE built world or the world silently loses its photographs
+// where the box ends: scripts/lib/world-area.mjs now reaches tx −24..32 and
+// tz −6..21, i.e. x ∈ [−115 km, +158 km] and z ∈ [−29 km, +106 km], because
+// the world runs from Prague to Zlín. The old +30 km eastern edge stopped
+// halfway to Svitavy and would have left every kilometre past it — Olomouc,
+// Přerov, Zlín — as flat colour. Kept a tile or two wider than the data on
+// every side; ČÚZK serves the whole country, so the margin costs nothing.
+const SANITY = { x0: -125000, x1: 168000, z0: -38000, z1: 115000 };
 
 // Supertile (sx, sz) covers x ∈ [sx·T, (sx+1)·T), z ∈ [sz·T, (sz+1)·T) local
 // meters. CRS:84 BBOX wants lonW,latS,lonE,latN — and because our z axis

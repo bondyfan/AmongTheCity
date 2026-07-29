@@ -29,6 +29,13 @@ export const DEV_PLACES = [
   { n: 'Pardubice letiště', x: -1257, z: 2032, h: 0 },
   { n: 'Praha — Václavské nám.', x: -95270, z: -5517, h: Math.PI },
   { n: 'Praha — letiště', x: -107193, z: -7688, h: 0 },
+  // …and the east. Zlín is 163 km from the spawn, which is four minutes in the
+  // Gripen and two hours in an Octavia, so it needs a door of its own.
+  { n: 'Olomouc — Horní nám.', x: 107101, z: 48709, h: Math.PI },
+  { n: 'Otrokovice', x: 127335, z: 91433, h: 0 },
+  { n: 'Zlín — nám. Míru', x: 136989, z: 89579, h: Math.PI },
+  { n: 'Kudlov', x: 135947, z: 92122, h: 0 },
+  { n: 'Březůvky', x: 140461, z: 97194, h: 0 },
 ];
 
 // Czech names for the kinds vehicles.js exports, so the dropdown reads like a
@@ -53,7 +60,7 @@ const CSS = `
 #atc-dev-grid .atc-dev-btn:active { transform: translateY(1px); }
 .atc-dev-row {
   grid-column: 1 / -1; display: flex; align-items: center; gap: 8px;
-  padding: 8px 10px; background: #161e2b; border: 1px solid #2a3purple; border-radius: 8px;
+  padding: 8px 10px; background: #161e2b; border: 1px solid #2a3550; border-radius: 8px;
 }
 .atc-dev-row select {
   flex: 1; padding: 6px 8px; border-radius: 6px; background: #0f1725;

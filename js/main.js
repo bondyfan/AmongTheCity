@@ -1332,8 +1332,19 @@ async function initDev() {
         world.city.ensureTiles?.(p.x, p.z)?.catch?.(() => {});
         player.pos.x = p.x; player.pos.z = p.z;
         player.heading = p.h ?? 0;
+        // The walk controller would settle this by falling, which from a Zlín
+        // ridge to the Pardubice plain is 130 m of freefall before the ground
+        // arrives. Put the feet down instead.
+        const gy = world.surfaceY?.(p.x, p.z)?.y;
+        if (gy !== undefined) { player.y = gy; player.vy = 0; player.grounded = true; }
+        // …and put it on the GROUND there, not at absolute zero. Zero was
+        // harmless while the world was a plane; Zlín stands at 230 m and its
+        // ridges at 350, so a teleported car arrived that far underground and a
+        // helicopter — which has no suspension to re-seat it — simply stayed
+        // there. surfaceY answers 0 until the height map lands, which is the
+        // same flat world as before and settles itself a moment later.
         if (ride) { ride.x = p.x; ride.z = p.z; ride.heading = p.h ?? 0; ride.speed = 0;
-          if (ride.y !== undefined) ride.y = 0; }
+          if (ride.y !== undefined) ride.y = world.surfaceY?.(p.x, p.z)?.y ?? 0; }
         camInit = false;              // stop the chase cam sliding 100 km
         ui_hint?.('📍 ' + p.n);
       },

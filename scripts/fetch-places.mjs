@@ -17,7 +17,7 @@
 
 import { writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { readPbf } from './lib/osmpbf.mjs';
-import { ORIGIN, M_PER_LAT, M_PER_LON, ENVELOPE, xOf, zOf } from './lib/world-area.mjs';
+import { ORIGIN, M_PER_LAT, M_PER_LON, TILE, xOf, zOf, tileWanted } from './lib/world-area.mjs';
 
 // rank drives label size and which names survive a crowded map
 const RANK = {
@@ -33,7 +33,7 @@ if (!files.length) {
   process.exit(1);
 }
 
-// The four extracts overlap along their shared borders, so the same village can
+// The extracts overlap along their shared borders, so the same village can
 // arrive twice; a node id is the identity that survives that.
 const seen = new Set();
 const places = [];
@@ -42,7 +42,12 @@ for (const f of files) {
   readPbf(f, {
     onNode(id, lat, lon, tags) {
       if (!tags || !PLACE.test(tags.place ?? '') || !tags.name) return;
-      if (lat < ENVELOPE.latS || lat > ENVELOPE.latN || lon < ENVELOPE.lonW || lon > ENVELOPE.lonE) return;
+      // The world's SHAPE, not its bounding box. The envelope now spans most of
+      // Moravia, and labelling Jihlava or Šumperk on a map that has no data
+      // there is worse than leaving them off — the player would drive to a name
+      // and find empty ground.
+      const px = xOf(lon), pz = zOf(lat);
+      if (!tileWanted(Math.floor(px / TILE), Math.floor(pz / TILE))) return;
       if (seen.has(id)) return;
       seen.add(id);
       places.push({

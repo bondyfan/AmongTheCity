@@ -24,7 +24,7 @@
 
 import { readdirSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { readPbf } from './lib/osmpbf.mjs';
-import { ENVELOPE, TILE, xOf, zOf, tileWanted, nearestWanted, wantedTiles } from './lib/world-area.mjs';
+import { TILE, xOf, zOf, tileWanted, nearestWanted, wantedTiles, nodeWanted } from './lib/world-area.mjs';
 
 const RAW_DIR = process.env.RAW_DIR || 'data/raw-region';  // overridable for dry runs
 const OSM_DIR = 'data/raw-osm';
@@ -194,7 +194,7 @@ function splitExtract(file, tiles) {
 
   readPbf(file, {
     onNode(id, lat, lon, tags) {
-      if (lat < ENVELOPE.latS || lat > ENVELOPE.latN || lon < ENVELOPE.lonW || lon > ENVELOPE.lonE) return;
+      if (!nodeWanted(lat, lon)) return;
       idx.push(id, lat, lon);
       stats.nodes++;
       if (wantNode(tags)) {
@@ -204,7 +204,7 @@ function splitExtract(file, tiles) {
       }
     },
     onWay(id, refs, tags) {
-      // resolve every ref; a way with a node outside the envelope is a way
+      // resolve every ref; a way with a node outside the kept region is a way
       // leaving the world, and half a road is worse than no road
       const nodes = new Array(refs.length);
       for (let i = 0; i < refs.length; i++) {
