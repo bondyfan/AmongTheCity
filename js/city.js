@@ -11,7 +11,7 @@ import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
-import { Terrain } from './terrain.js';
+import { Terrain, groundFor } from './terrain.js';
 import { stampFranchises } from './interiors.js';
 
 const _closest = { x: 0, z: 0, t: 0 };
@@ -328,6 +328,23 @@ export class CityWorld {
     return inside > best ? inside : best;
   }
 
+  // ---- where a building actually IS, vertically ----------------------------
+  // `b.h` and `b.y` are heights ABOVE THE GROUND — that is what the data file
+  // holds and what meshes.js and interiors.js both extrude from. While the
+  // ground was a plane at zero they doubled as absolute heights, and every
+  // test in this file compared a world-space y against them directly.
+  //
+  // With terrain they are 221 m out in Pardubice and up to 350 in Zlín, and the
+  // comparisons stopped meaning anything: a rocket arriving at a roof 235 m up
+  // was tested against `y > b.h` with b.h = 15, so it missed every building in
+  // the city and flew on to bury itself in the ground. Nothing could be blown
+  // up from the air at all.
+  //
+  // groundFor() is the same founding rule the chunk mesh and the floor plan
+  // use, so these three agree by construction rather than by coincidence.
+  _base(b) { return groundFor(b, this.terrain); }
+  _top(b) { return groundFor(b, this.terrain) + b.h; }
+
   // The top of a building you are ABOVE, or terrain height if there is none.
   // Roofs are surfaces, not just the tops of collision blocks: this is what
   // lets a helicopter set down on a block of flats and the pilot climb out and
@@ -340,9 +357,10 @@ export class CityWorld {
     if (!cell) return 0;
     let best = 0;
     for (const b of cell.buildings) {
-      if (b.h <= best || b.h > fromY + 0.05) continue;
+      const top = this._top(b);
+      if (top <= best || top > fromY + 0.05) continue;
       if (this.interiors.hidden.has(b._id)) continue;
-      if (pointInPolygon(x, z, b.o) && !(b.i ?? []).some((h) => pointInPolygon(x, z, h))) best = b.h;
+      if (pointInPolygon(x, z, b.o) && !(b.i ?? []).some((h) => pointInPolygon(x, z, h))) best = top;
     }
     return best;
   }
@@ -387,7 +405,7 @@ export class CityWorld {
     const above = opts?.aboveY;
     for (const b of cell.buildings) {
       if (b.y > 0.5) continue; // skyway/arch — walk under it
-      if (above !== undefined && b.h <= above) continue;
+      if (above !== undefined && this._top(b) <= above) continue;
       if (walker && this.interiors.isActive(b)) continue;   // its boxes did it
       pushed = this._pushOutOfPoly(pos, radius, b.o, b.i, true) || pushed;
     }
@@ -473,7 +491,7 @@ export class CityWorld {
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
     if (!cell) return null;
     for (const b of cell.buildings) {
-      if (y > b.h || y < (b.y ?? 0)) continue;
+      if (y > this._top(b) || y < this._base(b) + (b.y ?? 0)) continue;
       if (this.interiors.hidden.has(b._id)) continue;
       if (pointInPolygon(x, z, b.o) && !(b.i ?? []).some(h => pointInPolygon(x, z, h))) return b;
     }
@@ -626,7 +644,8 @@ export class CityWorld {
         if (seen.has(b._id)) continue;
         seen.add(b._id);
         if ((b.y ?? 0) > 0.5 || !b.o || b.o.length < 3) continue;
-        if (y - r > b.h || y + r < (b.y ?? 0)) continue;      // over or under it
+        const g = this._base(b);
+        if (y - r > g + b.h || y + r < g + (b.y ?? 0)) continue;  // over or under it
         let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
         for (const [px, pz] of b.o) {
           if (px < minX) minX = px; if (px > maxX) maxX = px;

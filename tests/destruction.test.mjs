@@ -225,3 +225,66 @@ test('replaying a whole snapshot does not re-mesh the city in one frame', () => 
   it._pruneWrecks();
   assert.equal(it.dropped.length, 2, 'restores are capped per call, cap or no cap');
 });
+
+// ---------------------------------------------------------------------------
+// buildings live 221 m up now, and every height test in city.js had to learn it
+// ---------------------------------------------------------------------------
+
+// `b.h` and `b.y` in the data are heights ABOVE THE GROUND. While the ground was
+// a plane at zero they doubled as absolute heights and city.js compared world-y
+// against them directly. On terrain that is 221 m out in Pardubice and 350 in
+// Zlín — a rocket arriving at a roof was tested against `y > b.h` with b.h = 15,
+// missed every building in the city, and flew on to bury itself in the ground.
+// Nothing could be blown up from the air at all, and since interiorsim only
+// builds rooms for a building that takes damage, nothing had an inside either.
+function mkTerrainWorld(groundY = 221) {
+  const terrain = { ready: () => true, heightAt: () => groundY, underRing: () => ({ lo: groundY, hi: groundY, mean: groundY }) };
+  const b = {
+    _id: 1, h: 15, y: 0,
+    o: [[0, 0], [20, 0], [20, 20], [0, 20]],
+  };
+  const city = { chunkIndex: new Map([['0,0', { buildings: [b] }]]) };
+  const w = Object.assign(Object.create(CityWorld.prototype), {
+    city, terrain, interiors: { hidden: new Set(), isActive: () => false, damage: () => {} },
+  });
+  return { w, b, groundY };
+}
+
+test('a rocket at roof height hits the building it is aimed at', () => {
+  const { w, b, groundY } = mkTerrainWorld();
+  // mid-wall, well inside the footprint
+  assert.equal(w.buildingHitAt(10, groundY + 8, 10), b, 'the rocket flew straight through');
+  // just under the eaves
+  assert.equal(w.buildingHitAt(10, groundY + 14.5, 10), b);
+});
+
+test('…and misses the sky above it and the ground below it', () => {
+  const { w, groundY } = mkTerrainWorld();
+  assert.equal(w.buildingHitAt(10, groundY + 15.5, 10), null, 'hit something over the roof');
+  assert.equal(w.buildingHitAt(10, groundY - 2, 10), null, 'hit something underground');
+  assert.equal(w.buildingHitAt(40, groundY + 8, 40), null, 'hit outside the footprint');
+});
+
+test('the blast radius finds the building at altitude, so damage() runs', () => {
+  const { w, groundY } = mkTerrainWorld();
+  const hit = [];
+  w.interiors.damage = (f, x, y, z, r) => hit.push({ f, y, r });
+  w.damageBuilding(null, 10, groundY + 9, 10, MISSILE.blast);
+  assert.equal(hit.length, 1, 'the blast passed through the building without touching it');
+  // interiorsim.damage() calls activate(), which is what gives a wrecked
+  // building its rooms — so "no interior" and "indestructible" were one bug.
+});
+
+test('a roof you are above reads as a surface at its real altitude', () => {
+  const { w, groundY } = mkTerrainWorld();
+  // a helicopter 40 m up over the footprint should find the roof at 236, not 15
+  assert.equal(w.roofY(10, 10, groundY + 40), groundY + 15);
+  // …and standing in the street beside it, the roof is over your head, not under
+  assert.equal(w.roofY(10, 10, groundY + 2), 0);
+});
+
+test('the same building in Zlín is 130 m higher and still hittable', () => {
+  const { w, b, groundY } = mkTerrainWorld(351);
+  assert.equal(w.buildingHitAt(10, groundY + 8, 10), b);
+  assert.equal(w.buildingHitAt(10, 229, 10), null, 'a Pardubice altitude hit a Zlín building');
+});
