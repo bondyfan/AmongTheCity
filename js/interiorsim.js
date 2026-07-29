@@ -186,7 +186,10 @@ export class Interiors {
             if (!keep.has(g._id) && !this.models.has(g._id) && this._dirty.has(g._home)) { pending = true; break; }
           if (pending) { keep.delete(f._id); continue; }
         }
-        this._model(f);
+        // null = the ground under it has not arrived. Do not spend the budget
+        // on it and do not KEEP it — the chunk mesh is still drawing it, and
+        // the next scan will try again once the height map lands.
+        if (!this._model(f)) { keep.delete(f._id); continue; }
         builtShell++;
       }
     }
@@ -219,17 +222,36 @@ export class Interiors {
   }
 
   /** Build (or fetch) the SHELL model of one building — the cheap tier. */
-  _model(f) {
+  _model(f, force = false) {
     let m = this.models.get(f._id);
-    if (m) { m.lastTouch = this._clock; return m; }
+    if (m) {
+      m.lastTouch = this._clock;
+      // A MODEL BUILT ON GROUND WE DID NOT HAVE YET. groundFor() answers 0 while
+      // the height map for that tile is still in flight, and a model is built
+      // ONCE — so a building that streamed in during that window was assembled
+      // at absolute zero and stayed there, 367 m under Březůvky, hidden from the
+      // chunk mesh by the very model that was buried. That is a race with tile
+      // loading, which is why the building was there on one visit and gone on
+      // the next. Ground is cheap to re-ask; when it disagrees, start again.
+      const g = groundFor(f, this.world?.terrain);
+      if (Math.abs((m.plan?.ground ?? 0) - g) > 0.05) { this._drop(f._id); m = null; }
+      else return m;
+    }
     // the plan wants the local roads (so the front door faces the street) and
     // the local buildings (so it is not cut into a shared party wall)
     const cell = this.city.chunkIndex.get(chunkKey(f.o[0][0], f.o[0][1]));
     // the SAME ground the chunk mesh extruded this building from — see
     // terrain.groundFor. Two answers here is a building that sinks the moment
     // you walk close enough for its interior to replace the far model.
+    // …and do not START one on ground nobody knows. The chunk mesh is drawing
+    // this building perfectly well; it can keep doing that for another second.
+    // activate() is the exception — a rocket must always open a building up —
+    // and it passes force, taking whatever ground there is and relying on the
+    // re-check above to correct it once the tile lands.
+    const terrain = this.world?.terrain;
+    if (!force && terrain?.ready && !terrain.ready(f.o[0][0], f.o[0][1])) return null;
     const plan = buildingPlan(f, cell?.roads, cell?.buildings,
-      groundFor(f, this.world?.terrain));
+      groundFor(f, terrain));
     // Hand the plan the facade's own wall colour. This is what stops a building
     // visibly changing identity the instant it is promoted from painted quads
     // to solid boxes: the boxes come out the colour the facade already was,
@@ -261,7 +283,7 @@ export class Interiors {
    *  The upgrade only ADDS pieces under the standing shell, so from the street
    *  nothing appears to happen. */
   activate(f) {
-    const m = this._model(f);
+    const m = this._model(f, true);
     m.ensureInterior();
     if (!m.populated) this._populate(m);
     return m;
