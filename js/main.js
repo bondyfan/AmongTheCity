@@ -973,10 +973,18 @@ input.onKey('KeyE', () => {
     // window only (two people press E inside one round trip). Say who has it,
     // by name, exactly as the helicopter does — "Obsazeno" on a car standing
     // empty in front of you reads as a bug.
+    // A peer's claim says who is DRIVING it, not that the car is off limits.
+    // Refusing the whole car turned "somebody is already at the wheel" into
+    // "you cannot get in", so two players could never ride together — which is
+    // most of what a shared city is for. The claim takes the driver's seat; we
+    // take the next free one.
     const holder = parkClaimedByPeer(car);
-    if (holder) { ui_hint('Řídí ' + (net?.peerName(holder) || 'jiný hráč')); return; }
-    const seat = freeSeat(car);
-    if (seat < 0) { ui_hint('Obsazeno'); return; }
+    const seat = holder ? (car.seats?.[1] ? -1 : 1) : freeSeat(car);
+    if (seat < 0) {
+      ui_hint(holder ? 'Plné — řídí ' + (net?.peerName(holder) || 'jiný hráč')
+        : 'Obsazeno');
+      return;
+    }
     const inTraffic = traffic.cars instanceof Set ? traffic.cars.has(car) : traffic.cars.includes?.(car);
     if (inTraffic) {
       // The slot key has to be read BEFORE steal(), which nulls car.ai and
