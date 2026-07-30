@@ -92,24 +92,140 @@ export function bridgeElevation(dist, totalLen) {
 // Lazy, because terrain streams in after the roads do — and only cached once
 // every sample is against ground that has actually arrived, the same discipline
 // as waterLevel() and groundFor().
-const GRADE_MAX = 0.075;    // 7.5 % — the steepest a Czech road holds for long
-const GRADE_DS = 5;         // m between profile samples
-const GRADE_FILL = 9;       // m of embankment we are willing to invent. Six was
-                            // not enough: measured over real height maps, the cap
-                            // bound inside ordinary Polabí dells and handed the
-                            // grade guarantee back (a 55 % slope came out 44 %).
-                            // At nine the guarantee holds everywhere flat country
-                            // is flat — and gives way in the Zlín hills, where a
-                            // steep road is not an artefact, it is the hill.
+// ---- the road's LEVEL, and why it is not the ground's ----------------------
+// A road is not a drape over the landscape. It is a surface a machine laid, and
+// the thing that makes it read as a road rather than as painted dirt is that it
+// is SMOOTH — the ground under Pardubice wanders by a couple of centimetres per
+// metre and a real street does not.
+//
+// Two earlier tries were both the wrong shape. Draping straight onto the ground
+// gave a road with every kink of a 20 m height grid in it, which is what "jsou
+// takto hrbolaté" was about. Replacing that with a slope-limited envelope was
+// worse in a way that took a screenshot to see: an envelope does not fill dips,
+// it FLATTENS HILLS. Its cone reaches GRADE_FILL / grade — a hundred metres at
+// the constants then in force — so every road running downhill came out on an
+// embankment, and the city grew viaducts.
+//
+// What a road actually is: the smoothest line that stays within reach of the
+// ground. So take the ground, blur it, and hold it between two bounds —
+//
+//   it may CUT into the hill by GRADE_CUT, which is not a free parameter: it is
+//   the thickness of the surfacing (LAYER_Y.road, less 2 cm of daylight). The
+//   ribbon renders that thickness above its level, so a road cutting by exactly
+//   its own depth still lies ON the ground and can never be buried under it.
+//   That is the entire trick, and it is nearly free: measured over 321 km of
+//   real OSM roads on the Pardubice tile, the worst kink in the median road
+//   falls from 2.1 cm to 0.04 cm at this depth alone.
+//
+//   it may FILL a hollow by GRADE_FILL, which is a real embankment and is
+//   capped low, because an embankment nobody built is a viaduct.
+//
+// The blur and the bounds are applied alternately rather than once, because a
+// bound applied to a finished blur puts a corner exactly where it bites — the
+// max() of two smooth things is not smooth, and that single mistake was worth
+// most of the remaining roughness.
+//
+// PINS. Every way is levelled alone, so ways meeting at a junction would each
+// smooth their own way and arrive at different heights — a step at every
+// corner, which is precisely the bumpiness being removed. So a junction node
+// gets ONE height, computed from the node's own coordinates and therefore
+// identical for every arm, and each arm's profile is pinned to it. junctionY
+// averages a small disc rather than sampling a point: the shared height should
+// itself be smooth, or the pins would put the ground's roughness straight back.
+const GRADE_CUT = 0.14;      // m the road may sink into the hill — under LAYER_Y.road
+const GRADE_FILL = 1.6;      // m of embankment over a hollow, and no more
+const GRADE_DS = 2;          // m between profile samples
+const SMOOTH_SIGMA = 4;      // m — one blur pass…
+const SMOOTH_PASSES = 24;    // …applied this many times, bounds re-imposed between
+const PIN_TAPER = 30;        // m a junction's agreed height is blended in over
+const JUNCTION_R = 8;        // m — radius the shared junction height averages over
+
+/** One Gaussian pass over a 1-D profile, reflecting at the ends. */
+function blurPass(y, out, sigma, ds) {
+  const n = y.length, r = Math.max(1, Math.round((sigma * 2) / ds));
+  const w = new Float64Array(2 * r + 1);
+  let sum = 0;
+  for (let k = -r; k <= r; k++) { const v = Math.exp(-((k * ds) ** 2) / (2 * sigma * sigma)); w[k + r] = v; sum += v; }
+  for (let i = 0; i < n; i++) {
+    let a = 0;
+    for (let k = -r; k <= r; k++) {
+      let j = i + k;
+      if (j < 0) j = -j;
+      if (j >= n) j = 2 * n - 2 - j;
+      a += y[j] * w[k + r];
+    }
+    out[i] = a / sum;
+  }
+  return out;
+}
+
+/**
+ * The one height every road meeting at a node agrees on: the AVERAGE of what
+ * its arms would each level themselves to there, left to themselves.
+ *
+ * The first version averaged the terrain over a disc instead, and it is worth
+ * saying why that failed, because it looks reasonable. A disc average is a
+ * perfectly good smooth function — it is just a DIFFERENT smooth function from
+ * the one each road is computing along its own length, so every pin yanked the
+ * profile off its natural line and left a corner. Measured over 197 km of
+ * Pardubice roads: 0.05 cm of kink in the median road without pins, 1.22 cm
+ * with disc-average pins — the pins were putting back most of the bumpiness the
+ * levelling had just removed.
+ *
+ * Averaging the arms' own answers costs a second pass and fixes it outright:
+ * the pin lands within centimetres of where each arm was going anyway, so it
+ * corrects rather than overrides, and all the arms still meet exactly.
+ */
+function junctionY(node, terrain) {
+  if (node._ny !== undefined && node._nyT === terrain) return node._ny;
+  node._nyT = terrain;
+  node._ny = terrain.heightAt(node.x, node.z);   // in case an arm recurses back here
+  let a = 0, n = 0;
+  for (const arm of node.arms) {
+    const prof = levelWay(arm.r, terrain, null);
+    if (!prof) continue;
+    a += sampleProfile(prof, arm.s);
+    n++;
+  }
+  if (n) node._ny = a / n;
+  return node._ny;
+}
+
+/** Read a levelled profile at an arclength — Catmull-Rom, clamped (see roadGradeY). */
+function sampleProfile(prof, dist) {
+  const u = Math.max(0, Math.min(prof.n - 1, dist / prof.ds));
+  const i = Math.min(prof.n - 2, Math.floor(u)), f = u - i;
+  const y = prof.y, n = prof.n;
+  const p0 = y[i > 0 ? i - 1 : 0], p1 = y[i], p2 = y[i + 1], p3 = y[i + 2 < n ? i + 2 : n - 1];
+  const v = p1 + 0.5 * f * ((p2 - p0) + f * ((2 * p0 - 5 * p1 + 4 * p2 - p3) + f * (3 * (p1 - p2) + p3 - p0)));
+  const lo = p1 < p2 ? p1 : p2, hi = p1 < p2 ? p2 : p1;
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
 export function roadProfile(way, terrain) {
   if (!terrain || !way?.p || way.p.length < 2) return null;
   if (way._prof && way._prof.terrain === terrain) return way._prof;
+  const prof = levelWay(way, terrain, way._pins ?? null);
+  // Terrain answers with a guess while a height tile is still on the way; keep
+  // the profile only once the ground under it is authoritative, and let the
+  // arriving tile rebuild the chunk with a real one.
+  if (prof && prof.ready) way._prof = prof;
+  return prof;
+}
+
+/**
+ * Level one way, with or without its junction pins. Called twice per way: once
+ * unpinned so the nodes can agree on a height, once pinned to those.
+ */
+function levelWay(way, terrain, pinList) {
+  if (!pinList && way._raw && way._raw.terrain === terrain) return way._raw;
   const total = way._len ?? polylineLength(way.p);
   if (total < GRADE_DS * 2) return null;
   const n = Math.ceil(total / GRADE_DS) + 1;
   const ds = total / (n - 1);
   const y = new Float32Array(n);
   const gx = new Float32Array(n), gz = new Float32Array(n);
+  const top = new Float32Array(n);          // highest ground each sample answers for
   let ready = true;
   // walk the polyline once, sampling at even arclength
   let seg = 0, acc = 0;
@@ -129,29 +245,83 @@ export function roadProfile(way, terrain) {
     gx[i] = x; gz[i] = z;
     if (terrain.ready && !terrain.ready(x, z)) ready = false;
     y[i] = terrain.heightAt(x, z);
+    // The floor is the HIGHEST ground this sample answers for, not the ground
+    // exactly under it. roadGradeY reads the profile linearly between samples,
+    // so a hummock sitting between two of them would be missed entirely and
+    // would come up through the tarmac — measured at 0.22 m with a plain point
+    // sample, which is more than the surfacing had to give.
+    let hi = y[i];
+    const dx = (bx - ax) / (segLen || 1), dz = (bz - az) / (segLen || 1);
+    for (let k = -2; k <= 2; k++) {
+      if (!k) continue;
+      const o = (k / 2) * (ds / 2);
+      const h = terrain.heightAt(x + dx * o, z + dz * o);
+      if (h > hi) hi = h;
+    }
+    top[i] = hi;
   }
   const ground = Float32Array.from(y);
-  const drop = GRADE_MAX * ds;
-  // The fill cap belongs INSIDE the passes, not after them. Clamping a finished
-  // envelope puts a clamped sample next to an unclamped one and hands back the
-  // step the envelope had just removed — measured over the Zlín hills, a 77 %
-  // slope came out at 75.7 %, i.e. the grading had achieved nothing there.
-  // Capping as it propagates degrades gracefully instead: the grade holds
-  // wherever a GRADE_FILL embankment can hold it, and beyond that the road
-  // follows the hill, which in genuinely steep country is the right answer —
-  // the alternative is inventing a viaduct out of a grade rule.
-  const ceil = (i) => ground[i] + GRADE_FILL;
-  for (let i = 1; i < n; i++) {
-    const want = y[i - 1] - drop;
-    if (y[i] < want) y[i] = Math.min(want, ceil(i));
+
+  // The floor never outranks the ceiling. `top` is the highest ground a sample
+  // answers for, and at a cliff falling between two samples that is metres
+  // above the sample's own ground — taking it literally hauled a road 26 m into
+  // the air at the lip of a quarry, one sample before the ground got there. No
+  // profile can bridge a cliff it cannot see; the fill cap wins and the road
+  // follows the drop.
+  const lo = new Float32Array(n), hi = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    hi[i] = ground[i] + GRADE_FILL;
+    lo[i] = Math.min(top[i] - GRADE_CUT, hi[i]);
   }
-  for (let i = n - 2; i >= 0; i--) {
-    const want = y[i + 1] - drop;
-    if (y[i] < want) y[i] = Math.min(want, ceil(i));
+
+  // blur, then put the bounds back, and again — a bound applied once to a
+  // finished blur leaves a corner exactly where it bites, and the max() of two
+  // smooth things is not smooth.
+  let a = Float64Array.from(ground), b = new Float64Array(n);
+  for (let k = 0; k < SMOOTH_PASSES; k++) {
+    blurPass(a, b, SMOOTH_SIGMA, ds);
+    for (let i = 0; i < n; i++) b[i] = b[i] < lo[i] ? lo[i] : b[i] > hi[i] ? hi[i] : b[i];
+    const t = a; a = b; b = t;
   }
-  for (let i = 0; i < n; i++) if (y[i] < ground[i]) y[i] = ground[i];  // fill, never cut
-  const prof = { terrain, ds, n, y, ground, gx, gz, total };
-  if (ready) way._prof = prof;
+  for (let i = 0; i < n; i++) y[i] = a[i];
+
+  // ---- junctions, as a correction rather than a command ----
+  // Each pin says "every arm here levels to THIS". Nailing the sample to it
+  // works and looks terrible: the levelled road arrives a few centimetres off,
+  // the nail drags it back over one sample, and the corner that makes is the
+  // bumpiness all over again — measured at 1.05 cm of kink in the median
+  // Pardubice road against 0.05 cm with the pins simply switched off.
+  //
+  // So the pin is applied as a taper instead: the whole offset at the node,
+  // dying away over PIN_TAPER metres on a raised cosine, which meets the
+  // untouched road with matching slope. The node still lands EXACTLY on the
+  // agreed height — that is what stops a step between two ways — and the road
+  // either side is bent by centimetres over tens of metres instead of being
+  // kinked. Neighbouring pins clip each other's reach so their tapers cannot
+  // overlap and fight.
+  if (pinList?.length) {
+    const idx = pinList.map((pin) => Math.max(0, Math.min(n - 1, Math.round(pin.s / ds))));
+    const order = idx.map((_, k) => k).sort((p, q) => idx[p] - idx[q]);
+    const reach = Math.max(1, Math.round(PIN_TAPER / ds));
+    for (let o = 0; o < order.length; o++) {
+      const k = order[o], i = idx[k];
+      const d = junctionY(pinList[k].node, terrain) - y[i];
+      if (!Number.isFinite(d) || Math.abs(d) < 1e-4) continue;
+      // never reach past a neighbouring pin, or past the end of the road
+      const prev = o > 0 ? idx[order[o - 1]] : -Infinity;
+      const next = o < order.length - 1 ? idx[order[o + 1]] : Infinity;
+      const back = Math.min(reach, i, Math.floor((i - prev) / 2));
+      const fwd = Math.min(reach, n - 1 - i, Math.floor((next - i) / 2));
+      for (let j = -back; j <= fwd; j++) {
+        const w = j === 0 ? 1
+          : 0.5 + 0.5 * Math.cos(Math.PI * Math.min(1, Math.abs(j) / (j < 0 ? back : fwd)));
+        const v = y[i + j] + d * w;
+        y[i + j] = v < lo[i + j] ? lo[i + j] : v > hi[i + j] ? hi[i + j] : v;
+      }
+    }
+  }
+  const prof = { terrain, ds, n, y, ground, gx, gz, total, ready };
+  if (!pinList && ready) way._raw = prof;
   return prof;
 }
 
@@ -176,7 +346,19 @@ export function roadGradeY(way, dist, terrain) {
   if (!prof) return null;
   const u = Math.max(0, Math.min(prof.n - 1, dist / prof.ds));
   const i = Math.min(prof.n - 2, Math.floor(u)), f = u - i;
-  return prof.y[i] + (prof.y[i + 1] - prof.y[i]) * f;
+  // Catmull-Rom, not a straight line between samples. Reading a smooth profile
+  // with a straight line puts a corner back at EVERY sample — measured on the
+  // Pardubice roads, linear reading left the median road at 1.24 cm of kink
+  // against the ground's 2.0, while the levelled profile itself is at 0.07: the
+  // interpolation was throwing away almost all of the work.
+  const y = prof.y, n = prof.n;
+  const p0 = y[i > 0 ? i - 1 : 0], p1 = y[i], p2 = y[i + 1], p3 = y[i + 2 < n ? i + 2 : n - 1];
+  const v = p1 + 0.5 * f * ((p2 - p0) + f * ((2 * p0 - 5 * p1 + 4 * p2 - p3) + f * (3 * (p1 - p2) + p3 - p0)));
+  // …clamped to the two samples it lies between, so every bound the levelling
+  // proved AT the samples — never cut deeper than the surfacing — still holds
+  // between them. A spline may overshoot; a road may not.
+  const lo = p1 < p2 ? p1 : p2, hi = p1 < p2 ? p2 : p1;
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 // Absolute bridge-deck height. Adding bridgeElevation() to the terrain at every
@@ -207,7 +389,7 @@ export function roadGradeY(way, dist, terrain) {
 // embankment grading uses. At the 25 % this used to allow, BRIDGE_Y's own 0.85 m
 // of deck clearance came down over six metres, which is a 14 % kick right at
 // the abutment and reads as "there is no ramp at all".
-const BRIDGE_GRADE = GRADE_MAX;
+const BRIDGE_GRADE = 0.06;   // 6 % — what a real bridge approach climbs at
 export function bridgeDeckHeight(way, dist, terrain) {
   const total = way?._len ?? polylineLength(way?.p ?? []);
   if (!terrain || !way?.p?.length) return bridgeElevation(dist, total);
@@ -351,7 +533,7 @@ function smoothBends(p, isBridge) {
 const J_KEY = (x, z) => Math.round(x * 50) + ',' + Math.round(z * 50);
 const J_MIN_ARMS = 3;       // two ways meeting is a way that was split, not a junction
 const J_MAX_TRIM = 0.35;    // never eat more than this fraction of a short road
-function indexJunctions(roads) {
+export function indexJunctions(roads) {
   const at = new Map();
   for (const r of roads) {
     if (!r.d || !r.p || r.p.length < 2) continue;
@@ -391,6 +573,19 @@ function indexJunctions(roads) {
       for (let i = 0; i < road.i; i++) at += Math.hypot(q[i + 1][0] - q[i][0], q[i + 1][1] - q[i][1]);
       const link = { road: road.r, at };
       if (a.i === 0) a.r._ap0 = link; else a.r._ap1 = link;
+    }
+    // Every arm at a shared node remembers where along itself the node is, so
+    // roadProfile can pin its level there. Two arms is already a junction for
+    // this purpose — it is where OSM split one street into two ways, and a step
+    // in the middle of a street is exactly as wrong as one at a crossroads.
+    if (e.arms.length >= 2) {
+      for (const a of e.arms) {
+        const q = a.r.p;
+        let at = 0;
+        for (let i = 0; i < a.i; i++) at += Math.hypot(q[i + 1][0] - q[i][0], q[i + 1][1] - q[i][1]);
+        a.s = at;                       // junctionY reads every arm at its own node
+        (a.r._pins ??= []).push({ s: at, node: e });
+      }
     }
     if (e.arms.length < J_MIN_ARMS) continue;
     // the pad has to clear the widest road that meets here

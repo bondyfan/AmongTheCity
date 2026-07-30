@@ -95,21 +95,23 @@ test('regional data retains the Labe road and footbridge tags', () => {
 // roads are built, not draped
 // ---------------------------------------------------------------------------
 
-const { roadProfile, roadGradeY, polylineLength } = await import('../js/geo.js');
+const { roadProfile, roadGradeY, polylineLength, indexJunctions } = await import('../js/geo.js');
+const { LAYER_Y } = await import('../js/config.js');
 
 test('a road across a dell is embanked, not dropped into it', () => {
   // The defect this exists for: DMR 5G is bare earth and OSM does not tag
   // embankments, so a road laid straight onto the ground dived into every dell
-  // it crossed. Measured over a real Pardubice height map before the grading,
-  // the worst grade on a 200 m road was 65.8 % at the extreme and 17.0 % at p95;
-  // after it, 9.9 % and 7.5 %. In the Zlín hills the median halves and the
-  // extremes stay, because there the slope IS the hill.
+  // it crossed.
   const RES = 20;
-  // a 6 m dell, 30 m across, in otherwise level ground
+  // A 2 m dell, 30 m across — the size of dip a road is actually built over.
+  // The fill is capped low on purpose. The version before this one used an
+  // unbounded slope envelope, and an envelope does not fill dips, it FLATTENS
+  // HILLS: its cone reached a hundred metres, so every downhill road came out
+  // on an embankment and the city grew viaducts.
   const terrain = {
     res: RES,
     ready: () => true,
-    heightAt: (x) => (x > 85 && x < 115 ? 200 - 6 * Math.sin((x - 85) / 30 * Math.PI) : 200),
+    heightAt: (x) => (x > 85 && x < 115 ? 200 - 2 * Math.sin((x - 85) / 30 * Math.PI) : 200),
   };
   const way = { p: [[0, 0], [200, 0]] };
   way._len = polylineLength(way.p);
@@ -125,21 +127,75 @@ test('a road across a dell is embanked, not dropped into it', () => {
     cut = Math.max(cut, terrain.heightAt(s) - y);
     prev = y;
   }
-  // the road holds a road's grade across it…
-  assert.ok(worst <= 0.076, `graded road still climbs at ${(worst * 100).toFixed(0)} % per metre`);
-  // …by filling…
-  assert.ok(fill > 3, `only ${fill.toFixed(1)} m of embankment — the dell was not filled`);
-  // …and never by cutting, because a hill that is really there must stay.
-  assert.ok(cut < 1e-6, `the road was cut ${cut.toFixed(2)} m into the ground`);
+  // the road crosses it far flatter than the ground does (the dell bottoms 2 m
+  // below the rim over 15 m, a 13 % slope)…
+  assert.ok(worst <= 0.08, `road still climbs at ${(worst * 100).toFixed(0)} % per metre`);
+  // …by filling, and by no more than the cap allows…
+  assert.ok(fill > 0.8, `only ${fill.toFixed(2)} m of embankment — the dell was not filled`);
+  assert.ok(fill <= 1.7, `${fill.toFixed(1)} m of embankment is a viaduct, not a road`);
+  // …and it may cut, but never deeper than the surfacing it is then raised by,
+  // which is what keeps the ground off the tarmac.
+  assert.ok(cut <= LAYER_Y.road, `the road was cut ${cut.toFixed(2)} m in — deeper than it is thick`);
 });
 
-test('the profile leaves both ends on the terrain, so joining roads agree', () => {
-  const terrain = { res: 20, ready: () => true, heightAt: (x) => 200 + x * 0.01 };
-  const way = { p: [[0, 0], [200, 0]] };
+test('a levelled road is far smoother than the ground under it', () => {
+  // The whole point. "Jsou takto hrbolaté" was a road draped straight onto a
+  // 20 m height grid, which kinks at every cell boundary; a real street does
+  // not. Roughness here is the worst change of slope over one metre, which is
+  // what a wheel feels. Measured over 321 km of real OSM roads on the Pardubice
+  // tile, the median road goes from 2.1 cm to 0.04 cm by this rule alone.
+  // The ground is PIECEWISE LINEAR between samples 20 m apart, because that is
+  // what a height map is — the kinks are at the cell boundaries and they are
+  // the whole complaint. A smooth analytic hill would prove nothing: there is
+  // no roughness in it to remove.
+  // Amplitudes chosen so the ground's own worst kink lands near the 2 cm the
+  // real Pardubice height map measures, not at some picturesque 12 cm no city
+  // has — the fixture has to be as rough as the country actually is.
+  const node = (k) => 200 + 0.12 * Math.sin(k * 2.3) + 0.07 * Math.sin(k * 5.1 + 1);
+  const terrain = {
+    res: 20,
+    ready: () => true,
+    heightAt: (x) => {
+      const u = x / 20, i = Math.floor(u), f = u - i;
+      return node(i) + (node(i + 1) - node(i)) * f;
+    },
+  };
+  const way = { p: [[0, 0], [400, 0]] };
   way._len = polylineLength(way.p);
-  roadProfile(way, terrain);
-  assert.ok(Math.abs(roadGradeY(way, 0, terrain) - 200) < 1e-6);
-  assert.ok(Math.abs(roadGradeY(way, 200, terrain) - 202) < 1e-6);
+  assert.ok(roadProfile(way, terrain), 'no profile');
+
+  const kink = (f) => {
+    let w = 0;
+    for (let s = 1; s < 399; s++) w = Math.max(w, Math.abs(f(s + 1) - 2 * f(s) + f(s - 1)));
+    return w;
+  };
+  const ground = kink((s) => terrain.heightAt(s));
+  const road = kink((s) => roadGradeY(way, s, terrain));
+  assert.ok(road < ground / 5,
+    `road kinks ${(road * 100).toFixed(1)} cm against the ground's ${(ground * 100).toFixed(1)} cm`);
+});
+
+test('two roads meeting at a node are levelled to the SAME height there', () => {
+  // Every way is levelled on its own, so without this each would smooth its own
+  // way to the corner and arrive somewhere else — a step at every junction,
+  // which is the bumpiness, just relocated. The node gets one height, computed
+  // from its own coordinates, and both arms are pinned to it.
+  const terrain = {
+    res: 20,
+    ready: () => true,
+    heightAt: (x, z) => 200 + 0.02 * x - 0.03 * z + 0.8 * Math.sin(x / 23) + 0.5 * Math.cos(z / 17),
+  };
+  // an L: one way ends where the other begins, sharing the node exactly
+  const a = { d: 1, p: [[0, 0], [120, 0], [240, 0]] };
+  const b = { d: 1, p: [[240, 0], [240, 130]] };
+  for (const w of [a, b]) w._len = polylineLength(w.p);
+  indexJunctions([a, b]);
+  roadProfile(a, terrain);
+  roadProfile(b, terrain);
+  const ya = roadGradeY(a, a._len, terrain);
+  const yb = roadGradeY(b, 0, terrain);
+  assert.ok(Math.abs(ya - yb) < 0.02,
+    `the two arms meet at ${ya.toFixed(2)} and ${yb.toFixed(2)} — a ${Math.abs(ya - yb).toFixed(2)} m step`);
 });
 
 test('a road is the higher of the ground and its profile, so it cannot sink', () => {

@@ -312,7 +312,7 @@ export class CityWorld {
           // meshes.js laid the ribbon at, so the wheels are on the surface that
           // was drawn and not on either of the two things it was made from.
           const gy = r.br ? bridgeDeckHeight(r, s, this.terrain)
-            : Math.max(ground, roadGradeY(r, s, this.terrain) ?? ground);
+            : (roadGradeY(r, s, this.terrain) ?? ground);
           const y = gy + LAYER_Y.road;
           if (y > best) best = y;
         }

@@ -922,8 +922,12 @@ function roadRibbon(sink, f, terrain, cell, key) {
   const elev = (d, x, z) => {
     if (f.br) return bridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len);
     if (!graded) return 0;
+    // NOT max(0, …): the levelled road may cut GRADE_CUT into the hill, and
+    // clamping that away hands back every kink the levelling just removed. The
+    // cut is smaller than the surfacing the ribbon is raised by, so a road in
+    // cutting still lies ON the ground rather than in it.
     const gy = roadGradeY(f, d, terrain);
-    return gy === null ? 0 : Math.max(0, gy - terrain.heightAt(x, z));
+    return gy === null ? 0 : gy - terrain.heightAt(x, z);
   };
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
   const cr = _c.r, cg = _c.g, cb = _c.b;
