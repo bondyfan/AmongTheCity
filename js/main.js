@@ -1964,6 +1964,10 @@ async function boot() {
   if (!city) city = await loadCity(CITY_DATA_URL);
   world = new CityWorld(scene, city);
   grass = new Grass(scene, world, city);
+  // A region tile landing changes what the ground under us is MADE of — a car
+  // park arriving where the mask said field has to stop the grass growing
+  // through it. The mask is cheap to rebuild and this only fires on a tile.
+  city.onTileLoaded?.(() => grass?.invalidate());
   grass.setEnabled(getSettings().grass !== false);
   sky = makeSky(scene);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
