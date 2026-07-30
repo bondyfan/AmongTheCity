@@ -42,7 +42,12 @@ const SPAN = TILE / 2;                  // …covering this many metres (2 m/px)
 // the footways are about ten metres wide: closing with a radius of 2 (an 8 m
 // erosion) ate them and put the grass fallback back up from 22 % to 42 %.
 const MIN_AREA = 80;                    // m² — under this it is a shadow
-const CLOSE_R = 1;                      // cells — 4 m, narrower than any real strip
+// Closing radius, in cells — 4 m, narrower than any real strip. Measured with
+// roads no longer stamped out, in case that had changed the answer: closing by
+// 2 cuts the tile from 8 682 polygons to 6 233, and takes the paving in front
+// of Pardubice station from 33 % of the square back down to 17 %. It eats the
+// thing it is there to find. Stays at 1.
+const CLOSE_R = 1;
 const WMS = 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer';
 const UA = 'AmongTheCity-dev/0.7 (three.js game prototype; contact: bondyfanfrankwild@gmail.com)';
 const DIR = 'public/data/tiles';
@@ -89,7 +94,7 @@ async function fetchQuadrant(tile, qx, qz) {
 // Exactly the layers whose ground the runtime already draws. Anything stamped
 // here is left alone: OSM stood on it and the photograph did not.
 
-const COVERED = 1, GRASS = 2, PAVING = 3, ASPHALT = 4, DIRT = 5, CLAIMED = 6;
+const COVERED = 1, GRASS = 2, PAVING = 3, ASPHALT = 4, DIRT = 5, CLAIMED = 6, UNKNOWN = 7;
 
 function stampCovered(mask, tile) {
   const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
@@ -103,20 +108,26 @@ function stampCovered(mask, tile) {
   // it. OSM's green polygons are drawn generously, around whole blocks, and are
   // the one layer here that is routinely wrong about its own inside.
   //
-  // Buildings, water, paved and roads stay covered: those are structural, OSM
-  // is reliable about them, and a photograph cannot see under a roof anyway.
+  // Buildings, water and paved stay covered: those are structural, OSM is
+  // reliable about them, and a photograph cannot see under a roof anyway.
   for (const f of tile.green) if (f.o?.length >= 3) fillPolygon(mask, x0, z0, f.o, f.i, CLAIMED);
-  // Roads and rails only as wide as they actually are. The first version
-  // allowed a three-metre shoulder to keep kerb-grey out of the classifier,
-  // and it was the thing that broke it: in a station forecourt criss-crossed
-  // by footways the shoulders fragmented the paving into slivers, every sliver
-  // fell under MIN_AREA, and 71 % of the ground in front of Pardubice hlavní
-  // nádraží went back to being a lawn — while the photograph of it averages
-  // RGB 165,157,154 and classifies 89 samples out of 110 as paving.
+  // ROADS ARE NOT COVERED EITHER, and this was the whole of the remaining bug.
   //
-  // The shoulder was never needed anyway: a road ribbon draws ABOVE this layer,
-  // so anything inferred under one is invisible.
-  for (const f of tile.roads) stampLine(mask, x0, z0, f.p, (f.w ?? 3) / 2 + 0.5);
+  // Traced at the exact spot the user reported, x 18.1 z −118.4 in front of
+  // Pardubice station: the photograph there is RGB 176,175,171 — bright neutral
+  // grey, paving, exactly as reported — and the classifier never looked at it,
+  // because the cell was stamped COVERED by a two-metre footway. Cells are 4 m,
+  // so a cell is blanked whenever its CENTRE falls within the corridor: a 2 m
+  // path takes out a 4 m swath, and the ribbon drawn over it is 2 m wide. The
+  // difference showed as a lawn down both sides of every path in the city.
+  //
+  // Narrowing the corridor only moves the error. Removing it costs nothing: a
+  // road ribbon draws at LAYER_Y.road, well above this layer, so ground
+  // inferred underneath one is invisible — and the margins either side, which
+  // are the part you can actually see, finally get classified.
+  //
+  // Rails keep their stamp: ballast is not a surface the photograph can read
+  // usefully, and the sleepers alias into stripes of "paving".
   for (const f of tile.rails) stampLine(mask, x0, z0, f.p, 2);
 }
 
@@ -178,7 +189,7 @@ const warmOf = (r, b) => r - b;
 
 /** Average a 2×2 block of 2 m pixels into one 4 m cell, then decide. */
 function classify(mask, quads) {
-  let green = 0, paving = 0, asphalt = 0, dirt = 0;
+  let green = 0, paving = 0, asphalt = 0, dirt = 0, unknown = 0;
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       const claim = mask[j * N + i];
@@ -217,16 +228,69 @@ function classify(mask, quads) {
         else { mask[j * N + i] = GRASS; green++; }
         continue;
       }
-      if (exg > 18) { mask[j * N + i] = GRASS; green++; }
+      // ---- TOO DARK TO JUDGE is not the same as GRASS -----------------------
+      // Measured at the exact spot the user reported, x 18.1 z −118.4 in front
+      // of Pardubice station: r 23, g 34, b 38 — luminance 31. That is the tree
+      // row's shadow, and the old guard ("cool and dark is water or shadow,
+      // leave it as field") turned every shaded pavement in the city into a
+      // lawn. A photograph taken at nine in the morning shadows one side of
+      // every street, so this was not an edge case.
+      //
+      // Darkness carries no colour information, so it is recorded as UNKNOWN
+      // and filled in afterwards from the ground AROUND it — a shadow in the
+      // middle of a forecourt is forecourt, a shadow in the middle of a lawn is
+      // lawn. That is the only honest reading of a pixel with no signal in it.
+      if (lum < 62) { mask[j * N + i] = UNKNOWN; unknown++; }
+      else if (exg > 18) { mask[j * N + i] = GRASS; green++; }
       else if (warm > 14) { mask[j * N + i] = DIRT; dirt++; }
-      // …and COOL and dark is water or a deep shadow, neither of which is a
-      // surface. Left unclassified: the field fallback is the safer wrong answer.
-      else if (b > r + 8 && lum < 110) { mask[j * N + i] = GRASS; green++; }
+      // Real water: distinctly blue, not merely unlit.
+      else if (b > r + 18 && lum < 100) { mask[j * N + i] = GRASS; green++; }
       else if (lum > 105) { mask[j * N + i] = PAVING; paving++; }
       else { mask[j * N + i] = ASPHALT; asphalt++; }
     }
   }
-  return { green, paving, asphalt, dirt };
+  return { green, paving, asphalt, dirt, unknown };
+}
+
+/**
+ * Fill UNKNOWN cells from their neighbours, a ring at a time.
+ *
+ * Everything that is in shadow in the photograph lands here, which in a city
+ * photographed in the morning is one side of every street. The rule is a plain
+ * majority of the eight neighbours, applied repeatedly, so a shaded strip takes
+ * the surface of the ground it is a strip OF, and grows inward from both edges
+ * at once. Cells still unknown after `rounds` are left alone — that is a shadow
+ * wider than 2·rounds cells with nothing identifiable anywhere near it, and the
+ * field fallback is the safer wrong answer for those.
+ */
+function inpaint(mask, rounds = 14) {
+  const vote = new Int32Array(8);
+  for (let pass = 0; pass < rounds; pass++) {
+    const next = [];
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        if (mask[j * N + i] !== UNKNOWN) continue;
+        vote.fill(0);
+        let best = 0, bestN = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          for (let di = -1; di <= 1; di++) {
+            if (!di && !dj) continue;
+            const jj = j + dj, ii = i + di;
+            if (jj < 0 || jj >= N || ii < 0 || ii >= N) continue;
+            const v = mask[jj * N + ii];
+            if (v !== GRASS && v !== PAVING && v !== ASPHALT && v !== DIRT) continue;
+            if (++vote[v] > bestN) { bestN = vote[v]; best = v; }
+          }
+        }
+        if (best) next.push(j * N + i, best);
+      }
+    }
+    if (!next.length) break;
+    for (let k = 0; k < next.length; k += 2) mask[next[k]] = next[k + 1];
+  }
+  let left = 0;
+  for (let k = 0; k < mask.length; k++) if (mask[k] === UNKNOWN) { mask[k] = 0; left++; }
+  return left;
 }
 
 /**
@@ -302,16 +366,28 @@ function rectangles(mask, want, x0, z0) {
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       if (used[j * N + i] || mask[j * N + i] !== want) continue;
+      // The LARGEST rectangle anchored here, not the first one that is as wide
+      // as it can be. Taking maximum width and then growing down cuts an
+      // irregular region into a staircase of slivers — on the Pardubice tile
+      // that was 8 777 rectangles where the same ground fits in a fraction of
+      // them, and the count is what the client pays to load and to index.
       let w = 0;
       while (i + w < N && !used[j * N + i + w] && mask[j * N + i + w] === want) w++;
-      let h = 1;
-      grow: while (j + h < N) {
-        for (let k = 0; k < w; k++) {
-          const o = (j + h) * N + i + k;
-          if (used[o] || mask[o] !== want) break grow;
+      let bw = w, bh = 1, best = w;
+      let run = w;
+      for (let h = 2; j + h - 1 < N; h++) {
+        let k = 0;
+        while (k < run) {
+          const o = (j + h - 1) * N + i + k;
+          if (used[o] || mask[o] !== want) break;
+          k++;
         }
-        h++;
+        if (!k) break;
+        run = k;                                    // the widest this deep
+        if (run * h > best) { best = run * h; bw = run; bh = h; }
       }
+      w = bw;
+      const h = bh;
       for (let dj = 0; dj < h; dj++) for (let di = 0; di < w; di++) used[(j + dj) * N + i + di] = 1;
       if (w * h * RES * RES < MIN_AREA) continue;
       const ax = x0 + i * RES, az = z0 + j * RES;
@@ -360,7 +436,22 @@ for (const key of tiles) {
       + ` warm=${r - b}`);
   }
   const stats = classify(mask, quads);
+  const NAME = { 0: 'open', 1: 'covered', 2: 'grass', 3: 'paving', 4: 'asphalt', 5: 'dirt', 6: 'claimed', 7: 'SHADOW' };
+  for (const [px, pz] of probes) {
+    const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
+    console.log(`    → classified as ${NAME[mask[j * N + i]]}`);
+  }
+  // Shadow gets the surface of what surrounds it — see inpaint().
+  const dark = inpaint(mask);
+  for (const [px, pz] of probes) {
+    const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
+    console.log(`    → after in-painting ${NAME[mask[j * N + i]]}`);
+  }
   const clean = despeckle(mask);
+  for (const [px, pz] of probes) {
+    const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
+    console.log(`    → after despeckle ${NAME[clean[j * N + i]]}`);
+  }
 
   const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
   const before = tile.paved.length;
@@ -373,7 +464,8 @@ for (const key of tiles) {
   if (!DRY) writeFileSync(file, JSON.stringify(tile));
   done++;
   console.log(`  ${key}: ${(100 * open / (N * N)).toFixed(0)}% unmapped → `
-    + `${stats.green} field, ${stats.dirt} dirt, ${stats.paving} paving, ${stats.asphalt} asphalt cells → ${n} polygons`);
+    + `${stats.green} field, ${stats.dirt} dirt, ${stats.paving} paving, ${stats.asphalt} asphalt`
+    + `, ${stats.unknown} in shadow (${dark} of them still unread) → ${n} polygons`);
   await sleep(200);                            // be a good citizen of a free service
 }
 console.log(`\n${done} tiles, ${added} inferred polygons${DRY ? ' (dry run, nothing written)' : ''}`);
