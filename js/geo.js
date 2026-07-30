@@ -97,9 +97,22 @@ export function bridgeDeckHeight(way, dist, terrain) {
 
   let profile = way._bridgeProfile;
   if (!profile || profile.terrain !== terrain) {
+    // The APPROACH heights when the junction index found them (see
+    // indexJunctions), and the endpoint only as a fallback for a bridge that
+    // joins nothing — a footbridge over a stream with no road at either end.
+    // The APPROACH heights when the junction index found them (see
+    // indexJunctions) — the HIGHEST point on each approach, which is the crest
+    // of the embankment the real road is built on. The endpoint is only a
+    // fallback, for a bridge that joins nothing: a footbridge over a stream.
+    const reach = (pts, fb) => {
+      if (!pts) return terrain.heightAt(fb[0], fb[1]);
+      let h = -Infinity;
+      for (const [x, z] of pts) { const v = terrain.heightAt(x, z); if (v > h) h = v; }
+      return h;
+    };
     const first = way.p[0], last = way.p[way.p.length - 1];
-    const start = terrain.heightAt(first[0], first[1]);
-    const end = terrain.heightAt(last[0], last[1]);
+    const start = reach(way._ap0, first);
+    const end = reach(way._ap1, last);
     const deck = Math.max(start, end) + BRIDGE_Y;
     const rampFor = (rise) => Math.min(total * 0.4,
       Math.max(BRIDGE_RAMP, Math.abs(rise) / BRIDGE_GRADE));
@@ -208,6 +221,9 @@ function smoothBends(p, isBridge) {
 const J_KEY = (x, z) => Math.round(x * 50) + ',' + Math.round(z * 50);
 const J_MIN_ARMS = 3;       // two ways meeting is a way that was split, not a junction
 const J_MAX_TRIM = 0.35;    // never eat more than this fraction of a short road
+const J_APPROACH = 45;      // m of approach sampled — long enough to clear a
+                            // Labe embankment, which takes about twenty
+const J_AP_STEP = 5;        // …at this spacing, so the crest is not stepped over
 function indexJunctions(roads) {
   const at = new Map();
   for (const r of roads) {
@@ -219,7 +235,51 @@ function indexJunctions(roads) {
       e.arms.push({ r, i, end: i === 0 || i === r.p.length - 1 });
     }
   }
+  // ---- where a bridge actually MEETS the road ----
+  // A bridge deck has to arrive at the height of the road that continues, and
+  // its own tagged endpoint is the wrong place to ask: OSM routinely ends a
+  // bridge way out over the water, where the bare-earth model reads the river
+  // rather than the bank. Measured on the Labe crossing by Pardubice's Zámek —
+  // the deck ramped down to 216.4 m while the road it joins sits at 220.9, a
+  // FOUR METRE hole at the abutment. (Before this the deck ran level edge to
+  // edge instead, which left it floating clear of the road; both are wrong, and
+  // for the same reason — neither asked the approach.)
+  //
+  // The node knows. Every arm at it is here, so for a bridge END, find a
+  // non-bridge road sharing the node and remember a point ten metres along it,
+  // away from the water. bridgeDeckHeight samples the terrain there.
   for (const e of at.values()) {
+    for (const a of e.arms) {
+      if (!a.r.br || !a.end) continue;
+      const road = e.arms.find((o) => o.r !== a.r && !o.r.br && o.r.p.length > 1);
+      if (!road) continue;
+      // Sample the approach for J_APPROACH metres and keep every point, because
+      // one point is not enough: the deck has to reach the CREST of the bank,
+      // and ten metres along a Labe embankment is still halfway down it.
+      // bridgeDeckHeight takes the highest of these — the top of the ramp the
+      // real road is built on, which is what the deck must meet.
+      // Every J_AP_STEP metres, not once per polyline vertex: an approach can be
+      // a single 200 m straight, and one sample at the far end of it says
+      // nothing about where the embankment crests.
+      const q = road.r.p;
+      const out = [];
+      let px = e.x, pz = e.z, left = J_APPROACH;
+      const step = road.i === 0 ? 1 : -1;
+      for (let i = road.i; left > 0; i += step) {
+        const j = step > 0 ? i + 1 : i - 1;
+        if (j < 0 || j >= q.length) break;
+        const nx = q[j][0], nz = q[j][1];
+        let L = Math.hypot(nx - px, nz - pz);
+        if (L < 1e-6) { px = nx; pz = nz; continue; }
+        const ux = (nx - px) / L, uz = (nz - pz) / L;
+        while (L > 0 && left > 0) {
+          const d = Math.min(J_AP_STEP, L, left);
+          px += ux * d; pz += uz * d; L -= d; left -= d;
+          out.push([px, pz]);
+        }
+      }
+      if (out.length) { if (a.i === 0) a.r._ap0 = out; else a.r._ap1 = out; }
+    }
     if (e.arms.length < J_MIN_ARMS) continue;
     // the pad has to clear the widest road that meets here
     let wMax = 0;
