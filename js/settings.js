@@ -22,11 +22,11 @@ const PRESETS = {
             interiors: false, buildingR: 80, mblur: false, flare: false,
             cloudDist: 'medium' },
   medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 240,
-            ortho: true,  facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
+            ortho: false, facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
             interiors: true, buildingR: 160, mblur: true, flare: true,
             cloudDist: 'medium' },
   high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
-            ortho: true,  facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
+            ortho: false, facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
             interiors: true, buildingR: 280, mblur: true, flare: true,
             cloudDist: 'far' },
 };

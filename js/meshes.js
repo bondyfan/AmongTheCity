@@ -33,6 +33,7 @@ import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
 import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
   junctionsIn, distPointToSegment, roadProfile, roadGradeY } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
+import { SURF, surfaceMaterial } from './surfaces.js';
 import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
 
@@ -205,7 +206,12 @@ export function makeMaterials() {
   // (bool) after the fact — buildChunkMeshes reads both, and lazily caches a
   // textured wall material as mats._facadeMat so the atlas is built once
   return {
-    flat: new THREE.MeshLambertMaterial({ vertexColors: true }),
+    // Every flat surface in the world — ground, lawns, car parks, carriageways,
+    // kerbs, lane paint, riverbanks — is one mesh with one material, and now
+    // that material is PBR with a synthesised albedo/normal/roughness per
+    // surface class (surfaces.js). One draw call still, because the classes
+    // live in a texture ARRAY indexed by a per-vertex attribute.
+    flat: surfaceMaterial(),
     water: makeWaterMaterial(),
     building: new THREE.MeshLambertMaterial({ vertexColors: true }),
     trunk: new THREE.MeshLambertMaterial({ color: COLORS.treeTrunk }),
@@ -230,8 +236,18 @@ export function makeMaterials() {
 // Optional uv mode (facade walls): plain tris pin to the neutral plaster cell
 // so ridge prisms and roof caps sample "nothing", wallUV maps real sub-rects.
 class TriSink {
-  constructor(uv = false) {
+  // `surf` off for anything that is not ground: a building carries a hundred
+  // thousand vertices per chunk and a class index it never reads is 400 kB of
+  // nothing. The merges are per-material anyway, so the two never meet.
+  constructor(uv = false, surf = true) {
     this.pos = []; this.nrm = []; this.col = []; this.uv = uv ? [] : null;
+    // Which material every following triangle is made of — see surfaces.js.
+    // A mutable cursor rather than an argument on twenty call sites: the
+    // emitters here are already carrying a colour, a terrain and a cell, and
+    // threading a thirteenth parameter through capDisc and wallQuad would bury
+    // the thing it is trying to say.
+    this.sf = surf ? [] : null;
+    this.layer = SURF.concrete;
     // Ranges of this.pos that are ALREADY at their absolute height and must not
     // be draped again. Two things need it: a bridge deck, which spans a valley
     // and has to stay level rather than dive into the river, and a riverbank
@@ -239,6 +255,8 @@ class TriSink {
     this.fixed = [];
   }
   mark() { return this.pos.length; }
+  /** Every triangle from here on is made of this. Returns the sink, so it chains. */
+  at(layer) { this.layer = layer; return this; }
   fixFrom(start) { if (this.pos.length > start) this.fixed.push(start, this.pos.length); }
   tri(ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b) {
     const ux = bx - ax, uy = by - ay, uz = bz - az;
@@ -249,6 +267,7 @@ class TriSink {
     this.pos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
     this.nrm.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
     this.col.push(r, g, b, r, g, b, r, g, b);
+    if (this.sf) this.sf.push(this.layer, this.layer, this.layer);
     if (this.uv) this.uv.push(PIN_U, PIN_V, PIN_U, PIN_V, PIN_U, PIN_V);
   }
   quad(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b) {
@@ -276,6 +295,7 @@ class TriSink {
     this.pos.push(Ax, yT, Az, Bx, yT, Bz, Bx, yB, Bz, Ax, yT, Az, Bx, yB, Bz, Ax, yB, Az);
     for (let k = 0; k < 6; k++) this.nrm.push(nx, 0, nz);
     this.col.push(rT, gT, bT, rT, gT, bT, rB, gB, bB, rT, gT, bT, rB, gB, bB, rB, gB, bB);
+    if (this.sf) for (let k = 0; k < 6; k++) this.sf.push(this.layer);
     this.uv.push(ua, v1, ub, v1, ub, v0, ua, v1, ub, v0, ua, v0);
   }
   geo() {
@@ -284,21 +304,45 @@ class TriSink {
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.pos), 3));
     g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(this.nrm), 3));
     g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(this.col), 3));
+    if (this.sf) g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(this.sf), 1));
     if (this.uv) g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(this.uv), 2));
     return g;
   }
 }
 
+// ---- what a feature is MADE of -------------------------------------------
+// OSM says what a thing IS; these say what it is made of. The mapping is the
+// obvious one everywhere it can be, and where OSM is vague the tie is broken
+// towards what the Czech Republic actually builds: a `path` is gravel, a
+// `pedestrian` street is paving, a `track` between fields is dirt with stone in
+// it. Anything unknown falls to grass, because unknown ground in this country
+// is a field.
+const WOOD_SURF = new Set(['wood', 'forest', 'scrub', 'nature_reserve']);
+const FARM_SURF = new Set(['farmland', 'farmyard', 'orchard', 'vineyard', 'allotments', 'greenhouse_horticulture']);
+const MEADOW_SURF = new Set(['meadow', 'grassland', 'heath', 'village_green', 'recreation_ground']);
+const surfOfGreen = (f) => (WOOD_SURF.has(f.t) ? SURF.forest
+  : FARM_SURF.has(f.t) ? SURF.farm
+  : MEADOW_SURF.has(f.t) ? SURF.meadow
+  : SURF.grass);
+const surfOfPaved = (f) => (f.t === 'plaza' || f.t === 'pedestrian' ? SURF.paving : SURF.concrete);
+const ROAD_SURF = {
+  pedestrian: SURF.paving, footway: SURF.paving, steps: SURF.concrete,
+  path: SURF.gravel, track: SURF.dirt, bridleway: SURF.dirt,
+  runway: SURF.concrete, taxiway: SURF.concrete, taxilane: SURF.concrete, airstrip: SURF.gravel,
+};
+const surfOfRoad = (f) => ROAD_SURF[f.t] ?? SURF.asphalt;
+
 // ---- shared small helpers ----
 
 // uniform-color a stock geometry and strip what mergeGeometries would trip on
-function colorize(gIn, hex) {
+function colorize(gIn, hex, layer = SURF.grass) {
   const g = gIn.index ? gIn.toNonIndexed() : gIn;
   g.deleteAttribute('uv');
   _c.setHex(hex);
   const n = g.attributes.position.count, col = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) { col[i * 3] = _c.r; col[i * 3 + 1] = _c.g; col[i * 3 + 2] = _c.b; }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(n).fill(layer), 1));
   return g;
 }
 
@@ -313,12 +357,12 @@ function ringShape(outer, holes) {
 }
 
 // flat colored polygon at height y, or null when triangulation degenerates
-function shapePoly(ring, holes, y, hex) {
+function shapePoly(ring, holes, y, hex, layer = SURF.grass) {
   if (!ring || ring.length < 3) return null;
   const g = new THREE.ShapeGeometry(ringShape(ring, holes)).rotateX(-Math.PI / 2);
   if (!g.attributes.position.count) return null;
   if (y) g.translate(0, y, 0);
-  return colorize(g, hex);
+  return colorize(g, hex, layer);
 }
 
 // ---- draping ------------------------------------------------------------
@@ -354,7 +398,7 @@ function drape(geo, terrain, fixed = null) {
 // the height map rather than an approximation of it. Chunk corners are samples
 // too, so neighbouring chunks share their edge vertices by construction and no
 // crack can open between them.
-function terrainQuad(x0, z0, terrain, hex, y = 0) {
+function terrainQuad(x0, z0, terrain, hex, y = 0, layer = SURF.grass) {
   const SEG = 6;
   const step = CHUNK / SEG;
   const pos = [], idx = [];
@@ -374,7 +418,7 @@ function terrainQuad(x0, z0, terrain, hex, y = 0) {
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setIndex(idx);
   g.computeVertexNormals();
-  return colorize(g, hex);
+  return colorize(g, hex, layer);
 }
 
 // ---- following the ground along a line -----------------------------------
@@ -579,6 +623,13 @@ function mergeSurfaceGeometries(geometries) {
     const g = source.index ? source.toNonIndexed() : source;
     if (g !== source) source.dispose();
     g.deleteAttribute('uv');
+    // Anything that reached here without a class is ground: terrainTess and the
+    // stock geometries hand back what colorize gave them, but a merge is a
+    // union of ATTRIBUTES and one missing buffer takes the whole chunk out.
+    if (!g.attributes.surf) {
+      const n = g.attributes.position.count;
+      g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(n).fill(SURF.grass), 1));
+    }
     normalized.push(g);
   }
   return mergeGeometries(normalized, false);
@@ -929,6 +980,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
     const gy = roadGradeY(f, d, terrain);
     return gy === null ? 0 : gy - terrain.heightAt(x, z);
   };
+  sink.at(surfOfRoad(f));
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
   const cr = _c.r, cg = _c.g, cb = _c.b;
   _c.setHex(RAILING_COL);
@@ -988,6 +1040,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // above the asphalt, below nothing. A bridge gets them too: its deck is paint
   // like any other, and `elev` already carries the span height.
   if (f.d && (f.w ?? 0) >= EDGE_MIN_W && EDGE_CLASSES.has(f.t)) {
+    sink.at(SURF.paint);
     _c.setHex(COLORS.marking);
     const er = _c.r, eg = _c.g, eb = _c.b;
     const off = hw - EDGE_INSET;
@@ -1084,6 +1137,7 @@ function trimEnds(p, t0 = 0, t1 = 0) {
 // to check, no inset that can fold — and it covers every arm by construction
 // because each arm's own corners are vertices of it.
 function junctionPad(sink, j, terrain) {
+  sink.at(SURF.asphalt);
   const pts = [];
   for (const a of j.arms) {
     const p = a.r.p;
@@ -1157,6 +1211,7 @@ function stripe(sink, fr, s0, s1, off, hwid, r, g, b) {
 }
 
 function runwayPaint(sink, fr, hw) {
+  sink.at(SURF.paint);
   const len = fr.len;
   if (len < 120) return;                       // a stub, not a strip
   _c.setHex(COLORS.runwayPaint);
@@ -1185,6 +1240,7 @@ function runwayPaint(sink, fr, hw) {
 // Taxiways get the one mark that matters: a continuous yellow centreline. It
 // is the thread that visibly ties the apron to the runway threshold.
 function taxiPaint(sink, fr) {
+  sink.at(SURF.paint);
   if (fr.len < 20) return;
   _c.setHex(COLORS.taxiPaint);
   stripe(sink, fr, 1, fr.len - 1, 0, 0.3, _c.r, _c.g, _c.b);
@@ -1200,6 +1256,10 @@ function railWay(sink, f, terrain) {
   // sits on its own layer, steel nudged above the sleepers against z-fights
   const steelY = tram ? LAYER_Y.marking : LAYER_Y.rail + 0.04;
   const elev = (d) => (f.br ? bridgeElevation(d, len) : 0);
+  // Crushed stone under the whole of it. The steel and the sleepers are a few
+  // centimetres wide and share the class: at any distance where you could tell
+  // them apart you are looking at the rail head, which is its own colour.
+  sink.at(tram ? SURF.asphalt : SURF.ballast);
   _c.setHex(COLORS.rail);
   const cr = _c.r, cg = _c.g, cb = _c.b;
   for (const side of [-1, 1]) {
@@ -1924,7 +1984,7 @@ export function roofGeometry(f, topY, wallHex) {
   if (!f?.r || f.r === 'flat' || !f.o?.length) return null;
   _c.setHex(wallHex ?? 0xb0a89c);
   const r = _c.r * ROOF_DARKEN, g = _c.g * ROOF_DARKEN, b = _c.b * ROOF_DARKEN;
-  const sink = new TriSink();
+  const sink = new TriSink(false, false);      // a roof is a building, not ground
   const a = Math.abs(polygonArea(f.o));
   if (f.r === 'gabled' && a < 300) ridgePrism(sink, f.o, topY, r, g, b);
   else if (a >= 300 && PITCHED.has(f.r)) roofCap(sink, f.o, topY, a, r, g, b);
@@ -2192,13 +2252,13 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   if (!cell) return null;
   const facades = !!mats.facades;
   const hidden = mats.hidden;
-  const bGeos = [], bSink = new TriSink(facades);
+  const bGeos = [], bSink = new TriSink(facades, false);
   // door dressing lives in its own two batches: the surround/canopy carry no
   // atlas uv, and the sign board needs an emissive material main.js can turn up
   // at dusk. Two extra draw calls per chunk buys a city where you can see which
   // buildings you can walk into. Brand WORDMARKS batch per chain on top —
   // a cell holding a Lidl and two Kauflands adds two meshes, not six.
-  const trim = new TriSink(), sign = new TriSink();
+  const trim = new TriSink(false, false), sign = new TriSink(false, false);
   const marks = new Map();
   // SHELL tier drops the small stuff. From 300 m up a garden shed is two pixels,
   // and a Czech village is mostly garden sheds: skipping everything under
@@ -2223,6 +2283,10 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
     : mats.building;
   const group = new THREE.Group();
   group.name = 'buildings';
+  // A merge is a union of attributes, so one geometry arriving with a ground
+  // class index would take the whole chunk's buildings out. Nothing here reads
+  // it; strip it rather than depend on every producer remembering.
+  for (const g of bGeos) g.deleteAttribute('surf');
   const m = new THREE.Mesh(mergeGeometries(bGeos, false), mat);
   m.castShadow = m.receiveShadow = true;
   group.add(m);
@@ -2557,8 +2621,11 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // clamps its requests to the region) — the apron is the right answer there,
     // and paving open country with grey quads would only cost draw calls.
     if (!cell) return null;
-    const q = new THREE.Mesh(terrainQuad(x0, z0, mats.terrain, COLORS.groundBase),
-      mats.flatFar ?? mats.flat);
+    // The far ring gets the SAME material as everything else. It used to have a
+    // flat sage colour of its own, which was invisible while an aerial photo
+    // was draped over it and is the entire horizon now that there is not one.
+    const q = new THREE.Mesh(terrainQuad(x0, z0, mats.terrain, COLORS.groundBase, 0, SURF.grass),
+      mats.flat);
     group.add(q);
     return done();
   }
@@ -2574,6 +2641,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   let flooded = false;                          // some ring swallowed the whole cell
   _c.setHex(BANK_COL);
   const kr = _c.r, kg = _c.g, kb = _c.b;
+  sink.at(SURF.dirt);                 // riverbanks and trench walls are earth
   const bankMark = sink.mark();
   for (const f of cell.water) {
     if (!f.o || f.o.length < 3) continue;
@@ -2596,7 +2664,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // islands are land: give them a lid just under the green-fill layer,
       // their outline already grows a skirt facing out into the water below
       for (const h of iClip) {
-        const plate = drape(shapePoly(h, null, 0.02, COLORS.groundBase), mats.terrain);
+        const plate = drape(shapePoly(h, null, 0.02, COLORS.groundBase, SURF.grass), mats.terrain);
         if (plate) flat.push(plate);
       }
     }
@@ -2631,8 +2699,8 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // riverbank, which is where the flat WATER surface is the shape that
       // matters anyway.
       const g = holes.length
-        ? drape(terrainTess(shapePoly([[x0, z0], [x1, z0], [x1, z1], [x0, z1]], holes, 0, COLORS.groundBase)), mats.terrain)
-        : terrainQuad(x0, z0, mats.terrain, COLORS.groundBase);
+        ? drape(terrainTess(shapePoly([[x0, z0], [x1, z0], [x1, z1], [x0, z1]], holes, 0, COLORS.groundBase, SURF.grass)), mats.terrain)
+        : terrainQuad(x0, z0, mats.terrain, COLORS.groundBase, 0, SURF.grass);
       if (g) flat.push(g);
     }
   }
@@ -2648,12 +2716,12 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     const greenOf = (f) => (scatter && WOOD_TYPES.has(f.t) ? FOREST_FLOOR
       : COLORS.green[f.t] ?? (WOOD_TYPES.has(f.t) ? COLORS.green.wood : COLORS.green.grass));
     const polyKinds = [
-      [cell.green, LAYER_Y.green, greenOf],
-      [cell.paved, LAYER_Y.paved, (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza],
+      [cell.green, LAYER_Y.green, greenOf, surfOfGreen],
+      [cell.paved, LAYER_Y.paved, (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved],
     ];
-    for (const [list, y, pick] of polyKinds) for (const f of list) {
+    for (const [list, y, pick, kind] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;
-      const g = drape(terrainTess(shapePoly(f.o, f.i, y, pick(f))), mats.terrain);
+      const g = drape(terrainTess(shapePoly(f.o, f.i, y, pick(f), kind(f))), mats.terrain);
       if (g) flat.push(g);
     }
   }

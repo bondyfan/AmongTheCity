@@ -144,15 +144,20 @@ const JUNCTION_R = 8;        // m — radius the shared junction height averages
 /** One Gaussian pass over a 1-D profile, reflecting at the ends. */
 function blurPass(y, out, sigma, ds) {
   const n = y.length, r = Math.max(1, Math.round((sigma * 2) / ds));
+  if (n < 3) { for (let i = 0; i < n; i++) out[i] = y[i]; return out; }
   const w = new Float64Array(2 * r + 1);
   let sum = 0;
   for (let k = -r; k <= r; k++) { const v = Math.exp(-((k * ds) ** 2) / (2 * sigma * sigma)); w[k + r] = v; sum += v; }
   for (let i = 0; i < n; i++) {
     let a = 0;
     for (let k = -r; k <= r; k++) {
+      // Reflect REPEATEDLY. A single fold is only enough while the kernel is
+      // narrower than the profile, and a 30 m way sampled every 2 m is three
+      // samples wide against a nine-sample kernel: one fold left the index
+      // negative, the read was undefined, and the NaN went all the way out to
+      // the vertex buffer — every short road in the city, silently.
       let j = i + k;
-      if (j < 0) j = -j;
-      if (j >= n) j = 2 * n - 2 - j;
+      while (j < 0 || j >= n) { if (j < 0) j = -j; if (j >= n) j = 2 * n - 2 - j; }
       a += y[j] * w[k + r];
     }
     out[i] = a / sum;

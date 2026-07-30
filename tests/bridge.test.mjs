@@ -299,3 +299,23 @@ test('you can be under a bridge instead of on it', () => {
   // put down beneath a viaduct with nothing at that height: the road, not the deck
   assert.equal(levels.reset(180).add(220).add(226).value(), 220);
 });
+
+test('a road too short for the smoothing kernel is still a number', () => {
+  // The blur reflects at the ends, and a single fold is only enough while the
+  // kernel is narrower than the profile. A 30 m way sampled every 2 m is three
+  // samples against a nine-sample kernel: one fold left the index NEGATIVE, the
+  // read came back undefined, and the NaN travelled all the way to the vertex
+  // buffer — "Computed radius is NaN" for every short road in the city, which
+  // in Pardubice is most of them.
+  const terrain = { res: 20, ready: () => true, heightAt: (x) => 200 + 0.01 * x };
+  for (let len = 4; len <= 60; len += 1) {
+    const way = { p: [[0, 0], [len, 0]] };
+    way._len = len;
+    const prof = roadProfile(way, terrain);
+    if (!prof) continue;
+    for (let i = 0; i < prof.n; i++) {
+      assert.ok(Number.isFinite(prof.y[i]),
+        `a ${len} m road levelled to ${prof.y[i]} at sample ${i} of ${prof.n}`);
+    }
+  }
+});
