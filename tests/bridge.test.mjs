@@ -18,8 +18,11 @@ test('a bridge holds one flat deck over a terrain valley', () => {
   const deck = 12 + BRIDGE_Y;                  // the higher bank owns the level
 
   // The SPAN is level — that is the whole point of a bridge, and it must not
-  // follow the −4 m river bed underneath it.
-  for (const distance of [12, 15, 20])
+  // follow the −4 m river bed underneath it. The samples sit inside the level
+  // region: with ramps at a road's 7.5 % grade, a 30 m bridge with a 2.85 m
+  // rise at one end spends 12 m climbing and 11.3 m descending, so the flat
+  // part is s ∈ (12, 18.7).
+  for (const distance of [13, 15, 17])
     assert.equal(bridgeDeckHeight(way, distance, terrain), deck);
   // …and it never dives below either bank anywhere.
   for (let d = 0; d <= 30; d += 0.5)
@@ -61,7 +64,8 @@ test('a short bridge stays a bridge instead of becoming two ramps', () => {
   const way = { p: [[0, 0], [0, 20]], _len: 20 };
   const terrain = { ready: () => true, heightAt: (_x, z) => (z <= 0 ? 4 : z >= 20 ? 14 : 0) };
   const deck = 14 + BRIDGE_Y;
-  for (const d of [8, 10, 12]) assert.equal(bridgeDeckHeight(way, d, terrain), deck);
+  // ramps are capped at two fifths of the span from each end, so 8 < s < 12
+  for (const d of [9, 10, 11]) assert.equal(bridgeDeckHeight(way, d, terrain), deck);
 });
 
 test('a long straight bridge is split into short fascia sections', () => {

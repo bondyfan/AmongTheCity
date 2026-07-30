@@ -31,7 +31,7 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
 import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
-  junctionsIn, distPointToSegment } from './geo.js';
+  junctionsIn, distPointToSegment, roadLift } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
@@ -901,9 +901,13 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // would sink into the Vltava and climb out on the far side.
   const bridge = !!f.br && !!terrain;
   const mark = bridge ? sink.mark() : -1;
+  // A road is BUILT, not draped: roadLift is the embankment that keeps it to a
+  // road's grade instead of diving into every dell. drape() adds the bare earth
+  // afterwards, so this is the fill on top of it. A bridge has no fill — its
+  // deck is an absolute height and the drape is told to leave it alone.
   const elev = (d) => (f.br
     ? (bridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len))
-    : 0);
+    : roadLift(f, d, terrain));
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
   const cr = _c.r, cg = _c.g, cb = _c.b;
   _c.setHex(RAILING_COL);

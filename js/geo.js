@@ -66,6 +66,102 @@ export function bridgeElevation(dist, totalLen) {
   return Math.max(0, Math.min(BRIDGE_Y, (edge / BRIDGE_RAMP) * BRIDGE_Y));
 }
 
+// ---- roads are built, not draped ------------------------------------------
+// A road laid straight onto bare earth dives into every dell it crosses. The
+// real one does not: it is built on a fill, and the fill is why a Czech road
+// holds a grade instead of following the ground. DMR 5G is bare earth and OSM
+// does not tag embankments, so the fill has to be inferred — and it can be,
+// because a road's defining property is a maximum GRADE.
+//
+// The envelope: sample the terrain along the way, then raise any point that
+// would need a steeper descent than a road is allowed, from both directions.
+//
+//     forward   y[i] = max(y[i], y[i−1] − G·ds)
+//     backward  y[i] = max(y[i], y[i+1] − G·ds)
+//
+// The result never goes BELOW the ground — this fills, it never cuts, because
+// cutting into a hill that is really there is a worse lie than a road that
+// climbs it. It leaves the two ends exactly on the terrain, which is what keeps
+// a road agreeing with the roads it joins: a dip at a junction stays a dip, and
+// both ways see the same one.
+//
+// The fill is capped. Past MAX_FILL the honest reading is not "embankment" but
+// "bridge somebody forgot to tag", and inventing a twelve-metre viaduct from a
+// grade rule would be worse than the dip.
+//
+// Lazy, because terrain streams in after the roads do — and only cached once
+// every sample is against ground that has actually arrived, the same discipline
+// as waterLevel() and groundFor().
+const GRADE_MAX = 0.075;    // 7.5 % — the steepest a Czech road holds for long
+const GRADE_DS = 5;         // m between profile samples
+const GRADE_FILL = 6;       // m of embankment we are willing to invent
+export function roadProfile(way, terrain) {
+  if (!terrain || !way?.p || way.p.length < 2) return null;
+  if (way._prof && way._prof.terrain === terrain) return way._prof;
+  const total = way._len ?? polylineLength(way.p);
+  if (total < GRADE_DS * 2) return null;
+  const n = Math.ceil(total / GRADE_DS) + 1;
+  const ds = total / (n - 1);
+  const y = new Float32Array(n);
+  const gx = new Float32Array(n), gz = new Float32Array(n);
+  let ready = true;
+  // walk the polyline once, sampling at even arclength
+  let seg = 0, acc = 0;
+  let ax = way.p[0][0], az = way.p[0][1];
+  let bx = way.p[1][0], bz = way.p[1][1];
+  let segLen = Math.hypot(bx - ax, bz - az);
+  for (let i = 0; i < n; i++) {
+    const want = i * ds;
+    while (want > acc + segLen && seg < way.p.length - 2) {
+      acc += segLen; seg++;
+      ax = way.p[seg][0]; az = way.p[seg][1];
+      bx = way.p[seg + 1][0]; bz = way.p[seg + 1][1];
+      segLen = Math.hypot(bx - ax, bz - az) || 1e-6;
+    }
+    const t = Math.max(0, Math.min(1, (want - acc) / segLen));
+    const x = ax + (bx - ax) * t, z = az + (bz - az) * t;
+    gx[i] = x; gz[i] = z;
+    if (terrain.ready && !terrain.ready(x, z)) ready = false;
+    y[i] = terrain.heightAt(x, z);
+  }
+  const ground = Float32Array.from(y);
+  const drop = GRADE_MAX * ds;
+  for (let i = 1; i < n; i++) if (y[i] < y[i - 1] - drop) y[i] = y[i - 1] - drop;
+  for (let i = n - 2; i >= 0; i--) if (y[i] < y[i + 1] - drop) y[i] = y[i + 1] - drop;
+  // never more embankment than we are willing to claim, and never a cut
+  for (let i = 0; i < n; i++) {
+    if (y[i] > ground[i] + GRADE_FILL) y[i] = ground[i] + GRADE_FILL;
+    if (y[i] < ground[i]) y[i] = ground[i];
+  }
+  const prof = { terrain, ds, n, y, ground, gx, gz, total };
+  if (ready) way._prof = prof;
+  return prof;
+}
+
+/**
+ * How far ABOVE the bare earth the built road sits at `dist` along it — the
+ * embankment, in metres. Everything that places something on a road adds this:
+ * the ribbon, surfaceY, and the traffic AI, so all three agree.
+ */
+export function roadLift(way, dist, terrain) {
+  const prof = roadProfile(way, terrain);
+  if (!prof) return 0;
+  const u = Math.max(0, Math.min(prof.n - 1, dist / prof.ds));
+  const i = Math.min(prof.n - 2, Math.floor(u)), f = u - i;
+  const lift0 = prof.y[i] - prof.ground[i];
+  const lift1 = prof.y[i + 1] - prof.ground[i + 1];
+  return lift0 + (lift1 - lift0) * f;
+}
+
+/** The built road's absolute height at `dist` — bare earth plus its embankment. */
+export function roadGradeY(way, dist, terrain) {
+  const prof = roadProfile(way, terrain);
+  if (!prof) return null;
+  const u = Math.max(0, Math.min(prof.n - 1, dist / prof.ds));
+  const i = Math.min(prof.n - 2, Math.floor(u)), f = u - i;
+  return prof.y[i] + (prof.y[i + 1] - prof.y[i]) * f;
+}
+
 // Absolute bridge-deck height. Adding bridgeElevation() to the terrain at every
 // point makes a road faithfully copy the river valley below it, so the span
 // holds ONE level across the middle of the OSM bridge way — the higher bank
@@ -90,7 +186,11 @@ export function bridgeElevation(dist, totalLen) {
 // bridge keeps a level middle instead of becoming two ramps that meet — and
 // when the two limits fight, the length wins. A steep approach is a bridge you
 // drive up; a vertical step is the gap this exists to close.
-const BRIDGE_GRADE = 0.25;             // steepest approach ramp we will build
+// A bridge ramp is a ROAD, so it climbs at a road's grade — the same 7.5 % the
+// embankment grading uses. At the 25 % this used to allow, BRIDGE_Y's own 0.85 m
+// of deck clearance came down over six metres, which is a 14 % kick right at
+// the abutment and reads as "there is no ramp at all".
+const BRIDGE_GRADE = GRADE_MAX;
 export function bridgeDeckHeight(way, dist, terrain) {
   const total = way?._len ?? polylineLength(way?.p ?? []);
   if (!terrain || !way?.p?.length) return bridgeElevation(dist, total);
@@ -104,11 +204,12 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // indexJunctions) — the HIGHEST point on each approach, which is the crest
     // of the embankment the real road is built on. The endpoint is only a
     // fallback, for a bridge that joins nothing: a footbridge over a stream.
-    const reach = (pts, fb) => {
-      if (!pts) return terrain.heightAt(fb[0], fb[1]);
-      let h = -Infinity;
-      for (const [x, z] of pts) { const v = terrain.heightAt(x, z); if (v > h) h = v; }
-      return h;
+    // The height the road that CONTINUES is actually built at, right where the
+    // two meet. roadProfile has already put the embankment under it, so this is
+    // the crest without having to go looking for one.
+    const reach = (link, fb) => {
+      const y = link && roadGradeY(link.road, link.at, terrain);
+      return y === null || y === undefined ? terrain.heightAt(fb[0], fb[1]) : y;
     };
     const first = way.p[0], last = way.p[way.p.length - 1];
     const start = reach(way._ap0, first);
@@ -221,9 +322,6 @@ function smoothBends(p, isBridge) {
 const J_KEY = (x, z) => Math.round(x * 50) + ',' + Math.round(z * 50);
 const J_MIN_ARMS = 3;       // two ways meeting is a way that was split, not a junction
 const J_MAX_TRIM = 0.35;    // never eat more than this fraction of a short road
-const J_APPROACH = 45;      // m of approach sampled — long enough to clear a
-                            // Labe embankment, which takes about twenty
-const J_AP_STEP = 5;        // …at this spacing, so the crest is not stepped over
 function indexJunctions(roads) {
   const at = new Map();
   for (const r of roads) {
@@ -253,32 +351,17 @@ function indexJunctions(roads) {
       if (!a.r.br || !a.end) continue;
       const road = e.arms.find((o) => o.r !== a.r && !o.r.br && o.r.p.length > 1);
       if (!road) continue;
-      // Sample the approach for J_APPROACH metres and keep every point, because
-      // one point is not enough: the deck has to reach the CREST of the bank,
-      // and ten metres along a Labe embankment is still halfway down it.
-      // bridgeDeckHeight takes the highest of these — the top of the ramp the
-      // real road is built on, which is what the deck must meet.
-      // Every J_AP_STEP metres, not once per polyline vertex: an approach can be
-      // a single 200 m straight, and one sample at the far end of it says
-      // nothing about where the embankment crests.
+      // Remember WHICH road continues and where along it the node sits. The
+      // deck then meets that road's own BUILT height there — the graded profile,
+      // embankment included — which is the only height the two can agree on.
+      // Reaching for the crest of the bank instead (the previous attempt) put
+      // the deck above where the road actually is at the join, and left a gap.
       const q = road.r.p;
-      const out = [];
-      let px = e.x, pz = e.z, left = J_APPROACH;
-      const step = road.i === 0 ? 1 : -1;
-      for (let i = road.i; left > 0; i += step) {
-        const j = step > 0 ? i + 1 : i - 1;
-        if (j < 0 || j >= q.length) break;
-        const nx = q[j][0], nz = q[j][1];
-        let L = Math.hypot(nx - px, nz - pz);
-        if (L < 1e-6) { px = nx; pz = nz; continue; }
-        const ux = (nx - px) / L, uz = (nz - pz) / L;
-        while (L > 0 && left > 0) {
-          const d = Math.min(J_AP_STEP, L, left);
-          px += ux * d; pz += uz * d; L -= d; left -= d;
-          out.push([px, pz]);
-        }
-      }
-      if (out.length) { if (a.i === 0) a.r._ap0 = out; else a.r._ap1 = out; }
+      // arclength of the node along that road, so bridgeDeckHeight can ask it
+      let at = 0;
+      for (let i = 0; i < road.i; i++) at += Math.hypot(q[i + 1][0] - q[i][0], q[i + 1][1] - q[i][1]);
+      const link = { road: road.r, at };
+      if (a.i === 0) a.r._ap0 = link; else a.r._ap1 = link;
     }
     if (e.arms.length < J_MIN_ARMS) continue;
     // the pad has to clear the widest road that meets here

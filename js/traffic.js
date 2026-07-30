@@ -207,7 +207,7 @@
 
 import * as THREE from 'three';
 import { TRAFFIC, CAR_COLORS } from './config.js';
-import { bridgeDeckHeight, distPointToSegment } from './geo.js';
+import { bridgeDeckHeight, distPointToSegment, roadLift } from './geo.js';
 import { LAYER_Y } from './config.js';
 // namespace import on purpose: pickCarColor is a newer export and a named
 // import of something a stale vehicles.js doesn't have is a hard link error —
@@ -1748,9 +1748,12 @@ export class Traffic {
     // directly (it never goes through driveStep), so it is the one place that
     // has to add the terrain itself — without it the whole city's traffic
     // drove 220 m under Pardubice, invisible but perfectly well behaved.
+    // …and the embankment the road is BUILT on, or the AI drives in the ditch
+    // beside a road the player is riding over the top of
     const bridgeY = e.road.br
       ? bridgeDeckHeight(e.road, e.off0 + e.offSign * p.s, this.world?.terrain)
-      : this._groundAt(p.sx, p.sz);
+      : this._groundAt(p.sx, p.sz)
+        + roadLift(e.road, e.off0 + e.offSign * p.s, this.world?.terrain);
     p.sy = p.py = bridgeY + LAYER_Y.road;
     const car = this.vehicles.add(kind, p.sx, p.sz, heading, color);
     car.vK = p.vK;
@@ -2275,7 +2278,8 @@ export class Traffic {
     // what the shared ramp math wants — decks rise only near the way's ends.
     const bridgeY = re.road.br
       ? bridgeDeckHeight(re.road, re.off0 + re.offSign * p.s, this.world?.terrain)
-      : this._groundAt(p.sx, p.sz);
+      : this._groundAt(p.sx, p.sz)
+        + roadLift(re.road, re.off0 + re.offSign * p.s, this.world?.terrain);
     p.sy = bridgeY + LAYER_Y.road;
   }
 
