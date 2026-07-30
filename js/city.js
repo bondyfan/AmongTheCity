@@ -8,7 +8,8 @@
 
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
-import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight, roadLift } from './geo.js';
+import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
+  roadGradeY } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain, groundFor } from './terrain.js';
@@ -307,11 +308,12 @@ export class CityWorld {
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
         if (d < half) {
           const s = along + Math.hypot(_closest.x - ax, _closest.z - az);
-          // …plus the embankment the road is built on, so the wheels ride the
-          // surface meshes.js drew rather than the bare earth under it
-          const y = r.br
-            ? bridgeDeckHeight(r, s, this.terrain) + LAYER_Y.road
-            : ground + LAYER_Y.road + roadLift(r, s, this.terrain);
+          // The BUILT height, absolute, exactly as meshes.js laid the ribbon —
+          // not the bare earth plus an interpolated lift, which is a different
+          // surface between profile samples.
+          const gy = r.br ? bridgeDeckHeight(r, s, this.terrain)
+            : roadGradeY(r, s, this.terrain);
+          const y = (gy === null || gy === undefined ? ground : gy) + LAYER_Y.road;
           if (y > best) best = y;
         }
         along += Math.hypot(bx - ax, bz - az);

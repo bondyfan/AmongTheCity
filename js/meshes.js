@@ -31,7 +31,7 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
 import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
-  junctionsIn, distPointToSegment, roadLift } from './geo.js';
+  junctionsIn, distPointToSegment, roadProfile, roadGradeY } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
@@ -900,14 +900,24 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // flagged so the chunk-wide drape leaves it alone — otherwise Karlův most
   // would sink into the Vltava and climb out on the far side.
   const bridge = !!f.br && !!terrain;
-  const mark = bridge ? sink.mark() : -1;
+  // A GRADED road is laid the same way a bridge deck is: absolute heights,
+  // excluded from the chunk-wide drape. It has to be. The first version added
+  // the embankment as a LIFT on top of whatever the drape found, and a lift
+  // interpolated between 5 m samples plus a terrain that is not linear between
+  // them is not the graded profile — it is the profile plus the terrain's own
+  // wiggle, which is how a 7.5 % guarantee came out as an 18 % kick eleven
+  // metres past an abutment. Laying the absolute height makes the ribbon
+  // exactly what roadProfile promised, and flat across its width into the
+  // bargain, which is what a road is.
+  const graded = !f.br && !!terrain && !!roadProfile(f, terrain);
+  const mark = (bridge || graded) ? sink.mark() : -1;
   // A road is BUILT, not draped: roadLift is the embankment that keeps it to a
   // road's grade instead of diving into every dell. drape() adds the bare earth
   // afterwards, so this is the fill on top of it. A bridge has no fill — its
   // deck is an absolute height and the drape is told to leave it alone.
   const elev = (d) => (f.br
     ? (bridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len))
-    : roadLift(f, d, terrain));
+    : graded ? roadGradeY(f, d, terrain) : 0);
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
   const cr = _c.r, cg = _c.g, cb = _c.b;
   _c.setHex(RAILING_COL);
@@ -1020,7 +1030,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
   else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr);
   // everything this bridge emitted — deck, fascia, parapets, lane paint — is
   // already at its absolute height
-  if (bridge) sink.fixFrom(mark);
+  if (bridge || graded) sink.fixFrom(mark);
 }
 
 /**

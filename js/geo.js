@@ -94,7 +94,13 @@ export function bridgeElevation(dist, totalLen) {
 // as waterLevel() and groundFor().
 const GRADE_MAX = 0.075;    // 7.5 % — the steepest a Czech road holds for long
 const GRADE_DS = 5;         // m between profile samples
-const GRADE_FILL = 6;       // m of embankment we are willing to invent
+const GRADE_FILL = 9;       // m of embankment we are willing to invent. Six was
+                            // not enough: measured over real height maps, the cap
+                            // bound inside ordinary Polabí dells and handed the
+                            // grade guarantee back (a 55 % slope came out 44 %).
+                            // At nine the guarantee holds everywhere flat country
+                            // is flat — and gives way in the Zlín hills, where a
+                            // steep road is not an artefact, it is the hill.
 export function roadProfile(way, terrain) {
   if (!terrain || !way?.p || way.p.length < 2) return null;
   if (way._prof && way._prof.terrain === terrain) return way._prof;
@@ -126,13 +132,24 @@ export function roadProfile(way, terrain) {
   }
   const ground = Float32Array.from(y);
   const drop = GRADE_MAX * ds;
-  for (let i = 1; i < n; i++) if (y[i] < y[i - 1] - drop) y[i] = y[i - 1] - drop;
-  for (let i = n - 2; i >= 0; i--) if (y[i] < y[i + 1] - drop) y[i] = y[i + 1] - drop;
-  // never more embankment than we are willing to claim, and never a cut
-  for (let i = 0; i < n; i++) {
-    if (y[i] > ground[i] + GRADE_FILL) y[i] = ground[i] + GRADE_FILL;
-    if (y[i] < ground[i]) y[i] = ground[i];
+  // The fill cap belongs INSIDE the passes, not after them. Clamping a finished
+  // envelope puts a clamped sample next to an unclamped one and hands back the
+  // step the envelope had just removed — measured over the Zlín hills, a 77 %
+  // slope came out at 75.7 %, i.e. the grading had achieved nothing there.
+  // Capping as it propagates degrades gracefully instead: the grade holds
+  // wherever a GRADE_FILL embankment can hold it, and beyond that the road
+  // follows the hill, which in genuinely steep country is the right answer —
+  // the alternative is inventing a viaduct out of a grade rule.
+  const ceil = (i) => ground[i] + GRADE_FILL;
+  for (let i = 1; i < n; i++) {
+    const want = y[i - 1] - drop;
+    if (y[i] < want) y[i] = Math.min(want, ceil(i));
   }
+  for (let i = n - 2; i >= 0; i--) {
+    const want = y[i + 1] - drop;
+    if (y[i] < want) y[i] = Math.min(want, ceil(i));
+  }
+  for (let i = 0; i < n; i++) if (y[i] < ground[i]) y[i] = ground[i];  // fill, never cut
   const prof = { terrain, ds, n, y, ground, gx, gz, total };
   if (ready) way._prof = prof;
   return prof;
@@ -214,7 +231,19 @@ export function bridgeDeckHeight(way, dist, terrain) {
     const first = way.p[0], last = way.p[way.p.length - 1];
     const start = reach(way._ap0, first);
     const end = reach(way._ap1, last);
-    const deck = Math.max(start, end) + BRIDGE_Y;
+    // The deck sits at the height of the HIGHER road it joins, and nothing on
+    // top of that. BRIDGE_Y's 0.85 m used to be added here, and it is a fossil:
+    // it dates from a flat world, where a deck had to be lifted off the plane to
+    // read as a bridge at all. On real terrain the BANK is already above the
+    // water, so the lift buys nothing and costs the only thing that was wrong
+    // with these crossings — it is the entire reason a ramp existed. At Kpt.
+    // Bartoše the real road runs flat onto a flat bridge; ours climbed 0.85 m
+    // and came back down, because of a constant that stopped meaning anything
+    // the day the ground got a shape.
+    //
+    // A ramp now appears only where the two banks are at DIFFERENT heights,
+    // which is the one case a real bridge ramps too.
+    const deck = Math.max(start, end);
     const rampFor = (rise) => Math.min(total * 0.4,
       Math.max(BRIDGE_RAMP, Math.abs(rise) / BRIDGE_GRADE));
     profile = { terrain, start, end, deck,

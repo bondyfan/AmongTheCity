@@ -15,14 +15,15 @@ test('a bridge holds one flat deck over a terrain valley', () => {
     ready: () => true,
     heightAt: (_x, z) => z <= 0 ? 10 : z >= 30 ? 12 : -4,
   };
-  const deck = 12 + BRIDGE_Y;                  // the higher bank owns the level
+  // The higher bank owns the level, and nothing is added to it: BRIDGE_Y was a
+  // flat-world fossil, and it was the whole reason these crossings had a ramp.
+  const deck = 12;
 
   // The SPAN is level — that is the whole point of a bridge, and it must not
-  // follow the −4 m river bed underneath it. The samples sit inside the level
-  // region: with ramps at a road's 7.5 % grade, a 30 m bridge with a 2.85 m
-  // rise at one end spends 12 m climbing and 11.3 m descending, so the flat
-  // part is s ∈ (12, 18.7).
-  for (const distance of [13, 15, 17])
+  // follow the −4 m river bed underneath it. With the deck at the higher bank
+  // and ramps at a road's 7.5 % grade, the 2 m rise from the low bank takes
+  // 12 m (capped at two fifths of the span) and the high bank needs none.
+  for (const distance of [13, 20, 28])
     assert.equal(bridgeDeckHeight(way, distance, terrain), deck);
   // …and it never dives below either bank anywhere.
   for (let d = 0; d <= 30; d += 0.5)
@@ -43,6 +44,8 @@ test('the deck comes down to meet the road at both abutments', () => {
   };
   assert.equal(bridgeDeckHeight(way, 0, terrain), 10, 'gap at the near abutment');
   assert.equal(bridgeDeckHeight(way, 30, terrain), 12, 'gap at the far abutment');
+  // …and the far bank IS the deck level, so that end has no ramp at all —
+  // which is what a real bridge onto level ground does.
 
   // the climb is monotone — no hump, no dip on the way up
   let prev = -Infinity;
@@ -51,11 +54,11 @@ test('the deck comes down to meet the road at both abutments', () => {
     assert.ok(y >= prev - 1e-9, `ramp went backwards at ${d} m`);
     prev = y;
   }
-  // …and it is not a wall: 2.85 m of climb may not happen in 6 m
+  // …and it is not a wall: a road's grade, not a kerb
   const grade = (bridgeDeckHeight(way, 1, terrain) - 10) / 1;
-  assert.ok(grade <= 0.26, `approach ramp is a ${(grade * 100).toFixed(0)} % climb`);
+  assert.ok(grade <= 0.18, `approach ramp is a ${(grade * 100).toFixed(0)} % climb`);
   // the deck still holds a level middle — the ramps must not eat the span
-  assert.equal(bridgeDeckHeight(way, 15, terrain), 12 + BRIDGE_Y);
+  assert.equal(bridgeDeckHeight(way, 20, terrain), 12);
 });
 
 test('a short bridge stays a bridge instead of becoming two ramps', () => {
@@ -63,9 +66,9 @@ test('a short bridge stays a bridge instead of becoming two ramps', () => {
   // step still leaves half the deck level.
   const way = { p: [[0, 0], [0, 20]], _len: 20 };
   const terrain = { ready: () => true, heightAt: (_x, z) => (z <= 0 ? 4 : z >= 20 ? 14 : 0) };
-  const deck = 14 + BRIDGE_Y;
-  // ramps are capped at two fifths of the span from each end, so 8 < s < 12
-  for (const d of [9, 10, 11]) assert.equal(bridgeDeckHeight(way, d, terrain), deck);
+  const deck = 14;
+  // ramps are capped at two fifths of the span from each end, so 8 < s < 20
+  for (const d of [9, 12, 16]) assert.equal(bridgeDeckHeight(way, d, terrain), deck);
 });
 
 test('a long straight bridge is split into short fascia sections', () => {
@@ -86,4 +89,55 @@ test('regional data retains the Labe road and footbridge tags', () => {
   assert.equal(crossing.length, 4);
   assert.ok(crossing.every((r) => r.br === 1),
     'the region builder dropped bridge=yes from a Labe crossing');
+});
+
+// ---------------------------------------------------------------------------
+// roads are built, not draped
+// ---------------------------------------------------------------------------
+
+const { roadProfile, roadGradeY, polylineLength } = await import('../js/geo.js');
+
+test('a road across a dell is embanked, not dropped into it', () => {
+  // The defect this exists for: DMR 5G is bare earth and OSM does not tag
+  // embankments, so a road laid straight onto the ground dived into every dell
+  // it crossed. Measured over a real Pardubice height map before the grading,
+  // the worst grade on a 200 m road was 65.8 % at the extreme and 17.0 % at p95;
+  // after it, 9.9 % and 7.5 %. In the Zlín hills the median halves and the
+  // extremes stay, because there the slope IS the hill.
+  const RES = 20;
+  // a 6 m dell, 30 m across, in otherwise level ground
+  const terrain = {
+    res: RES,
+    ready: () => true,
+    heightAt: (x) => (x > 85 && x < 115 ? 200 - 6 * Math.sin((x - 85) / 30 * Math.PI) : 200),
+  };
+  const way = { p: [[0, 0], [200, 0]] };
+  way._len = polylineLength(way.p);
+  const prof = roadProfile(way, terrain);
+  assert.ok(prof, 'no profile was built');
+
+  let worst = 0, fill = 0, cut = 0;
+  let prev = roadGradeY(way, 0, terrain);
+  for (let s = 1; s <= 200; s++) {
+    const y = roadGradeY(way, s, terrain);
+    worst = Math.max(worst, Math.abs(y - prev));
+    fill = Math.max(fill, y - terrain.heightAt(s));
+    cut = Math.max(cut, terrain.heightAt(s) - y);
+    prev = y;
+  }
+  // the road holds a road's grade across it…
+  assert.ok(worst <= 0.076, `graded road still climbs at ${(worst * 100).toFixed(0)} % per metre`);
+  // …by filling…
+  assert.ok(fill > 3, `only ${fill.toFixed(1)} m of embankment — the dell was not filled`);
+  // …and never by cutting, because a hill that is really there must stay.
+  assert.ok(cut < 1e-6, `the road was cut ${cut.toFixed(2)} m into the ground`);
+});
+
+test('the profile leaves both ends on the terrain, so joining roads agree', () => {
+  const terrain = { res: 20, ready: () => true, heightAt: (x) => 200 + x * 0.01 };
+  const way = { p: [[0, 0], [200, 0]] };
+  way._len = polylineLength(way.p);
+  roadProfile(way, terrain);
+  assert.ok(Math.abs(roadGradeY(way, 0, terrain) - 200) < 1e-6);
+  assert.ok(Math.abs(roadGradeY(way, 200, terrain) - 202) < 1e-6);
 });
