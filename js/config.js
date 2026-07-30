@@ -71,6 +71,10 @@ export const COLORS = {
   // dirtier than a swept plaza. `platform` is the ground in front of a station.
   paved: { parking: 0x8a8d90, plaza: 0x9d9a92, platform: 0xa19e96, yard: 0x7f7d77,
     apron: 0x93969a, helipad: 0x6e7176, runway: 0x55585d },
+  // Ground read off the aerial photograph where OSM said nothing at all
+  // (scripts/classify-ground.mjs). Its tone comes from what the photograph said
+  // it was, not from a kind — there is no kind, that is the whole point.
+  inferred: { paving: 0x9a978f, asphalt: 0x5c5f64, dirt: 0x7a6a55, concrete: 0x8e8b84 },
   water: 0x3f6f95,
   road: {
     motorway: 0x4c4f55, trunk: 0x4c4f55, primary: 0x53565c, secondary: 0x55585e,

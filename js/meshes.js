@@ -2727,7 +2727,8 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       : COLORS.green[f.t] ?? (WOOD_TYPES.has(f.t) ? COLORS.green.wood : COLORS.green.grass));
     const polyKinds = [
       [cell.green, LAYER_Y.green, greenOf, surfOfGreen],
-      [cell.paved, LAYER_Y.paved, (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved],
+      [cell.paved, LAYER_Y.paved,
+        (f) => COLORS.inferred[f.s] ?? COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved],
     ];
     for (const [list, y, pick, kind] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;

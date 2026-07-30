@@ -22,3 +22,4 @@ data/raw-osm/
 # join; reduced to data/ipr-buildings.json, which build-region bakes into tiles.
 data/raw-ipr/
 data/ipr-buildings.json
+data/raw-ortho/
