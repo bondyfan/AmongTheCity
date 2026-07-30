@@ -89,7 +89,7 @@ async function fetchQuadrant(tile, qx, qz) {
 // Exactly the layers whose ground the runtime already draws. Anything stamped
 // here is left alone: OSM stood on it and the photograph did not.
 
-const COVERED = 1, GRASS = 2, PAVING = 3, ASPHALT = 4, DIRT = 5;
+const COVERED = 1, GRASS = 2, PAVING = 3, ASPHALT = 4, DIRT = 5, CLAIMED = 6;
 
 function stampCovered(mask, tile) {
   const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
@@ -97,7 +97,15 @@ function stampCovered(mask, tile) {
   for (const f of tile.buildings) if (f.o?.length >= 3) poly(f.o, f.i);
   for (const f of tile.paved) if (f.o?.length >= 3) poly(f.o, f.i);
   for (const f of tile.water) if (f.o?.length >= 3) poly(f.o, f.i);
-  for (const f of tile.green) if (f.o?.length >= 3) poly(f.o, f.i);
+  // GREEN is not covered — it is a CLAIM, and the photograph gets to dispute it.
+  // The courtyard at Pardubice hlavní nádraží is tagged landuse=grass and is a
+  // grey concrete rectangle in the orthophoto; trusting the tag drew a lawn over
+  // it. OSM's green polygons are drawn generously, around whole blocks, and are
+  // the one layer here that is routinely wrong about its own inside.
+  //
+  // Buildings, water, paved and roads stay covered: those are structural, OSM
+  // is reliable about them, and a photograph cannot see under a roof anyway.
+  for (const f of tile.green) if (f.o?.length >= 3) fillPolygon(mask, x0, z0, f.o, f.i, CLAIMED);
   // Roads and rails only as wide as they actually are. The first version
   // allowed a three-metre shoulder to keep kerb-grey out of the classifier,
   // and it was the thing that broke it: in a station forecourt criss-crossed
@@ -166,12 +174,15 @@ function stampLine(m, x0, z0, pts, hw) {
 
 // ---- the classifier --------------------------------------------------------
 
+const warmOf = (r, b) => r - b;
+
 /** Average a 2×2 block of 2 m pixels into one 4 m cell, then decide. */
 function classify(mask, quads) {
   let green = 0, paving = 0, asphalt = 0, dirt = 0;
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
-      if (mask[j * N + i]) continue;
+      const claim = mask[j * N + i];
+      if (claim && claim !== CLAIMED) continue;
       const qx = i < N / 2 ? 0 : 1, qz = j < N / 2 ? 0 : 1;
       const img = quads[qz * 2 + qx];
       if (!img) continue;
@@ -196,7 +207,16 @@ function classify(mask, quads) {
       // Pardubice tile asphalt — which would have tarmacked the countryside.
       // Tarmac is NEUTRAL grey, r ≈ g ≈ b; earth is not, and the red-blue gap
       // is what says so.
-      const warm = r - b;
+      const warm = warmOf(r, b);
+      // Overruling OSM takes MORE evidence than filling a blank. A park with a
+      // dry August patch must stay a park; only ground that is both plainly
+      // colourless and plainly bright — concrete, not shadow, not soil — is
+      // allowed to take a green tag off the map.
+      if (claim === CLAIMED) {
+        if (exg < 6 && lum > 96 && Math.abs(warmOf(r, b)) < 24) { mask[j * N + i] = PAVING; paving++; }
+        else { mask[j * N + i] = GRASS; green++; }
+        continue;
+      }
       if (exg > 18) { mask[j * N + i] = GRASS; green++; }
       else if (warm > 14) { mask[j * N + i] = DIRT; dirt++; }
       // …and COOL and dark is water or a deep shadow, neither of which is a

@@ -162,7 +162,27 @@ export class Interiors {
       if (keep.size >= maxShell) break;
       if (keep.has(f._id)) continue;
       keep.add(f._id);
-      const m = this.models.get(f._id);
+      let m = this.models.get(f._id);
+      // ---- a model built on ground we did not have yet -----------------------
+      // groundFor answers with a guess while the height map for that tile is in
+      // flight, and a model is built ONCE. A building assembled in that window
+      // is put together at the wrong height, hidden from the chunk mesh by the
+      // very model that is buried, and stays that way for the rest of the
+      // session — invisible, and still solid, because collide() works from the
+      // footprint and never asks whether the building is hidden.
+      //
+      // _model() has always re-checked this, and the check was UNREACHABLE on
+      // the normal path: the scan only calls _model when there is no model at
+      // all. The one thing that did call it was activate(), which is why the
+      // building appeared the moment you drove into it — a crash forced the
+      // rebuild that the scan never asked for. So the check belongs here, where
+      // every model passes every scan.
+      //
+      // It bites hardest on a building that straddles a tile boundary: the
+      // readiness test asks about the FIRST ring point, and the station canopy
+      // at Pardubice runs 196 m across the x = 0 seam, so one end can be known
+      // ground while the other is still a guess.
+      if (m && this._stale(m)) { this._drop(f._id); m = null; }
       if (m) m.lastTouch = this._clock;
       if (onFoot && d < I.activateR && full.size < I.maxActive) {
         full.add(f._id);
@@ -221,6 +241,17 @@ export class Interiors {
     this._flushChunks();
   }
 
+  /**
+   * Was this model built on ground that has since turned out to be somewhere
+   * else? Cheap enough to ask about every model on every scan — one terrain
+   * lookup — and the alternative is a building nobody can see.
+   */
+  _stale(m) {
+    if (!m || m.damaged) return false;         // a wreck is where the wreck is
+    const g = groundFor(m.f, this.world?.terrain);
+    return Math.abs((m.plan?.ground ?? 0) - g) > 0.05;
+  }
+
   /** Build (or fetch) the SHELL model of one building — the cheap tier. */
   _model(f, force = false) {
     let m = this.models.get(f._id);
@@ -270,6 +301,22 @@ export class Interiors {
     // building IS, never what it looks like. The facade quads in the chunk mesh
     // step aside for as long as this model exists.
     m.addShell();
+    // ---- only hide what you actually replaced -----------------------------
+    // addShell sets `shelled` whether or not it produced anything, and
+    // shellPieces emits its walls per STOREY — so a footprint that comes out
+    // with none (a canopy, a `building=roof`, anything whose plan degenerates)
+    // gets an empty shell, and hiding the building behind it deleted the
+    // building. Invisible, and still solid: collide() works from the footprint
+    // and never asks whether a building is hidden.
+    //
+    // That is the whole of "I cannot see it until I crash into it" — the crash
+    // ran activate(), which built the interior, which finally put something
+    // there to see. Hiding is now conditional on there being a replacement.
+    if (!m.alive) {
+      m.dispose();
+      this.models.delete(f._id);
+      return null;                    // the chunk mesh keeps drawing it, correctly
+    }
     // …and the roof the chunk mesh would have built, since the shell is about to
     // stop that mesh drawing this building at all.
     m.addRoof(roofGeometry(f, plan.top, plan.wallHex));
