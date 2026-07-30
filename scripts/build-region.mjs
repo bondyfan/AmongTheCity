@@ -378,7 +378,11 @@ function processRoads(els, owns) {
     // 0.5 m on a centreline under a 5–11 m ribbon is invisible, and DP never
     // drops an endpoint — so every junction node the traffic graph keys on
     // survives untouched.
-    const r = { p: simplify(ring(el.geometry), 0.5), t: t.highway ?? t.aeroway, w: spec.w, v: spec.v, d: spec.d };
+    const r = { p: simplify(ring(el.geometry), 0.5), t: t.highway ?? t.aeroway, w: spec.w, v: spec.v, d: spec.d,
+      // What it is PAVED with, when OSM says. A `track` is gravel by default
+      // and dirt half the time, a `service` road behind a block is often sett,
+      // and guessing from the class gets both wrong — see SURFACE above.
+      s: surfaceOf(t) ?? undefined };
     const w = parseFloat(t.width);
     // a runway's own `width` tag is 45–60 m, well past the 30 m road sanity cap
     if (w > 1 && w < (t.aeroway ? 90 : 30)) r.w = +w.toFixed(1);
@@ -431,7 +435,30 @@ function processRails(els, owns) {
 // move 2.5 m and nobody will ever know; a tennis court or a cemetery wall is
 // small enough that the same tolerance would visibly round its corners, and a
 // riverbank carries the bridge geometry, so both stay near-exact.
-const AREA_EPS = { wood: 2.5, grass: 2.5, park: 1.2, pitch: 0.8, cemetery: 1.2, water: 1.2, parking: 0.8, plaza: 0.8 };
+const AREA_EPS = { wood: 2.5, grass: 2.5, park: 1.2, pitch: 0.8, cemetery: 1.2, water: 1.2,
+  parking: 0.8, plaza: 0.8, platform: 0.5, yard: 2.0 };
+
+// ---------- what a thing is MADE OF ----------
+// OSM's `surface` tag is the single most useful thing in the file for a world
+// that builds its ground rather than photographing it, and until now every one
+// of them was thrown away: tile -1,-1 alone carries 995 asphalt, 552
+// paving_stones, 61 concrete, 30 sett, 15 gravel. That is the difference
+// between a cobbled square and a concrete apron, stated by a surveyor who
+// stood on it, and it was being replaced by a guess from the road class.
+//
+// The codes are the runtime's own surface classes (js/surfaces.js), so the
+// client needs no second table — an unknown value simply falls through and the
+// class guess by type takes over, which is the old behaviour exactly.
+const SURFACE = {
+  asphalt: 'asphalt', chipseal: 'asphalt', tarmac: 'asphalt', bitumen: 'asphalt',
+  concrete: 'concrete', 'concrete:plates': 'concrete', 'concrete:lanes': 'concrete',
+  paving_stones: 'paving', paved: 'paving', flagstones: 'paving', bricks: 'paving',
+  sett: 'cobble', cobblestone: 'cobble', unhewn_cobblestone: 'cobble',
+  gravel: 'gravel', fine_gravel: 'gravel', compacted: 'gravel', pebblestone: 'gravel',
+  ground: 'dirt', dirt: 'dirt', earth: 'dirt', mud: 'dirt', unpaved: 'dirt', sand: 'dirt',
+  grass: 'grass', grass_paver: 'grass',
+};
+const surfaceOf = (t) => SURFACE[t.surface] ?? null;
 
 function processAreas(els, select, keep, owns) {
   const out = [], seen = new Set();
@@ -448,12 +475,12 @@ function processAreas(els, select, keep, owns) {
     if (el.type === 'way' && el.geometry) {
       const o = ring(el.geometry);
       if (closed(o) && Math.abs(area(o.slice(0, -1))) > 25 && owns(o[0]))
-        out.push({ o: simplifyRing(o.slice(0, -1), eps), t: kind });
+        out.push({ o: simplifyRing(o.slice(0, -1), eps), t: kind, s: surfaceOf(t) ?? undefined });
     } else if (el.type === 'relation') {
       for (const poly of assembleRelation(el))
         if (Math.abs(area(poly.o)) > 25 && owns(poly.o[0]))
           out.push({
-            o: simplifyRing(poly.o, eps), t: kind,
+            o: simplifyRing(poly.o, eps), t: kind, s: surfaceOf(t) ?? undefined,
             i: poly.i.length ? poly.i.map(r => simplifyRing(r, eps)) : undefined,
           });
     }
@@ -464,6 +491,7 @@ function processAreas(els, select, keep, owns) {
 const isWaterPoly = (t, el) =>
   t.natural === 'water' || (el.type === 'relation' && t.waterway === 'riverbank');
 
+const YARD_LANDUSE = /^(railway|industrial|retail|commercial|construction|quarry|brownfield|landfill|port|depot)$/;
 const GREEN_LANDUSE = /^(grass|forest|meadow|recreation_ground|cemetery|allotments|village_green|orchard|farmland)$/;
 const GREEN_LEISURE = /^(park|garden|pitch|playground|golf_course|stadium)$/;
 const GREEN_NATURAL = /^(wood|scrub|grassland)$/;
@@ -476,15 +504,37 @@ const greenKind = (t) =>
   : t.landuse === 'cemetery' ? 'cemetery'
   : (t.landuse || t.natural || t.leisure) ? 'grass' : null;
 
+// A PLATFORM is the ground in front of a station, and there are 77 of them in
+// the Pardubice tile alone. Measured over a 180 m circle on the main station:
+// 90 % of the ground there carries no polygon we kept, so the world fell back
+// to "unmapped ground is a field" and paved the forecourt with lawn. Eleven of
+// OSM's platform areas cover it, most tagged surface=paving_stones — which is
+// exactly right and exactly what was being dropped.
 const isPaved = (t) =>
   (t.amenity === 'parking' && !/underground|multi-storey/.test(t.parking ?? ''))
   || (t.highway === 'pedestrian' && t.area === 'yes') || t.place === 'square'
+  // …and NOT gated on area=yes. A closed `railway=platform` way is an area by
+  // convention and OSM barely ever adds the tag: of the 77 platforms in the
+  // Pardubice tile, requiring it let exactly none of them through. processAreas
+  // tests closed() anyway, so a platform drawn as a line is still skipped.
+  || t.railway === 'platform' || t.highway === 'platform'
+  || t.public_transport === 'platform'
+  // A works, a railway yard, a retail park: hard standing, not meadow. The
+  // runtime's fallback for ground nobody mapped is a field, which is right in
+  // open country and absurd in a city centre — this is what tells it which it
+  // is looking at. `residential` is left out: a Czech suburb really is gardens.
+  || YARD_LANDUSE.test(t.landuse ?? '')
+  || (t.highway === 'footway' && t.area === 'yes')
   // aprons and helipads are always areas; runways/taxiways sometimes are too
   || (!!AERO_AREA[t.aeroway] && (t.area === 'yes' || t.aeroway === 'apron' || t.aeroway === 'helipad'));
 const pavedKind = (t) =>
   t.amenity === 'parking' ? 'parking'
   : AERO_AREA[t.aeroway] ? AERO_AREA[t.aeroway]
-  : (t.highway === 'pedestrian' || t.place === 'square') ? 'plaza' : null;
+  : (t.railway === 'platform' || t.highway === 'platform'
+     || t.public_transport === 'platform') ? 'platform'
+  : (t.highway === 'pedestrian' || t.place === 'square' || t.highway === 'footway') ? 'plaza'
+  : YARD_LANDUSE.test(t.landuse ?? '') ? 'yard'
+  : null;
 
 // ---------- waterway centerlines ----------
 function processWaterLines(els, owns) {
@@ -654,6 +704,10 @@ function processSignals(els, owns) {
 // world-area.mjs and a partially-finished split is simply a smaller world.
 // Dry runs point RAW_DIR/OUT_DIR at a scratch directory; production uses both
 // defaults, which are the paths the game and the deploy actually read.
+// `--tiles=-1,-1 0,-2` rebuilds just those, so an extraction change can be
+// measured on one tile before it is let loose on all 342.
+const ONLY = (process.argv.find((a) => a.startsWith('--tiles=')) ?? '')
+  .slice(8).split(/\s+/).filter(Boolean);
 const RAW_DIR = process.env.RAW_DIR || 'data/raw-region';
 const OUT_DIR = process.env.OUT_DIR || 'public/data';
 mkdirSync(`${OUT_DIR}/tiles`, { recursive: true });
@@ -683,6 +737,7 @@ const rawTiles = readdirSync(RAW_DIR)
 
 {
   for (const [tx, tz] of rawTiles) {
+    if (ONLY.length && !ONLY.includes(tx + ',' + tz)) continue;
     const rawFile = `${RAW_DIR}/${tx}_${tz}.json`;
     const raw = JSON.parse(readFileSync(rawFile, 'utf8'));
     const els = raw.elements ?? [];

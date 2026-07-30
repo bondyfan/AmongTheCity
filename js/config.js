@@ -65,7 +65,12 @@ export const COLORS = {
   green: { park: 0x6fa05a, wood: 0x4e7a44, grass: 0x7fa863, pitch: 0x6f9e75, cemetery: 0x7a9468 },
   // airport concrete is paler and greyer than street asphalt — it is concrete,
   // not tarmac, and that contrast is most of what makes an airfield read as one
-  paved: { parking: 0x8a8d90, plaza: 0x9d9a92, apron: 0x93969a, helipad: 0x6e7176, runway: 0x55585d },
+  // `platform` is the ground in front of a station — bus stands, the forecourt,
+  // the strip along a track. Paving slabs, so a shade lighter than a car park.
+  // `yard` is a works, a railway yard, a retail park — hard standing, and
+  // dirtier than a swept plaza. `platform` is the ground in front of a station.
+  paved: { parking: 0x8a8d90, plaza: 0x9d9a92, platform: 0xa19e96, yard: 0x7f7d77,
+    apron: 0x93969a, helipad: 0x6e7176, runway: 0x55585d },
   water: 0x3f6f95,
   road: {
     motorway: 0x4c4f55, trunk: 0x4c4f55, primary: 0x53565c, secondary: 0x55585e,

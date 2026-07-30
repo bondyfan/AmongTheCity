@@ -324,13 +324,23 @@ const surfOfGreen = (f) => (WOOD_SURF.has(f.t) ? SURF.forest
   : FARM_SURF.has(f.t) ? SURF.farm
   : MEADOW_SURF.has(f.t) ? SURF.meadow
   : SURF.grass);
-const surfOfPaved = (f) => (f.t === 'plaza' || f.t === 'pedestrian' ? SURF.paving : SURF.concrete);
+
+// …and when OSM SAYS what it is paved with, that beats every guess below. The
+// tag is on 1 600 features in the Pardubice tile alone — a surveyor who stood
+// on the ground, against a table that infers concrete from the word "parking".
+const TAGGED = {
+  asphalt: SURF.asphalt, concrete: SURF.concrete, paving: SURF.paving,
+  cobble: SURF.cobble, gravel: SURF.gravel, dirt: SURF.dirt, grass: SURF.grass,
+};
+const surfOfPaved = (f) => TAGGED[f.s]
+  ?? (f.t === 'plaza' || f.t === 'pedestrian' || f.t === 'platform' ? SURF.paving
+    : f.t === 'yard' ? SURF.gravel : SURF.concrete);
 const ROAD_SURF = {
   pedestrian: SURF.paving, footway: SURF.paving, steps: SURF.concrete,
   path: SURF.gravel, track: SURF.dirt, bridleway: SURF.dirt,
   runway: SURF.concrete, taxiway: SURF.concrete, taxilane: SURF.concrete, airstrip: SURF.gravel,
 };
-const surfOfRoad = (f) => ROAD_SURF[f.t] ?? SURF.asphalt;
+const surfOfRoad = (f) => TAGGED[f.s] ?? ROAD_SURF[f.t] ?? SURF.asphalt;
 
 // ---- shared small helpers ----
 

@@ -37,9 +37,19 @@ const RAILWAY = /^(rail|tram|light_rail)$/;
 const WATERWAY = /^(river|stream|canal)$/;
 const POI_AMENITY = /^(fuel|hospital|police|fire_station)$/;
 
+// Ground that is NOT a field. Measured over a 180 m circle on Pardubice main
+// station: 90 % of it carried no polygon this file kept, so the runtime fell
+// back to "unmapped ground is a field" and turned the forecourt into a lawn.
+// These are the tags that say otherwise — a platform, a railway yard, a works,
+// a retail park. `residential` is deliberately NOT here: the ground between
+// Czech houses really is garden.
+const YARD_LANDUSE = /^(railway|industrial|retail|commercial|construction|quarry|brownfield|landfill|port|depot)$/;
+
 const wantWay = (t) => !!t && (
   !!t.building
   || !!t.highway
+  || t.railway === 'platform' || t.public_transport === 'platform'
+  || YARD_LANDUSE.test(t.landuse ?? '')
   || !!t.aeroway                    // runways, taxiways, aprons, helipads, hangars
   || RAILWAY.test(t.railway ?? '')
   || t.natural === 'water' || WATERWAY.test(t.waterway ?? '')
@@ -56,6 +66,7 @@ const wantRelation = (t) => !!t && (
   !!t.building
   || t.natural === 'water' || t.waterway === 'riverbank'
   || GREEN_LANDUSE.test(t.landuse ?? '') || GREEN_LEISURE.test(t.leisure ?? '')
+  || YARD_LANDUSE.test(t.landuse ?? '')
 );
 
 const wantNode = (t) => !!t && (

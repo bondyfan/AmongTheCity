@@ -76,3 +76,34 @@ test('spawn area has drivable roads close by', () => {
   }
   assert.ok(best < 120, `nearest drivable road ${best.toFixed(0)} m from spawn`);
 });
+
+// ---------------------------------------------------------------------------
+// what the ground is MADE of
+// ---------------------------------------------------------------------------
+
+test('the world knows what its surfaces are paved with', async () => {
+  // OSM's `surface` tag is the most useful thing in the file for a world that
+  // builds its ground rather than photographing it, and every one of them used
+  // to be thrown away — the class of the road was the only input, so a grass
+  // track and a motorway differed by a guess. Tile -1,-1 carries 1 872 of them.
+  const t = JSON.parse(readFileSync('public/data/tiles/-1_-1.json', 'utf8'));
+  const tagged = [...t.roads, ...t.paved].filter((f) => f.s);
+  assert.ok(tagged.length > 1000,
+    `only ${tagged.length} features carry a surface — the tag is being dropped again`);
+  // …and every value is one the runtime can map (js/meshes.js TAGGED)
+  const known = new Set(['asphalt', 'concrete', 'paving', 'cobble', 'gravel', 'dirt', 'grass']);
+  const bad = [...new Set(tagged.map((f) => f.s))].filter((s) => !known.has(s));
+  assert.deepEqual(bad, [], `surface codes the client cannot map: ${bad}`);
+});
+
+test('station platforms and works yards survive the extraction', () => {
+  // The ground in front of a station is mapped in OSM as platform areas, and
+  // none of them reached the game: split-extracts kept only rail|tram|light_rail
+  // railways, and build-region then demanded area=yes, which OSM barely ever
+  // adds to a closed platform way. Between them, all 77 platforms in this tile
+  // were dropped and the forecourt fell back to "unmapped ground is a field".
+  const t = JSON.parse(readFileSync('public/data/tiles/-1_-1.json', 'utf8'));
+  const kinds = new Set(t.paved.map((f) => f.t));
+  assert.ok(kinds.has('platform'), 'no station platform survived');
+  assert.ok(kinds.has('yard'), 'no works or railway yard survived');
+});
