@@ -900,24 +900,31 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // flagged so the chunk-wide drape leaves it alone — otherwise Karlův most
   // would sink into the Vltava and climb out on the far side.
   const bridge = !!f.br && !!terrain;
-  // A GRADED road is laid the same way a bridge deck is: absolute heights,
-  // excluded from the chunk-wide drape. It has to be. The first version added
-  // the embankment as a LIFT on top of whatever the drape found, and a lift
-  // interpolated between 5 m samples plus a terrain that is not linear between
-  // them is not the graded profile — it is the profile plus the terrain's own
-  // wiggle, which is how a 7.5 % guarantee came out as an 18 % kick eleven
-  // metres past an abutment. Laying the absolute height makes the ribbon
-  // exactly what roadProfile promised, and flat across its width into the
-  // bargain, which is what a road is.
+  // A road is the HIGHER of two surfaces: the ground it lies on, and the graded
+  // profile that keeps it to a road's grade. Neither alone works, and both have
+  // been tried:
+  //   · terrain alone dives into every dell (no embankment in the data);
+  //   · the profile alone stops following the ground, so it sinks under the
+  //     aerial photograph between its 5 m samples and inherits every wiggle of
+  //     them as a step — which is the bumpy road with the little jumps.
+  // max(ground, profile) is smooth where the ground is smooth, filled where the
+  // ground dips, and cannot sink beneath the ground anywhere, because the ground
+  // is one of the two things it is the maximum of. The drape adds the ground per
+  // vertex, so what this contributes is the FILL — and it is computed against
+  // that same vertex's ground, not an interpolated one, which is where the 18 %
+  // kick came from.
   const graded = !f.br && !!terrain && !!roadProfile(f, terrain);
-  const mark = (bridge || graded) ? sink.mark() : -1;
+  const mark = bridge ? sink.mark() : -1;
   // A road is BUILT, not draped: roadLift is the embankment that keeps it to a
   // road's grade instead of diving into every dell. drape() adds the bare earth
   // afterwards, so this is the fill on top of it. A bridge has no fill — its
   // deck is an absolute height and the drape is told to leave it alone.
-  const elev = (d) => (f.br
-    ? (bridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len))
-    : graded ? roadGradeY(f, d, terrain) : 0);
+  const elev = (d, x, z) => {
+    if (f.br) return bridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len);
+    if (!graded) return 0;
+    const gy = roadGradeY(f, d, terrain);
+    return gy === null ? 0 : Math.max(0, gy - terrain.heightAt(x, z));
+  };
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
   const cr = _c.r, cg = _c.g, cb = _c.b;
   _c.setHex(RAILING_COL);
@@ -942,7 +949,8 @@ function roadRibbon(sink, f, terrain, cell, key) {
     return false;
   };
   for (let i = 0; i < q.length - 1; i++) {
-    const y0 = baseY + elev(along[i]), y1 = baseY + elev(along[i + 1]);
+    const y0 = baseY + elev(along[i], q[i][0], q[i][1]);
+    const y1 = baseY + elev(along[i + 1], q[i + 1][0], q[i + 1][1]);
     const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
     const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
     if (foot && crossesRoad(ax, az, bx, bz)) continue;
@@ -967,8 +975,9 @@ function roadRibbon(sink, f, terrain, cell, key) {
       }
     }
   }
-  capDisc(sink, q[0][0], baseY + elev(0), q[0][1], hw, cr, cg, cb);
-  capDisc(sink, q[q.length - 1][0], baseY + elev(len), q[q.length - 1][1], hw, cr, cg, cb);
+  capDisc(sink, q[0][0], baseY + elev(0, q[0][0], q[0][1]), q[0][1], hw, cr, cg, cb);
+  capDisc(sink, q[q.length - 1][0], baseY + elev(len, q[q.length - 1][0], q[q.length - 1][1]),
+    q[q.length - 1][1], hw, cr, cg, cb);
   // ---- edge lines ----
   // Emitted from the SAME mitred frame as the deck, so they follow every bend
   // and every terrain split the ribbon does, and they sit at LAYER_Y.marking —
@@ -998,8 +1007,8 @@ function roadRibbon(sink, f, terrain, cell, key) {
         // stripe head-on and paint a white lattice over the intersection. Real
         // edge lines stop at the give-way line for the same reason.
         if (along[i] < EDGE_END || along[i + 1] > len - EDGE_END) continue;
-        const ya = LAYER_Y.marking + elev(along[i]);
-        const yb = LAYER_Y.marking + elev(along[i + 1]);
+        const ya = LAYER_Y.marking + elev(along[i], q[i][0], q[i][1]);
+        const yb = LAYER_Y.marking + elev(along[i + 1], q[i + 1][0], q[i + 1][1]);
         const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
         const ax = q[i][0] + pax * off * side, az = q[i][1] + paz * off * side;
         const bx = q[i + 1][0] + pbx * off * side, bz = q[i + 1][1] + pbz * off * side;
@@ -1021,7 +1030,8 @@ function roadRibbon(sink, f, terrain, cell, key) {
       walkAt(fr, s, _WA); walkAt(fr, s + DASH_LEN, _WB);
       // a centre line does not run through a junction either
       if (js2 && js2.some((j) => (_WA.x - j.x) ** 2 + (_WA.z - j.z) ** 2 < (j.pad + 1.5) ** 2)) continue;
-      const ya = LAYER_Y.marking + elev(s), yb = LAYER_Y.marking + elev(s + DASH_LEN);
+      const ya = LAYER_Y.marking + elev(s, _WA.x, _WA.z);
+      const yb = LAYER_Y.marking + elev(s + DASH_LEN, _WB.x, _WB.z);
       const px = _WA.dz * DASH_HW, pz = -_WA.dx * DASH_HW;
       sink.quad(_WA.x - px, ya, _WA.z - pz, _WB.x - px, yb, _WB.z - pz,
         _WB.x + px, yb, _WB.z + pz, _WA.x + px, ya, _WA.z + pz, mr, mg, mb);
@@ -1030,7 +1040,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
   else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr);
   // everything this bridge emitted — deck, fascia, parapets, lane paint — is
   // already at its absolute height
-  if (bridge || graded) sink.fixFrom(mark);
+  if (bridge) sink.fixFrom(mark);
 }
 
 /**

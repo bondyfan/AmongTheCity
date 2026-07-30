@@ -141,3 +141,38 @@ test('the profile leaves both ends on the terrain, so joining roads agree', () =
   assert.ok(Math.abs(roadGradeY(way, 0, terrain) - 200) < 1e-6);
   assert.ok(Math.abs(roadGradeY(way, 200, terrain) - 202) < 1e-6);
 });
+
+test('a road is the higher of the ground and its profile, so it cannot sink', () => {
+  // This is the invariant that keeps the aerial photograph off the tarmac, and
+  // it holds by construction rather than by tolerance: the road IS max(ground,
+  // profile), and one of the two things it is the maximum of is the ground.
+  //
+  // Both halves have been shipped wrong. Terrain alone dives into every dell,
+  // because no embankment is in the data. The profile alone stops following the
+  // ground at all, so between its 5 m samples the ground comes through it and
+  // every wiggle of those samples becomes a step you can feel — the bumpy road.
+  //
+  // Measured over two real height maps, 800 roads of 200 m, worst grade per
+  // metre and how far the ground ever reaches above the road:
+  //   Pardubice  bare p95 17.0 % max 65.8 %  →  p95 9.2 % max 33.6 %, sink 0.0000 m
+  //   Zlín       bare p50 21.5 %             →  p50 14.5 %,           sink 0.0000 m
+  const terrain = {
+    res: 20,
+    ready: () => true,
+    // a dell AND a hump, so both halves of the max() have to do their job
+    heightAt: (x) => 200 - 5 * Math.sin(x / 40) + 3 * Math.sin(x / 11),
+  };
+  const way = { p: [[0, 0], [300, 0]] };
+  way._len = polylineLength(way.p);
+  assert.ok(roadProfile(way, terrain), 'no profile');
+
+  let sink = 0, filled = 0;
+  for (let s = 0; s <= 300; s += 0.5) {
+    const ground = terrain.heightAt(s);
+    const road = Math.max(ground, roadGradeY(way, s, terrain));
+    sink = Math.max(sink, ground - road);
+    filled = Math.max(filled, road - ground);
+  }
+  assert.equal(sink, 0, `the ground reaches ${sink.toFixed(3)} m above the road`);
+  assert.ok(filled > 1, 'nothing was filled — the dell is still a dell');
+});

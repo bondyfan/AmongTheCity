@@ -1750,10 +1750,10 @@ export class Traffic {
     // drove 220 m under Pardubice, invisible but perfectly well behaved.
     // …and the embankment the road is BUILT on, or the AI drives in the ditch
     // beside a road the player is riding over the top of
+    const gnd = this._groundAt(p.sx, p.sz);
     const bridgeY = e.road.br
       ? bridgeDeckHeight(e.road, e.off0 + e.offSign * p.s, this.world?.terrain)
-      : (roadGradeY(e.road, e.off0 + e.offSign * p.s, this.world?.terrain)
-        ?? this._groundAt(p.sx, p.sz));
+      : Math.max(gnd, roadGradeY(e.road, e.off0 + e.offSign * p.s, this.world?.terrain) ?? gnd);
     p.sy = p.py = bridgeY + LAYER_Y.road;
     const car = this.vehicles.add(kind, p.sx, p.sz, heading, color);
     car.vK = p.vK;
@@ -2276,10 +2276,10 @@ export class Traffic {
     p.sz = pose.z + hx * p.laneOff;
     // off0 + offSign·s = meters from the WAY start (not the edge), which is
     // what the shared ramp math wants — decks rise only near the way's ends.
+    const gnd2 = this._groundAt(p.sx, p.sz);
     const bridgeY = re.road.br
       ? bridgeDeckHeight(re.road, re.off0 + re.offSign * p.s, this.world?.terrain)
-      : (roadGradeY(re.road, re.off0 + re.offSign * p.s, this.world?.terrain)
-        ?? this._groundAt(p.sx, p.sz));
+      : Math.max(gnd2, roadGradeY(re.road, re.off0 + re.offSign * p.s, this.world?.terrain) ?? gnd2);
     p.sy = bridgeY + LAYER_Y.road;
   }
 

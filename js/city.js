@@ -308,12 +308,12 @@ export class CityWorld {
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
         if (d < half) {
           const s = along + Math.hypot(_closest.x - ax, _closest.z - az);
-          // The BUILT height, absolute, exactly as meshes.js laid the ribbon —
-          // not the bare earth plus an interpolated lift, which is a different
-          // surface between profile samples.
+          // The HIGHER of the ground and the graded profile — the same max()
+          // meshes.js laid the ribbon at, so the wheels are on the surface that
+          // was drawn and not on either of the two things it was made from.
           const gy = r.br ? bridgeDeckHeight(r, s, this.terrain)
-            : roadGradeY(r, s, this.terrain);
-          const y = (gy === null || gy === undefined ? ground : gy) + LAYER_Y.road;
+            : Math.max(ground, roadGradeY(r, s, this.terrain) ?? ground);
+          const y = gy + LAYER_Y.road;
           if (y > best) best = y;
         }
         along += Math.hypot(bx - ax, bz - az);
