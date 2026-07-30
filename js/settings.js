@@ -18,15 +18,15 @@ const LS_KEY = 'atc-settings';
 // performance knobs — presets leave them alone and changing them never forks to custom.
 const PRESETS = {
   low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 60,
-            ortho: false, facades: false, trees: true, peds: 12, bloom: false, rays: false,
+            ortho: false, facades: false, trees: true, grass: false, peds: 12, bloom: false, rays: false,
             interiors: false, buildingR: 80, mblur: false, flare: false,
             cloudDist: 'medium' },
   medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 240,
-            ortho: false, facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
+            ortho: false, facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
             interiors: true, buildingR: 160, mblur: true, flare: true,
             cloudDist: 'medium' },
   high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
-            ortho: false, facades: true,  trees: true, peds: 60, bloom: true,  rays: true,
+            ortho: false, facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
             interiors: true, buildingR: 280, mblur: true, flare: true,
             cloudDist: 'far' },
 };
@@ -274,6 +274,7 @@ export function initSettings(apply) {
       [120, 'Běžná'], [240, 'Hustá']]),
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
     toggleRow('facades', 'Textury fasád'),
+    toggleRow('grass', 'Tráva (3D stébla)'),
     toggleRow('bloom', 'Bloom (záře světel)'),
     toggleRow('rays', 'Sluneční paprsky'),
     toggleRow('mblur', 'Motion blur (rozmaz při rychlosti)'),

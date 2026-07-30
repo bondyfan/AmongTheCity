@@ -26,6 +26,7 @@ import { initOrtho } from './ortho.js';
 import { Pedestrians } from './pedestrians.js';
 import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
+import { Grass } from './grass.js';
 import { buildAirfields, nearestParked } from './airfield.js';
 import { Fighter } from './aircraft.js';
 import { Clouds } from './clouds.js';
@@ -139,6 +140,7 @@ const _ghostVeh = new Map();
 // uid → index into `helis` that peer has claimed (F22). One machine, one pilot.
 const _heliClaims = new Map();
 let _heliClaimT = 0;    // s until we re-announce our own claim (late joiners)
+let grass = null;       // the ring of instanced tufts around the camera
 let _myHeliClaim = -1;  // index of the helicopter WE hold, or -1
 // uid → index into `parkedFleet` that peer is driving. Same mechanism, and for
 // the same reason the helicopter needed one — see claimParked() below.
@@ -1940,6 +1942,7 @@ function applySettings(s, key) {
     world.mats.ortho = wantOrtho;
     world.mats.facades = !!s.facades;
     world.mats.trees = s.trees !== false;
+    grass?.setEnabled(s.grass !== false);
     if (recipeChanged && (key === undefined || ['ortho', 'facades', 'trees', 'preset'].includes(key))) {
       world.rebuildAll();
     }
@@ -1960,6 +1963,8 @@ async function boot() {
   }
   if (!city) city = await loadCity(CITY_DATA_URL);
   world = new CityWorld(scene, city);
+  grass = new Grass(scene, world, city);
+  grass.setEnabled(getSettings().grass !== false);
   sky = makeSky(scene);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
   // because it is the whole identity contract in one line: this same string
@@ -2196,6 +2201,10 @@ function stepGame(dt) {
   // to fly over instead of ground already behind the wing.
   const lead = leadFocus(focus);
   world.update(dt, lead, { onFoot: !game.car && !game.heli && !game.jet });
+  // Grass follows the EYE, not the streaming focus: the ring is 58 m across
+  // and pushing it two seconds down the track would leave the player standing
+  // in a bare circle at any speed.
+  grass?.update(focus.x, focus.z, dt);
 
   if (game.jet) {
     // Same hands as the helicopter, and the same hands GTA trained everyone's
