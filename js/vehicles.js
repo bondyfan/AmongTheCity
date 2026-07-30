@@ -1043,7 +1043,7 @@ export class Vehicles {
       // frame and the player's go through driveStep, so neither needs this.
       if (!car._grounded && !car.ai && this.world?.terrain) {
         if (this.world.terrain.ready(car.x, car.z)) {
-          car.y = this.world.surfaceY(car.x, car.z).y;
+          car.y = this.world.surfaceY(car.x, car.z, car.y).y;
           car._grounded = true;
         }
       }
@@ -1434,7 +1434,7 @@ export function driveStep(car, ctl, dt, world, others) {
   // shake the body. The transition eases over ~0.3 s so a kerb-hop doesn't
   // snap the suspension.
   if (world.surfaceY) {
-    const s = world.surfaceY(car.x, car.z);
+    const s = world.surfaceY(car.x, car.z, car.y);
     car.offroad += ((s.road ? 0 : 1) - (car.offroad ?? 0)) * Math.min(1, dt * 3.5);
     suspension(car, s.y, dt, world);
     if (car.offroad > 0.05 && Math.abs(car.speed) > 0.5) {
@@ -1489,7 +1489,7 @@ const STEP_SLOPE = 2;      // …plus this × the distance it actually travelled
 function suspension(car, surf, dt, world) {
   const y0 = car.y ?? surf;
   const at = world.surfaceY
-    ? (x, z) => world.surfaceY(x, z).y
+    ? (x, z) => world.surfaceY(x, z, car.y).y
     : (x, z) => world.heightAt(x, z);
 
   // A height map arriving (or a respawn) moves the ground by tens of metres

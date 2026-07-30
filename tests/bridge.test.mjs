@@ -95,7 +95,9 @@ test('regional data retains the Labe road and footbridge tags', () => {
 // roads are built, not draped
 // ---------------------------------------------------------------------------
 
-const { roadProfile, roadGradeY, polylineLength, indexJunctions } = await import('../js/geo.js');
+const { roadProfile, roadGradeY, polylineLength, indexJunctions, indexBridgeCrossings, bridgeClearance }
+  = await import('../js/geo.js');
+const { levels } = await import('../js/city.js');
 const { LAYER_Y } = await import('../js/config.js');
 
 test('a road across a dell is embanked, not dropped into it', () => {
@@ -231,4 +233,69 @@ test('a road is the higher of the ground and its profile, so it cannot sink', ()
   }
   assert.equal(sink, 0, `the ground reaches ${sink.toFixed(3)} m above the road`);
   assert.ok(filled > 1, 'nothing was filled — the dell is still a dell');
+});
+
+// ---------------------------------------------------------------------------
+// a bridge is a bridge OVER something
+// ---------------------------------------------------------------------------
+
+test('a road bridging a railway clears it, and its approaches are embanked', () => {
+  // The screenshot behind this: a road crossing the Pardubice lines with the
+  // rails running THROUGH the tarmac. Nothing in the data says otherwise — OSM
+  // tags the road `bridge=yes` and the railway `layer=-1` at best, and neither
+  // of those is a height. The height comes from what has to fit underneath.
+  const terrain = { res: 20, ready: () => true, heightAt: () => 200 };
+  //   approach ——— bridge ——— approach, running east; the railway crosses the
+  //   middle of the bridge and shares no node with it, which is what "over"
+  //   means as opposed to "joins".
+  const west = { d: 1, t: 'primary', w: 8, p: [[-300, 0], [-20, 0]] };
+  const span = { d: 1, t: 'primary', w: 8, br: 1, p: [[-20, 0], [20, 0]] };
+  const east = { d: 1, t: 'primary', w: 8, p: [[20, 0], [300, 0]] };
+  const rail = { p: [[0, -200], [0, 200]] };
+  const roads = [west, span, east];
+  for (const w of [...roads, rail]) w._len = polylineLength(w.p);
+  indexJunctions(roads);
+  indexBridgeCrossings(roads, [rail]);
+
+  assert.ok(span._cross?.length, 'the crossing was not found at all');
+  const deck = bridgeDeckHeight(span, span._len / 2, terrain);
+  assert.ok(deck >= 205.5, `the deck is at ${deck.toFixed(1)} m over rails at 200 — no headroom`);
+
+  // …and the approach ARRIVES there. A deck raised on its own would just move
+  // the hole from over the rails to the abutment.
+  const abut = roadGradeY(west, west._len, terrain);
+  assert.ok(Math.abs(abut - deck) < 0.3,
+    `the approach reaches ${abut.toFixed(1)} m and the deck is at ${deck.toFixed(1)} — a step`);
+  // …up a bank a road could actually climb, not a wall
+  const back = roadGradeY(west, west._len - 100, terrain);
+  assert.ok((abut - back) / 100 <= 0.07,
+    `the embankment climbs at ${(100 * (abut - back) / 100).toFixed(0)} % — that is not a road`);
+});
+
+test('a footpath under a bridge is not owed a road\'s headroom', () => {
+  // Five metres of steps that happen to cross a path became a bridge on a 4.5 m
+  // embankment. A path needs the height of a person, not of a lorry.
+  const terrain = { res: 20, ready: () => true, heightAt: () => 200 };
+  const span = { d: 1, t: 'footway', w: 2, br: 1, p: [[-20, 0], [20, 0]] };
+  const foot = { d: 1, t: 'footway', w: 2, p: [[0, -100], [0, 100]] };
+  for (const w of [span, foot]) w._len = polylineLength(w.p);
+  indexBridgeCrossings([span, foot], []);
+  const need = bridgeClearance(span, terrain);
+  assert.ok(need !== null && need < 203.5, `a footpath was owed ${(need - 200).toFixed(1)} m of headroom`);
+});
+
+test('you can be under a bridge instead of on it', () => {
+  // Every "how high is the world here" answered with the HIGHEST surface, so a
+  // car driving under a bridge was teleported onto the deck, driven along it,
+  // and dropped off the far end.
+  const on = levels.reset(226).add(220).add(226).value();
+  assert.equal(on, 226, 'a car on the deck was pulled down to the road under it');
+  const under = levels.reset(220.2).add(220).add(226).value();
+  assert.equal(under, 220, 'a car under the bridge was pulled up onto the deck');
+  // airborne over a crest, still its own deck
+  assert.equal(levels.reset(227).add(220).add(226).value(), 226);
+  // no hint at all — the top of the world, which is what a spawn wants
+  assert.equal(levels.reset(NaN).add(220).add(226).value(), 226);
+  // put down beneath a viaduct with nothing at that height: the road, not the deck
+  assert.equal(levels.reset(180).add(220).add(226).value(), 220);
 });

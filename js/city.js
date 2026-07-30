@@ -23,6 +23,38 @@ import { stampFranchises } from './interiors.js';
 const _closest = { x: 0, z: 0, t: 0 };
 const _surf = { y: 0, road: false };   // surfaceY's reusable answer
 
+// ---- WHICH surface, when a place has more than one -------------------------
+// A bridge and the road beneath it stand on the same ground, and "how high is
+// the world at (x, z)" has two answers there. Taking the higher — which is what
+// every caller did — is the whole reason you could not drive under a bridge:
+// the car popped up onto the deck, drove along it, and fell off the far end.
+//
+// So the caller says roughly where it IS, and the answer is the highest surface
+// that is not over its head. SNAP_UP is the headroom that keeps a car on its
+// own deck while it is airborne over a crest; it is far under the clearance of
+// any bridge, which is the gap this has to tell apart. With no hint the highest
+// still wins — a spawn or a teleport wants to land on top of the world.
+//
+// One object, no allocation, and shared by surfaceY and heightAt so the two
+// cannot drift apart.
+const SNAP_UP = 1.5;
+export const levels = {
+  best: -Infinity, above: Infinity, near: NaN,
+  reset(near) { this.best = -Infinity; this.above = Infinity; this.near = near; return this; },
+  add(y) {
+    if (!(y <= this.near + SNAP_UP)) {          // NaN near → no ceiling, all pass
+      if (Number.isFinite(this.near)) { if (y < this.above) this.above = y; return this; }
+    }
+    if (y > this.best) this.best = y;
+    return this;
+  },
+  // …and if everything here is overhead, the LOWEST of them: a car put down
+  // under a viaduct belongs on the road, not on the deck.
+  value(fallback = null) {
+    return this.best > -Infinity ? this.best : this.above < Infinity ? this.above : fallback;
+  },
+};
+
 // How much demolition history one session carries. The log exists so a player
 // who joins an hour late still finds the holes everybody else made, so it wants
 // to be long — but it also goes on the wire in one snapshot message, and
@@ -288,7 +320,7 @@ export class CityWorld {
   // their elevation), so a car placed at heightAt() rides with its tyres 20 cm
   // inside the asphalt, which on a bridge (parapet right beside the wheel)
   // finally became visible. Returns { y, road } and never allocates.
-  surfaceY(x, z) {
+  surfaceY(x, z, near) {
     _surf.road = false;
     // THE GROUND FIRST. Every height below is a thickness of surfacing — 20 cm
     // of asphalt, 10 of paving, 5 of grass — measured from the ground, not from
@@ -298,7 +330,7 @@ export class CityWorld {
     const ground = this.terrain.heightAt(x, z);
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
     if (!cell) { _surf.y = ground; return _surf; }
-    let best = -1;
+    levels.reset(near);
     for (const r of cell.roads) {
       if (!r.d) continue;
       const half = r.w / 2 + 0.35;               // a wheel just off the kerb still rides the kerb
@@ -313,13 +345,13 @@ export class CityWorld {
           // was drawn and not on either of the two things it was made from.
           const gy = r.br ? bridgeDeckHeight(r, s, this.terrain)
             : (roadGradeY(r, s, this.terrain) ?? ground);
-          const y = gy + LAYER_Y.road;
-          if (y > best) best = y;
+          levels.add(gy + LAYER_Y.road);
         }
         along += Math.hypot(bx - ax, bz - az);
       }
     }
-    if (best >= 0) { _surf.y = best; _surf.road = true; return _surf; }
+    const best = levels.value();
+    if (best !== null) { _surf.y = best; _surf.road = true; return _surf; }
     // car parks and plazas are paved and flat — driveable, not offroad
     for (const p of cell.paved) {
       if (pointInPolygon(x, z, p.o) && !(p.i ?? []).some((h) => pointInPolygon(x, z, h))) {
@@ -333,11 +365,13 @@ export class CityWorld {
   // Ground height plus bridge decks: standing on a bridge road means standing
   // on its level span, not on the river valley sampled underneath it. Nearest
   // drivable or walkable bridge way within half its width owns the point.
-  heightAt(x, z) {
+  // `near` — roughly where the asker is; see `levels` above for why a deck over
+  // your head is not the ground you are standing on.
+  heightAt(x, z, near) {
     const ground = this.terrain.heightAt(x, z);
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
     if (!cell) return ground;
-    let y = ground;
+    levels.reset(near).add(ground);
     for (const r of cell.roads) {
       if (!r.br) continue;
       let dist = 0;
@@ -346,12 +380,12 @@ export class CityWorld {
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
         if (d < r.w / 2 + 1.5) {
           const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
-          y = Math.max(y, bridgeDeckHeight(r, along, this.terrain));
+          levels.add(bridgeDeckHeight(r, along, this.terrain));
         }
         dist += Math.hypot(bx - ax, bz - az);
       }
     }
-    return y;
+    return levels.value(ground);
   }
 
   // What is (x, z) standing on, at or below `maxY`? Terrain and bridge decks
@@ -360,7 +394,7 @@ export class CityWorld {
   // staircase is, the walk controller merely keeps finding a surface 175 mm
   // higher than the last one.
   supportY(x, z, maxY) {
-    let best = this.heightAt(x, z);
+    let best = this.heightAt(x, z, maxY);
     const roof = this.roofY(x, z, maxY);
     if (roof > best) best = roof;
     const inside = this.interiors.supportY(x, z, maxY);

@@ -138,6 +138,7 @@ const GRADE_DS = 2;          // m between profile samples
 const SMOOTH_SIGMA = 4;      // m — one blur pass…
 const SMOOTH_PASSES = 24;    // …applied this many times, bounds re-imposed between
 const PIN_TAPER = 30;        // m a junction's agreed height is blended in over
+const BRIDGE_FILL = 12;      // m of embankment a bridge abutment may demand
 const JUNCTION_R = 8;        // m — radius the shared junction height averages over
 
 /** One Gaussian pass over a 1-D profile, reflecting at the ends. */
@@ -188,6 +189,16 @@ function junctionY(node, terrain) {
     n++;
   }
   if (n) node._ny = a / n;
+  // …unless a bridge meets here that has to clear something. Then the node is
+  // as high as the deck needs to be, and the approach roads are embanked up to
+  // it — which is what a real road over a railway is: a bridge and two banks.
+  // Nothing else in the data says the deck belongs above the rails, so this is
+  // where the height enters the world.
+  for (const arm of node.arms) {
+    if (!arm.r.br) continue;
+    const need = bridgeClearance(arm.r, terrain);
+    if (need !== null && need > node._ny) { node._ny = need; node._hard = true; }
+  }
   return node._ny;
 }
 
@@ -304,19 +315,28 @@ function levelWay(way, terrain, pinList) {
     const order = idx.map((_, k) => k).sort((p, q) => idx[p] - idx[q]);
     const reach = Math.max(1, Math.round(PIN_TAPER / ds));
     for (let o = 0; o < order.length; o++) {
-      const k = order[o], i = idx[k];
-      const d = junctionY(pinList[k].node, terrain) - y[i];
+      const k = order[o], i = idx[k], node = pinList[k].node;
+      const d = junctionY(node, terrain) - y[i];
       if (!Number.isFinite(d) || Math.abs(d) < 1e-4) continue;
+      // A HARD pin is a bridge abutment: the deck has to clear a railway, so
+      // this road is the embankment that gets it up there. It may therefore
+      // break the fill cap — the cap exists to stop the levelling INVENTING an
+      // embankment, and this one is not invented, it is holding up a bridge —
+      // and it takes as long as a road climbing at BRIDGE_GRADE needs.
+      const hard = node._hard === true;
+      const rise = Math.abs(d);
+      const span = hard ? Math.max(reach, Math.round(rise / BRIDGE_GRADE / ds)) : reach;
       // never reach past a neighbouring pin, or past the end of the road
       const prev = o > 0 ? idx[order[o - 1]] : -Infinity;
       const next = o < order.length - 1 ? idx[order[o + 1]] : Infinity;
-      const back = Math.min(reach, i, Math.floor((i - prev) / 2));
-      const fwd = Math.min(reach, n - 1 - i, Math.floor((next - i) / 2));
+      const back = Math.min(span, i, Math.floor((i - prev) / 2));
+      const fwd = Math.min(span, n - 1 - i, Math.floor((next - i) / 2));
       for (let j = -back; j <= fwd; j++) {
         const w = j === 0 ? 1
           : 0.5 + 0.5 * Math.cos(Math.PI * Math.min(1, Math.abs(j) / (j < 0 ? back : fwd)));
         const v = y[i + j] + d * w;
-        y[i + j] = v < lo[i + j] ? lo[i + j] : v > hi[i + j] ? hi[i + j] : v;
+        const cap = hard ? ground[i + j] + BRIDGE_FILL : hi[i + j];
+        y[i + j] = v < lo[i + j] ? lo[i + j] : v > cap ? cap : v;
       }
     }
   }
@@ -425,7 +445,11 @@ export function bridgeDeckHeight(way, dist, terrain) {
     //
     // A ramp now appears only where the two banks are at DIFFERENT heights,
     // which is the one case a real bridge ramps too.
-    const deck = Math.max(start, end);
+    // …and never below what has to fit underneath. The approaches are embanked
+    // to the same height (junctionY), so on a well-mapped crossing these agree;
+    // the floor is here for the case where they could not get there.
+    const need = bridgeClearance(way, terrain);
+    const deck = Math.max(start, end, need ?? -Infinity);
     const rampFor = (rise) => Math.min(total * 0.4,
       Math.max(BRIDGE_RAMP, Math.abs(rise) / BRIDGE_GRADE));
     profile = { terrain, start, end, deck,
@@ -609,6 +633,100 @@ export function indexJunctions(roads) {
   }
 }
 
+// ---- what a bridge is a bridge OVER -------------------------------------
+// A bridge deck used to be levelled to the roads at its two ends and nothing
+// else, and on flat ground that puts it exactly where the railway is. The
+// screenshot that started this: a road crossing the Pardubice lines with the
+// rails running THROUGH the tarmac, because nothing in the data said the two
+// were at different heights. OSM does not say it either — it tags the road
+// `bridge=yes` and the railway `layer=-1` at best, and neither is a height.
+//
+// The height comes from what has to fit underneath. So find where a bridge way
+// actually crosses a railway or another road WITHOUT sharing a node with it —
+// sharing a node is a junction, crossing without one is one passing over the
+// other — and demand the standard headroom over it.
+//
+// The clearances are the Czech ones and they are not decoration: 5.6 m over a
+// railway is what the overhead line needs (ČSN 73 6201 asks 5.6 m over an
+// electrified track), 4.5 m over a road is the signed minimum.
+// A path is not a road: demanding 4.5 m over a footway turned a five-metre
+// flight of steps that happens to cross one into a bridge on a 4.5 m bank.
+const CLEAR_RAIL = 5.6, CLEAR_ROAD = 4.5, CLEAR_FOOT = 2.6;
+const FOOT_TYPES = new Set(['footway', 'cycleway', 'path', 'steps', 'pedestrian', 'track']);
+const clearanceOver = (f) => (FOOT_TYPES.has(f.t) ? CLEAR_FOOT : CLEAR_ROAD);
+
+/** Where two segments cross, or null. Endpoints touching does not count. */
+function segCross(ax, az, bx, bz, cx, cz, dx, dz) {
+  const rx = bx - ax, rz = bz - az, sx = dx - cx, sz = dz - cz;
+  const den = rx * sz - rz * sx;
+  if (Math.abs(den) < 1e-9) return null;                  // parallel
+  const t = ((cx - ax) * sz - (cz - az) * sx) / den;
+  const u = ((cx - ax) * rz - (cz - az) * rx) / den;
+  if (t <= 0.001 || t >= 0.999 || u <= 0.001 || u >= 0.999) return null;
+  return [ax + rx * t, az + rz * t];
+}
+
+export function indexBridgeCrossings(roads, rails) {
+  const bridges = roads.filter((r) => r.br && r.p?.length > 1);
+  if (!bridges.length) return;
+  // A bridge shares nodes with the roads it JOINS; those are junctions, not
+  // crossings, and a coordinate-keyed set is enough to tell them apart because
+  // OSM shares nodes by identity.
+  const grid = new Map();                                  // chunk key → segments
+  const put = (f, clear) => {
+    for (let i = 0; i < f.p.length - 1; i++) {
+      const [ax, az] = f.p[i], [bx, bz] = f.p[i + 1];
+      const seg = [ax, az, bx, bz, clear];
+      // every chunk the segment's bounding box touches, not just the two its
+      // ENDS fall in — a 400 m railway registered at its endpoints alone is
+      // invisible in the 120 m chunk the bridge actually crosses it in
+      for (let cx = Math.floor(Math.min(ax, bx) / CHUNK); cx <= Math.floor(Math.max(ax, bx) / CHUNK); cx++) {
+        for (let cz = Math.floor(Math.min(az, bz) / CHUNK); cz <= Math.floor(Math.max(az, bz) / CHUNK); cz++) {
+          const k = cx + ',' + cz;
+          let list = grid.get(k);
+          if (!list) grid.set(k, list = []);
+          list.push(seg);
+        }
+      }
+    }
+  };
+  for (const r of rails ?? []) if (r.p?.length > 1) put(r, CLEAR_RAIL);
+  for (const r of roads) if (!r.br && r.p?.length > 1) put(r, clearanceOver(r));
+
+  for (const b of bridges) {
+    const nodes = new Set(b.p.map(([x, z]) => J_KEY(x, z)));
+    const found = [];
+    for (let i = 0; i < b.p.length - 1; i++) {
+      const [ax, az] = b.p[i], [bx, bz] = b.p[i + 1];
+      for (let cx = Math.floor(Math.min(ax, bx) / CHUNK); cx <= Math.floor(Math.max(ax, bx) / CHUNK); cx++) {
+       for (let cz = Math.floor(Math.min(az, bz) / CHUNK); cz <= Math.floor(Math.max(az, bz) / CHUNK); cz++) {
+        for (const g of grid.get(cx + ',' + cz) ?? []) {
+          // a way that ENDS on this bridge is joining it, not passing under it
+          if (nodes.has(J_KEY(g[0], g[1])) || nodes.has(J_KEY(g[2], g[3]))) continue;
+          const at = segCross(ax, az, bx, bz, g[0], g[1], g[2], g[3]);
+          if (at) found.push({ x: at[0], z: at[1], clear: g[4] });
+        }
+       }
+      }
+    }
+    if (found.length) b._cross = found;
+  }
+}
+
+/**
+ * How high this bridge's deck has to be to clear what runs under it — null if
+ * it crosses nothing, which is most bridges (a river needs no headroom).
+ */
+export function bridgeClearance(way, terrain) {
+  if (!way?._cross || !terrain) return null;
+  let need = null;
+  for (const c of way._cross) {
+    const y = terrain.heightAt(c.x, c.z) + c.clear;
+    if (need === null || y > need) need = y;
+  }
+  return need;
+}
+
 /** Junction pads, bucketed by chunk key. meshes.js asks for its own. */
 export const JUNCTIONS = new Map();
 export function junctionsIn(chunkK) { return JUNCTIONS.get(chunkK) ?? null; }
@@ -690,8 +808,9 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   const roads = stamp(data.roads), rails = stamp(data.rails),
     water = stamp(data.water), green = stamp(data.green), paved = stamp(data.paved);
   for (const r of roads) { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); }
-  indexJunctions(roads);
   for (const r of rails) r.p = smoothBends(r.p, r.br);
+  indexJunctions(roads);
+  indexBridgeCrossings(roads, rails);
   bucketize(city.chunkIndex, roads, 'roads', touched);
   bucketize(city.chunkIndex, rails, 'rails', touched);
   bucketize(city.chunkIndex, water, 'water', touched);
