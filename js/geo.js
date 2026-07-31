@@ -132,7 +132,7 @@ export function bridgeElevation(dist, totalLen) {
 // identical for every arm, and each arm's profile is pinned to it. junctionY
 // averages a small disc rather than sampling a point: the shared height should
 // itself be smooth, or the pins would put the ground's roughness straight back.
-const GRADE_CUT = 0.14;      // m the road may sink into the hill — under LAYER_Y.road
+export const GRADE_CUT = 0.14;      // m the road may sink into the hill — under LAYER_Y.road
 const GRADE_FILL = 1.6;      // m of embankment over a hollow, and no more
 const GRADE_DS = 2;          // m between profile samples
 const SMOOTH_SIGMA = 4;      // m — one blur pass…
@@ -182,7 +182,7 @@ function blurPass(y, out, sigma, ds) {
  * the pin lands within centimetres of where each arm was going anyway, so it
  * corrects rather than overrides, and all the arms still meet exactly.
  */
-function junctionY(node, terrain) {
+export function junctionY(node, terrain) {
   if (node._ny !== undefined && node._nyT === terrain) return node._ny;
   node._nyT = terrain;
   node._ny = terrain.heightAt(node.x, node.z);   // in case an arm recurses back here

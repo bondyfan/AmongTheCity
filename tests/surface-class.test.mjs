@@ -23,6 +23,8 @@ import { register } from 'node:module';
 register(new URL('./three-alias.mjs', import.meta.url));
 
 const { buildChunkMeshes, makeMaterials } = await import('../js/meshes.js');
+const geoForTest = await import('../js/geo.js');
+const chunkOf = (city, mats) => buildChunkMeshes(city, 0, 0, mats, 'full');
 const { SURF } = await import('../js/surfaces.js');
 const { LAYER_Y, CHUNK } = await import('../js/config.js');
 
@@ -98,4 +100,46 @@ test('a subdivided polygon keeps its class on EVERY vertex, not just the corners
   }
   assert.ok(n > 12, `only ${n} vertices — the fixture did not subdivide`);
   assert.equal(wrong, 0, `${wrong} of ${n} vertices lost the class`);
+});
+
+test('a green median cannot rise above the deck of the road it lies in', () => {
+  // Palackého třída: OSM maps the median as a green polygon, drawn draped on
+  // the terrain, while the carriageway is LEVELLED and may cut up to 14 cm into
+  // a bump. Over the bump the median at terrain + 0.05 stood above the deck —
+  // grass in the middle of the road with the lane dashes floating over it.
+  const bump = (x) => GROUND + (x > 40 && x < 80 ? 0.5 : 0);
+  let id = 0;
+  const road = { d: 1, t: 'primary', w: 9, p: [[0, 60], [120, 60]] };
+  const green = { t: 'grass', o: [[30, 55], [95, 55], [95, 65], [30, 65]] };
+  for (const f of [road, green]) { f._id = ++id; f._home = '0,0'; }
+  road._len = 120;
+  const cell = { buildings: [], roads: [road], rails: [], water: [], green: [green], paved: [], trees: [] };
+  const city = { chunkIndex: new Map([['0,0', cell]]), tile: 4800 };
+  const mats = makeMaterials();
+  mats.terrain = { res: 20, ready: () => true, heightAt: (x) => bump(x), missed: false };
+  mats.trees = false; mats.facades = false; mats.ortho = null;
+  const g = chunkOf(city, mats);
+  assert.ok(g, 'nothing built');
+
+  const { roadGradeY } = geoForTest;
+  let breaches = 0, inCorridor = 0;
+  for (const m of g.children) {
+    const pos = m.geometry?.attributes?.position, sf = m.geometry?.attributes?.surf;
+    if (!pos || !sf) continue;
+    for (let i = 0; i < pos.count; i++) {
+      if (sf.getX(i) !== SURF.grass) continue;
+      const x = pos.getX(i), z = pos.getZ(i);
+      if (z < 60 - 4.5 || z > 60 + 4.5) continue;         // outside the corridor
+      if (x < 30 || x > 95) continue;                     // outside the median ring
+      // …and only GROUND-height vertices: lamp posts merge into the same mesh
+      // and inherit the default grass class, and a pole is allowed to stand
+      // above a deck — that is what a pole is.
+      if (pos.getY(i) > bump(x) + 0.25) continue;
+      inCorridor++;
+      const gy = roadGradeY(road, x, mats.terrain);
+      if (gy !== null && pos.getY(i) > gy + LAYER_Y.road - 0.04) breaches++;
+    }
+  }
+  assert.ok(inCorridor >= 4, `only ${inCorridor} median vertices landed in the corridor`);
+  assert.equal(breaches, 0, `${breaches} of ${inCorridor} median vertices stand above the deck`);
 });

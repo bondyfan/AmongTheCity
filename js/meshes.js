@@ -31,7 +31,7 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
 import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
-  junctionsIn, distPointToSegment, roadProfile, roadGradeY } from './geo.js';
+  junctionsIn, distPointToSegment, roadProfile, roadGradeY, junctionY, GRADE_CUT } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
 import { entranceOf, brandOf } from './interiors.js';
@@ -767,6 +767,49 @@ function clipSeg(ax, az, bx, bz, x0, z0, x1, z1) {
   return { t0, t1 };
 }
 
+// ---- no fill may rise above a carriageway that runs over it ---------------
+// Fills are draped on the raw terrain; carriageways are LEVELLED, and a
+// levelled road may cut up to GRADE_CUT below the terrain. So over any road in
+// cutting, a green median at terrain + 0.05 or a car park at terrain + 0.10
+// sits ABOVE the deck at grade + 0.20 − cut — which is grass growing out of
+// the middle of Palackého třída with the lane dashes floating over it.
+//
+// The rule that fixes it is the physical one: a surface under a road is under
+// the road. Every fill vertex that lies within a drivable corridor is pushed
+// down to just below that deck; vertices outside the corridor keep their
+// height, so the fill dives under the ribbon's edge the way ground under a
+// kerb actually does. min() only — a road on an embankment is ABOVE the fill
+// already, and under a bridge the deck is metres up, where min() changes
+// nothing.
+const _cl = { x: 0, z: 0, t: 0 };      // distPointToSegment's reusable answer
+function clampUnderRoads(geo, drv, terrain) {
+  if (!geo || !drv?.length || !terrain) return geo;
+  const a = geo.attributes.position.array;
+  for (let i = 0; i < a.length; i += 3) {
+    const x = a[i], z = a[i + 2];
+    for (const { r, bb, hw } of drv) {
+      if (x < bb[0] - hw || x > bb[2] + hw || z < bb[1] - hw || z > bb[3] + hw) continue;
+      let along = 0;
+      for (let k = 0; k < r.p.length - 1; k++) {
+        const [ax, az] = r.p[k], [bx, bz] = r.p[k + 1];
+        const d = distPointToSegment(x, z, ax, az, bx, bz, _cl);
+        if (d < hw) {
+          const s2 = along + Math.hypot(_cl.x - ax, _cl.z - az);
+          const gy = r.br ? bridgeDeckHeight(r, s2, terrain) : roadGradeY(r, s2, terrain);
+          if (gy !== null && gy !== undefined) {
+            const cap = gy + LAYER_Y.road - 0.05;
+            if (a[i + 1] > cap) a[i + 1] = cap;
+          }
+        }
+        along += Math.hypot(bx - ax, bz - az);
+      }
+    }
+  }
+  geo.attributes.position.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
+
 // ---- water: sunken surface + earthy bank walls cut through the ground ----
 
 // Vertical bank wall along a water outline ring, from the 5 cm curb lip down
@@ -1197,24 +1240,40 @@ function junctionPad(sink, j, terrain) {
   const ring = convexHull(pts);
   if (!ring || ring.length < 3) return;
   _c.setHex(COLORS.road.residential);
-  // The pad spans the whole junction, and it used to go down as ONE fan of
-  // hull-sized triangles, draped only at its corners. Over any bump the
-  // interior sagged below the finely-subdivided ground beside it and the
-  // ground came up through the middle of the junction — the light patches in
-  // the middle of every big crossing. Same rule as every other flat surface:
-  // subdivide until no edge outruns the terrain, THEN drape.
-  const y = LAYER_Y.road + 0.012;    // a hair above the ribbons, never fighting
+  // ---- the pad rides the JUNCTION'S grade, not the terrain -----------------
+  // The roads arriving here are levelled: every arm is pinned to one agreed
+  // height (junctionY) and may sit up to GRADE_CUT below the terrain. The pad
+  // used to drape on the raw terrain instead, which put it up to 15 cm ABOVE
+  // the decks it exists to join — it buried the ribbons, buried their give-way
+  // markings ("silnicím chybí značení" was largely this), and its seams with
+  // the differently-graded arms were the patchwork of shades all over every
+  // big crossing.
+  //
+  // So the pad now lives at the same height the arms were pinned to, rising
+  // only where the terrain forces it up by more than the cut budget — exactly
+  // the bound the roads themselves obey. Absolute heights, marked fixed so the
+  // final drape leaves them alone; tessellated so a bump between hull corners
+  // cannot lift the ground through it.
+  const jy = terrain ? junctionY(j, terrain) : 0;
+  const lift = LAYER_Y.road + 0.012;   // a hair above the ribbons, never fighting
   const fan = [];
   for (let i = 1; i < ring.length - 1; i++) {
-    fan.push(ring[0][0], y, ring[0][1],
-      ring[i][0], y, ring[i][1],
-      ring[i + 1][0], y, ring[i + 1][1]);
+    fan.push(ring[0][0], 0, ring[0][1],
+      ring[i][0], 0, ring[i][1],
+      ring[i + 1][0], 0, ring[i + 1][1]);
   }
   const tp = tessTriangles(fan, fan.length / 9, 8);
+  const deckAt = (x, z) => (terrain
+    ? Math.max(jy, terrain.heightAt(x, z) - GRADE_CUT) : 0) + lift;
+  const mark = sink.mark();
   for (let k = 0; k < tp.length; k += 9) {
-    sink.triFacing(tp[k], tp[k + 1], tp[k + 2], tp[k + 3], tp[k + 4], tp[k + 5],
-      tp[k + 6], tp[k + 7], tp[k + 8], 0, 1, 0, _c.r, _c.g, _c.b);
+    sink.triFacing(
+      tp[k], deckAt(tp[k], tp[k + 2]), tp[k + 2],
+      tp[k + 3], deckAt(tp[k + 3], tp[k + 5]), tp[k + 5],
+      tp[k + 6], deckAt(tp[k + 6], tp[k + 8]), tp[k + 8],
+      0, 1, 0, _c.r, _c.g, _c.b);
   }
+  if (terrain) sink.fixFrom(mark);
 }
 
 /** Andrew's monotone chain. Small inputs (≤ 16 points), so the sort is free. */
@@ -2771,9 +2830,15 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       [cell.paved, LAYER_Y.paved,
         (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved],
     ];
+    // the drivable decks this chunk's fills must stay under, bboxed once
+    const drv = cell.roads
+      .filter((r) => r.d && r.p?.length > 1)
+      .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25 }));
     for (const [list, y, pick, kind] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;
-      const g = drape(terrainTess(shapePoly(f.o, f.i, y, pick(f), kind(f))), mats.terrain);
+      const g = clampUnderRoads(
+        drape(terrainTess(shapePoly(f.o, f.i, y, pick(f), kind(f))), mats.terrain),
+        drv, mats.terrain);
       if (g) flat.push(g);
     }
     // The classifier's sealed ground, straight off the raster: a handful of
@@ -2781,12 +2846,15 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // as every other fill — at LAYER_Y.inferred, under everything OSM said and
     // under every levelled road, which is the entire point of the layer.
     if (mats.ground) {
+      const drvR = cell.roads
+        .filter((r) => r.d && r.p?.length > 1)
+        .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25 }));
       for (const r of mats.ground.rectsIn(x0, z0)) {
         const col = r.c === 2 ? COLORS.inferred.asphalt : COLORS.inferred.paving;
         const sc = r.c === 2 ? SURF.asphalt : SURF.paving;
-        const g = drape(terrainTess(shapePoly(
+        const g = clampUnderRoads(drape(terrainTess(shapePoly(
           [[r.x0, r.z0], [r.x1, r.z0], [r.x1, r.z1], [r.x0, r.z1]],
-          null, LAYER_Y.inferred, col, sc)), mats.terrain);
+          null, LAYER_Y.inferred, col, sc)), mats.terrain), drvR, mats.terrain);
         if (g) flat.push(g);
       }
     }
