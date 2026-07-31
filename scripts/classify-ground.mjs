@@ -94,7 +94,11 @@ async function fetchQuadrant(tile, qx, qz) {
 // Exactly the layers whose ground the runtime already draws. Anything stamped
 // here is left alone: OSM stood on it and the photograph did not.
 
-const COVERED = 1, GRASS = 2, PAVING = 3, ASPHALT = 4, DIRT = 5, CLAIMED = 6, UNKNOWN = 7;
+// GREEN and SEALED are the only two things the photograph decides. PAVING,
+// ASPHALT and GRAVEL are what a SEALED region is later found to be MADE of,
+// from its context — never from its brightness.
+const COVERED = 1, GREEN = 2, SEALED = 3, CLAIMED = 6;
+const PAVING = 10, ASPHALT = 11, GRAVEL = 12;
 
 function stampCovered(mask, tile) {
   const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
@@ -188,8 +192,30 @@ function stampLine(m, x0, z0, pts, hw, value = COVERED) {
 const warmOf = (r, b) => r - b;
 
 /** Average a 2×2 block of 2 m pixels into one 4 m cell, then decide. */
+// ---- what the photograph can and cannot see --------------------------------
+// Measured on tile 0_-1, against ground OSM states the material of, inside this
+// same orthophoto: asphalt roads median luminance 153, paving 148, concrete
+// 150, cobble 139, gravel 152. Separating asphalt from paving costs 50.0 %
+// balanced error on luminance — EXACTLY CHANCE — and 31.6 % on the best index
+// tried. The photograph cannot see material. Every "bright is paving, dark is
+// asphalt" rule this file used to contain was reading noise, and the noise it
+// was reading was shadow: one grey expanse with dark continents drifting over
+// it is what that looks like on screen.
+//
+// What it CAN see is chlorophyll. Sealed against green, on the normalised
+// excess-green index, costs 8.1 % — and 13.8 % inside shadow, where a raw index
+// falls apart, because dividing by (R+G+B) is exactly the exposure correction a
+// shadow needs. The warm axis is kept alongside it, not as a class of its own
+// but to stop a harvested field being called a car park: bare Czech soil is
+// strongly red-over-blue and nothing paved is.
+//
+// So the photograph is asked ONE BIT, and the material is decided afterwards
+// from context — which is where the information actually is.
+const SEAL_GREEN = 0.055;      // normalised excess green, above this it grows
+const SEAL_WARM = 0.07;        // normalised red-over-blue, above this it is soil
+
 function classify(mask, quads) {
-  let green = 0, paving = 0, asphalt = 0, dirt = 0, unknown = 0;
+  let sealed = 0, green = 0, unknown = 0;
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       const claim = mask[j * N + i];
@@ -197,7 +223,6 @@ function classify(mask, quads) {
       const qx = i < N / 2 ? 0 : 1, qz = j < N / 2 ? 0 : 1;
       const img = quads[qz * 2 + qx];
       if (!img) continue;
-      // the cell's own 2×2 patch of 2 m pixels inside that quadrant
       const px0 = (i - qx * (N / 2)) * 2, pz0 = (j - qz * (N / 2)) * 2;
       let r = 0, g = 0, b = 0;
       for (let dy = 0; dy < 2; dy++) {
@@ -207,153 +232,92 @@ function classify(mask, quads) {
         }
       }
       r /= 4; g /= 4; b /= 4;
-      // Excess green — the standard index for separating vegetation from
-      // everything else in plain RGB, and the reason this works at all: a lawn
-      // and a concrete apron are both mid-grey in luminance and nothing alike
-      // in this.
-      const exg = 2 * g - r - b;
-      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      // WARM means soil. This is the correction that mattered: a ploughed field
-      // in October is dark brown, and luminance alone called a quarter of the
-      // Pardubice tile asphalt — which would have tarmacked the countryside.
-      // Tarmac is NEUTRAL grey, r ≈ g ≈ b; earth is not, and the red-blue gap
-      // is what says so.
-      const warm = warmOf(r, b);
-      // Overruling OSM takes MORE evidence than filling a blank. A park with a
-      // dry August patch must stay a park; only ground that is both plainly
-      // colourless and plainly bright — concrete, not shadow, not soil — is
-      // allowed to take a green tag off the map.
+      const sum = r + g + b || 1;
+      const nexg = (2 * g - r - b) / sum;
+      const nwarm = (r - b) / sum;
+      const isSealed = nexg < SEAL_GREEN && nwarm < SEAL_WARM;
+      // Overruling OSM's own green tag takes more than filling a blank: a park
+      // with an August dry patch must stay a park, so the index has to be well
+      // clear of the line, not merely on the other side of it.
       if (claim === CLAIMED) {
-        if (exg < 6 && lum > 96 && Math.abs(warmOf(r, b)) < 24) { mask[j * N + i] = PAVING; paving++; }
-        else { mask[j * N + i] = GRASS; green++; }
+        if (nexg < SEAL_GREEN - 0.02 && nwarm < SEAL_WARM) { mask[j * N + i] = SEALED; sealed++; }
+        else { mask[j * N + i] = GREEN; green++; }
         continue;
       }
-      // ---- TOO DARK TO JUDGE is not the same as GRASS -----------------------
-      // Measured at the exact spot the user reported, x 18.1 z −118.4 in front
-      // of Pardubice station: r 23, g 34, b 38 — luminance 31. That is the tree
-      // row's shadow, and the old guard ("cool and dark is water or shadow,
-      // leave it as field") turned every shaded pavement in the city into a
-      // lawn. A photograph taken at nine in the morning shadows one side of
-      // every street, so this was not an edge case.
-      //
-      // Darkness carries no colour information, so it is recorded as UNKNOWN
-      // and filled in afterwards from the ground AROUND it — a shadow in the
-      // middle of a forecourt is forecourt, a shadow in the middle of a lawn is
-      // lawn. That is the only honest reading of a pixel with no signal in it.
-      if (lum < 62) { mask[j * N + i] = UNKNOWN; unknown++; }
-      else if (exg > 18) { mask[j * N + i] = GRASS; green++; }
-      else if (warm > 14) { mask[j * N + i] = DIRT; dirt++; }
-      // Real water: distinctly blue, not merely unlit.
-      else if (b > r + 18 && lum < 100) { mask[j * N + i] = GRASS; green++; }
-      else if (lum > 105) { mask[j * N + i] = PAVING; paving++; }
-      else { mask[j * N + i] = ASPHALT; asphalt++; }
+      if (isSealed) { mask[j * N + i] = SEALED; sealed++; }
+      else { mask[j * N + i] = GREEN; green++; }
     }
   }
-  return { green, paving, asphalt, dirt, unknown };
+  return { sealed, green, unknown };
 }
 
 /**
- * One surface per SURFACE.
+ * What a SEALED region is MADE OF, decided from context rather than brightness
+ * — because brightness was measured to be worth nothing for it (see classify
+ * above) and context is not.
  *
- * Paving and asphalt are told apart by brightness, and brightness is the one
- * thing a photograph varies for reasons that have nothing to do with material:
- * a cloud, a shadow, a wet patch, the sun on one half of a square. Deciding
- * cell by cell therefore shatters a single paved forecourt into paving with
- * ragged asphalt continents drifting across it — which is exactly what it
- * looked like, and no real square is built that way.
+ * Ordered, first match wins, and every rule is a thing you could point at:
+ *   · inside a works, depot, railway yard or car park → asphalt. That is what
+ *     those are made of.
+ *   · mostly ringed by carriageway                    → asphalt. A bay, a
+ *     turning head, the space a service road opens into: the road, spread out.
+ *   · touching a platform or a plaza                  → paving. The same
+ *     surface, continuing past where OSM stopped drawing it.
+ *   · anything else                                   → paving, which is what
+ *     unmapped sealed ground in a Czech town nearly always is.
  *
- * So the decision is made once per CONNECTED REGION of hard standing: label the
- * component, count the votes inside it, and give the whole thing the winner. A
- * square comes out as a square, a car park as a car park, and the seam between
- * them stays where the geometry actually changes.
- *
- * Dirt is left out of the vote — soil beside tarmac is a real edge, not a
- * lighting artefact.
+ * Components are found first and the small ones dropped, so the decision is
+ * made once for a whole yard rather than once per cell — which is the whole
+ * difference between a square and a square with the weather on it.
  */
-function oneMaterialPerRegion(mask, road) {
+function materialise(mask, road, tile) {
+  const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
+  const yard = new Uint8Array(N * N), soft = new Uint8Array(N * N);
+  for (const f of tile.paved ?? []) {
+    if (!f.o || f.o.length < 3 || f.t === 'inferred') continue;
+    if (f.t === 'yard' || f.t === 'parking') fillPolygon(yard, x0, z0, f.o, f.i, 1);
+    else fillPolygon(soft, x0, z0, f.o, f.i, 1);        // platform, plaza, apron
+  }
   const seen = new Uint8Array(N * N);
-  const stack = [];
-  const region = [];
-  let merged = 0;
+  const stack = [], region = [];
+  const stats = { paving: 0, asphalt: 0, dropped: 0 };
   for (let start = 0; start < N * N; start++) {
-    const v0 = mask[start];
-    if (seen[start] || (v0 !== PAVING && v0 !== ASPHALT)) continue;
-    region.length = 0;
-    stack.length = 0;
-    stack.push(start);
-    seen[start] = 1;
-    let paving = 0, asphalt = 0;
+    if (seen[start] || mask[start] !== SEALED) continue;
+    region.length = 0; stack.length = 0;
+    stack.push(start); seen[start] = 1;
+    let inYard = 0, touchSoft = 0, edge = 0, edgeOnRoad = 0;
     while (stack.length) {
       const at = stack.pop();
       region.push(at);
-      if (mask[at] === PAVING) paving++; else asphalt++;
+      if (yard[at]) inYard++;
+      if (soft[at]) touchSoft++;
       const i = at % N, j = (at / N) | 0;
+      let border = false;
       for (let dj = -1; dj <= 1; dj++) {
         for (let di = -1; di <= 1; di++) {
+          if ((di && dj) || (!di && !dj)) continue;      // 4-connected
           const ii = i + di, jj = j + dj;
-          if (ii < 0 || ii >= N || jj < 0 || jj >= N) continue;
+          if (ii < 0 || ii >= N || jj < 0 || jj >= N) { border = true; continue; }
           const o = jj * N + ii;
+          if (mask[o] !== SEALED) { border = true; if (road[o]) edgeOnRoad++; continue; }
           if (seen[o]) continue;
-          const v = mask[o];
-          if (v !== PAVING && v !== ASPHALT) continue;
-          // A KERB IS A BOUNDARY. Without this the vote walks straight off the
-          // carriageway onto the pavement beside it, the two become one region,
-          // and the brighter paving outvotes the asphalt — which is exactly how
-          // the road stopped being a road and the whole street became one grey
-          // expanse. A carriageway is its own surface; so is the pavement.
-          if (road[o] !== road[at]) continue;
-          seen[o] = 1;
-          stack.push(o);
+          seen[o] = 1; stack.push(o);
         }
       }
+      if (border) edge++;
     }
-    const win = paving >= asphalt ? PAVING : ASPHALT;
-    const lost = Math.min(paving, asphalt);
-    if (lost) merged += lost;
-    for (const o of region) mask[o] = win;
-  }
-  return merged;
-}
-
-/**
- * Fill UNKNOWN cells from their neighbours, a ring at a time.
- *
- * Everything that is in shadow in the photograph lands here, which in a city
- * photographed in the morning is one side of every street. The rule is a plain
- * majority of the eight neighbours, applied repeatedly, so a shaded strip takes
- * the surface of the ground it is a strip OF, and grows inward from both edges
- * at once. Cells still unknown after `rounds` are left alone — that is a shadow
- * wider than 2·rounds cells with nothing identifiable anywhere near it, and the
- * field fallback is the safer wrong answer for those.
- */
-function inpaint(mask, rounds = 14) {
-  const vote = new Int32Array(8);
-  for (let pass = 0; pass < rounds; pass++) {
-    const next = [];
-    for (let j = 0; j < N; j++) {
-      for (let i = 0; i < N; i++) {
-        if (mask[j * N + i] !== UNKNOWN) continue;
-        vote.fill(0);
-        let best = 0, bestN = 0;
-        for (let dj = -1; dj <= 1; dj++) {
-          for (let di = -1; di <= 1; di++) {
-            if (!di && !dj) continue;
-            const jj = j + dj, ii = i + di;
-            if (jj < 0 || jj >= N || ii < 0 || ii >= N) continue;
-            const v = mask[jj * N + ii];
-            if (v !== GRASS && v !== PAVING && v !== ASPHALT && v !== DIRT) continue;
-            if (++vote[v] > bestN) { bestN = vote[v]; best = v; }
-          }
-        }
-        if (best) next.push(j * N + i, best);
-      }
+    if (region.length * RES * RES < MIN_AREA) {
+      for (const o of region) mask[o] = 0;
+      stats.dropped++;
+      continue;
     }
-    if (!next.length) break;
-    for (let k = 0; k < next.length; k += 2) mask[next[k]] = next[k + 1];
+    const mat = inYard > region.length / 2 ? ASPHALT
+      : (edge && edgeOnRoad / edge > 0.6) ? ASPHALT
+      : PAVING;
+    for (const o of region) mask[o] = mat;
+    stats[mat === ASPHALT ? 'asphalt' : 'paving']++;
   }
-  let left = 0;
-  for (let k = 0; k < mask.length; k++) if (mask[k] === UNKNOWN) { mask[k] = 0; left++; }
-  return left;
+  return stats;
 }
 
 /**
@@ -499,31 +463,26 @@ for (const key of tiles) {
       + ` warm=${r - b}`);
   }
   const stats = classify(mask, quads);
-  const NAME = { 0: 'open', 1: 'covered', 2: 'grass', 3: 'paving', 4: 'asphalt', 5: 'dirt', 6: 'claimed', 7: 'SHADOW' };
+  const NAME = { 0: 'open', 1: 'covered', 2: 'green', 3: 'sealed', 6: 'claimed', 10: 'paving', 11: 'asphalt' };
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
-    console.log(`    → classified as ${NAME[mask[j * N + i]]}`);
+    console.log(`    → the photograph says ${NAME[mask[j * N + i]]}`);
   }
-  // Shadow gets the surface of what surrounds it — see inpaint().
-  const dark = inpaint(mask);
-  // …and then a paved area is ONE paved area, bounded by the kerbs OSM knows
-  // about — see oneMaterialPerRegion().
+  // A kerb bounds a region (a carriageway is not the pavement beside it), and
+  // the material comes from CONTEXT — never from brightness, which is measured
+  // to be worth nothing for it.
   const roadCells = new Uint8Array(N * N);
   for (const f of tile.roads) stampLine(roadCells, tile.tx * TILE, tile.tz * TILE, f.p, (f.w ?? 3) / 2, 1);
-  const flipped = oneMaterialPerRegion(mask, roadCells);
+  const made = materialise(mask, roadCells, tile);
+  const clean = mask;
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
-    console.log(`    → after in-painting ${NAME[mask[j * N + i]]}`);
-  }
-  const clean = despeckle(mask);
-  for (const [px, pz] of probes) {
-    const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
-    console.log(`    → after despeckle ${NAME[clean[j * N + i]]}`);
+    console.log(`    → made of ${NAME[clean[j * N + i]]}`);
   }
 
   const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
   const before = tile.paved.length;
-  for (const [want, s] of [[PAVING, 'paving'], [ASPHALT, 'asphalt'], [DIRT, 'dirt']]) {
+  for (const [want, s] of [[PAVING, 'paving'], [ASPHALT, 'asphalt']]) {
     const joined = close(clean, want, CLOSE_R);
     for (const o of rectangles(joined, want, x0, z0)) tile.paved.push({ o, t: 'inferred', s });
   }
@@ -532,9 +491,9 @@ for (const key of tiles) {
   if (!DRY) writeFileSync(file, JSON.stringify(tile));
   done++;
   console.log(`  ${key}: ${(100 * open / (N * N)).toFixed(0)}% unmapped → `
-    + `${stats.green} field, ${stats.dirt} dirt, ${stats.paving} paving, ${stats.asphalt} asphalt`
-    + `, ${stats.unknown} in shadow (${dark} still unread)`
-    + `, ${flipped} cells joined their region → ${n} polygons`);
+    + `${stats.sealed} sealed / ${stats.green} green cells → `
+    + `${made.paving} paved regions, ${made.asphalt} asphalt, ${made.dropped} too small`
+    + ` → ${n} polygons`);
   await sleep(200);                            // be a good citizen of a free service
 }
 console.log(`\n${done} tiles, ${added} inferred polygons${DRY ? ' (dry run, nothing written)' : ''}`);
