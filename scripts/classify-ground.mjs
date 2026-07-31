@@ -253,6 +253,63 @@ function classify(mask, quads) {
 }
 
 /**
+ * One surface per SURFACE.
+ *
+ * Paving and asphalt are told apart by brightness, and brightness is the one
+ * thing a photograph varies for reasons that have nothing to do with material:
+ * a cloud, a shadow, a wet patch, the sun on one half of a square. Deciding
+ * cell by cell therefore shatters a single paved forecourt into paving with
+ * ragged asphalt continents drifting across it — which is exactly what it
+ * looked like, and no real square is built that way.
+ *
+ * So the decision is made once per CONNECTED REGION of hard standing: label the
+ * component, count the votes inside it, and give the whole thing the winner. A
+ * square comes out as a square, a car park as a car park, and the seam between
+ * them stays where the geometry actually changes.
+ *
+ * Dirt is left out of the vote — soil beside tarmac is a real edge, not a
+ * lighting artefact.
+ */
+function oneMaterialPerRegion(mask) {
+  const seen = new Uint8Array(N * N);
+  const stack = [];
+  const region = [];
+  let merged = 0;
+  for (let start = 0; start < N * N; start++) {
+    const v0 = mask[start];
+    if (seen[start] || (v0 !== PAVING && v0 !== ASPHALT)) continue;
+    region.length = 0;
+    stack.length = 0;
+    stack.push(start);
+    seen[start] = 1;
+    let paving = 0, asphalt = 0;
+    while (stack.length) {
+      const at = stack.pop();
+      region.push(at);
+      if (mask[at] === PAVING) paving++; else asphalt++;
+      const i = at % N, j = (at / N) | 0;
+      for (let dj = -1; dj <= 1; dj++) {
+        for (let di = -1; di <= 1; di++) {
+          const ii = i + di, jj = j + dj;
+          if (ii < 0 || ii >= N || jj < 0 || jj >= N) continue;
+          const o = jj * N + ii;
+          if (seen[o]) continue;
+          const v = mask[o];
+          if (v !== PAVING && v !== ASPHALT) continue;
+          seen[o] = 1;
+          stack.push(o);
+        }
+      }
+    }
+    const win = paving >= asphalt ? PAVING : ASPHALT;
+    const lost = Math.min(paving, asphalt);
+    if (lost) merged += lost;
+    for (const o of region) mask[o] = win;
+  }
+  return merged;
+}
+
+/**
  * Fill UNKNOWN cells from their neighbours, a ring at a time.
  *
  * Everything that is in shadow in the photograph lands here, which in a city
@@ -443,6 +500,8 @@ for (const key of tiles) {
   }
   // Shadow gets the surface of what surrounds it — see inpaint().
   const dark = inpaint(mask);
+  // …and then a paved area is ONE paved area — see oneMaterialPerRegion().
+  const flipped = oneMaterialPerRegion(mask);
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
     console.log(`    → after in-painting ${NAME[mask[j * N + i]]}`);
@@ -465,7 +524,8 @@ for (const key of tiles) {
   done++;
   console.log(`  ${key}: ${(100 * open / (N * N)).toFixed(0)}% unmapped → `
     + `${stats.green} field, ${stats.dirt} dirt, ${stats.paving} paving, ${stats.asphalt} asphalt`
-    + `, ${stats.unknown} in shadow (${dark} of them still unread) → ${n} polygons`);
+    + `, ${stats.unknown} in shadow (${dark} still unread)`
+    + `, ${flipped} cells joined their region → ${n} polygons`);
   await sleep(200);                            // be a good citizen of a free service
 }
 console.log(`\n${done} tiles, ${added} inferred polygons${DRY ? ' (dry run, nothing written)' : ''}`);
