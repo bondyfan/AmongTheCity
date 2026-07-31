@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
-  roadGradeY } from './geo.js';
+  roadGradeY, roadProfile } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain, groundFor } from './terrain.js';
@@ -68,6 +68,113 @@ const HIT_LOG_MAX = 240;
 // until onTileLoaded says the ground under it exists.
 const PENDING_HITS_MAX = 128;
 const HIT_IDS_MAX = 8192;          // dedupe set ceiling — see _rememberHit
+
+// ---- earthworks: the terrain conforms to the roads -------------------------
+// Every visual disaster this project has fought — terrain lying across a
+// carriageway, tall torn edges, kerb walls two metres high, fills breaching
+// decks — came from one decision: the roads negotiated with a fixed terrain.
+// The survey (DMR 5G, 20 m samples with sharp creases) is not ground anyone
+// built on; a real road comes with EARTHWORKS, and the ground around it is
+// shaped to meet it. The flat-world build looked right for exactly this
+// reason: the ground and the roads were one surface.
+//
+// So once a height tile and the roads over it are both in, the tile's grid is
+// re-shaped ONCE: every sample within a road corridor takes the road's own
+// levelled grade, and a shoulder around it blends smoothly back into the
+// survey. After that, by construction: the terrain can never rise through a
+// deck, every kerb face is the same 25 cm, every fill draped on the ground
+// meets the road edge exactly — and the hills stay where no road runs.
+//
+// The pristine survey is kept per tile, because roads arrive by data tile and
+// a later tile can add roads over ground already shaped — the re-bake starts
+// from the survey, not from the previous bake.
+const CONFORM_FALL = 14;      // m of shoulder blending deck grade into survey
+const CONFORM_FOOT = 5;       // …for footways, which move far less earth
+
+export function conformTerrainTile(terrain, city, tx, tz) {
+  const key = tx + ',' + tz;
+  const g = terrain.grids.get(key);
+  if (!g) return false;
+  terrain._conformed ??= new Set();
+  if (terrain._conformed.has(key)) return false;
+  terrain._raw ??= new Map();
+  if (!terrain._raw.has(key)) terrain._raw.set(key, g.slice());
+  const raw = terrain._raw.get(key);
+  const n = terrain.n, res = terrain.res, T = terrain.tile;
+  const x0 = tx * T, z0 = tz * T;
+
+  // every road touching the tile, via the chunk index (which is cross-tile)
+  const roads = new Map();
+  for (let cx = Math.floor(x0 / CHUNK); cx < Math.floor((x0 + T) / CHUNK); cx++) {
+    for (let cz = Math.floor(z0 / CHUNK); cz < Math.floor((z0 + T) / CHUNK); cz++) {
+      const cell = city.chunkIndex.get(cx + ',' + cz);
+      if (!cell) continue;
+      for (const r of cell.roads) {
+        if (r.br || !r.p || r.p.length < 2) continue;
+        roads.set(r._id, r);
+      }
+    }
+  }
+  if (!roads.size) { terrain._conformed.add(key); return false; }
+
+  // Profiles FIRST, against the pristine survey — they are cached on the way,
+  // so every later consumer (ribbons, cars, this bake) reads the same line.
+  for (const r of roads.values()) roadProfile(r, terrain);
+
+  // Road-major stamping: per segment, visit only the grid samples its
+  // corridor + shoulder can reach, and keep the strongest claim per sample.
+  const tBest = new Float32Array(n * n);
+  const hBest = new Float32Array(n * n);
+  for (const r of roads.values()) {
+    const fall = r.d ? CONFORM_FALL : CONFORM_FOOT;
+    const hw = (r.w ?? 3) / 2;
+    const reach = hw + fall;
+    let along = 0;
+    for (let k = 0; k < r.p.length - 1; k++) {
+      const [ax, az] = r.p[k], [bx, bz] = r.p[k + 1];
+      const segLen = Math.hypot(bx - ax, bz - az);
+      const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - reach - x0) / res));
+      const i1 = Math.min(n - 1, Math.ceil((Math.max(ax, bx) + reach - x0) / res));
+      const j0 = Math.max(0, Math.floor((Math.min(az, bz) - reach - z0) / res));
+      const j1 = Math.min(n - 1, Math.ceil((Math.max(az, bz) + reach - z0) / res));
+      for (let j = j0; j <= j1; j++) {
+        for (let i = i0; i <= i1; i++) {
+          const x = x0 + i * res, z = z0 + j * res;
+          const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
+          if (d >= reach) continue;
+          const o = j * n + i;
+          let t = d <= hw ? 1 : 1 - (d - hw) / fall;
+          t = t * t * (3 - 2 * t);                    // smooth shoulder
+          if (t <= tBest[o]) continue;
+          const s2 = along + Math.hypot(_closest.x - ax, _closest.z - az);
+          const gy = roadGradeY(r, s2, terrain);
+          if (gy === null || gy === undefined) continue;
+          tBest[o] = t;
+          hBest[o] = gy;
+        }
+      }
+      along += segLen;
+    }
+  }
+  let moved = 0;
+  for (let o = 0; o < n * n; o++) {
+    if (!tBest[o] || raw[o] === -32768) continue;
+    const h0 = raw[o] / 10;
+    const h1 = h0 + (hBest[o] - h0) * tBest[o];
+    const v = Math.round(h1 * 10);
+    if (v !== g[o]) { g[o] = v; moved++; }
+  }
+  // Ground memos measured against the survey are stale now.
+  for (let cx = Math.floor(x0 / CHUNK); cx < Math.floor((x0 + T) / CHUNK); cx++) {
+    for (let cz = Math.floor(z0 / CHUNK); cz < Math.floor((z0 + T) / CHUNK); cz++) {
+      const cell = city.chunkIndex.get(cx + ',' + cz);
+      if (!cell) continue;
+      for (const b of cell.buildings) { delete b._gy; delete b._gfall; }
+    }
+  }
+  terrain._conformed.add(key);
+  return moved > 0;
+}
 
 export class CityWorld {
   constructor(scene, city) {
@@ -134,6 +241,11 @@ export class CityWorld {
     city.onTileLoaded?.((t) => {
       this._dropCells(t.cells); this._stampFranchises();
       this._tileIn(t, true); this._flushHits();
+      // new roads may have landed over ground already shaped — bake again,
+      // from the survey, next update
+      if (this.terrain._conformed) {
+        for (const tk of [...this.terrain._conformed]) this.terrain._conformed.delete(tk);
+      }
     });
     // The far side of streaming: a tile that fell 9 km behind gives its
     // buildings back (geo.js evictFar). Its cells are far out of view, but they
@@ -160,6 +272,17 @@ export class CityWorld {
       // 116 KB against a feature tile's several megabytes, and terrain that
       // arrives late means a chunk gets built flat and then rebuilt.
       this.terrain.ensure(focus.x, focus.z, 6000);
+      // Earthworks: one tile per pass, so a bake never stalls a frame. A tile
+      // that gains roads later (its data tile arriving after its height map)
+      // is re-marked below and re-baked from the pristine survey.
+      for (const tk of this.terrain.grids.keys()) {
+        if (this.terrain._conformed?.has(tk)) continue;
+        const [ttx, ttz] = tk.split(',').map(Number);
+        if (conformTerrainTile(this.terrain, this.city, ttx, ttz)) {
+          this._dropTileChunks(ttx, ttz);
+        }
+        break;
+      }
       // Trees are only scattered inside the built radius, so the canopy needs
       // far less reach than the ground — and it is four times the samples.
       this.canopy.ensure(focus.x, focus.z, 2000);
@@ -302,6 +425,22 @@ export class CityWorld {
       if (group) {
         this.scene.remove(group);
         group.traverse(o => { o.geometry?.dispose?.(); });
+      }
+      this.built.delete(key);
+    }
+  }
+
+  /** Drop the built chunks of ONE terrain tile — its ground just moved. */
+  _dropTileChunks(tx, tz) {
+    const T = this.terrain.tile;
+    const c0x = Math.floor((tx * T) / CHUNK), c1x = Math.floor(((tx + 1) * T) / CHUNK);
+    const c0z = Math.floor((tz * T) / CHUNK), c1z = Math.floor(((tz + 1) * T) / CHUNK);
+    for (const [key, group] of [...this.built]) {
+      const [cx, cz] = key.split(',').map(Number);
+      if (cx < c0x || cx >= c1x || cz < c0z || cz >= c1z) continue;
+      if (group) {
+        this.scene.remove(group);
+        group.traverse((o) => { o.geometry?.dispose?.(); });
       }
       this.built.delete(key);
     }

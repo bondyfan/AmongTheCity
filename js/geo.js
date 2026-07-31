@@ -274,17 +274,6 @@ function levelWay(way, terrain, pinList) {
       const h = terrain.heightAt(x + dx * o, z + dz * o);
       if (h > hi) hi = h;
     }
-    // …and ACROSS the deck, which the first version never did. The deck is
-    // flat across its width, but the bound only sampled the centreline — so a
-    // road running along a hillside had its uphill half buried under the bank,
-    // and the terrain lay across the carriageway in green tongues with the
-    // lane dashes painted over them. The floor has to clear the highest ground
-    // anywhere UNDER the deck, not just under its centre.
-    const hw2 = (way.w ?? 3) / 2 + 0.3;
-    for (const o of [-hw2, -hw2 * 0.5, hw2 * 0.5, hw2]) {
-      const h = terrain.heightAt(x - dz * o, z + dx * o);
-      if (h > hi) hi = h;
-    }
     top[i] = hi;
   }
   const ground = Float32Array.from(y);
