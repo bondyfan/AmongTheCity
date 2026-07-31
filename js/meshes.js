@@ -44,6 +44,11 @@ const GAUGE_H = 1.435 / 2;                           // standard gauge, rail cen
 const RAIL_HW = 0.09;                                // steel ribbon half-width
 const SLEEPER_STEP = 0.8, SLEEPER_HL = 1.25, SLEEPER_HW = 0.12;
 const FASCIA = 0.55;                                 // girder face below a bridge deck edge
+// The kerb face along every drivable deck edge — light concrete, like the kerb
+// stones it stands in for.
+const KERB_HEX = 0x8d8a83;
+const _kc = new THREE.Color(KERB_HEX);
+const KERB_R = _kc.r, KERB_G = _kc.g, KERB_B = _kc.b;
 const RAILING_H = 0.9, RAILING_COL = 0x2b2d31;       // bridge parapet strips
 const TRENCH_D = 1.2;                                // a stream sits this far under its banks
 const BANK_TOP = 0.05, BANK_COL = 0x6b5f4c;          // river bank walls: curb lip → just under water
@@ -1089,6 +1094,25 @@ function roadRibbon(sink, f, terrain, cell, key) {
     sink.quad(
       ax - pax * hw, y0, az - paz * hw, bx - pbx * hw, y1, bz - pbz * hw,
       bx + pbx * hw, y1, bz + pbz * hw, ax + pax * hw, y0, az + paz * hw, cr, cg, cb);
+    // ---- the kerb: a road has a BODY -------------------------------------
+    // Until this existed a road was a floating sheet — a deck 6 to 180 cm
+    // above the ground with daylight under its edges, so every gap between the
+    // ribbon and the terrain read as torn paper, and "silnice nejsou rigid" is
+    // exactly what that looks like. A road is a slab: from each deck edge a
+    // face runs down INTO the ground (to 5 cm below it, so a terrain crease
+    // between two vertices cannot open a slit). Concrete kerb colour, both
+    // edges, drivable roads only — footways sit too low to show an edge, and
+    // bridges already carry a fascia.
+    if (f.d && !f.br && graded) {
+      sink.at(SURF.concrete);
+      for (const e of [-1, 1]) {
+        const X0 = ax + pax * hw * e, Z0 = az + paz * hw * e;
+        const X1 = bx + pbx * hw * e, Z1 = bz + pbz * hw * e;
+        sink.quad(X0, y0, Z0, X1, y1, Z1, X1, -0.05, Z1, X0, -0.05, Z0, KERB_R, KERB_G, KERB_B);
+        sink.quad(X0, -0.05, Z0, X1, -0.05, Z1, X1, y1, Z1, X0, y0, Z0, KERB_R, KERB_G, KERB_B);
+      }
+      sink.at(surfOfRoad(f));
+    }
     // Bridge edges: decks run FLAT at BRIDGE_Y now — what sells the bridge is
     // the river sunk below it, so v1's deep girder curtains are gone. A short
     // fascia below the deck edge and a 0.9 m parapet above, both double-sided
@@ -1270,7 +1294,7 @@ function junctionPad(sink, j, terrain) {
       ring[i][0], 0, ring[i][1],
       ring[i + 1][0], 0, ring[i + 1][1]);
   }
-  const tp = tessTriangles(fan, fan.length / 9, 8);
+  const tp = tessTriangles(fan, fan.length / 9, 4);
   // ---- the pad is the CONTINUATION of its arms, pointwise ------------------
   // One flat height was tried and looked like torn paper: the arms climb to
   // the node along their own levelled grades, so a pad at any single height
@@ -1306,9 +1330,17 @@ function junctionPad(sink, j, terrain) {
         gy = g.r.br ? bridgeDeckHeight(g.r, s2, terrain) : roadGradeY(g.r, s2, terrain);
       }
     }
-    // the terrain guard stays, for a bump between the arms taller than any of
-    // them — the same cut budget the roads themselves obey
-    return Math.max(gy ?? jy, terrain.heightAt(x, z) - GRADE_CUT) + lift;
+    // The terrain guard stays, for a bump between the arms taller than any of
+    // them — and it samples a small NEIGHBOURHOOD, not the point alone: pad
+    // triangles span up to 4 m while the terrain bends on 20 m creases, so a
+    // point sample let the ground rise through the middle of a triangle whose
+    // corners all cleared it.
+    let hi = terrain.heightAt(x, z);
+    for (const [ox, oz] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) {
+      const h = terrain.heightAt(x + ox, z + oz);
+      if (h > hi) hi = h;
+    }
+    return Math.max(gy ?? jy, hi - GRADE_CUT) + lift;
   };
   const mark = sink.mark();
   for (let k = 0; k < tp.length; k += 9) {
@@ -2875,10 +2907,27 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       [cell.paved, LAYER_Y.paved,
         (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved],
     ];
-    // the drivable decks this chunk's fills must stay under, bboxed once
-    const drv = cell.roads
-      .filter((r) => r.d && r.p?.length > 1)
-      .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25 }));
+    // The drivable decks a fill must stay under — from EVERY chunk the fill
+    // reaches, not just this one. A fill is drawn whole from its home chunk,
+    // and clamping it against the home cell's roads alone left the part that
+    // crosses into a neighbour unclamped against the neighbour's roads: a
+    // green tongue lying across the junction one chunk over, lane dashes
+    // painted on top of it.
+    const drvFor = (fb) => {
+      const seen = new Set(), out = [];
+      for (let cx2 = Math.floor(fb[0] / CHUNK); cx2 <= Math.floor(fb[2] / CHUNK); cx2++) {
+        for (let cz2 = Math.floor(fb[1] / CHUNK); cz2 <= Math.floor(fb[3] / CHUNK); cz2++) {
+          const c2 = city.chunkIndex.get(cx2 + ',' + cz2);
+          if (!c2) continue;
+          for (const r of c2.roads) {
+            if (!r.d || !r.p || r.p.length < 2 || seen.has(r._id)) continue;
+            seen.add(r._id);
+            out.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25 });
+          }
+        }
+      }
+      return out;
+    };
     for (const [list, y, pick, kind] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;
       // A fill that touches a drivable corridor is tessellated FINER than the
@@ -2888,6 +2937,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // the lane dashes ran over grass. 3.5 m guarantees a vertex lands inside
       // any corridor wider than it, which every drivable one is.
       const fb = bboxOfRing(f);
+      const drv = drvFor(fb);
       const nearRoad = drv.some(({ bb, hw }) =>
         !(fb[2] < bb[0] - hw || fb[0] > bb[2] + hw || fb[3] < bb[1] - hw || fb[1] > bb[3] + hw));
       const g = clampUnderRoads(
