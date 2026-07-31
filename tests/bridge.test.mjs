@@ -319,3 +319,39 @@ test('a road too short for the smoothing kernel is still a number', () => {
     }
   }
 });
+
+test('a viaduct in pieces is ONE structure with one grade', () => {
+  // A viaduct arrives from OSM as a chain of bridge ways sharing endpoints.
+  // Each used to level itself alone: its neighbours are bridges too, so the
+  // approach search found nothing, fell back to the terrain under the span,
+  // and the clearance rule hoisted every middle into a peak — a row of black
+  // tents over the railway. A chain now carries one grade end to end.
+  const terrain = { res: 20, ready: () => true, heightAt: () => 200 };
+  const approachW = { d: 1, t: 'primary', w: 8, p: [[-300, 0], [-60, 0]] };
+  const s1 = { d: 1, t: 'primary', w: 8, br: 1, p: [[-60, 0], [0, 0]] };
+  const s2 = { d: 1, t: 'primary', w: 8, br: 1, p: [[0, 0], [60, 0]] };
+  const s3 = { d: 1, t: 'primary', w: 8, br: 1, p: [[60, 0], [120, 0]] };
+  const approachE = { d: 1, t: 'primary', w: 8, p: [[120, 0], [360, 0]] };
+  const rail = { p: [[30, -200], [30, 200]] };
+  const roads = [approachW, s1, s2, s3, approachE];
+  for (const w of [...roads, rail]) w._len = polylineLength(w.p);
+  indexJunctions(roads);
+  indexBridgeCrossings(roads, [rail]);
+
+  assert.ok(s1._chain && s1._chain === s2._chain && s2._chain === s3._chain,
+    'the three spans were not chained into one structure');
+
+  // one continuous grade: clears the rail in the middle…
+  const midDeck = bridgeDeckHeight(s2, 30, terrain);
+  assert.ok(midDeck >= 205.5, `the chain clears only ${(midDeck - 200).toFixed(1)} m over the rail`);
+  // …and NO tent: walk the whole chain, the grade never exceeds 7 %
+  let worst = 0, prev = null;
+  for (const [w, off] of [[s1, 0], [s2, 60], [s3, 120]]) {
+    for (let d = 0; d <= 60; d += 2) {
+      const y = bridgeDeckHeight(w, d, terrain);
+      if (prev !== null) worst = Math.max(worst, Math.abs(y - prev) / 2);
+      prev = y;
+    }
+  }
+  assert.ok(worst <= 0.07, `the chained deck climbs at ${(worst * 100).toFixed(0)} % — a tent`);
+});

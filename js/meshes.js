@@ -1440,7 +1440,17 @@ function railWay(sink, f, terrain) {
   // trams lie flush IN the street (marking height, no sleepers); proper rail
   // sits on its own layer, steel nudged above the sleepers against z-fights
   const steelY = tram ? LAYER_Y.marking : LAYER_Y.rail + 0.04;
-  const elev = (d) => (f.br ? bridgeElevation(d, len) : 0);
+  // A railway is LEVELLED like a road — flatter, in fact: real rail holds
+  // 1–2 %. Draped raw it kinked at every terrain crease, and the sleepers
+  // showed each fold as a visible corner. The earthworks pull the ground to
+  // this same line, so the ballast sits ON its bed instead of over a crack.
+  const railGraded = !f.br && !!terrain && !!roadProfile(f, terrain);
+  const elev = (d, x2, z2) => {
+    if (f.br) return bridgeElevation(d, len);
+    if (!railGraded) return 0;
+    const gy = roadGradeY(f, d, terrain);
+    return gy === null ? 0 : gy - terrain.heightAt(x2, z2);
+  };
   // Crushed stone under the whole of it. The steel and the sleepers are a few
   // centimetres wide and share the class: at any distance where you could tell
   // them apart you are looking at the rail head, which is its own colour.
@@ -1450,7 +1460,8 @@ function railWay(sink, f, terrain) {
   for (const side of [-1, 1]) {
     const o1 = side * GAUGE_H - RAIL_HW, o2 = side * GAUGE_H + RAIL_HW;
     for (let i = 0; i < q.length - 1; i++) {
-      const y0 = steelY + elev(along[i]), y1 = steelY + elev(along[i + 1]);
+      const y0 = steelY + elev(along[i], q[i][0], q[i][1]);
+      const y1 = steelY + elev(along[i + 1], q[i + 1][0], q[i + 1][1]);
       const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
       const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
       sink.quad(
@@ -1463,7 +1474,7 @@ function railWay(sink, f, terrain) {
     const sr = _c.r, sg = _c.g, sb = _c.b;
     for (let s = SLEEPER_STEP / 2; s < len; s += SLEEPER_STEP) {
       walkAt(fr, s, _WA);
-      const y = LAYER_Y.rail + elev(s);
+      const y = LAYER_Y.rail + elev(s, _WA.x, _WA.z);
       const ux = _WA.dx * SLEEPER_HW, uz = _WA.dz * SLEEPER_HW;
       const px = _WA.dz * SLEEPER_HL, pz = -_WA.dx * SLEEPER_HL;
       sink.quad(

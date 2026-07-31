@@ -420,6 +420,65 @@ export function bridgeDeckHeight(way, dist, terrain) {
   const total = way?._len ?? polylineLength(way?.p ?? []);
   if (!terrain || !way?.p?.length) return bridgeElevation(dist, total);
 
+  // ---- a chained bridge reads the CHAIN's grade, not its own --------------
+  // One grade for the whole viaduct: anchored on the real approaches at its
+  // two ends, lifted where a crossing demands headroom, climbing at a road's
+  // 6 % — the upper envelope of the anchor line and one cone per clearance.
+  if (way._chain) {
+    const ch = way._chain;
+    let prof = ch.profile;
+    if (!prof || prof.terrain !== terrain) {
+      const anchor = (w, end) => {
+        const link = end === 0 ? w._ap0 : w._ap1;
+        const y = link && roadGradeY(link.road, link.at, terrain);
+        if (y !== null && y !== undefined) return y;
+        const p = w.p[end === 0 ? 0 : w.p.length - 1];
+        return terrain.heightAt(p[0], p[1]);
+      };
+      const A = anchor(ch.headWay, ch.headEnd === 0 ? 0 : 1);
+      const B = anchor(ch.tailWay, ch.tailEnd === 0 ? 0 : 1);
+      const cones = [];
+      for (const m of ch.members) {
+        for (const c of m._cross ?? []) {
+          // arclength of the crossing along the chain
+          let along = 0, sAt = 0, bestD = Infinity;
+          for (let k = 0; k < m.p.length - 1; k++) {
+            const [ax, az] = m.p[k], [bx, bz] = m.p[k + 1];
+            const dx = bx - ax, dz = bz - az;
+            const L2 = dx * dx + dz * dz || 1e-9;
+            let t = ((c.x - ax) * dx + (c.z - az) * dz) / L2;
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            const px2 = ax + dx * t, pz2 = az + dz * t;
+            const d2 = (c.x - px2) ** 2 + (c.z - pz2) ** 2;
+            const seg = Math.sqrt(L2);
+            if (d2 < bestD) { bestD = d2; sAt = along + seg * t; }
+            along += seg;
+          }
+          const mLen = m._len ?? polylineLength(m.p);
+          const local = m._chainRev ? mLen - sAt : sAt;
+          cones.push([m._chainOff + local, terrain.heightAt(c.x, c.z) + c.clear]);
+        }
+      }
+      let ready = !terrain.ready;
+      if (!ready) {
+        const hp = ch.headWay.p[ch.headEnd === 0 ? 0 : ch.headWay.p.length - 1];
+        const tp = ch.tailWay.p[ch.tailEnd === 0 ? 0 : ch.tailWay.p.length - 1];
+        ready = terrain.ready(hp[0], hp[1]) && terrain.ready(tp[0], tp[1]);
+      }
+      prof = { terrain, A, B, cones, total: ch.total };
+      if (ready) ch.profile = prof;
+    }
+    const local = way._chainRev ? total - Math.max(0, Math.min(total, dist))
+      : Math.max(0, Math.min(total, dist));
+    const s = way._chainOff + local;
+    let y = prof.A + (prof.B - prof.A) * (s / prof.total);
+    for (const [cs, cy] of prof.cones) {
+      const v = cy - Math.abs(s - cs) * BRIDGE_GRADE;
+      if (v > y) y = v;
+    }
+    return y;
+  }
+
   let profile = way._bridgeProfile;
   if (!profile || profile.terrain !== terrain) {
     // The APPROACH heights when the junction index found them (see
@@ -715,6 +774,73 @@ export function indexBridgeCrossings(roads, rails) {
   for (const r of rails ?? []) if (r.p?.length > 1) put(r, CLEAR_RAIL);
   for (const r of roads) if (!r.br && r.p?.length > 1) put(r, clearanceOver(r));
 
+  // ---- chained bridges are ONE structure ---------------------------------
+  // A viaduct arrives from OSM as a chain of bridge ways sharing endpoints.
+  // Each used to level itself alone: its neighbours are bridges too, so the
+  // approach search found nothing, fell back to the terrain under the span —
+  // street level — and the clearance rule then hoisted the middle into a
+  // peak. A row of black tents over the railway is what a viaduct looks like
+  // when every segment believes it is its own bridge. Chains are indexed
+  // here; bridgeDeckHeight lays ONE grade along the whole structure.
+  {
+    const byNode = new Map();
+    for (const b of bridges) {
+      for (const e of [0, b.p.length - 1]) {
+        const k = J_KEY(b.p[e][0], b.p[e][1]);
+        let list = byNode.get(k);
+        if (!list) byNode.set(k, list = []);
+        list.push({ b, e });
+      }
+    }
+    const seen = new Set();          // way OBJECTS — chaining must not depend
+    for (const b0 of bridges) {      // on _id having been stamped yet
+      if (seen.has(b0)) continue;
+      // walk the component
+      const comp = [];
+      const stack = [b0];
+      seen.add(b0);
+      let branched = false;
+      while (stack.length) {
+        const w = stack.pop();
+        comp.push(w);
+        for (const e of [0, w.p.length - 1]) {
+          const k = J_KEY(w.p[e][0], w.p[e][1]);
+          const arms = byNode.get(k) ?? [];
+          if (arms.length > 2) branched = true;
+          for (const a of arms) {
+            if (!seen.has(a.b)) { seen.add(a.b); stack.push(a.b); }
+          }
+        }
+      }
+      if (branched || comp.length < 2) continue;   // lone spans keep their own law
+      // order the chain from one terminal, accumulating offsets
+      const degree = (w, e) => (byNode.get(J_KEY(w.p[e][0], w.p[e][1])) ?? []).length;
+      let head = comp.find((w) => degree(w, 0) === 1 || degree(w, w.p.length - 1) === 1);
+      if (!head) continue;                          // a loop — leave it be
+      let enterEnd = degree(head, 0) === 1 ? 0 : head.p.length - 1;
+      const chain = { total: 0, members: [] };
+      const used = new Set();
+      while (head && !used.has(head)) {
+        used.add(head);
+        const L = head._len ?? polylineLength(head.p);
+        // reversed = the chain runs against this way's own arclength
+        const reversed = enterEnd !== 0;
+        head._chain = chain;
+        head._chainOff = chain.total;
+        head._chainRev = reversed;
+        chain.members.push(head);
+        chain.total += L;
+        const exitEnd = reversed ? 0 : head.p.length - 1;
+        const k = J_KEY(head.p[exitEnd][0], head.p[exitEnd][1]);
+        const next = (byNode.get(k) ?? []).find((a) => !used.has(a.b));
+        if (!next) { chain.tailWay = head; chain.tailEnd = exitEnd; break; }
+        head = next.b;
+        enterEnd = next.e;
+      }
+      chain.headWay = chain.members[0];
+      chain.headEnd = chain.members[0]._chainRev ? chain.members[0].p.length - 1 : 0;
+    }
+  }
   for (const b of bridges) {
     const nodes = new Set(b.p.map(([x, z]) => J_KEY(x, z)));
     const found = [];

@@ -113,6 +113,12 @@ export function conformTerrainTile(terrain, city, tx, tz) {
         if (r.br || !r.p || r.p.length < 2) continue;
         roads.set(r._id, r);
       }
+      // rails are levelled and bedded exactly like roads — a railway is the
+      // most engineered earthwork in any landscape
+      for (const r of cell.rails) {
+        if (r.br || !r.p || r.p.length < 2) continue;
+        roads.set(r._id ?? (r._id = 'rail:' + (cell.rails.indexOf(r))), r);
+      }
     }
   }
   if (!roads.size) { terrain._conformed.add(key); return false; }
@@ -126,7 +132,7 @@ export function conformTerrainTile(terrain, city, tx, tz) {
   const tBest = new Float32Array(n * n);
   const hBest = new Float32Array(n * n);
   for (const r of roads.values()) {
-    const fall = r.d ? CONFORM_FALL : CONFORM_FOOT;
+    const fall = r.d ? CONFORM_FALL : r.t ? CONFORM_FOOT : 8;   // rails: 8 m bed
     const hw = (r.w ?? 3) / 2;
     const reach = hw + fall;
     let along = 0;
