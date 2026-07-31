@@ -415,6 +415,7 @@ export function roadGradeY(way, dist, terrain) {
 // of deck clearance came down over six metres, which is a 14 % kick right at
 // the abutment and reads as "there is no ramp at all".
 const BRIDGE_GRADE = 0.06;   // 6 % — what a real bridge approach climbs at
+const FOOT_BRIDGE = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestrian']);
 export function bridgeDeckHeight(way, dist, terrain) {
   const total = way?._len ?? polylineLength(way?.p ?? []);
   if (!terrain || !way?.p?.length) return bridgeElevation(dist, total);
@@ -455,10 +456,25 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // the floor is here for the case where they could not get there.
     const need = bridgeClearance(way, terrain);
     const deck = Math.max(start, end, need ?? -Infinity);
-    const rampFor = (rise) => Math.min(total * 0.4,
-      Math.max(BRIDGE_RAMP, Math.abs(rise) / BRIDGE_GRADE));
+    // A FOOTBRIDGE climbs by stairs, not by a road's 6 % ramp. Held to road
+    // grade, a lávka lifted 5 m to clear the street below spent 16 m climbing
+    // on each side of a 40 m span — two 31 % slopes meeting at a point, which
+    // with the parapets on rendered as a row of huge black TENTS over the
+    // Pardubice flyover. Stairs are ~50 %: short steep ends, long flat deck,
+    // which is what a footbridge is.
+    const foot = FOOT_BRIDGE.has(way.t);
+    const rampFor = (rise) => (foot
+      ? Math.min(total * 0.3, Math.max(3, Math.abs(rise) / 0.5))
+      : Math.min(total * 0.4, Math.max(BRIDGE_RAMP, Math.abs(rise) / BRIDGE_GRADE)));
     profile = { terrain, start, end, deck,
       r0: rampFor(deck - start), r1: rampFor(deck - end) };
+    // A foot RAMP is a ramp along its whole length. The spiral serving the
+    // Pardubice footbridge connects the ground to the deck five metres up, and
+    // the flat-middle model made it jump in its first metres and then run
+    // LEVEL round the loop, wrapped in a parapet falling all the way to the
+    // ground — the tall black C. When a foot way's two ends differ by more
+    // than a storey's worth, the whole way IS the climb.
+    if (foot && Math.abs(end - start) > 1.5) profile.linear = true;
     // Terrain answers 0 while a height tile is still on the way. Remember the
     // profile only after both approaches are authoritative; the arriving tile
     // then rebuilds the chunk and gets a fresh, correct level.
@@ -468,6 +484,7 @@ export function bridgeDeckHeight(way, dist, terrain) {
   }
 
   const d = Math.max(0, Math.min(total, dist));
+  if (profile.linear) return profile.start + (profile.end - profile.start) * (d / total);
   if (d < profile.r0 && profile.r0 > 0) {
     return profile.start + (profile.deck - profile.start) * (d / profile.r0);
   }

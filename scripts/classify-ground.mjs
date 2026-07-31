@@ -223,6 +223,44 @@ const SEAL_WARM = 0.07;        // normalised red-over-blue, above this it is soi
 // taller than CANOPY_MIN there is a crown, and the ground under a crown is
 // UNSEEN — decided from its neighbours, not from the pixel.
 const CANOPY_MIN = 2.5;               // m — under this it is a hedge you can see past
+
+// ---- nothing paved is built on a bank --------------------------------------
+// The flyover embankments came out PAVED: dry grass on a sunlit slope is
+// bright and colourless enough to pass the sealed test, and the paving texture
+// then climbed the bank beside the road. Ground steeper than SLOPE_MAX is not
+// a square, a car park or a forecourt anywhere in this country — it is a bank,
+// and a bank is green.
+const SLOPE_MAX = 0.18;
+const TERRAIN_RES = 20, TERRAIN_N = 241;
+
+function loadTerrain(tile) {
+  try {
+    const b = readFileSync(`public/data/terrain/${tile.tx}_${tile.tz}.bin`);
+    return b.length >= TERRAIN_N * TERRAIN_N * 2 ? new Int16Array(b.buffer, b.byteOffset, TERRAIN_N * TERRAIN_N) : null;
+  } catch { return null; }
+}
+
+/** Blank SEALED off every cell on a bank. Returns how many it moved. */
+function vetoSlopes(mask, terr) {
+  if (!terr) return 0;
+  const hAt = (i, j) => {
+    const ti = Math.max(0, Math.min(TERRAIN_N - 1, Math.round((i * RES) / TERRAIN_RES)));
+    const tj = Math.max(0, Math.min(TERRAIN_N - 1, Math.round((j * RES) / TERRAIN_RES)));
+    const v = terr[tj * TERRAIN_N + ti];
+    return v === -32768 ? null : v / 10;
+  };
+  let n = 0;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      if (mask[j * N + i] !== SEALED) continue;
+      const h0 = hAt(i, j), hx = hAt(i + 5, j), hz = hAt(i, j + 5);
+      if (h0 === null || hx === null || hz === null) continue;
+      const run = 5 * RES;
+      if (Math.hypot((hx - h0) / run, (hz - h0) / run) > SLOPE_MAX) { mask[j * N + i] = GREEN; n++; }
+    }
+  }
+  return n;
+}
 const CANOPY_RES = 10, CANOPY_N = 481;
 
 function loadCanopy(tile) {
@@ -492,6 +530,7 @@ for (const key of tiles) {
   // the photograph never saw the ground under a crown — decide those cells
   // from their surroundings instead of from a picture of a tree
   const crowned = maskCanopy(mask, loadCanopy(tile), tile);
+  const banked = vetoSlopes(mask, loadTerrain(tile));
   const unfilled = inpaint(mask);
   const absorbed = tidy(mask);
   const NAME = { 0: 'open', 1: 'covered', 2: 'green', 3: 'sealed', 10: 'paving', 11: 'asphalt' };
@@ -584,7 +623,7 @@ for (const key of tiles) {
   console.log(`  ${key}: ${(100 * open / (N * N)).toFixed(0)}% unmapped → `
     + `${stats.sealed} sealed / ${stats.green} green cells → `
     + `${made.paving} paved regions, ${made.asphalt} asphalt, ${made.dropped} too small`
-    + `; ${crowned} under canopy (${unfilled} unfilled), ${absorbed} speckles absorbed`
+    + `; ${crowned} under canopy (${unfilled} unfilled), ${banked} on banks, ${absorbed} speckles absorbed`
     + ` → ${(bytes3 / 1024).toFixed(0)} kB raster (${cells} cells)`);
   await sleep(200);                            // be a good citizen of a free service
 }

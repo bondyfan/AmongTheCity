@@ -1094,16 +1094,24 @@ function roadRibbon(sink, f, terrain, cell, key) {
     // fascia below the deck edge and a 0.9 m parapet above, both double-sided
     // (seen from the bank AND from the deck), along the entire bridge way.
     if (f.br) {
-      const b0 = Math.max(0.02, y0 - FASCIA), b1 = Math.max(0.02, y1 - FASCIA);
-      const t0 = y0 + RAILING_H, t1 = y1 + RAILING_H;
+      // A footbridge is not a motorway viaduct. Its girder face is a fraction
+      // of a road bridge's, and its parapet is CONCRETE, not near-black steel
+      // — the black was what turned the spiral ramp by the Pardubice flyover
+      // into a charcoal wall you could see from the station.
+      const foot = FOOT_CLASSES.has(f.t);
+      const b0 = Math.max(0.02, y0 - (foot ? 0.25 : FASCIA));
+      const b1 = Math.max(0.02, y1 - (foot ? 0.25 : FASCIA));
+      const t0 = y0 + (foot ? 1.05 : RAILING_H), t1 = y1 + (foot ? 1.05 : RAILING_H);
       const sr = cr * 0.72, sg = cg * 0.72, sb = cb * 0.72;
+      let pr = lr, pg = lg, pb = lb;
+      if (foot) { _c.setHex(0x93908a); pr = _c.r; pg = _c.g; pb = _c.b; }
       for (const e of [-1, 1]) {
         const X0 = ax + pax * hw * e, Z0 = az + paz * hw * e;
         const X1 = bx + pbx * hw * e, Z1 = bz + pbz * hw * e;
         sink.quad(X0, y0, Z0, X1, y1, Z1, X1, b1, Z1, X0, b0, Z0, sr, sg, sb);
         sink.quad(X0, b0, Z0, X1, b1, Z1, X1, y1, Z1, X0, y0, Z0, sr, sg, sb);
-        sink.quad(X0, t0, Z0, X1, t1, Z1, X1, y1, Z1, X0, y0, Z0, lr, lg, lb);
-        sink.quad(X0, y0, Z0, X1, y1, Z1, X1, t1, Z1, X0, t0, Z0, lr, lg, lb);
+        sink.quad(X0, t0, Z0, X1, t1, Z1, X1, y1, Z1, X0, y0, Z0, pr, pg, pb);
+        sink.quad(X0, y0, Z0, X1, y1, Z1, X1, t1, Z1, X0, t0, Z0, pr, pg, pb);
       }
     }
   }
