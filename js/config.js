@@ -20,7 +20,9 @@ export const LAYER_Y = {
   // BELOW everything OSM said: below green, so a mapped park outranks a guess,
   // and far below the shallowest levelled road (+6 cm at full cut), so a
   // carriageway can never be buried under its own pavement again.
-  inferred: 0.04,
+  // 0.03, not more: a levelled road may cut 0.14 into the hill, so its deck can
+  // sit as low as terrain + 0.06 — the sealed ground has to stay clear below it.
+  inferred: 0.03,
   green: 0.05, water: 0.08, paved: 0.10, rail: 0.14,
   footway: 0.16, road: 0.20, marking: 0.26,
 };

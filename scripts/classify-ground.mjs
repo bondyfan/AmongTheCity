@@ -370,6 +370,46 @@ for (const key of tiles) {
   const roadCells = new Uint8Array(N * N);
   for (const f of tile.roads) stampLine(roadCells, tile.tx * TILE, tile.tz * TILE, f.p, (f.w ?? 3) / 2, 1);
   const made = materialise(mask, roadCells, tile);
+  // ---- junction mouths are asphalt ----------------------------------------
+  // OSM draws a road at its width, and at a junction the real carriageway fans
+  // out well past it — turn lanes, corner radii, the splay. The photograph
+  // classifies that fan as sealed (it is), and with material coming from
+  // context it came out PAVING: light-grey patches sitting in the middle of
+  // every big crossing. The context that decides it is "this is the junction,
+  // spread out": sealed cells near a node where three or more drivable arms
+  // meet, and still within reach of a carriageway, are the carriageway.
+  const MOUTH_R = 13, MOUTH_REACH = 4.5;
+  {
+    const wide = new Uint8Array(N * N);
+    for (const f of tile.roads) {
+      if (!f.d) continue;
+      stampLine(wide, tile.tx * TILE, tile.tz * TILE, f.p, (f.w ?? 3) / 2 + MOUTH_REACH, 1);
+    }
+    const arms = new Map();
+    for (const f of tile.roads) {
+      if (!f.d || !f.p || f.p.length < 2) continue;
+      for (const q of f.p) {
+        const k = Math.round(q[0] * 2) + ',' + Math.round(q[1] * 2);
+        arms.set(k, (arms.get(k) ?? 0) + 1);
+      }
+    }
+    const rc = Math.ceil(MOUTH_R / RES);
+    for (const [k, n] of arms) {
+      if (n < 3) continue;                       // two arms is a street split
+      const [qx2, qz2] = k.split(',').map(Number);
+      const nx = qx2 / 2 - tile.tx * TILE, nz = qz2 / 2 - tile.tz * TILE;
+      const ci = Math.round(nx / RES), cj = Math.round(nz / RES);
+      for (let dj = -rc; dj <= rc; dj++) {
+        for (let di = -rc; di <= rc; di++) {
+          if ((di * di + dj * dj) * RES * RES > MOUTH_R * MOUTH_R) continue;
+          const ii = ci + di, jj = cj + dj;
+          if (ii < 0 || ii >= N || jj < 0 || jj >= N) continue;
+          const o = jj * N + ii;
+          if (mask[o] === PAVING && wide[o]) mask[o] = ASPHALT;
+        }
+      }
+    }
+  }
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
     console.log(`    → made of ${NAME[mask[j * N + i]]}`);

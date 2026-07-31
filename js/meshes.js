@@ -64,7 +64,11 @@ const EDGE_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tert
   'primary_link', 'secondary_link', 'tertiary_link']);
 const EDGE_INSET = 0.30, EDGE_HW = 0.0625;   // m from the kerb, half-width of the stripe
 const EDGE_MIN_W = 4.0;                      // narrower than this and paint would meet in the middle
-const EDGE_END = 5;                          // m of bare asphalt at each end, for the junction
+// Bare asphalt at each end, for the junction box. 5 m of it, on top of the
+// junction trim that already shortened the way, left whole short links between
+// two junctions with no paint at all — "silnicím občas chybí značení". A real
+// give-way line sits a metre or two off the crossing, so that is what this is.
+const EDGE_END = 2.2;
 const FOOT_CLASSES = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestrian', 'track']);
 
 // facade rhythm: one window bay per 2.7 m of wall, one atlas row per storey.
@@ -1085,7 +1089,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
     const covered = (x, z) => onCarriageway(cell, f, x, z, -0.4)
       // …and a road running THROUGH a junction stops its lines there, the way a
       // real one stops at the give-way line rather than painting over the box.
-      || !!(js && js.some((j) => (x - j.x) ** 2 + (z - j.z) ** 2 < (j.pad + 1.5) ** 2));
+      || !!(js && js.some((j) => (x - j.x) ** 2 + (z - j.z) ** 2 < (j.pad + 0.6) ** 2));
     for (const side of [-1, 1]) {
       for (let i = 0; i < q.length - 1; i++) {
         // Break the line short of each end. OSM splits a way at every junction,
@@ -1193,8 +1197,24 @@ function junctionPad(sink, j, terrain) {
   const ring = convexHull(pts);
   if (!ring || ring.length < 3) return;
   _c.setHex(COLORS.road.residential);
-  // a hair above the ribbons so the two never fight for the same pixel
-  capInto(sink, ring, null, LAYER_Y.road + 0.012, true, _c.r, _c.g, _c.b);
+  // The pad spans the whole junction, and it used to go down as ONE fan of
+  // hull-sized triangles, draped only at its corners. Over any bump the
+  // interior sagged below the finely-subdivided ground beside it and the
+  // ground came up through the middle of the junction — the light patches in
+  // the middle of every big crossing. Same rule as every other flat surface:
+  // subdivide until no edge outruns the terrain, THEN drape.
+  const y = LAYER_Y.road + 0.012;    // a hair above the ribbons, never fighting
+  const fan = [];
+  for (let i = 1; i < ring.length - 1; i++) {
+    fan.push(ring[0][0], y, ring[0][1],
+      ring[i][0], y, ring[i][1],
+      ring[i + 1][0], y, ring[i + 1][1]);
+  }
+  const tp = tessTriangles(fan, fan.length / 9, 8);
+  for (let k = 0; k < tp.length; k += 9) {
+    sink.triFacing(tp[k], tp[k + 1], tp[k + 2], tp[k + 3], tp[k + 4], tp[k + 5],
+      tp[k + 6], tp[k + 7], tp[k + 8], 0, 1, 0, _c.r, _c.g, _c.b);
+  }
 }
 
 /** Andrew's monotone chain. Small inputs (≤ 16 points), so the sort is free. */
