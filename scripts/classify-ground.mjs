@@ -160,7 +160,7 @@ function crossings(ring, zc, out) {
   }
 }
 
-function stampLine(m, x0, z0, pts, hw) {
+function stampLine(m, x0, z0, pts, hw, value = COVERED) {
   if (!pts || pts.length < 2) return;
   const hw2 = hw * hw;
   for (let k = 0; k < pts.length - 1; k++) {
@@ -177,7 +177,7 @@ function stampLine(m, x0, z0, pts, hw) {
         let t = ((px - ax) * dx + (pz - az) * dz) / len2;
         if (t < 0) t = 0; else if (t > 1) t = 1;
         const ex = px - (ax + dx * t), ez = pz - (az + dz * t);
-        if (ex * ex + ez * ez <= hw2) m[j * N + i] = COVERED;
+        if (ex * ex + ez * ez <= hw2) m[j * N + i] = value;
       }
     }
   }
@@ -270,7 +270,7 @@ function classify(mask, quads) {
  * Dirt is left out of the vote — soil beside tarmac is a real edge, not a
  * lighting artefact.
  */
-function oneMaterialPerRegion(mask) {
+function oneMaterialPerRegion(mask, road) {
   const seen = new Uint8Array(N * N);
   const stack = [];
   const region = [];
@@ -296,6 +296,12 @@ function oneMaterialPerRegion(mask) {
           if (seen[o]) continue;
           const v = mask[o];
           if (v !== PAVING && v !== ASPHALT) continue;
+          // A KERB IS A BOUNDARY. Without this the vote walks straight off the
+          // carriageway onto the pavement beside it, the two become one region,
+          // and the brighter paving outvotes the asphalt — which is exactly how
+          // the road stopped being a road and the whole street became one grey
+          // expanse. A carriageway is its own surface; so is the pavement.
+          if (road[o] !== road[at]) continue;
           seen[o] = 1;
           stack.push(o);
         }
@@ -500,8 +506,11 @@ for (const key of tiles) {
   }
   // Shadow gets the surface of what surrounds it — see inpaint().
   const dark = inpaint(mask);
-  // …and then a paved area is ONE paved area — see oneMaterialPerRegion().
-  const flipped = oneMaterialPerRegion(mask);
+  // …and then a paved area is ONE paved area, bounded by the kerbs OSM knows
+  // about — see oneMaterialPerRegion().
+  const roadCells = new Uint8Array(N * N);
+  for (const f of tile.roads) stampLine(roadCells, tile.tx * TILE, tile.tz * TILE, f.p, (f.w ?? 3) / 2, 1);
+  const flipped = oneMaterialPerRegion(mask, roadCells);
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
     console.log(`    → after in-painting ${NAME[mask[j * N + i]]}`);
