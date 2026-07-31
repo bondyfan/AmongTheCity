@@ -100,7 +100,7 @@ async function fetchQuadrant(tile, qx, qz) {
 // GREEN and SEALED are the only two things the photograph decides. PAVING,
 // ASPHALT and GRAVEL are what a SEALED region is later found to be MADE of,
 // from its context — never from its brightness.
-const COVERED = 1, GREEN = 2, SEALED = 3;
+const COVERED = 1, GREEN = 2, SEALED = 3, CLAIMED = 6, UNSEEN = 7;
 const PAVING = 10, ASPHALT = 11, GRAVEL = 12;
 
 function stampCovered(mask, tile) {
@@ -212,6 +212,136 @@ const warmOf = (r, b) => r - b;
 // from context — which is where the information actually is.
 const SEAL_GREEN = 0.055;      // normalised excess green, above this it grows
 const SEAL_WARM = 0.07;        // normalised red-over-blue, above this it is soil
+
+// ---- where the photograph cannot see the ground ---------------------------
+// An orthophoto is taken from above, and over every street tree it records the
+// CROWN, not the pavement under it. Classified naively that is a green cell in
+// the middle of a plaza — and a city square came out with ragged green blotches
+// scattered all over it, one per tree, which is exactly the mess on the
+// user's screenshot. The canopy raster (surface model minus bare earth,
+// fetch-canopy.mjs) says precisely where this happens: anything standing
+// taller than CANOPY_MIN there is a crown, and the ground under a crown is
+// UNSEEN — decided from its neighbours, not from the pixel.
+const CANOPY_MIN = 2.5;               // m — under this it is a hedge you can see past
+const CANOPY_RES = 10, CANOPY_N = 481;
+
+function loadCanopy(tile) {
+  try {
+    const b = readFileSync(`public/data/canopy/${tile.tx}_${tile.tz}.bin`);
+    return b.length >= CANOPY_N * CANOPY_N ? b : null;
+  } catch { return null; }
+}
+
+/** Blank every classified cell whose ground the photograph never saw. */
+function maskCanopy(mask, canopy, tile) {
+  if (!canopy) return 0;
+  let n = 0;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const v = mask[j * N + i];
+      if (v !== GREEN && v !== SEALED) continue;
+      const ci = Math.round(((i + 0.5) * RES) / CANOPY_RES);
+      const cj = Math.round(((j + 0.5) * RES) / CANOPY_RES);
+      const h = canopy[Math.min(CANOPY_N - 1, cj) * CANOPY_N + Math.min(CANOPY_N - 1, ci)];
+      if (h !== 255 && h * 0.25 > CANOPY_MIN) { mask[j * N + i] = UNSEEN; n++; }
+    }
+  }
+  return n;
+}
+
+/**
+ * Decide UNSEEN cells from their neighbours, ring by ring — ground under a
+ * crown is whatever the ground around the crown is. Cells no ring ever reaches
+ * (the middle of a wood) default to GREEN, which is what a wood floor is.
+ */
+function inpaint(mask, rounds = 20) {
+  for (let pass = 0; pass < rounds; pass++) {
+    const flips = [];
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        if (mask[j * N + i] !== UNSEEN) continue;
+        let g = 0, sl = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          for (let di = -1; di <= 1; di++) {
+            if (!di && !dj) continue;
+            const ii = i + di, jj = j + dj;
+            if (ii < 0 || ii >= N || jj < 0 || jj >= N) continue;
+            const v = mask[jj * N + ii];
+            if (v === GREEN) g++; else if (v === SEALED) sl++;
+          }
+        }
+        if (g || sl) flips.push(j * N + i, sl > g ? SEALED : GREEN);
+      }
+    }
+    if (!flips.length) break;
+    for (let k = 0; k < flips.length; k += 2) mask[flips[k]] = flips[k + 1];
+  }
+  let left = 0;
+  for (let k = 0; k < mask.length; k++) if (mask[k] === UNSEEN) { mask[k] = GREEN; left++; }
+  return left;
+}
+
+/**
+ * One 3×3 majority pass over the green/sealed field, then absorb every green
+ * island smaller than a real bed. The first straightens the 4 m staircase the
+ * raster cuts along every boundary; the second is what "clean" means on a
+ * square — a 150 m² lawn is a lawn, a 30 m² speckle is a classifier artefact.
+ */
+function tidy(mask) {
+  const flips = [];
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const v = mask[j * N + i];
+      if (v !== GREEN && v !== SEALED) continue;
+      let same = 0, other = 0;
+      for (let dj = -1; dj <= 1; dj++) {
+        for (let di = -1; di <= 1; di++) {
+          if (!di && !dj) continue;
+          const ii = i + di, jj = j + dj;
+          if (ii < 0 || ii >= N || jj < 0 || jj >= N) continue;
+          const w = mask[jj * N + ii];
+          if (w === v) same++;
+          else if (w === GREEN || w === SEALED) other++;
+        }
+      }
+      if (other >= 6 && same <= 2) flips.push(j * N + i, v === GREEN ? SEALED : GREEN);
+    }
+  }
+  for (let k = 0; k < flips.length; k += 2) mask[flips[k]] = flips[k + 1];
+
+  const MIN_GREEN = 150;                       // m² — under this it is noise
+  const seen = new Uint8Array(N * N);
+  const stack = [], region = [];
+  let absorbed = 0;
+  for (let start = 0; start < N * N; start++) {
+    if (seen[start] || mask[start] !== GREEN) continue;
+    region.length = 0; stack.length = 0;
+    stack.push(start); seen[start] = 1;
+    let pure = true;                           // touching only SEALED (and edges)
+    while (stack.length) {
+      const at = stack.pop();
+      region.push(at);
+      const i = at % N, j = (at / N) | 0;
+      for (let dj = -1; dj <= 1; dj++) {
+        for (let di = -1; di <= 1; di++) {
+          if ((di && dj) || (!di && !dj)) continue;
+          const ii = i + di, jj = j + dj;
+          if (ii < 0 || ii >= N || jj < 0 || jj >= N) continue;
+          const o = jj * N + ii;
+          const v = mask[o];
+          if (v === GREEN) { if (!seen[o]) { seen[o] = 1; stack.push(o); } }
+          else if (v !== SEALED) pure = false; // meets covered/open ground
+        }
+      }
+      if (region.length * RES * RES > MIN_GREEN * 4) pure = false; // early out
+    }
+    if (pure && region.length * RES * RES < MIN_GREEN) {
+      for (const o of region) mask[o] = SEALED;
+      absorbed++;
+    }
+  }
+  return absorbed;
+}
 
 function classify(mask, quads) {
   let sealed = 0, green = 0, unknown = 0;
@@ -359,6 +489,11 @@ for (const key of tiles) {
       + ` warm=${r - b}`);
   }
   const stats = classify(mask, quads);
+  // the photograph never saw the ground under a crown — decide those cells
+  // from their surroundings instead of from a picture of a tree
+  const crowned = maskCanopy(mask, loadCanopy(tile), tile);
+  const unfilled = inpaint(mask);
+  const absorbed = tidy(mask);
   const NAME = { 0: 'open', 1: 'covered', 2: 'green', 3: 'sealed', 10: 'paving', 11: 'asphalt' };
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
@@ -449,6 +584,7 @@ for (const key of tiles) {
   console.log(`  ${key}: ${(100 * open / (N * N)).toFixed(0)}% unmapped → `
     + `${stats.sealed} sealed / ${stats.green} green cells → `
     + `${made.paving} paved regions, ${made.asphalt} asphalt, ${made.dropped} too small`
+    + `; ${crowned} under canopy (${unfilled} unfilled), ${absorbed} speckles absorbed`
     + ` → ${(bytes3 / 1024).toFixed(0)} kB raster (${cells} cells)`);
   await sleep(200);                            // be a good citizen of a free service
 }
