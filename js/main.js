@@ -1366,7 +1366,7 @@ async function initDev() {
   try {
     const { initDevMode, isDevMode } = await import('./devmode.js');
     if (!isDevMode()) return;
-    initDevMode({
+    const actions = {
       teleport(p) {
         if (!world || !player) return;      // panel can be open at the menu
         // Put the player (and whatever they are riding) down at the place, then
@@ -1391,6 +1391,10 @@ async function initDev() {
         if (ride) { ride.x = p.x; ride.z = p.z; ride.heading = p.h ?? 0; ride.speed = 0;
           if (ride.y !== undefined) ride.y = world.surfaceY?.(p.x, p.z)?.y ?? 0; }
         camInit = false;              // stop the chase cam sliding 100 km
+        // …and turn the VIEW too, not just the body. The pose readout reports
+        // the camera's bearing, so a teleport that ignores it puts you on the
+        // right spot looking the wrong way — half a reproduction.
+        if (p.h !== undefined) camYaw = p.h;
         ui_hint?.('📍 ' + p.n);
       },
       // Everything a bug report needs to be reproducible: where, which way, in
@@ -1451,7 +1455,26 @@ async function initDev() {
         parked.push(car);
         ui_hint?.('🚗 ' + kind);
       },
-    });
+    };
+    initDevMode(actions);
+    // ?tp=x,z[,heading] — stand exactly where a report was filed. Every bug in
+    // this project arrives as a pose from the dev readout, and not being able
+    // to GO there is how a session ends up reasoning instead of looking.
+    // Applied once the session is actually in the world; before that the
+    // world/player guards inside teleport() would silently drop it.
+    const tpArg = new URLSearchParams(location.search).get('tp');
+    if (tpArg) {
+      const [tx2, tz2, th2] = tpArg.split(',').map(Number);
+      if (Number.isFinite(tx2) && Number.isFinite(tz2)) {
+        const t = setInterval(() => {
+          if (!world || !player || game.mode !== 'play') return;
+          clearInterval(t);
+          actions.teleport({ x: tx2, z: tz2,
+            h: Number.isFinite(th2) ? (th2 * Math.PI) / 180 : 0,
+            n: `tp ${tx2}, ${tz2}` });
+        }, 250);
+      }
+    }
   } catch (err) {
     console.warn('devmode unavailable:', err.message);
   }

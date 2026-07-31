@@ -2873,8 +2873,18 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25 }));
     for (const [list, y, pick, kind] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;
+      // A fill that touches a drivable corridor is tessellated FINER than the
+      // corridor is wide. The clamp below works on vertices, and the default
+      // 12 m tessellation let one triangle bridge a 6 m carriageway with all
+      // three corners outside it — the median stayed high across the road and
+      // the lane dashes ran over grass. 3.5 m guarantees a vertex lands inside
+      // any corridor wider than it, which every drivable one is.
+      const fb = bboxOfRing(f);
+      const nearRoad = drv.some(({ bb, hw }) =>
+        !(fb[2] < bb[0] - hw || fb[0] > bb[2] + hw || fb[3] < bb[1] - hw || fb[1] > bb[3] + hw));
       const g = clampUnderRoads(
-        drape(terrainTess(shapePoly(f.o, f.i, y, pick(f), kind(f))), mats.terrain),
+        drape(terrainTess(shapePoly(f.o, f.i, y, pick(f), kind(f)), nearRoad ? 3.5 : undefined),
+          mats.terrain),
         drv, mats.terrain);
       if (g) flat.push(g);
     }
@@ -2889,9 +2899,11 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       for (const r of mats.ground.rectsIn(x0, z0)) {
         const col = r.c === 2 ? COLORS.inferred.asphalt : COLORS.inferred.paving;
         const sc = r.c === 2 ? SURF.asphalt : SURF.paving;
+        const nearRoad = drvR.some(({ bb, hw }) =>
+          !(r.x1 < bb[0] - hw || r.x0 > bb[2] + hw || r.z1 < bb[1] - hw || r.z0 > bb[3] + hw));
         const g = clampUnderRoads(drape(terrainTess(shapePoly(
           [[r.x0, r.z0], [r.x1, r.z0], [r.x1, r.z1], [r.x0, r.z1]],
-          null, LAYER_Y.inferred, col, sc)), mats.terrain), drvR, mats.terrain);
+          null, LAYER_Y.inferred, col, sc), nearRoad ? 3.5 : undefined), mats.terrain), drvR, mats.terrain);
         if (g) flat.push(g);
       }
     }
