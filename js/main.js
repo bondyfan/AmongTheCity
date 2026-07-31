@@ -1968,6 +1968,7 @@ async function boot() {
   // park arriving where the mask said field has to stop the grass growing
   // through it. The mask is cheap to rebuild and this only fires on a tile.
   city.onTileLoaded?.(() => grass?.invalidate());
+  world.ground?.onTileLoaded?.(() => grass?.invalidate());
   grass.setEnabled(getSettings().grass !== false);
   sky = makeSky(scene);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),

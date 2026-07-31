@@ -28,6 +28,14 @@
 // then open-close the raster to kill speckle, and emit only regions above a
 // minimum area, because a 4 m² patch of "paving" in a meadow is a shadow.
 //
+// OUTPUT IS A RASTER, NOT POLYGONS. The polygon version shipped nine thousand
+// rectangles per city tile (2.3 MB of coordinates for a byte per cell) and,
+// worse, a polygon is a plate at a fixed layer height — a levelled road cuts up
+// to 14 cm into the hill, so the plate could sit ABOVE the carriageway and bury
+// it. The raster is drawn by the client at LAYER_Y.inferred = 4 cm, below every
+// OSM fill and below the shallowest possible road, so that conflict cannot
+// exist. RLE, ~20–150 kB per city tile, nothing for open country.
+//
 // Usage: node scripts/classify-ground.mjs [--tiles="-1,-1 0,-2"] [--dry]
 
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
@@ -42,15 +50,10 @@ const SPAN = TILE / 2;                  // …covering this many metres (2 m/px)
 // the footways are about ten metres wide: closing with a radius of 2 (an 8 m
 // erosion) ate them and put the grass fallback back up from 22 % to 42 %.
 const MIN_AREA = 80;                    // m² — under this it is a shadow
-// Closing radius, in cells — 4 m, narrower than any real strip. Measured with
-// roads no longer stamped out, in case that had changed the answer: closing by
-// 2 cuts the tile from 8 682 polygons to 6 233, and takes the paving in front
-// of Pardubice station from 33 % of the square back down to 17 %. It eats the
-// thing it is there to find. Stays at 1.
-const CLOSE_R = 1;
 const WMS = 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer';
 const UA = 'AmongTheCity-dev/0.7 (three.js game prototype; contact: bondyfanfrankwild@gmail.com)';
 const DIR = 'public/data/tiles';
+const GROUND_DIR = 'public/data/ground';
 // The photograph is the slow part and the classifier is the part being tuned,
 // so the download is cached on disk. Gitignored, throwaway, and it turns a
 // forty-second iteration into a two-second one.
@@ -97,7 +100,7 @@ async function fetchQuadrant(tile, qx, qz) {
 // GREEN and SEALED are the only two things the photograph decides. PAVING,
 // ASPHALT and GRAVEL are what a SEALED region is later found to be MADE of,
 // from its context — never from its brightness.
-const COVERED = 1, GREEN = 2, SEALED = 3, CLAIMED = 6;
+const COVERED = 1, GREEN = 2, SEALED = 3;
 const PAVING = 10, ASPHALT = 11, GRAVEL = 12;
 
 function stampCovered(mask, tile) {
@@ -106,15 +109,11 @@ function stampCovered(mask, tile) {
   for (const f of tile.buildings) if (f.o?.length >= 3) poly(f.o, f.i);
   for (const f of tile.paved) if (f.o?.length >= 3) poly(f.o, f.i);
   for (const f of tile.water) if (f.o?.length >= 3) poly(f.o, f.i);
-  // GREEN is not covered — it is a CLAIM, and the photograph gets to dispute it.
-  // The courtyard at Pardubice hlavní nádraží is tagged landuse=grass and is a
-  // grey concrete rectangle in the orthophoto; trusting the tag drew a lawn over
-  // it. OSM's green polygons are drawn generously, around whole blocks, and are
-  // the one layer here that is routinely wrong about its own inside.
-  //
-  // Buildings, water and paved stay covered: those are structural, OSM is
-  // reliable about them, and a photograph cannot see under a roof anyway.
-  for (const f of tile.green) if (f.o?.length >= 3) fillPolygon(mask, x0, z0, f.o, f.i, CLAIMED);
+// GREEN is trusted. There was a release where the photograph could dispute an
+  // OSM green tag; with the output a raster UNDER the OSM fills that dispute
+  // cannot render (the mapped green draws on top regardless), so the honest
+  // thing is not to make it. Where OSM drew a polygon, OSM decides.
+  for (const f of tile.green) if (f.o?.length >= 3) poly(f.o, f.i);
   // ROADS ARE NOT COVERED EITHER, and this was the whole of the remaining bug.
   //
   // Traced at the exact spot the user reported, x 18.1 z −118.4 in front of
@@ -218,8 +217,7 @@ function classify(mask, quads) {
   let sealed = 0, green = 0, unknown = 0;
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
-      const claim = mask[j * N + i];
-      if (claim && claim !== CLAIMED) continue;
+      if (mask[j * N + i]) continue;
       const qx = i < N / 2 ? 0 : 1, qz = j < N / 2 ? 0 : 1;
       const img = quads[qz * 2 + qx];
       if (!img) continue;
@@ -235,16 +233,7 @@ function classify(mask, quads) {
       const sum = r + g + b || 1;
       const nexg = (2 * g - r - b) / sum;
       const nwarm = (r - b) / sum;
-      const isSealed = nexg < SEAL_GREEN && nwarm < SEAL_WARM;
-      // Overruling OSM's own green tag takes more than filling a blank: a park
-      // with an August dry patch must stay a park, so the index has to be well
-      // clear of the line, not merely on the other side of it.
-      if (claim === CLAIMED) {
-        if (nexg < SEAL_GREEN - 0.02 && nwarm < SEAL_WARM) { mask[j * N + i] = SEALED; sealed++; }
-        else { mask[j * N + i] = GREEN; green++; }
-        continue;
-      }
-      if (isSealed) { mask[j * N + i] = SEALED; sealed++; }
+      if (nexg < SEAL_GREEN && nwarm < SEAL_WARM) { mask[j * N + i] = SEALED; sealed++; }
       else { mask[j * N + i] = GREEN; green++; }
     }
   }
@@ -272,7 +261,15 @@ function classify(mask, quads) {
  */
 function materialise(mask, road, tile) {
   const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
+  // A WORKS zone (railway, industrial, depot, port, quarry) is the one context
+  // where unmapped sealed ground is asphalt rather than paving. `urban` zones —
+  // commercial, retail — are deliberately NOT here: they span whole town-centre
+  // blocks, squares and streets alike, and voting them asphalt is what painted
+  // Palackého třída dark.
   const yard = new Uint8Array(N * N);
+  for (const f of tile.zones ?? []) {
+    if (f.t === 'works' && f.o?.length >= 3) fillPolygon(yard, x0, z0, f.o, f.i, 1);
+  }
   for (const f of tile.paved ?? []) {
     if (!f.o || f.o.length < 3 || f.t === 'inferred') continue;
     if (f.t === 'yard' || f.t === 'parking') fillPolygon(yard, x0, z0, f.o, f.i, 1);
@@ -323,110 +320,6 @@ function materialise(mask, road, tile) {
   return stats;
 }
 
-/**
- * Morphological CLOSE of one class: dilate by `r` then erode by `r`. It joins
- * patches separated by a cell or two — a paved yard cut up by a shadow, a
- * forecourt nibbled by the corridor of every footway crossing it — without
- * growing the region's outer edge.
- *
- * This is what makes the output shippable: without it the Pardubice tile
- * vectorised into 8 760 rectangles and took thirty seconds to load. The regions
- * were right; they were just shattered.
- */
-function close(mask, want, r) {
-  const grow = new Uint8Array(N * N);
-  for (let j = 0; j < N; j++) {
-    for (let i = 0; i < N; i++) {
-      if (mask[j * N + i] !== want) continue;
-      for (let dj = -r; dj <= r; dj++) {
-        const y = j + dj;
-        if (y < 0 || y >= N) continue;
-        for (let di = -r; di <= r; di++) {
-          const x = i + di;
-          // never dilate over ground OSM already answered for
-          if (x >= 0 && x < N && mask[y * N + x] !== COVERED) grow[y * N + x] = 1;
-        }
-      }
-    }
-  }
-  const out = new Uint8Array(N * N);
-  for (let j = r; j < N - r; j++) {
-    for (let i = r; i < N - r; i++) {
-      if (!grow[j * N + i]) continue;
-      let all = 1;
-      for (let dj = -r; dj <= r && all; dj++)
-        for (let di = -r; di <= r; di++)
-          if (!grow[(j + dj) * N + i + di]) { all = 0; break; }
-      if (all) out[j * N + i] = want;
-    }
-  }
-  return out;
-}
-
-/** Majority filter — removes single-cell speckle without moving real edges. */
-function despeckle(mask) {
-  const out = Uint8Array.from(mask);
-  for (let j = 1; j < N - 1; j++) {
-    for (let i = 1; i < N - 1; i++) {
-      const v = mask[j * N + i];
-      if (v === 0 || v === COVERED) continue;
-      const tally = new Map();
-      for (let dj = -1; dj <= 1; dj++) {
-        for (let di = -1; di <= 1; di++) {
-          const u = mask[(j + dj) * N + i + di];
-          if (u && u !== COVERED) tally.set(u, (tally.get(u) ?? 0) + 1);
-        }
-      }
-      let best = v, bn = 0;
-      for (const [k, n] of tally) if (n > bn) { bn = n; best = k; }
-      out[j * N + i] = best;
-    }
-  }
-  return out;
-}
-
-// ---- vectorise -------------------------------------------------------------
-// Greedy maximal rectangles. Not the prettiest decomposition, but the regions
-// are inferred and mostly bounded by roads and buildings that draw on top of
-// them, and rectangles cost four points each and can never self-intersect.
-
-function rectangles(mask, want, x0, z0) {
-  const used = new Uint8Array(N * N);
-  const out = [];
-  for (let j = 0; j < N; j++) {
-    for (let i = 0; i < N; i++) {
-      if (used[j * N + i] || mask[j * N + i] !== want) continue;
-      // The LARGEST rectangle anchored here, not the first one that is as wide
-      // as it can be. Taking maximum width and then growing down cuts an
-      // irregular region into a staircase of slivers — on the Pardubice tile
-      // that was 8 777 rectangles where the same ground fits in a fraction of
-      // them, and the count is what the client pays to load and to index.
-      let w = 0;
-      while (i + w < N && !used[j * N + i + w] && mask[j * N + i + w] === want) w++;
-      let bw = w, bh = 1, best = w;
-      let run = w;
-      for (let h = 2; j + h - 1 < N; h++) {
-        let k = 0;
-        while (k < run) {
-          const o = (j + h - 1) * N + i + k;
-          if (used[o] || mask[o] !== want) break;
-          k++;
-        }
-        if (!k) break;
-        run = k;                                    // the widest this deep
-        if (run * h > best) { best = run * h; bw = run; bh = h; }
-      }
-      w = bw;
-      const h = bh;
-      for (let dj = 0; dj < h; dj++) for (let di = 0; di < w; di++) used[(j + dj) * N + i + di] = 1;
-      if (w * h * RES * RES < MIN_AREA) continue;
-      const ax = x0 + i * RES, az = z0 + j * RES;
-      const bx = ax + w * RES, bz = az + h * RES;
-      out.push([[ax, az], [bx, az], [bx, bz], [ax, bz]]);
-    }
-  }
-  return out;
-}
 
 // ---- per tile --------------------------------------------------------------
 
@@ -466,7 +359,7 @@ for (const key of tiles) {
       + ` warm=${r - b}`);
   }
   const stats = classify(mask, quads);
-  const NAME = { 0: 'open', 1: 'covered', 2: 'green', 3: 'sealed', 6: 'claimed', 10: 'paving', 11: 'asphalt' };
+  const NAME = { 0: 'open', 1: 'covered', 2: 'green', 3: 'sealed', 10: 'paving', 11: 'asphalt' };
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
     console.log(`    → the photograph says ${NAME[mask[j * N + i]]}`);
@@ -477,42 +370,47 @@ for (const key of tiles) {
   const roadCells = new Uint8Array(N * N);
   for (const f of tile.roads) stampLine(roadCells, tile.tx * TILE, tile.tz * TILE, f.p, (f.w ?? 3) / 2, 1);
   const made = materialise(mask, roadCells, tile);
-  // ---- NOTHING IS EMITTED OVER A CARRIAGEWAY ------------------------------
-  // A road is LEVELLED — geo.js lets it cut up to 14 cm into the hill — while
-  // these fills are draped 10 cm over the bare terrain. So on any road in
-  // cutting the inferred paving sits ABOVE the tarmac and buries it, which is
-  // the "silnice mizí a pod nimi je dlažba" the user kept reporting: a main
-  // street rendered as pavement with its own lane markings floating on top.
-  //
-  // The corridor is subtracted two metres INSIDE the ribbon's own edge, not at
-  // it: a cell is 4 m and is keyed on its centre, so subtracting at the edge
-  // would blank ground up to two metres outside the road and leave the lawn
-  // strip down both sides that this file has already been round once. Cut
-  // short, the emitted paving disappears under the ribbon before it stops.
-  for (const f of tile.roads) {
-    const inset = Math.max(0, (f.w ?? 3) / 2 - 2);
-    if (inset > 0) stampLine(mask, tile.tx * TILE, tile.tz * TILE, f.p, inset, 0);
-  }
-  const clean = mask;
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
-    console.log(`    → made of ${NAME[clean[j * N + i]]}`);
+    console.log(`    → made of ${NAME[mask[j * N + i]]}`);
   }
 
-  const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
-  const before = tile.paved.length;
-  for (const [want, s] of [[PAVING, 'paving'], [ASPHALT, 'asphalt']]) {
-    const joined = close(clean, want, CLOSE_R);
-    for (const o of rectangles(joined, want, x0, z0)) tile.paved.push({ o, t: 'inferred', s });
+  // ---- ship it as the raster it is --------------------------------------
+  // No carriageway subtraction and no corridor games: the client draws this
+  // at LAYER_Y.inferred, below every levelled road, so sealed ground under a
+  // ribbon is simply invisible — which is what "under" should have meant all
+  // along. And the tile sheds the nine thousand rectangles a previous version
+  // pushed into `paved`; stripping them here is what un-ships them.
+  const out = Buffer.allocUnsafe(N * N * 3);
+  let bytes3 = 0, cells = 0;
+  let run = 0, val = mask[0] === PAVING ? 1 : mask[0] === ASPHALT ? 2 : 0;
+  const flush = (v, n) => {
+    while (n > 0) {
+      const take = Math.min(n, 65535);
+      out.writeUInt16LE(take, bytes3); out.writeUInt8(v, bytes3 + 2);
+      bytes3 += 3; n -= take;
+    }
+  };
+  for (let k = 0; k < N * N; k++) {
+    const v = mask[k] === PAVING ? 1 : mask[k] === ASPHALT ? 2 : 0;
+    if (v) cells++;
+    if (v === val) { run++; continue; }
+    flush(val, run); val = v; run = 1;
   }
-  const n = tile.paved.length - before;
+  flush(val, run);
+  const n = cells;
   added += n;
-  if (!DRY) writeFileSync(file, JSON.stringify(tile));
+  if (!DRY) {
+    mkdirSync(GROUND_DIR, { recursive: true });
+    writeFileSync(`${GROUND_DIR}/${key}.bin`, out.subarray(0, bytes3));
+    writeFileSync(file, JSON.stringify(tile));   // …with the inferred polygons stripped
+  }
   done++;
   console.log(`  ${key}: ${(100 * open / (N * N)).toFixed(0)}% unmapped → `
     + `${stats.sealed} sealed / ${stats.green} green cells → `
     + `${made.paving} paved regions, ${made.asphalt} asphalt, ${made.dropped} too small`
-    + ` → ${n} polygons`);
+    + ` → ${(bytes3 / 1024).toFixed(0)} kB raster (${cells} cells)`);
   await sleep(200);                            // be a good citizen of a free service
 }
-console.log(`\n${done} tiles, ${added} inferred polygons${DRY ? ' (dry run, nothing written)' : ''}`);
+console.log(`
+${done} tiles, ${(added / 1e3).toFixed(0)}k sealed cells rastered${DRY ? ' (dry run, nothing written)' : ''}`);

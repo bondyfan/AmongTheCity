@@ -491,7 +491,17 @@ function processAreas(els, select, keep, owns) {
 const isWaterPoly = (t, el) =>
   t.natural === 'water' || (el.type === 'relation' && t.waterway === 'riverbank');
 
-const YARD_LANDUSE = /^(railway|industrial|retail|commercial|construction|quarry|brownfield|landfill|port|depot)$/;
+// Two different questions hide in landuse, and conflating them painted the city
+// centre dark: "what is this ground MADE of" and "what is this ground FOR".
+// A railway yard or a works really is a surface — hard standing wall to wall.
+// landuse=commercial in a Czech town centre is ZONING: it spans whole blocks,
+// squares, streets and gardens alike, and rendering it as a slab of ground put
+// one giant dark polygon over Palackého třída. Surfaces render; zones are kept
+// as CONTEXT for the offline classifier and are never drawn.
+const YARD_LANDUSE = /^(railway|industrial|depot|port)$/;
+const ZONE_LANDUSE = /^(railway|industrial|depot|port|quarry|commercial|retail|construction|brownfield|landfill)$/;
+const isZone = (t) => ZONE_LANDUSE.test(t.landuse ?? '');
+const zoneKind = (t) => (/^(railway|industrial|depot|port|quarry)$/.test(t.landuse ?? '') ? 'works' : 'urban');
 const GREEN_LANDUSE = /^(grass|forest|meadow|recreation_ground|cemetery|allotments|village_green|orchard|farmland)$/;
 const GREEN_LEISURE = /^(park|garden|pitch|playground|golf_course|stadium)$/;
 const GREEN_NATURAL = /^(wood|scrub|grassland)$/;
@@ -533,7 +543,7 @@ const pavedKind = (t) =>
   : (t.railway === 'platform' || t.highway === 'platform'
      || t.public_transport === 'platform') ? 'platform'
   : (t.highway === 'pedestrian' || t.place === 'square' || t.highway === 'footway') ? 'plaza'
-  : YARD_LANDUSE.test(t.landuse ?? '') ? 'yard'
+  : YARD_LANDUSE.test(t.landuse ?? '') ? 'yard'   // real surfaces only — see above
   : null;
 
 // ---------- waterway centerlines ----------
@@ -736,8 +746,19 @@ const rawTiles = readdirSync(RAW_DIR)
   .sort((a, b) => (a[1] - b[1]) || (a[0] - b[0]));
 
 {
+  // With --tiles, the manifest must still describe the WHOLE world: skipping a
+  // tile has to keep its existing manifest entry, or a partial rebuild ships a
+  // manifest of two tiles and unloads the other 340 from under the game.
+  const prevManifest = (() => {
+    try { return JSON.parse(readFileSync(`${OUT_DIR}/manifest.json`, 'utf8')).tiles ?? []; }
+    catch { return []; }
+  })();
   for (const [tx, tz] of rawTiles) {
-    if (ONLY.length && !ONLY.includes(tx + ',' + tz)) continue;
+    if (ONLY.length && !ONLY.includes(tx + ',' + tz)) {
+      const prev = prevManifest.find((t) => t.tx === tx && t.tz === tz);
+      if (prev) manifestTiles.push(prev);
+      continue;
+    }
     const rawFile = `${RAW_DIR}/${tx}_${tz}.json`;
     const raw = JSON.parse(readFileSync(rawFile, 'utf8'));
     const els = raw.elements ?? [];
@@ -753,6 +774,8 @@ const rawTiles = readdirSync(RAW_DIR)
       water: processAreas(els, isWaterPoly, () => 'water', owns),
       waterways: processWaterLines(els, owns),
       green: processAreas(els, isGreen, greenKind, owns),
+      // context for the offline ground classifier — the client never draws these
+      zones: processAreas(els, isZone, zoneKind, owns),
       paved: processAreas(els, isPaved, pavedKind, owns),
       trees: processTrees(els, owns),
       pois: processPois(els, owns),

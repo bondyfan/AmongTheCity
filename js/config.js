@@ -16,6 +16,11 @@ export const CHUNKS_PER_FRAME = 2; // build budget — no hitching on the move
 // vertical layering (meters above the y=0 base plane) — generous steps, the
 // AmongTheWoods ground taught us tight offsets z-fight at 200 m
 export const LAYER_Y = {
+  // `inferred` is the classifier's sealed ground (groundclass.js) and it sits
+  // BELOW everything OSM said: below green, so a mapped park outranks a guess,
+  // and far below the shallowest levelled road (+6 cm at full cut), so a
+  // carriageway can never be buried under its own pavement again.
+  inferred: 0.04,
   green: 0.05, water: 0.08, paved: 0.10, rail: 0.14,
   footway: 0.16, road: 0.20, marking: 0.26,
 };

@@ -41,9 +41,10 @@ const MEADOW_TYPES = new Set(['meadow', 'grassland', 'heath', 'scrub', 'village_
 const BARE_GREEN = new Set(['pitch', 'cemetery']);
 
 export class GrassMask {
-  /** @param city the indexed city — chunkIndex is all this needs */
-  constructor(city) {
+  /** @param city the indexed city; @param ground the sealed-ground raster */
+  constructor(city, ground = null) {
     this.city = city;
+    this.ground = ground;
     this.masks = new Map();           // chunk key → Uint8Array(N*N)
     this.queue = [];                  // keys waiting to be rasterised
     this._queued = new Set();
@@ -114,6 +115,15 @@ export class GrassMask {
     for (const b of cell.buildings) if (b.o?.length >= 3) fillPolygon(m, x0, z0, b.o, b.i, 0);
     for (const r of cell.roads) stampLine(m, x0, z0, r.p, (r.w ?? 3) / 2 + 0.6);
     for (const r of cell.rails) stampLine(m, x0, z0, r.p, 2.6);
+    // …and the classifier's sealed ground says none too. The raster is 4 m
+    // cells; asking at each mask metre keeps its edges where it drew them.
+    if (this.ground) {
+      for (let j = 0; j < N; j++) {
+        for (let i = 0; i < N; i++) {
+          if (m[j * N + i] && this.ground.classAt(x0 + i + 0.5, z0 + j + 0.5) > 0) m[j * N + i] = 0;
+        }
+      }
+    }
   }
 }
 

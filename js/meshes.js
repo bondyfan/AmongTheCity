@@ -2624,6 +2624,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // never rebuilt — it kept its guess for the rest of the session.
   if (mats.terrain) mats.terrain.missed = false;
   if (mats.canopy) mats.canopy.missed = false;
+  if (mats.ground) mats.ground.missed = false;
   const key = cx + ',' + cz;
   const cell = city.chunkIndex.get(key);
   // A GROUND-ONLY cell needs nothing from the city — it is an aerial photo and
@@ -2640,7 +2641,8 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   const done = () => {
     rebase(group, bx, bz); group.position.set(bx, 0, bz);
     // …read AFTER every vertex has been placed, which is the point
-    group.userData.guessedGround = !!mats.terrain?.missed || !!mats.canopy?.missed;
+    group.userData.guessedGround = !!mats.terrain?.missed || !!mats.canopy?.missed
+      || !!mats.ground?.missed;
     return group;
   };
   if (groundOnly) {
@@ -2747,12 +2749,26 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     const polyKinds = [
       [cell.green, LAYER_Y.green, greenOf, surfOfGreen],
       [cell.paved, LAYER_Y.paved,
-        (f) => COLORS.inferred[f.s] ?? COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved],
+        (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved],
     ];
     for (const [list, y, pick, kind] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;
       const g = drape(terrainTess(shapePoly(f.o, f.i, y, pick(f), kind(f))), mats.terrain);
       if (g) flat.push(g);
+    }
+    // The classifier's sealed ground, straight off the raster: a handful of
+    // merged rectangles per chunk, through the very same tess-and-drape path
+    // as every other fill — at LAYER_Y.inferred, under everything OSM said and
+    // under every levelled road, which is the entire point of the layer.
+    if (mats.ground) {
+      for (const r of mats.ground.rectsIn(x0, z0)) {
+        const col = r.c === 2 ? COLORS.inferred.asphalt : COLORS.inferred.paving;
+        const sc = r.c === 2 ? SURF.asphalt : SURF.paving;
+        const g = drape(terrainTess(shapePoly(
+          [[r.x0, r.z0], [r.x1, r.z0], [r.x1, r.z1], [r.x0, r.z1]],
+          null, LAYER_Y.inferred, col, sc)), mats.terrain);
+        if (g) flat.push(g);
+      }
     }
   }
 
