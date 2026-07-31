@@ -1263,8 +1263,45 @@ function junctionPad(sink, j, terrain) {
       ring[i + 1][0], 0, ring[i + 1][1]);
   }
   const tp = tessTriangles(fan, fan.length / 9, 8);
-  const deckAt = (x, z) => (terrain
-    ? Math.max(jy, terrain.heightAt(x, z) - GRADE_CUT) : 0) + lift;
+  // ---- the pad is the CONTINUATION of its arms, pointwise ------------------
+  // One flat height was tried and looked like torn paper: the arms climb to
+  // the node along their own levelled grades, so a pad at any single height
+  // meets every one of them at a different step, and the max() with the
+  // terrain guard put creases through the middle that flat-shaded into a
+  // patchwork of facets. What a junction's surface actually is: at every
+  // point, the deck of the NEAREST arm. That meets each ribbon at exactly its
+  // own height, overlapping pads of a clustered junction agree because they
+  // share arms, and the surface is as smooth as the grades themselves.
+  const segs = [];
+  if (terrain) {
+    for (const a of j.arms) {
+      const p = a.r.p;
+      if (!p || p.length < 2 || a.s === undefined) continue;
+      const len = (k) => Math.hypot(p[k + 1][0] - p[k][0], p[k + 1][1] - p[k][1]);
+      const k0 = Math.max(0, a.i - 2), k1 = Math.min(p.length - 2, a.i + 1);
+      for (let k = k0; k <= k1; k++) {
+        let s0 = a.s;
+        if (k >= a.i) { for (let m = a.i; m < k; m++) s0 += len(m); }
+        else { for (let m = k; m < a.i; m++) s0 -= len(m); }
+        segs.push({ r: a.r, s0, ax: p[k][0], az: p[k][1], bx: p[k + 1][0], bz: p[k + 1][1] });
+      }
+    }
+  }
+  const deckAt = (x, z) => {
+    if (!terrain) return lift;
+    let best = Infinity, gy = null;
+    for (const g of segs) {
+      const d = distPointToSegment(x, z, g.ax, g.az, g.bx, g.bz, _cl);
+      if (d < best) {
+        best = d;
+        const s2 = Math.max(0, g.s0 + Math.hypot(_cl.x - g.ax, _cl.z - g.az));
+        gy = g.r.br ? bridgeDeckHeight(g.r, s2, terrain) : roadGradeY(g.r, s2, terrain);
+      }
+    }
+    // the terrain guard stays, for a bump between the arms taller than any of
+    // them — the same cut budget the roads themselves obey
+    return Math.max(gy ?? jy, terrain.heightAt(x, z) - GRADE_CUT) + lift;
+  };
   const mark = sink.mark();
   for (let k = 0; k < tp.length; k += 9) {
     sink.triFacing(
