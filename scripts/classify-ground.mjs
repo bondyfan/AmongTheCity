@@ -272,11 +272,10 @@ function classify(mask, quads) {
  */
 function materialise(mask, road, tile) {
   const x0 = tile.tx * TILE, z0 = tile.tz * TILE;
-  const yard = new Uint8Array(N * N), soft = new Uint8Array(N * N);
+  const yard = new Uint8Array(N * N);
   for (const f of tile.paved ?? []) {
     if (!f.o || f.o.length < 3 || f.t === 'inferred') continue;
     if (f.t === 'yard' || f.t === 'parking') fillPolygon(yard, x0, z0, f.o, f.i, 1);
-    else fillPolygon(soft, x0, z0, f.o, f.i, 1);        // platform, plaza, apron
   }
   const seen = new Uint8Array(N * N);
   const stack = [], region = [];
@@ -285,35 +284,39 @@ function materialise(mask, road, tile) {
     if (seen[start] || mask[start] !== SEALED) continue;
     region.length = 0; stack.length = 0;
     stack.push(start); seen[start] = 1;
-    let inYard = 0, touchSoft = 0, edge = 0, edgeOnRoad = 0;
+    let inYard = 0;
     while (stack.length) {
       const at = stack.pop();
       region.push(at);
       if (yard[at]) inYard++;
-      if (soft[at]) touchSoft++;
       const i = at % N, j = (at / N) | 0;
-      let border = false;
       for (let dj = -1; dj <= 1; dj++) {
         for (let di = -1; di <= 1; di++) {
           if ((di && dj) || (!di && !dj)) continue;      // 4-connected
           const ii = i + di, jj = j + dj;
-          if (ii < 0 || ii >= N || jj < 0 || jj >= N) { border = true; continue; }
+          if (ii < 0 || ii >= N || jj < 0 || jj >= N) continue;
           const o = jj * N + ii;
-          if (mask[o] !== SEALED) { border = true; if (road[o]) edgeOnRoad++; continue; }
-          if (seen[o]) continue;
+          if (mask[o] !== SEALED || seen[o]) continue;
+          // a kerb bounds a region: a carriageway is not the pavement beside it
+          if (road[o] !== road[at]) continue;
           seen[o] = 1; stack.push(o);
         }
       }
-      if (border) edge++;
     }
     if (region.length * RES * RES < MIN_AREA) {
       for (const o of region) mask[o] = 0;
       stats.dropped++;
       continue;
     }
-    const mat = inYard > region.length / 2 ? ASPHALT
-      : (edge && edgeOnRoad / edge > 0.6) ? ASPHALT
-      : PAVING;
+    // ASPHALT ONLY WHERE A POLYGON SAYS SO. The rule that guessed it from being
+    // ringed by carriageway is what put ragged dark continents all over the
+    // station square: every pocket of ground beside a road became tarmac, with
+    // a boundary made of 4 m rectangles, and the square stopped reading as a
+    // square. It also had nothing to add — the roads are already drawn as
+    // ribbons from OSM, at their own layer, above this one. What is left over
+    // beside them is pavement, and in a Czech town that is what it nearly
+    // always is.
+    const mat = inYard > region.length / 2 ? ASPHALT : PAVING;
     for (const o of region) mask[o] = mat;
     stats[mat === ASPHALT ? 'asphalt' : 'paving']++;
   }
@@ -474,6 +477,22 @@ for (const key of tiles) {
   const roadCells = new Uint8Array(N * N);
   for (const f of tile.roads) stampLine(roadCells, tile.tx * TILE, tile.tz * TILE, f.p, (f.w ?? 3) / 2, 1);
   const made = materialise(mask, roadCells, tile);
+  // ---- NOTHING IS EMITTED OVER A CARRIAGEWAY ------------------------------
+  // A road is LEVELLED — geo.js lets it cut up to 14 cm into the hill — while
+  // these fills are draped 10 cm over the bare terrain. So on any road in
+  // cutting the inferred paving sits ABOVE the tarmac and buries it, which is
+  // the "silnice mizí a pod nimi je dlažba" the user kept reporting: a main
+  // street rendered as pavement with its own lane markings floating on top.
+  //
+  // The corridor is subtracted two metres INSIDE the ribbon's own edge, not at
+  // it: a cell is 4 m and is keyed on its centre, so subtracting at the edge
+  // would blank ground up to two metres outside the road and leave the lawn
+  // strip down both sides that this file has already been round once. Cut
+  // short, the emitted paving disappears under the ribbon before it stops.
+  for (const f of tile.roads) {
+    const inset = Math.max(0, (f.w ?? 3) / 2 - 2);
+    if (inset > 0) stampLine(mask, tile.tx * TILE, tile.tz * TILE, f.p, inset, 0);
+  }
   const clean = mask;
   for (const [px, pz] of probes) {
     const i = Math.floor((px - tile.tx * TILE) / RES), j = Math.floor((pz - tile.tz * TILE) / RES);
