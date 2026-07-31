@@ -603,6 +603,16 @@ function terrainTess(geo, edge = TESS_EDGE) {
   const n = pos.count;
   if (n < 3) return work;
   const cSrc = work.attributes.color?.array;
+  // The SURFACE CLASS has to survive the subdivision, and for a long time it did
+  // not: this function rebuilt a geometry out of position and colour alone, the
+  // merge downstream found no `surf` attribute and helpfully filled one in with
+  // SURF.grass, and so every polygon fill in the world — every park, every car
+  // park, every plaza, every station platform, every square inferred from the
+  // photograph — was drawn with the grass TEXTURE. The colour was right, which
+  // is exactly what made it hard to see: a grey car park times a green grass
+  // texture is a green car park, and it reads as a lawn somebody has parked on.
+  // Uniform per geometry, like the colour, so one value is copied out.
+  const sSrc = work.attributes.surf?.array;
   const p = tessTriangles(pos.array, n / 3, edge);
   if (p.length === n * 3) {
     // Flat/water shaders do not use ShapeGeometry's UVs. Removing them keeps
@@ -617,6 +627,9 @@ function terrainTess(geo, edge = TESS_EDGE) {
     const col = new Float32Array(p.length);
     for (let i = 0; i < col.length; i += 3) { col[i] = cSrc[0]; col[i + 1] = cSrc[1]; col[i + 2] = cSrc[2]; }
     g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  }
+  if (sSrc) {
+    g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(p.length / 3).fill(sSrc[0]), 1));
   }
   g.computeVertexNormals();
   work.dispose();
@@ -636,6 +649,12 @@ function mergeSurfaceGeometries(geometries) {
     // Anything that reached here without a class is ground: terrainTess and the
     // stock geometries hand back what colorize gave them, but a merge is a
     // union of ATTRIBUTES and one missing buffer takes the whole chunk out.
+    // A geometry with no class is ground — the stock quads and the far tier.
+    // This default was a trap once: terrainTess used to DROP the class, and
+    // silently defaulting every polygon fill in the world to grass turned a
+    // real bug into an invisible one. It is kept because a merge is a union of
+    // attributes and one missing buffer takes the whole chunk out, but the
+    // producers all carry the class now — see tests/surface-class.test.mjs.
     if (!g.attributes.surf) {
       const n = g.attributes.position.count;
       g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(n).fill(SURF.grass), 1));
