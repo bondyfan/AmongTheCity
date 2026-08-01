@@ -31,7 +31,8 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
 import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
-  junctionsIn, distPointToSegment, roadProfile, roadGradeY, junctionY, GRADE_CUT } from './geo.js';
+  junctionsIn, distPointToSegment, roadProfile, roadGradeY, junctionDeckY, junctionHull,
+  GRADE_CUT } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
 import { entranceOf, brandOf } from './interiors.js';
@@ -1041,20 +1042,20 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // that same vertex's ground, not an interpolated one, which is where the 18 %
   // kick came from.
   const graded = !f.br && !!terrain && !!roadProfile(f, terrain);
-  const mark = bridge ? sink.mark() : -1;
-  // A road is BUILT, not draped: roadLift is the embankment that keeps it to a
-  // road's grade instead of diving into every dell. drape() adds the bare earth
-  // afterwards, so this is the fill on top of it. A bridge has no fill — its
-  // deck is an absolute height and the drape is told to leave it alone.
+  const mark = bridge || graded ? sink.mark() : -1;
+  // A graded road is ABSOLUTE, like a bridge: elev returns the levelled deck
+  // itself and the drape is told to leave it alone. It used to return the
+  // FILL (deck minus ground) sampled at the CENTRELINE, for the drape to add
+  // the ground back per VERTEX — and on any cross-slope those are different
+  // grounds, so the deck came out tilted sideways and bent by exactly the
+  // terrain relief it was levelled to ignore: metres, beside a railway
+  // cutting. The road the wheels ride (roadGradeY) and the road the eyes see
+  // are now the same number by construction.
   const elev = (d, x, z) => {
     if (f.br) return bridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len);
     if (!graded) return 0;
-    // NOT max(0, …): the levelled road may cut GRADE_CUT into the hill, and
-    // clamping that away hands back every kink the levelling just removed. The
-    // cut is smaller than the surfacing the ribbon is raised by, so a road in
-    // cutting still lies ON the ground rather than in it.
     const gy = roadGradeY(f, d, terrain);
-    return gy === null ? 0 : gy - terrain.heightAt(x, z);
+    return gy === null ? terrain.heightAt(x, z) : gy;
   };
   sink.at(surfOfRoad(f));
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
@@ -1103,8 +1104,11 @@ function roadRibbon(sink, f, terrain, cell, key) {
       for (const e of [-1, 1]) {
         const X0 = ax + pax * hw * e, Z0 = az + paz * hw * e;
         const X1 = bx + pbx * hw * e, Z1 = bz + pbz * hw * e;
-        sink.quad(X0, y0, Z0, X1, y1, Z1, X1, -0.05, Z1, X0, -0.05, Z0, KERB_R, KERB_G, KERB_B);
-        sink.quad(X0, -0.05, Z0, X1, -0.05, Z1, X1, y1, Z1, X0, y0, Z0, KERB_R, KERB_G, KERB_B);
+        // the ribbon is fixed (absolute), so the kerb bottom samples the
+        // ground itself — 5 cm into it, so a crease cannot open a slit
+        const g0 = terrain.heightAt(X0, Z0) - 0.05, g1 = terrain.heightAt(X1, Z1) - 0.05;
+        sink.quad(X0, y0, Z0, X1, y1, Z1, X1, g1, Z1, X0, g0, Z0, KERB_R, KERB_G, KERB_B);
+        sink.quad(X0, g0, Z0, X1, g1, Z1, X1, y1, Z1, X0, y0, Z0, KERB_R, KERB_G, KERB_B);
       }
       sink.at(surfOfRoad(f));
     }
@@ -1198,9 +1202,9 @@ function roadRibbon(sink, f, terrain, cell, key) {
     }
   } else if (f.t === 'runway') runwayPaint(sink, fr, hw);
   else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr);
-  // everything this bridge emitted — deck, fascia, parapets, lane paint — is
-  // already at its absolute height
-  if (bridge) sink.fixFrom(mark);
+  // everything this ribbon emitted — deck, kerbs, fascia, parapets, lane
+  // paint — is already at its absolute height
+  if (mark >= 0) sink.fixFrom(mark);
 }
 
 /**
@@ -1241,31 +1245,8 @@ function trimEnds(p, t0 = 0, t1 = 0) {
 // because each arm's own corners are vertices of it.
 function junctionPad(sink, j, terrain) {
   sink.at(SURF.asphalt);
-  const pts = [];
-  for (const a of j.arms) {
-    const p = a.r.p;
-    // direction AWAY from the node, taken a little way along the arm so a
-    // rounded corner right at the mouth does not skew it
-    const i = a.i;
-    const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
-    let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
-    if (!a.end) {                            // through-road: use the local tangent
-      const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
-      dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
-    }
-    const L = Math.hypot(dx, dz) || 1;
-    const ux = dx / L, uz = dz / L, hw = (a.r.w ?? 3) / 2;
-    for (const side of [-1, 1]) {
-      // both directions for a through-road, so the pad spans it
-      for (const dir of a.end ? [1] : [1, -1]) {
-        pts.push([j.x + ux * dir * j.pad - uz * side * hw,
-          j.z + uz * dir * j.pad + ux * side * hw]);
-      }
-    }
-  }
-  if (pts.length < 3) return;
-  const ring = convexHull(pts);
-  if (!ring || ring.length < 3) return;
+  const ring = junctionHull(j);
+  if (!ring) return;
   _c.setHex(COLORS.road.residential);
   // ---- the pad rides the JUNCTION'S grade, not the terrain -----------------
   // The roads arriving here are levelled: every arm is pinned to one agreed
@@ -1281,7 +1262,6 @@ function junctionPad(sink, j, terrain) {
   // the bound the roads themselves obey. Absolute heights, marked fixed so the
   // final drape leaves them alone; tessellated so a bump between hull corners
   // cannot lift the ground through it.
-  const jy = terrain ? junctionY(j, terrain) : 0;
   const lift = LAYER_Y.road + 0.012;   // a hair above the ribbons, never fighting
   const fan = [];
   for (let i = 1; i < ring.length - 1; i++) {
@@ -1293,50 +1273,11 @@ function junctionPad(sink, j, terrain) {
   // ---- the pad is the CONTINUATION of its arms, pointwise ------------------
   // One flat height was tried and looked like torn paper: the arms climb to
   // the node along their own levelled grades, so a pad at any single height
-  // meets every one of them at a different step, and the max() with the
-  // terrain guard put creases through the middle that flat-shaded into a
-  // patchwork of facets. What a junction's surface actually is: at every
-  // point, the deck of the NEAREST arm. That meets each ribbon at exactly its
-  // own height, overlapping pads of a clustered junction agree because they
-  // share arms, and the surface is as smooth as the grades themselves.
-  const segs = [];
-  if (terrain) {
-    for (const a of j.arms) {
-      const p = a.r.p;
-      if (!p || p.length < 2 || a.s === undefined) continue;
-      const len = (k) => Math.hypot(p[k + 1][0] - p[k][0], p[k + 1][1] - p[k][1]);
-      const k0 = Math.max(0, a.i - 2), k1 = Math.min(p.length - 2, a.i + 1);
-      for (let k = k0; k <= k1; k++) {
-        let s0 = a.s;
-        if (k >= a.i) { for (let m = a.i; m < k; m++) s0 += len(m); }
-        else { for (let m = k; m < a.i; m++) s0 -= len(m); }
-        segs.push({ r: a.r, s0, ax: p[k][0], az: p[k][1], bx: p[k + 1][0], bz: p[k + 1][1] });
-      }
-    }
-  }
-  const deckAt = (x, z) => {
-    if (!terrain) return lift;
-    let best = Infinity, gy = null;
-    for (const g of segs) {
-      const d = distPointToSegment(x, z, g.ax, g.az, g.bx, g.bz, _cl);
-      if (d < best) {
-        best = d;
-        const s2 = Math.max(0, g.s0 + Math.hypot(_cl.x - g.ax, _cl.z - g.az));
-        gy = g.r.br ? bridgeDeckHeight(g.r, s2, terrain) : roadGradeY(g.r, s2, terrain);
-      }
-    }
-    // The terrain guard stays, for a bump between the arms taller than any of
-    // them — and it samples a small NEIGHBOURHOOD, not the point alone: pad
-    // triangles span up to 4 m while the terrain bends on 20 m creases, so a
-    // point sample let the ground rise through the middle of a triangle whose
-    // corners all cleared it.
-    let hi = terrain.heightAt(x, z);
-    for (const [ox, oz] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) {
-      const h = terrain.heightAt(x + ox, z + oz);
-      if (h > hi) hi = h;
-    }
-    return Math.max(gy ?? jy, hi - GRADE_CUT) + lift;
-  };
+  // meets every one of them at a different step. What a junction's surface
+  // actually is: at every point, the deck of the NEAREST arm — and that lives
+  // in geo.junctionDeckY, because the physics has to stand on the same numbers
+  // this fan is drawn from.
+  const deckAt = (x, z) => (terrain ? junctionDeckY(j, x, z, terrain) : 0) + lift;
   const mark = sink.mark();
   for (let k = 0; k < tp.length; k += 9) {
     sink.triFacing(
@@ -1346,23 +1287,6 @@ function junctionPad(sink, j, terrain) {
       0, 1, 0, _c.r, _c.g, _c.b);
   }
   if (terrain) sink.fixFrom(mark);
-}
-
-/** Andrew's monotone chain. Small inputs (≤ 16 points), so the sort is free. */
-function convexHull(pts) {
-  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  if (p.length < 3) return null;
-  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const half = (src) => {
-    const h = [];
-    for (const q of src) {
-      while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop();
-      h.push(q);
-    }
-    h.pop();
-    return h;
-  };
-  return [...half(p), ...half(p.slice().reverse())];
 }
 
 // ---- runway paint ---------------------------------------------------------
@@ -1440,11 +1364,16 @@ function railWay(sink, f, terrain) {
   // showed each fold as a visible corner. The earthworks pull the ground to
   // this same line, so the ballast sits ON its bed instead of over a crack.
   const railGraded = !f.br && !!terrain && !!roadProfile(f, terrain);
+  // Absolute, like the graded roads: the old fill-then-drape round trip
+  // sampled the ground at the centreline and re-added it at each vertex, so
+  // on a cross-slope one rail rode higher than the other — the thing a real
+  // track never does and the reason trains here would derail.
+  const railMark = railGraded ? sink.mark() : -1;
   const elev = (d, x2, z2) => {
     if (f.br) return bridgeElevation(d, len);
     if (!railGraded) return 0;
     const gy = roadGradeY(f, d, terrain);
-    return gy === null ? 0 : gy - terrain.heightAt(x2, z2);
+    return gy === null ? terrain.heightAt(x2, z2) : gy;
   };
   // Crushed stone under the whole of it. The steel and the sleepers are a few
   // centimetres wide and share the class: at any distance where you could tell
@@ -1477,6 +1406,7 @@ function railWay(sink, f, terrain) {
         _WA.x + ux + px, y, _WA.z + uz + pz, _WA.x - ux + px, y, _WA.z - uz + pz, sr, sg, sb);
     }
   }
+  if (railMark >= 0) sink.fixFrom(railMark);
 }
 
 // ---- facades: one shared 2048×1024 window atlas, built lazily on first use ----

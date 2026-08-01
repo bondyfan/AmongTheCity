@@ -9,7 +9,7 @@
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
-  roadGradeY, roadProfile } from './geo.js';
+  roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain, groundFor } from './terrain.js';
@@ -472,6 +472,33 @@ export class CityWorld {
   // their elevation), so a car placed at heightAt() rides with its tyres 20 cm
   // inside the asphalt, which on a bridge (parapet right beside the wheel)
   // finally became visible. Returns { y, road } and never allocates.
+  // The pads of every junction near (x, z), offered to `levels`. The pad is a
+  // REAL surface — meshes.js draws it from junctionDeckY over junctionHull —
+  // but it belongs to no road, so neither the wheels loop nor the feet loop
+  // ever saw it: a player walking onto an embanked crossing fell through the
+  // pad to the terrain a metre and a half below and stood in it up to the
+  // neck. Same shape, same height function, now load-bearing.
+  _padLevels(x, z) {
+    const M = 16;                            // no pad reaches this far over a border
+    const ci = Math.floor(x / CHUNK), cj = Math.floor(z / CHUNK);
+    const lx = x - ci * CHUNK, lz = z - cj * CHUNK;
+    const xs = lx < M ? [0, -1] : lx > CHUNK - M ? [0, 1] : [0];
+    const zs = lz < M ? [0, -1] : lz > CHUNK - M ? [0, 1] : [0];
+    for (const dx of xs) {
+      for (const dz of zs) {
+        const js = junctionsIn((ci + dx) + ',' + (cj + dz));
+        if (!js) continue;
+        for (const j of js) {
+          const r = j.padR ?? 6;
+          if ((x - j.x) ** 2 + (z - j.z) ** 2 > r * r) continue;
+          const ring = junctionHull(j);
+          if (!ring || !pointInPolygon(x, z, ring)) continue;
+          levels.add(junctionDeckY(j, x, z, this.terrain) + LAYER_Y.road + 0.012);
+        }
+      }
+    }
+  }
+
   surfaceY(x, z, near) {
     _surf.road = false;
     // THE GROUND FIRST. Every height below is a thickness of surfacing — 20 cm
@@ -502,6 +529,7 @@ export class CityWorld {
         along += Math.hypot(bx - ax, bz - az);
       }
     }
+    this._padLevels(x, z);
     const best = levels.value();
     if (best !== null) { _surf.y = best; _surf.road = true; return _surf; }
     // car parks and plazas are paved and flat — driveable, not offroad
@@ -529,18 +557,27 @@ export class CityWorld {
     if (!cell) return ground;
     levels.reset(near).add(ground);
     for (const r of cell.roads) {
-      if (!r.br) continue;
+      // Bridges, yes — but ALSO embanked ordinary roads: a levelled deck may
+      // ride up to GRADE_FILL above the terrain, and feet that only knew the
+      // terrain sank into it to the knees on a fill and to the neck on a big
+      // one. Any graded deck IS the ground where it runs.
+      const br = !!r.br;
       let dist = 0;
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-        if (d < r.w / 2 + 1.5) {
+        if (d < r.w / 2 + (br ? 1.5 : 0.35)) {
           const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
-          levels.add(bridgeDeckHeight(r, along, this.terrain));
+          if (br) levels.add(bridgeDeckHeight(r, along, this.terrain));
+          else {
+            const gy = roadGradeY(r, along, this.terrain);
+            if (gy !== null && gy !== undefined) levels.add(gy + LAYER_Y.road);
+          }
         }
         dist += Math.hypot(bx - ax, bz - az);
       }
     }
+    this._padLevels(x, z);
     return levels.value(ground);
   }
 

@@ -95,7 +95,8 @@ test('regional data retains the Labe road and footbridge tags', () => {
 // roads are built, not draped
 // ---------------------------------------------------------------------------
 
-const { roadProfile, roadGradeY, polylineLength, indexJunctions, indexBridgeCrossings, bridgeClearance }
+const { roadProfile, roadGradeY, polylineLength, indexJunctions, indexBridgeCrossings, bridgeClearance,
+  junctionDeckY, junctionHull, pointInPolygon }
   = await import('../js/geo.js');
 const { levels } = await import('../js/city.js');
 const { LAYER_Y } = await import('../js/config.js');
@@ -354,4 +355,79 @@ test('a viaduct in pieces is ONE structure with one grade', () => {
     }
   }
   assert.ok(worst <= 0.07, `the chained deck climbs at ${(worst * 100).toFixed(0)} % — a tent`);
+});
+
+test('a chained deck lands EXACTLY on its approaches, whatever it crosses', () => {
+  // A crossing close to one abutment used to hoist the deck's end above the
+  // road it lands on: the clearance cone fell at 6 % and had not reached the
+  // anchor by s=0, so the carriageway ended with a step in mid-air — the
+  // visible "silnice na sebe nenavazuje" at the flyover. A hard cone now
+  // steepens as much as it must (to 20 %) so the ends are exact.
+  const terrain = { res: 20, ready: () => true, heightAt: () => 200 };
+  const approachW = { d: 1, t: 'primary', w: 8, p: [[-300, 0], [-60, 0]] };
+  const s1 = { d: 1, t: 'primary', w: 8, br: 1, p: [[-60, 0], [0, 0]] };
+  const s2 = { d: 1, t: 'primary', w: 8, br: 1, p: [[0, 0], [60, 0]] };
+  const approachE = { d: 1, t: 'primary', w: 8, p: [[60, 0], [360, 0]] };
+  const rail = { p: [[-50, -200], [-50, 200]] };   // 10 m from the west abutment
+  const roads = [approachW, s1, s2, approachE];
+  for (const w of [...roads, rail]) w._len = polylineLength(w.p);
+  indexJunctions(roads);
+  indexBridgeCrossings(roads, [rail]);
+  assert.ok(s1._chain, 'the spans did not chain');
+  const A = roadGradeY(approachW, approachW._len, terrain);
+  const B = roadGradeY(approachE, 0, terrain);
+  assert.ok(Math.abs(bridgeDeckHeight(s1, 0, terrain) - A) < 0.02,
+    `west end steps ${(bridgeDeckHeight(s1, 0, terrain) - A).toFixed(2)} m off its approach`);
+  assert.ok(Math.abs(bridgeDeckHeight(s2, 60, terrain) - B) < 0.02,
+    `east end steps ${(bridgeDeckHeight(s2, 60, terrain) - B).toFixed(2)} m off its approach`);
+});
+
+test('the ground never rises through a chained deck', () => {
+  // The chain's profile knew the terrain only at its crossings; a smooth hill
+  // shoulder mid-span rose straight through the deck and the bridge ran as a
+  // green-roofed tunnel. The terrain along the whole line is now a floor.
+  const knoll = (x) => 200 + 3 * Math.exp(-((x - 30) ** 2) / (2 * 20 * 20));
+  const terrain = { res: 20, ready: () => true, heightAt: (x) => knoll(x) };
+  const approachW = { d: 1, t: 'primary', w: 8, p: [[-300, 0], [-60, 0]] };
+  const s1 = { d: 1, t: 'primary', w: 8, br: 1, p: [[-60, 0], [0, 0]] };
+  const s2 = { d: 1, t: 'primary', w: 8, br: 1, p: [[0, 0], [60, 0]] };
+  const s3 = { d: 1, t: 'primary', w: 8, br: 1, p: [[60, 0], [120, 0]] };
+  const approachE = { d: 1, t: 'primary', w: 8, p: [[120, 0], [360, 0]] };
+  const rail = { p: [[30, -200], [30, 200]] };
+  const roads = [approachW, s1, s2, s3, approachE];
+  for (const w of [...roads, rail]) w._len = polylineLength(w.p);
+  indexJunctions(roads);
+  indexBridgeCrossings(roads, [rail]);
+  for (const [w, x0] of [[s1, -60], [s2, 0], [s3, 60]]) {
+    for (let d = 0; d <= 60; d += 2) {
+      const y = bridgeDeckHeight(w, d, terrain);
+      assert.ok(y >= knoll(x0 + d) - 0.01,
+        `deck ${y.toFixed(2)} under ground ${knoll(x0 + d).toFixed(2)} at x=${x0 + d}`);
+    }
+  }
+});
+
+test('the pad the mesh draws is the pad the feet stand on', () => {
+  // junctionHull is the footprint and junctionDeckY the height, and BOTH mesh
+  // and physics read them — because the first time they disagreed, a player
+  // walking onto an embanked crossing sank into the pad up to the neck.
+  const terrain = { res: 20, ready: () => true, heightAt: (x, z) => 200 + 0.05 * x + 0.02 * z };
+  const a = { d: 1, t: 'residential', w: 6, p: [[-80, 0], [0, 0]] };
+  const b = { d: 1, t: 'residential', w: 6, p: [[0, 0], [80, 10]] };
+  const c = { d: 1, t: 'residential', w: 5, p: [[0, 0], [-10, 90]] };
+  const roads = [a, b, c];
+  for (const w of roads) w._len = polylineLength(w.p);
+  indexJunctions(roads);
+  const j = a._pins?.[0]?.node ?? b._pins?.[0]?.node;
+  assert.ok(j && j.arms.length >= 3, 'no junction was indexed');
+  const ring = junctionHull(j);
+  assert.ok(ring && ring.length >= 3, 'the pad has no footprint');
+  assert.ok(pointInPolygon(j.x, j.z, ring), 'the node is not inside its own pad');
+  const y = junctionDeckY(j, j.x, j.z, terrain);
+  assert.ok(Number.isFinite(y), 'the pad has no height');
+  // the pad continues its arms: at an arm mouth it must MATCH that arm's deck
+  const mouth = roadGradeY(a, a._len - j.pad, terrain);
+  const py = junctionDeckY(j, -j.pad, 0, terrain);
+  assert.ok(Math.abs(py - mouth) < 0.05,
+    `pad ${py.toFixed(2)} misses its arm's deck ${mouth.toFixed(2)} at the mouth`);
 });

@@ -456,8 +456,52 @@ export function bridgeDeckHeight(way, dist, terrain) {
           }
           const mLen = m._len ?? polylineLength(m.p);
           const local = m._chainRev ? mLen - sAt : sAt;
-          cones.push([m._chainOff + local, terrain.heightAt(c.x, c.z) + c.clear]);
+          cones.push([m._chainOff + local, terrain.heightAt(c.x, c.z) + c.clear, 1]);
         }
+      }
+      // ---- the terrain along the chain is a FLOOR --------------------------
+      // A bridge is the thing that is above the ground along its whole line;
+      // the profile so far only knew the ground at its crossings, so a smooth
+      // hill shoulder mid-span rose straight through the deck. Sample the
+      // ground at stations along every member and let each station push the
+      // deck up, at the same 6 % the clearance cones use.
+      const DS = 6, FLOOR = 0.2;
+      for (const m of ch.members) {
+        const mLen = m._len ?? polylineLength(m.p);
+        let along = 0;
+        for (let k = 0; k < m.p.length - 1; k++) {
+          const [ax, az] = m.p[k], [bx, bz] = m.p[k + 1];
+          const seg = Math.hypot(bx - ax, bz - az);
+          for (let d = 0; d < seg; d += DS) {
+            const t = d / seg;
+            const sAt = along + d;
+            const local = m._chainRev ? mLen - sAt : sAt;
+            cones.push([m._chainOff + local,
+              terrain.heightAt(ax + (bx - ax) * t, az + (bz - az) * t) + FLOOR, 0]);
+          }
+          along += seg;
+        }
+      }
+      // ---- and the anchors are LAW -----------------------------------------
+      // An unclamped cone near an abutment lifted the deck's END above the
+      // approach it lands on — a step in the carriageway, mid-air. The deck
+      // must equal A at s=0 and B at s=total. Headroom over a crossing is a
+      // hard constraint, so its cone keeps its height and STEEPENS instead —
+      // just enough slope to fall back to each anchor, up to a 20 % worst
+      // case; only past that is the height itself shaved. Terrain floors are
+      // aesthetic, so they yield at the ruling grade.
+      const STEEP = 0.2;
+      for (const c of cones) {
+        const [cs, , hard] = c;
+        let g = BRIDGE_GRADE;
+        if (hard) {
+          g = Math.max(g, (c[1] - A) / Math.max(cs, 1e-6),
+            (c[1] - B) / Math.max(ch.total - cs, 1e-6));
+          if (g > STEEP) g = STEEP;
+        }
+        const cap = Math.min(A + cs * g, B + (ch.total - cs) * g);
+        if (c[1] > cap) c[1] = cap;
+        c[2] = g;
       }
       let ready = !terrain.ready;
       if (!ready) {
@@ -472,8 +516,8 @@ export function bridgeDeckHeight(way, dist, terrain) {
       : Math.max(0, Math.min(total, dist));
     const s = way._chainOff + local;
     let y = prof.A + (prof.B - prof.A) * (s / prof.total);
-    for (const [cs, cy] of prof.cones) {
-      const v = cy - Math.abs(s - cs) * BRIDGE_GRADE;
+    for (const [cs, cy, cg] of prof.cones) {
+      const v = cy - Math.abs(s - cs) * cg;
       if (v > y) y = v;
     }
     return y;
@@ -697,6 +741,7 @@ export function indexJunctions(roads) {
     let wMax = 0;
     for (const a of e.arms) wMax = Math.max(wMax, (a.r.w ?? 3) / 2);
     e.pad = wMax + 0.6;
+    e.padR = Math.hypot(e.pad, wMax) + 0.1;  // bounding radius of the hull corners
     for (const a of e.arms) {
       if (!a.end) continue;                       // a through-road runs straight on
       const trim = Math.min(e.pad, a.r._len * J_MAX_TRIM);
@@ -873,6 +918,102 @@ export function bridgeClearance(way, terrain) {
     if (need === null || y > need) need = y;
   }
   return need;
+}
+
+/**
+ * The height of a junction's PAD at (x, z): the deck of the nearest arm at its
+ * closest point, floored by the local terrain less the cut budget. This is the
+ * one definition of the pad surface — the mesh draws it and the physics stands
+ * on it, from this same function, because the first time those two disagreed a
+ * player sank into a pad up to the neck.
+ */
+/**
+ * The pad's FOOTPRINT: convex hull of the arm mouths — two cross-section
+ * corners per arm at the pad radius, both directions for a through-road.
+ * Cached on the node; meshes.js draws this ring and city.js stands on it,
+ * so the two can never disagree about where the pad ends.
+ */
+export function junctionHull(node) {
+  if (node._hullRing !== undefined) return node._hullRing;
+  const pts = [];
+  for (const a of node.arms) {
+    const p = a.r.p;
+    const i = a.i;
+    const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
+    let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
+    if (!a.end) {
+      const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
+      dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
+    }
+    const L = Math.hypot(dx, dz) || 1;
+    const ux = dx / L, uz = dz / L, hw = (a.r.w ?? 3) / 2;
+    for (const side of [-1, 1]) {
+      for (const dir of a.end ? [1] : [1, -1]) {
+        pts.push([node.x + ux * dir * node.pad - uz * side * hw,
+          node.z + uz * dir * node.pad + ux * side * hw]);
+      }
+    }
+  }
+  return (node._hullRing = pts.length >= 3 ? convexHull(pts) : null);
+}
+
+/** Andrew's monotone chain. Small inputs (≤ 16 points), so the sort is free. */
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (p.length < 3) return null;
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (src) => {
+    const h = [];
+    for (const q of src) {
+      while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop();
+      h.push(q);
+    }
+    h.pop();
+    return h;
+  };
+  const ring = [...half(p), ...half(p.slice().reverse())];
+  return ring.length >= 3 ? ring : null;
+}
+
+export function junctionDeckY(node, x, z, terrain) {
+  if (!terrain) return 0;
+  let segs = node._deckSegs;
+  if (!segs) {
+    segs = node._deckSegs = [];
+    for (const a of node.arms) {
+      const p = a.r.p;
+      if (!p || p.length < 2 || a.s === undefined) continue;
+      const len = (k) => Math.hypot(p[k + 1][0] - p[k][0], p[k + 1][1] - p[k][1]);
+      const k0 = Math.max(0, a.i - 2), k1 = Math.min(p.length - 2, a.i + 1);
+      for (let k = k0; k <= k1; k++) {
+        let s0 = a.s;
+        if (k >= a.i) { for (let m = a.i; m < k; m++) s0 += len(m); }
+        else { for (let m = k; m < a.i; m++) s0 -= len(m); }
+        segs.push({ r: a.r, s0, ax: p[k][0], az: p[k][1], bx: p[k + 1][0], bz: p[k + 1][1] });
+      }
+    }
+  }
+  let best = Infinity, gy = null;
+  for (const g of segs) {
+    const dx = g.bx - g.ax, dz = g.bz - g.az;
+    const L2 = dx * dx + dz * dz || 1e-9;
+    let t = ((x - g.ax) * dx + (z - g.az) * dz) / L2;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const px = g.ax + dx * t, pz = g.az + dz * t;
+    const d2 = (x - px) ** 2 + (z - pz) ** 2;
+    if (d2 < best) {
+      best = d2;
+      const s2 = Math.max(0, g.s0 + Math.hypot(px - g.ax, pz - g.az));
+      gy = g.r.br ? bridgeDeckHeight(g.r, s2, terrain) : roadGradeY(g.r, s2, terrain);
+    }
+  }
+  // the terrain guard, sampling a small neighbourhood like the road cut does
+  let hi = terrain.heightAt(x, z);
+  for (const [ox, oz] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) {
+    const h = terrain.heightAt(x + ox, z + oz);
+    if (h > hi) hi = h;
+  }
+  return Math.max(gy ?? junctionY(node, terrain), hi - GRADE_CUT);
 }
 
 /** Junction pads, bucketed by chunk key. meshes.js asks for its own. */
