@@ -485,45 +485,31 @@ function terrainQuad(x0, z0, terrain, hex, y = 0, layer = SURF.grass) {
 // the ground anywhere, by construction rather than by tolerance.
 const TERRAIN_MAXSTEP = 12;   // …plus a ceiling, for the far side of a NoData hole
 function terrainResample(pts, terrain) {
+  // UNIFORM 4 m, and the break-line hunting is gone. It existed for a faceted
+  // world: the ground used to bend only on the survey grid's rulings, so
+  // cutting a ribbon exactly there made road-above-ground hold by construction.
+  // The ground is C1-SMOOTH now (terrain.js) — it bends everywhere and creases
+  // nowhere — so the rulings mean nothing, and the segments between the old cut
+  // points were straight chords up to 12 m long under a surface that now CURVES
+  // over them: on every crest the ground bulged above the chord by
+  // curvature·L²/8 and the road sank into the hill. 4 m is the same step the
+  // ground mesh itself draws at, so ribbon and ground approximate the same
+  // curve with the same error and neither can duck under the other.
   if (!terrain || pts.length < 2) return pts;
-  const R = terrain.res || 20;
+  const STEP = 4;
   const out = [pts[0]];
-  const ts = [];
   for (let i = 0; i < pts.length - 1; i++) {
     const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
-    const dx = bx - ax, dz = bz - az;
-    const L = Math.hypot(dx, dz);
-    ts.length = 0;
-    // where this segment crosses each family of break lines
-    const rule = (v0, dv) => {
-      if (Math.abs(dv) < 1e-9) return;
-      const k0 = Math.floor(v0 / R), k1 = Math.floor((v0 + dv) / R);
-      const lo = Math.min(k0, k1), hi = Math.max(k0, k1);
-      for (let k = lo; k <= hi + 1; k++) {
-        const t = (k * R - v0) / dv;
-        if (t > 1e-6 && t < 1 - 1e-6) ts.push(t);
-      }
-    };
-    rule(ax, dx);
-    rule(az, dz);
-    rule(ax + az, dx + dz);
-    // …and a ceiling, so a segment running exactly along a cell edge — which
-    // crosses nothing — still gets vertices for the drape to work with
-    if (L > TERRAIN_MAXSTEP) {
-      const n = Math.ceil(L / TERRAIN_MAXSTEP);
-      for (let k = 1; k < n; k++) ts.push(k / n);
-    }
-    ts.sort((p, q) => p - q);
-    let prev = 0;
-    for (const t of ts) {
-      if (t - prev < 1e-4) continue;         // two rulings crossing at a corner
-      prev = t;
-      out.push([ax + dx * t, az + dz * t]);
+    const L = Math.hypot(bx - ax, bz - az);
+    const n = Math.max(1, Math.ceil(L / STEP));
+    for (let k = 1; k < n; k++) {
+      out.push([ax + (bx - ax) * (k / n), az + (bz - az) * (k / n)]);
     }
     out.push(pts[i + 1]);
   }
   return out;
 }
+
 
 // A bridge deck is straight and level by definition, so it needs no break-line
 // cutting — but it still needs VERTICES, because its fascia and parapet are
@@ -562,7 +548,10 @@ export function bridgeResample(pts) {
 // The colour is read from the first vertex and reused, which is exact for these
 // fills (colorize paints one hex across the whole geometry) and is why the
 // output can be rebuilt as a plain triangle soup.
-const TESS_EDGE = 10;
+// 6 m, against the same chord bound as everything else: a fill sits 5–10 cm
+// over the smooth ground, and curvature·6²/8 stays under that on any curvature
+// a Czech landscape reaches. The old 10 let the ground bulge through the fills.
+const TESS_EDGE = 6;
 const TESS_MAX = 6000;      // triangles per polygon — a runaway backstop
 
 /**
