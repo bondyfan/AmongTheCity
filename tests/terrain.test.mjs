@@ -104,50 +104,13 @@ test('NoData corners fall back to their neighbours, not to −3276 m', () => {
 // the ground you sample must be the ground that is drawn
 // ---------------------------------------------------------------------------
 
-test('heightAt returns the triangle the renderer draws, not a bilinear patch', () => {
-  // A cell whose corners TWIST — high on one diagonal, low on the other. This
-  // is where bilinear interpolation and a triangulated quad part company, and
-  // it is why the aerial photograph used to cover the tarmac: the road was laid
-  // 20 cm above the bilinear answer while the renderer drew the ground higher
-  // still. Measured over a real tile before the fix: up to 1.82 m of daylight,
-  // exceeding LAYER_Y.road across 0.82 % of the ground.
-  const t = new Terrain(TILE, RES);
-  const g = new Int16Array(t.n * t.n);
-  const at = (i, j) => j * t.n + i;
-  g[at(0, 0)] = 100; g[at(1, 0)] = 0;      // decimetres
-  g[at(0, 1)] = 0;   g[at(1, 1)] = 100;    // a saddle: twist = 200 dm = 20 m
-  t.grids.set('0,0', g);
-
-  // The cell's own diagonal runs from (0,0) to (1,1) in sample space; the mesh
-  // splits it the OTHER way, on fx + fz = 1. A point ON that split line is
-  // shared by both triangles, so both readings must agree there.
-  const P = (u, v) => t.heightAt(u * RES, v * RES);
-  assert.ok(Math.abs(P(0.5, 0.5) - 0) < 1e-6,
-    `the split edge should read 0 m, got ${P(0.5, 0.5)}`);
-  // …and bilinear would have said 5 m there (the average of 10, 0, 0, 10).
-  assert.notEqual(Math.round(P(0.5, 0.5)), 5);
-
-  // inside the h00 triangle, the plane through (10, 0, 0)
-  assert.ok(Math.abs(P(0.25, 0.25) - 5) < 1e-6, `got ${P(0.25, 0.25)}`);
-  // inside the h11 triangle, the plane through (0, 0, 10)
-  assert.ok(Math.abs(P(0.75, 0.75) - 5) < 1e-6, `got ${P(0.75, 0.75)}`);
-  // the corners are still exactly themselves
-  assert.equal(P(0, 0), 10);
-  assert.equal(P(1, 1), 10);
-  assert.equal(P(1, 0), 0);
-  assert.equal(P(0, 1), 0);
-});
-
-test('the ground is PLANAR inside a triangle, which is what roads rely on', () => {
-  // meshes.js cuts a road at every line the ground bends on — the two cell
-  // edges and the diagonal — so each piece lies inside one triangle. That only
-  // buys anything if the ground really is a plane in there: if heightAt curved
-  // at all, a straight ribbon across it would still cut in.
-  //
-  // Measured with that resampler over the Zlín height map: 0 breakthroughs in
-  // 2 178 974 samples, worst case −0.1995 m — the road sitting exactly its own
-  // 20 cm above the ground everywhere. With a uniform 10 m step instead it
-  // broke through at 0.90 % of points, by up to 1.32 m.
+test('the ground is SMOOTH — no crease survives at the survey grid', () => {
+  // For most of this project's life the ground between samples was two flat
+  // triangles, and every terrain complaint that ever arrived — "hrboly",
+  // "seams", "přehyby", kinking roads, folding rails — was one complaint: the
+  // world was faceted at 20 m. A real landscape has no creases at survey-grid
+  // spacing. heightAt is a Catmull-Rom bicubic now: it passes exactly through
+  // every sample and its slope is continuous across every old break line.
   const t = new Terrain(TILE, RES);
   const g = new Int16Array(t.n * t.n);
   for (let j = 0; j < t.n; j++) {
@@ -155,23 +118,50 @@ test('the ground is PLANAR inside a triangle, which is what roads rely on', () =
   }
   t.grids.set('0,0', g);
 
-  let worst = 0;
-  for (let k = 0; k < 5000; k++) {
-    // three points inside ONE triangle: pick a cell, a half, and barycentrics
-    const i = 1 + ((Math.random() * 8) | 0), j = 1 + ((Math.random() * 8) | 0);
-    const lower = Math.random() < 0.5;
-    const pt = () => {
-      let a = Math.random(), b = Math.random();
-      if (a + b > 1) { a = 1 - a; b = 1 - b; }          // uniform in the triangle
-      const fx = lower ? a : 1 - a, fz = lower ? b : 1 - b;
-      return [(i + fx) * RES, (j + fz) * RES];
-    };
-    const P = [pt(), pt(), pt()];
-    const h = P.map(([x, z]) => t.heightAt(x, z));
-    // the midpoint of two of them must be the average of their heights — the
-    // definition of planar, and false for a bilinear patch
-    const mid = [(P[0][0] + P[1][0]) / 2, (P[0][1] + P[1][1]) / 2];
-    worst = Math.max(worst, Math.abs(t.heightAt(mid[0], mid[1]) - (h[0] + h[1]) / 2));
+  // exact at the samples…
+  for (const [i, j] of [[3, 4], [7, 7], [10, 2]]) {
+    assert.ok(Math.abs(t.heightAt(i * RES, j * RES) - g[j * t.n + i] / 10) < 1e-9,
+      'the smooth read does not pass through the survey samples');
   }
-  assert.ok(worst < 1e-6, `the ground bends inside a triangle by ${worst.toFixed(4)} m`);
+  // …and C1 across the old break lines: walk over a cell edge and a diagonal
+  // and demand the slope change stays an order below what the facets had.
+  let worst = 0;
+  for (const [x0, z0, dx, dz] of [[3 * RES - 6, 90, 1, 0.37], [95, 4 * RES - 6, 0.41, 1]]) {
+    let prev = null, prevSlope = null;
+    for (let s2 = 0; s2 <= 12; s2 += 0.5) {
+      const h = t.heightAt(x0 + dx * s2, z0 + dz * s2);
+      if (prev !== null) {
+        const slope = (h - prev) / 0.5;
+        if (prevSlope !== null) worst = Math.max(worst, Math.abs(slope - prevSlope));
+        prevSlope = slope;
+      }
+      prev = h;
+    }
+  }
+  assert.ok(worst < 0.09, `the ground still creases at ${worst.toFixed(3)} m/m per 0.5 m`);
+});
+
+test('a 4 m ground mesh follows the smooth field inside the road headroom', () => {
+  // The renderer draws the smooth field with 4 m triangles (terrainQuad
+  // SEG = 30). Between two of its vertices the drawn chord can sit above the
+  // smooth curve by the curvature sag, and a road is only LAYER_Y.road above
+  // the curve — so the sag must stay well under that headroom or the drawn
+  // ground would poke through the tarmac between vertices.
+  const t = new Terrain(TILE, RES);
+  const g = new Int16Array(t.n * t.n);
+  for (let j = 0; j < t.n; j++) {
+    for (let i = 0; i < t.n; i++) g[j * t.n + i] = Math.round(110 * Math.sin(i * 0.9) * Math.cos(j * 0.8));
+  }
+  t.grids.set('0,0', g);
+
+  let worst = 0;
+  for (let k = 0; k < 4000; k++) {
+    const x = 40 + ((k * 37) % 4000) / 10, z = 40 + ((k * 91) % 4000) / 10;
+    const step = 4;
+    const a = t.heightAt(x, z), b = t.heightAt(x + step, z);
+    const mid = t.heightAt(x + step / 2, z);
+    worst = Math.max(worst, (a + b) / 2 - mid);      // chord ABOVE curve is the danger
+  }
+  assert.ok(worst < 0.06,
+    `a 4 m chord stands ${worst.toFixed(3)} m proud of the ground — through the asphalt`);
 });

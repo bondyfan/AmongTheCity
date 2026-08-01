@@ -26,6 +26,7 @@
 
 const TERRAIN_URL = (tx, tz) => `data/terrain/${tx}_${tz}.bin`;
 const NO_DATA = -32768;
+const _crRows = new Float64Array(4);   // heightAt's scratch — it is HOT
 
 export class Terrain {
   /** @param tile metres per world tile (manifest.tile), @param res metres between samples */
@@ -155,23 +156,35 @@ export class Terrain {
       for (const h of [h00, h10, h01, h11]) if (h !== NO_DATA) { sum += h; k++; }
       return k ? sum / k / 10 : 0;
     }
-    // THE SAME TRIANGLE THE GROUND IS DRAWN AS, not a bilinear patch through the
-    // same four corners. Those are different surfaces: bilinear over a cell is a
-    // hyperbolic paraboloid and the drawn cell is two flat triangles, and they
-    // part company by a quarter of the cell's twist. Measured over tile −1,−1:
-    // the drawn ground stands ABOVE the bilinear answer by up to 1.82 m, and by
-    // more than LAYER_Y.road (0.20 m) across 0.82 % of the tile. Everywhere in
-    // that 0.82 % the road was laid 20 cm above a surface the renderer then drew
-    // higher still, so the aerial photograph covered the tarmac — "terén jde
-    // přes silnici", and it was the ground, not a path.
-    //
-    // Both grids split a cell on the SAME diagonal — meshes.js terrainQuad
-    // pushes (a, c, b) and ortho.js's PlaneGeometry comes out with its first
-    // triangle at (i,j), (i,j+1), (i+1,j) — so one test picks the right one:
-    // fx + fz ≤ 1 is the h00 corner's triangle.
-    //
-    // Now heightAt answers for the surface that EXISTS. Roads, cars, buildings
-    // and the ground agree by construction rather than to within a tolerance.
+    // ---- SMOOTH, because the world is ------------------------------------
+    // For most of this project's life the ground between samples was two flat
+    // triangles, and every complaint that ever came in about the terrain —
+    // "hrboly", "seams", "přehyby", roads that kink, rails that fold — was one
+    // complaint: the world was FACETED at 20 m. A real landscape is the
+    // integral of erosion; it has no creases at survey-grid spacing. So the
+    // height field is now read through a Catmull-Rom bicubic: C1-smooth
+    // everywhere, passing exactly through every sample, no crease anywhere
+    // for anything downstream to inherit. The levelled roads, the rails, the
+    // earthworks and the drape all read this same function, so they agree by
+    // construction.
+    const cr = (p0, p1, p2, p3, t) => p1 + 0.5 * t * ((p2 - p0)
+      + t * ((2 * p0 - 5 * p1 + 4 * p2 - p3) + t * (3 * (p1 - p2) + p3 - p0)));
+    const tap = (ti, tj) => {
+      const ci = ti < 0 ? 0 : ti > n - 1 ? n - 1 : ti;
+      const cj = tj < 0 ? 0 : tj > n - 1 ? n - 1 : tj;
+      return g[cj * n + ci];
+    };
+    let bad = false;
+    const rows = _crRows;
+    for (let dj = -1; dj <= 2; dj++) {
+      const a = tap(i - 1, j + dj), b = tap(i, j + dj);
+      const c2 = tap(i + 1, j + dj), d2 = tap(i + 2, j + dj);
+      if (a === NO_DATA || b === NO_DATA || c2 === NO_DATA || d2 === NO_DATA) { bad = true; break; }
+      rows[dj + 1] = cr(a, b, c2, d2, fx);
+    }
+    if (!bad) return cr(rows[0], rows[1], rows[2], rows[3], fz) / 10;
+    // NoData anywhere in the 4×4 window: fall back to the old drawn-triangle
+    // read, which only needs the four corners it already checked above.
     return (fx + fz <= 1
       ? h00 + (h10 - h00) * fx + (h01 - h00) * fz
       : h11 + (h01 - h11) * (1 - fx) + (h10 - h11) * (1 - fz)) / 10;

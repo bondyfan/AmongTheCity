@@ -418,7 +418,13 @@ function drape(geo, terrain, fixed = null) {
 // too, so neighbouring chunks share their edge vertices by construction and no
 // crack can open between them.
 function terrainQuad(x0, z0, terrain, hex, y = 0, layer = SURF.grass) {
-  const SEG = 6;
+  // 4 m, not 20. The height field is C1-smooth now (terrain.js), and a smooth
+  // function drawn with 20 m triangles is faceted right back into the creases
+  // the smoothing removed. 4 m is chosen against the road headroom: a chord
+  // over a smooth curve stands proud by curvature·step²/8, and at 4 m that
+  // stays under the 6 cm a cut road keeps above the ground even on curvature
+  // no Czech hillside reaches. 30×30 per chunk is 1 800 ground triangles.
+  const SEG = 30;
   const step = CHUNK / SEG;
   const pos = [], idx = [];
   for (let j = 0; j <= SEG; j++) {
