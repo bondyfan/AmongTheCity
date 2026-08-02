@@ -22,6 +22,16 @@ const LOD_RANK = { ground: 0, shell: 1, full: 2 };
 import { stampFranchises } from './interiors.js';
 
 const _closest = { x: 0, z: 0, t: 0 };
+
+// axis-aligned bbox of a way's polyline, cached on the feature — the physics
+// loops below run per wheel per frame, and most ways in a cell are nowhere
+// near the asker
+const lineBB = (f) => {
+  if (f._sbb) return f._sbb;
+  let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
+  for (const [x, z] of f.p) { if (x < a) a = x; if (z < b) b = z; if (x > c) c = x; if (z > d) d = z; }
+  return (f._sbb = [a, b, c, d]);
+};
 const _surf = { y: 0, road: false };   // surfaceY's reusable answer
 
 // ---- WHICH surface, when a place has more than one -------------------------
@@ -279,6 +289,7 @@ export class CityWorld {
   }
 
   update(dt, focus, opts) {
+    this._flushGuessedDrops();
     // interiors stream on their own schedule (they only matter on foot, and
     // they must keep running even while the chunk streamer has nothing to do)
     this.interiors.update(dt, focus, opts?.onFoot ?? false);
@@ -416,7 +427,17 @@ export class CityWorld {
     return 'ground';
   }
 
-  _dropGuessedChunks() {
+  // Debounced: height tiles land in bursts at boot, and every burst used to
+  // drop-and-rebuild the whole guessed set per tile — most of the loading
+  // stutter was the same chunks being rebuilt five times in three seconds.
+  _dropGuessedChunks() { this._guessDropWanted = true; }
+
+  _flushGuessedDrops() {
+    if (!this._guessDropWanted) return;
+    const now = performance.now();
+    if (now - (this._guessDropAt ?? 0) < 1500) return;
+    this._guessDropAt = now;
+    this._guessDropWanted = false;
     const keys = [];
     for (const key of this.built.keys()) {
       // ONLY the chunks that were meshed on ground somebody had to GUESS. A
@@ -531,6 +552,8 @@ export class CityWorld {
     for (const r of cell.roads) {
       if (!r.d) continue;
       const half = r.w / 2 + 0.35;               // a wheel just off the kerb still rides the kerb
+      const bb = lineBB(r);
+      if (x < bb[0] - half || x > bb[2] + half || z < bb[1] - half || z > bb[3] + half) continue;
       let along = 0;
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
@@ -579,6 +602,8 @@ export class CityWorld {
     // it — a metre, on a rail bridge
     for (const r of cell.rails ?? []) {
       if (!r.p || r.p.length < 2) continue;
+      const bb = lineBB(r);
+      if (x < bb[0] - 2.6 || x > bb[2] + 2.6 || z < bb[1] - 2.6 || z > bb[3] + 2.6) continue;
       let dist = 0;
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
@@ -600,6 +625,9 @@ export class CityWorld {
       // terrain sank into it to the knees on a fill and to the neck on a big
       // one. Any graded deck IS the ground where it runs.
       const br = !!r.br;
+      const reach = r.w / 2 + (br ? 1.5 : 0.35);
+      const bb = lineBB(r);
+      if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
       let dist = 0;
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];

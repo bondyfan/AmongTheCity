@@ -793,23 +793,42 @@ const _cl = { x: 0, z: 0, t: 0 };      // distPointToSegment's reusable answer
 function clampUnderRoads(geo, drv, terrain) {
   if (!geo || !drv?.length || !terrain) return geo;
   const a = geo.attributes.position.array;
+  // corridors that cannot touch this geometry are dropped ONCE, not per
+  // vertex, and the per-segment test is squared distance with no allocation —
+  // this runs for every fill and every ground quad of every chunk build.
+  let gx0 = 1e9, gz0 = 1e9, gx1 = -1e9, gz1 = -1e9;
   for (let i = 0; i < a.length; i += 3) {
     const x = a[i], z = a[i + 2];
-    for (const { r, bb, hw, lay } of drv) {
+    if (x < gx0) gx0 = x; if (x > gx1) gx1 = x;
+    if (z < gz0) gz0 = z; if (z > gz1) gz1 = z;
+  }
+  const use = drv.filter(({ bb, hw }) =>
+    !(gx1 < bb[0] - hw || gx0 > bb[2] + hw || gz1 < bb[1] - hw || gz0 > bb[3] + hw));
+  if (!use.length) return geo;
+  for (let i = 0; i < a.length; i += 3) {
+    const x = a[i], z = a[i + 2];
+    for (const { r, bb, hw, lay } of use) {
       if (x < bb[0] - hw || x > bb[2] + hw || z < bb[1] - hw || z > bb[3] + hw) continue;
+      const hw2 = hw * hw;
       let along = 0;
       for (let k = 0; k < r.p.length - 1; k++) {
         const [ax, az] = r.p[k], [bx, bz] = r.p[k + 1];
-        const d = distPointToSegment(x, z, ax, az, bx, bz, _cl);
-        if (d < hw) {
-          const s2 = along + Math.hypot(_cl.x - ax, _cl.z - az);
+        const dx = bx - ax, dz = bz - az;
+        const L = Math.hypot(dx, dz);
+        const L2 = L * L || 1e-9;
+        let t = ((x - ax) * dx + (z - az) * dz) / L2;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const px = ax + dx * t, pz = az + dz * t;
+        const ex = x - px, ez = z - pz;
+        if (ex * ex + ez * ez < hw2) {
+          const s2 = along + L * t;
           const gy = r.br ? bridgeDeckHeight(r, s2, terrain) : roadGradeY(r, s2, terrain);
           if (gy !== null && gy !== undefined) {
             const cap = gy + (lay ?? LAYER_Y.road) - 0.05;
             if (a[i + 1] > cap) a[i + 1] = cap;
           }
         }
-        along += Math.hypot(bx - ax, bz - az);
+        along += L;
       }
     }
   }
@@ -1180,11 +1199,14 @@ function roadRibbon(sink, f, terrain, cell, key) {
     // TARMAC is harmless: it is the same colour at the same height and reads as
     // a wider road. Overlapping white LINES are a lattice, because a line is the
     // highest-contrast thing on the surface.
-    const js = junctionsIn(key);
+    const js = junctionsNear(f);
     const covered = (x, z) => onCarriageway(cell, f, x, z, -0.4)
       // …and a road running THROUGH a junction stops its lines there, the way a
       // real one stops at the give-way line rather than painting over the box.
-      || !!(js && js.some((j) => (x - j.x) ** 2 + (z - j.z) ** 2 < (j.pad + 0.6) ** 2));
+      // The reach is the pad's HULL radius — the old node-centre radius let a
+      // line clip the pad's corners, which is half the lattice at any big
+      // crossing.
+      || js.some((j) => (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 0.6) ** 2);
     for (const side of [-1, 1]) {
       for (let i = 0; i < q.length - 1; i++) {
         // Break the line short of each end. OSM splits a way at every junction,
@@ -1210,11 +1232,18 @@ function roadRibbon(sink, f, terrain, cell, key) {
   if (f.d && (f.w ?? 0) >= 5.5 && DASH_CLASSES.has(f.t)) {
     _c.setHex(COLORS.marking);
     const mr = _c.r, mg = _c.g, mb = _c.b;
-    const js2 = junctionsIn(key);
+    const js2 = junctionsNear(f);
     for (let s = 1.2; s + DASH_LEN < len - 1.2; s += DASH_LEN + DASH_GAP) {
       walkAt(fr, s, _WA); walkAt(fr, s + DASH_LEN, _WB);
-      // a centre line does not run through a junction either
-      if (js2 && js2.some((j) => (_WA.x - j.x) ** 2 + (_WA.z - j.z) ** 2 < (j.pad + 1.5) ** 2)) continue;
+      // a centre line does not run through a junction either — tested at BOTH
+      // ends against the pad's hull radius (a dash starting outside the old
+      // node radius still landed across the pad), and never painted onto
+      // another carriageway lying over this one: the diagonal white chaos at
+      // every dual-carriageway crossing was exactly these two leaks.
+      const rj = (x, z) => js2.some((j) =>
+        (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 1.5) ** 2);
+      if (rj(_WA.x, _WA.z) || rj(_WB.x, _WB.z)) continue;
+      if (onCarriageway(cell, f, (_WA.x + _WB.x) / 2, (_WA.z + _WB.z) / 2, -0.4)) continue;
       const ya = LAYER_Y.marking + elev(s, _WA.x, _WA.z);
       const yb = LAYER_Y.marking + elev(s + DASH_LEN, _WB.x, _WB.z);
       const px = _WA.dz * DASH_HW, pz = -_WA.dx * DASH_HW;
@@ -1226,6 +1255,25 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // everything this ribbon emitted — deck, kerbs, fascia, parapets, lane
   // paint — is already at its absolute height
   if (mark >= 0) sink.fixFrom(mark);
+}
+
+// Every junction whose pad could touch this way — gathered from the buckets
+// of every chunk the way's bbox reaches (± one chunk), because junctions are
+// bucketed by their centre and a pad happily straddles the border. Cached on
+// the way: the list is asked for twice per ribbon, per rebuild.
+function junctionsNear(f) {
+  if (f._jsNear) return f._jsNear;
+  const bb = bboxOfLine(f);
+  const out = [];
+  const c0x = Math.floor(bb[0] / CHUNK) - 1, c1x = Math.floor(bb[2] / CHUNK) + 1;
+  const c0z = Math.floor(bb[1] / CHUNK) - 1, c1z = Math.floor(bb[3] / CHUNK) + 1;
+  for (let cx = c0x; cx <= c1x; cx++) {
+    for (let cz = c0z; cz <= c1z; cz++) {
+      const js = junctionsIn(cx + ',' + cz);
+      if (js) for (const j of js) out.push(j);
+    }
+  }
+  return (f._jsNear = out);
 }
 
 /**
@@ -1839,6 +1887,13 @@ function brandMarkMat(brand) {
   const cv = document.createElement('canvas');
   cv.width = 1024; cv.height = 256;
   const g = cv.getContext('2d');
+  // null context under memory pressure → unpainted canvas → solid black quad;
+  // fall back to flat brand colour rather than upload the void
+  if (!g) {
+    m = new THREE.MeshBasicMaterial({ color: brand.sign & 0xffffff, toneMapped: false });
+    _brandMats.set(label, m);
+    return m;
+  }
   const css = (hex) => '#' + hex.toString(16).padStart(6, '0');
   g.fillStyle = css(brand.sign);
   g.fillRect(0, 0, 1024, 256);
@@ -2470,6 +2525,77 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
 // carriageway every LAMP_STEP meters and alternating sides. Two instanced
 // meshes per chunk (post + head); the head material is emissive so dusk turns
 // the whole city on for free — no lights, no shadow cost.
+// one sign: post + panel, all vertex-coloured triangles in the chunk sink
+function signPost(sink, sg, cell) {
+  const [x, z] = sg.p[0];
+  // face against the travel of the nearest drivable road, from its right kerb
+  let dx = 0, dz = -1, hw = 3;
+  let best = 36;                                  // (6 m)² — orphans face north
+  for (const r of cell.roads) {
+    if (!r.d || !r.p) continue;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+      const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9;
+      let t = ((x - ax) * ex + (z - az) * ez) / L2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const qx = ax + ex * t, qz = az + ez * t;
+      const d2 = (x - qx) ** 2 + (z - qz) ** 2;
+      if (d2 < best) {
+        best = d2;
+        const L = Math.sqrt(L2);
+        dx = ex / L; dz = ez / L;
+        hw = (r.w ?? 6) / 2;
+      }
+    }
+  }
+  const px = x - dz * (hw + 0.6), pz = z + dx * (hw + 0.6);   // right of travel
+  // panel corners live in the plane facing −travel; u runs across it
+  const ux = -dz, uz = dx;
+  const H = 2.2;                                  // panel centre height
+  sink.at(SURF.concrete);
+  _c.setHex(0x8a8d92);                            // galvanised post
+  const prm = _c.r, pgm = _c.g, pbm = _c.b;
+  for (const [ox, oz] of [[ux, uz], [dx, dz]]) {  // two crossed fins read as a post
+    sink.quad(px - ox * 0.035, 0, pz - oz * 0.035, px + ox * 0.035, 0, pz + oz * 0.035,
+      px + ox * 0.035, H + 0.45, pz + oz * 0.035, px - ox * 0.035, H + 0.45, pz - oz * 0.035,
+      prm, pgm, pbm);
+    sink.quad(px + ox * 0.035, 0, pz + oz * 0.035, px - ox * 0.035, 0, pz - oz * 0.035,
+      px - ox * 0.035, H + 0.45, pz - oz * 0.035, px + ox * 0.035, H + 0.45, pz + oz * 0.035,
+      prm, pgm, pbm);
+  }
+  const P = (u, v) => [px + ux * u, H + v, pz + uz * u];
+  const tri2 = (a, b, c2, r, g, b2) => {          // both windings — read from both sides
+    sink.triFacing(a[0], a[1], a[2], b[0], b[1], b[2], c2[0], c2[1], c2[2], -dx, 0, -dz, r, g, b2);
+    sink.triFacing(a[0], a[1], a[2], c2[0], c2[1], c2[2], b[0], b[1], b[2], dx, 0, dz, r, g, b2);
+  };
+  _c.setHex(0xc8332a); const rr = _c.r, rg = _c.g, rb = _c.b;
+  _c.setHex(0xf2f0ea); const wr2 = _c.r, wg2 = _c.g, wb2 = _c.b;
+  if (sg.k === 'give_way') {
+    // inverted triangle: red border, white heart
+    tri2(P(-0.45, 0.45), P(0.45, 0.45), P(0, -0.35), rr, rg, rb);
+    const e = 0.012;
+    tri2(P(-0.30, 0.36 + e), P(0.30, 0.36 + e), P(0, -0.17 + e), wr2, wg2, wb2);
+  } else if (sg.k === 'stop') {
+    // red octagon (fan) with a white ring hinted by a lighter inner fan
+    const R = 0.42;
+    for (let i = 0; i < 8; i++) {
+      const a0 = (i / 8) * Math.PI * 2 + Math.PI / 8, a1 = ((i + 1) / 8) * Math.PI * 2 + Math.PI / 8;
+      tri2(P(0, 0), P(Math.cos(a0) * R, Math.sin(a0) * R), P(Math.cos(a1) * R, Math.sin(a1) * R),
+        rr, rg, rb);
+    }
+    // the white STOP bar — legible as the word from any driving distance
+    tri2(P(-0.26, 0.055), P(0.26, 0.055), P(-0.26, -0.055), wr2, wg2, wb2);
+    tri2(P(0.26, 0.055), P(0.26, -0.055), P(-0.26, -0.055), wr2, wg2, wb2);
+  } else {
+    // hlavní silnice: yellow diamond in a white one
+    tri2(P(-0.4, 0), P(0, 0.4), P(0.4, 0), wr2, wg2, wb2);
+    tri2(P(-0.4, 0), P(0.4, 0), P(0, -0.4), wr2, wg2, wb2);
+    _c.setHex(0xe7b33c); const yr = _c.r, yg = _c.g, yb = _c.b;
+    tri2(P(-0.28, 0.01), P(0, 0.29), P(0.28, 0.01), yr, yg, yb);
+    tri2(P(-0.28, 0.01), P(0.28, 0.01), P(0, -0.27), yr, yg, yb);
+  }
+}
+
 const LAMP_STEP = 34, LAMP_MIN_W = 5.4, LAMP_H = 7.2;
 let _lPost = null, _lHead = null;
 function lampTemplates() {
@@ -3051,6 +3177,21 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       heads.instanceMatrix.needsUpdate = true;
       group.add(posts, heads);
     }
+  }
+
+  // -- road signs: dej přednost, stop, hlavní silnice ----------------------
+  // A few flat-coloured triangles on a thin post, placed at the OSM node
+  // (which sits on the way at the stop line), pushed to the right kerb of the
+  // travel direction it governs and turned to face the oncoming driver — the
+  // same convention traffic.js uses for its signal poles. Relative heights;
+  // the chunk drape stands them on the ground.
+  if (!shell && cell.signs?.length) {
+    const mark0 = sink.mark();
+    for (const sg3 of cell.signs) {
+      if (sg3._home !== key) continue;
+      signPost(sink, sg3, cell);
+    }
+    void mark0;
   }
 
   // -- trees: two InstancedMeshes (trunks / crowns) sharing transforms --

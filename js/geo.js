@@ -1104,7 +1104,7 @@ function bucketize(index, list, kind, touched) {
   for (const f of list) {
     const ring = forEachCellOf(f, (key) => {
       let cell = index.get(key);
-      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [] });
+      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [] });
       cell[kind].push(f);
       touched?.add(key);
     });
@@ -1160,6 +1160,10 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   appendAll(city.pois, data.pois ?? []);           // not bucketized — HUD/labels
   const signals = data.signals ?? [];              // [[x,z],…] — traffic lights v3
   appendAll(city.signals, signals);
+  // road signs — typed {p:[x,z], k:'give_way'|'stop'|'priority'}; wrapped like
+  // trees so bucketize can hand each chunk its own posts
+  const signs = (data.signs ?? []).map((g) => ({ p: [g.p], k: g.k, _id: ++next }));
+  bucketize(city.chunkIndex, signs, 'signs', touched);
   return { roads, signals, heavy };
 }
 

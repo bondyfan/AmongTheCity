@@ -73,6 +73,10 @@ const wantNode = (t) => !!t && (
   t.natural === 'tree' || t.highway === 'traffic_signals' || t.highway === 'bus_stop'
   || t.railway === 'station' || POI_AMENITY.test(t.amenity ?? '')
   || t.aeroway === 'aerodrome'      // the airport's own name, for the map
+  // road signs: give way, stop, and anything with an explicit traffic_sign
+  // tag (hlavní silnice arrives as traffic_sign=CZ:P2 on a node)
+  || t.highway === 'give_way' || t.highway === 'stop'
+  || t.traffic_sign !== undefined
 );
 
 // ---- tile writer -----------------------------------------------------------

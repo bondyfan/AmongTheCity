@@ -84,9 +84,13 @@ export const COLORS = {
   inferred: { paving: 0x9a978f, asphalt: 0x5c5f64, dirt: 0x7a6a55, concrete: 0x8e8b84 },
   water: 0x3f6f95,
   road: {
-    motorway: 0x4c4f55, trunk: 0x4c4f55, primary: 0x53565c, secondary: 0x55585e,
-    tertiary: 0x585b60, unclassified: 0x5c5f64, residential: 0x5c5f64,
-    living_street: 0x67696d, service: 0x64666a, pedestrian: 0x8f8c84,
+    // ONE grey for every carriageway. These used to shade by class, which
+    // reads as information on a map and as PATCHWORK on the ground: every
+    // junction of two classes showed a seam, every dual carriageway a stripe.
+    // Real asphalt does not know its administrative class.
+    motorway: 0x55585e, trunk: 0x55585e, primary: 0x55585e, secondary: 0x55585e,
+    tertiary: 0x55585e, unclassified: 0x55585e, residential: 0x55585e,
+    living_street: 0x55585e, service: 0x55585e, pedestrian: 0x8f8c84,
     footway: 0x9a968c, path: 0x8f8a7c, cycleway: 0x7d6f74, steps: 0xa09c92, track: 0x84796a,
     runway: 0x55585d, taxiway: 0x6e7176, taxilane: 0x74777c, airstrip: 0x6a6257,
   },

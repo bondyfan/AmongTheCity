@@ -695,6 +695,36 @@ function urbanRuns() {
   return out;
 }
 
+// ---------- road signs (typed points — dej přednost, stop, hlavní) ---------
+// The kind is decided here so the client never parses tag soup: give_way and
+// stop from their highway values, priority from the Czech traffic_sign codes
+// (P2 hlavní silnice; IP6-style codes and everything unrecognised are skipped
+// rather than guessed).
+function signKind(t) {
+  if (!t) return null;
+  if (t.highway === 'give_way') return 'give_way';
+  if (t.highway === 'stop') return 'stop';
+  const ts = t.traffic_sign ?? '';
+  if (/(^|[;,])(CZ:)?P ?2($|[;,])/.test(ts)) return 'priority';
+  if (/(^|[;,])(CZ:)?P ?4($|[;,])/.test(ts)) return 'give_way';
+  if (/(^|[;,])(CZ:)?P ?6($|[;,])/.test(ts)) return 'stop';
+  return null;
+}
+function processSigns(els, owns) {
+  const out = [], seen = new Set();
+  for (const el of els) {
+    if (el.type !== 'node') continue;
+    const k = signKind(el.tags);
+    if (!k) continue;
+    const key = 'node/' + el.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const pt = [px(el.lon), pz(el.lat)];
+    if (owns(pt)) out.push({ p: pt, k });
+  }
+  return out;
+}
+
 // ---------- traffic signals (new layer — semafory for traffic v3) ----------
 function processSignals(els, owns) {
   const out = [], seen = new Set();
@@ -723,7 +753,7 @@ const OUT_DIR = process.env.OUT_DIR || 'public/data';
 mkdirSync(`${OUT_DIR}/tiles`, { recursive: true });
 const manifestTiles = [];
 const totals = { buildings: 0, roads: 0, rails: 0, water: 0, waterways: 0,
-  green: 0, paved: 0, trees: 0, pois: 0, signals: 0 };
+  green: 0, paved: 0, trees: 0, pois: 0, signals: 0, signs: 0 };
 let emitted = 0, empty = 0, bytes = 0;
 
 // Some rivers are single OSM multipolygons tens of kilometres long. They live
@@ -780,6 +810,7 @@ const rawTiles = readdirSync(RAW_DIR)
       trees: processTrees(els, owns),
       pois: processPois(els, owns),
       signals: processSignals(els, owns),
+      signs: processSigns(els, owns),
     };
     let n = 0;
     for (const key of Object.keys(totals)) { n += tile[key].length; totals[key] += tile[key].length; }

@@ -117,6 +117,15 @@ function wordmarkMat(text, bg = 0xffffff, fg = 0x1c1c1c) {
   const cv = document.createElement('canvas');
   cv.width = 1024; cv.height = 256;
   const g = cv.getContext('2d');
+  // Under GPU/canvas memory pressure Chrome hands back a null context, and a
+  // texture built from an unpainted canvas uploads as a solid BLACK board —
+  // the floating black squares. Plain sign colour is the honest fallback.
+  if (!g) {
+    mat = new THREE.MeshBasicMaterial({ color: typeof bg === 'string' ? bg : bg & 0xffffff,
+      toneMapped: false });
+    _wordmarks.set(key, mat);
+    return mat;
+  }
   const css = (hex) => typeof hex === 'string'    // defensive: the stamping agent
     ? hex : '#' + (hex & 0xffffff).toString(16).padStart(6, '0');  // may hand either
   g.fillStyle = css(bg);
