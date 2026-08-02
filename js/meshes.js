@@ -788,7 +788,7 @@ function clampUnderRoads(geo, drv, terrain) {
   const a = geo.attributes.position.array;
   for (let i = 0; i < a.length; i += 3) {
     const x = a[i], z = a[i + 2];
-    for (const { r, bb, hw } of drv) {
+    for (const { r, bb, hw, lay } of drv) {
       if (x < bb[0] - hw || x > bb[2] + hw || z < bb[1] - hw || z > bb[3] + hw) continue;
       let along = 0;
       for (let k = 0; k < r.p.length - 1; k++) {
@@ -798,7 +798,7 @@ function clampUnderRoads(geo, drv, terrain) {
           const s2 = along + Math.hypot(_cl.x - ax, _cl.z - az);
           const gy = r.br ? bridgeDeckHeight(r, s2, terrain) : roadGradeY(r, s2, terrain);
           if (gy !== null && gy !== undefined) {
-            const cap = gy + LAYER_Y.road - 0.05;
+            const cap = gy + (lay ?? LAYER_Y.road) - 0.05;
             if (a[i + 1] > cap) a[i + 1] = cap;
           }
         }
@@ -1247,7 +1247,14 @@ function junctionPad(sink, j, terrain) {
   sink.at(SURF.asphalt);
   const ring = junctionHull(j);
   if (!ring) return;
-  _c.setHex(COLORS.road.residential);
+  // the widest drivable arm names the surface — a pad in residential grey in
+  // the middle of a primary read as a patch of different tarmac at every
+  // big crossing
+  let padT = 'residential', padW = 0;
+  for (const a of j.arms) {
+    if (a.r.d && (a.r.w ?? 0) > padW && COLORS.road[a.r.t]) { padW = a.r.w; padT = a.r.t; }
+  }
+  _c.setHex(COLORS.road[padT] ?? COLORS.road.residential);
   // ---- the pad rides the JUNCTION'S grade, not the terrain -----------------
   // The roads arriving here are levelled: every arm is pinned to one agreed
   // height (junctionY) and may sit up to GRADE_CUT below the terrain. The pad
@@ -2821,9 +2828,33 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // only happens where water crosses the cell — and there the ground is a
       // riverbank, which is where the flat WATER surface is the shape that
       // matters anyway.
-      const g = holes.length
+      let g = holes.length
         ? drape(terrainTess(shapePoly([[x0, z0], [x1, z0], [x1, z1], [x0, z1]], holes, 0, COLORS.groundBase, SURF.grass)), mats.terrain)
         : terrainQuad(x0, z0, mats.terrain, COLORS.groundBase, 0, SURF.grass);
+      // ---- the ground never rises over a deck ----------------------------
+      // The earthworks conform the 20 m height grid to every levelled way,
+      // but a 20 m grid cannot hold a 9 m cutting: the bicubic arches back
+      // over the deck between grid nodes — measured 0.6 m of grass lying on
+      // Palackého at the flyover, 88 buried spots within one 90 m circle.
+      // So the drawn ground is CLAMPED under every corridor, like the fills
+      // already are. The reach extends 2.9 m past the kerb with a FLAT cap:
+      // the ground mesh samples every 4 m, so a narrower reach would let a
+      // chord between two outside vertices arch over a 3 m track — the flat
+      // band it cuts is the road's shoulder, which the conform already
+      // flattens at the coarser scale.
+      if (g && !shell && mats.terrain) {
+        const corr = [];
+        for (const r of cell.roads) {
+          if (r.br || !r.p || r.p.length < 2) continue;
+          corr.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 2.9,
+            lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road });
+        }
+        for (const r of cell.rails) {
+          if (r.br || !r.p || r.p.length < 2) continue;
+          corr.push({ r, bb: bboxOfLine(r), hw: 2.2 + 2.9, lay: LAYER_Y.rail });
+        }
+        g = clampUnderRoads(g, corr, mats.terrain);
+      }
       if (g) flat.push(g);
     }
   }
@@ -2856,9 +2887,19 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
           const c2 = city.chunkIndex.get(cx2 + ',' + cz2);
           if (!c2) continue;
           for (const r of c2.roads) {
-            if (!r.d || !r.p || r.p.length < 2 || seen.has(r._id)) continue;
+            // every levelled way, not only the drivable ones — a green fill
+            // lying over a cycleway buries it exactly like over a street
+            if (r.br || !r.p || r.p.length < 2 || seen.has(r._id)) continue;
             seen.add(r._id);
-            out.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25 });
+            out.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25,
+              lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road });
+          }
+          for (const r of c2.rails) {
+            if (r.br || !r.p || r.p.length < 2) continue;
+            const id = r._id ?? (r._id = 'rail:' + c2.rails.indexOf(r));
+            if (seen.has(id)) continue;
+            seen.add(id);
+            out.push({ r, bb: bboxOfLine(r), hw: 2.45, lay: LAYER_Y.rail });
           }
         }
       }
@@ -2888,8 +2929,9 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // under every levelled road, which is the entire point of the layer.
     if (mats.ground) {
       const drvR = cell.roads
-        .filter((r) => r.d && r.p?.length > 1)
-        .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25 }));
+        .filter((r) => !r.br && r.p?.length > 1)
+        .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25,
+          lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road }));
       for (const r of mats.ground.rectsIn(x0, z0)) {
         const col = r.c === 2 ? COLORS.inferred.asphalt : COLORS.inferred.paving;
         const sc = r.c === 2 ? SURF.asphalt : SURF.paving;
