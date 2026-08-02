@@ -403,18 +403,29 @@ export function surfaceMaterial() {
           // The ground is very nearly flat in world terms, so a tangent frame
           // derived from screen-space derivatives is stable here and saves
           // carrying tangents through every merge in meshes.js.
+          //
+          // …NEARLY flat. A VERTICAL face running east-west has constant
+          // world Z down the screen, both st.y derivatives are zero, the
+          // tangent collapses and normalize(0) is NaN — and NaN lighting is
+          // PURE BLACK. That was every "black square" in the city: kerb and
+          // skirt faces aligned with the X axis. Where the frame degenerates
+          // the face keeps its geometric normal, which on a 25 cm kerb wall
+          // nobody can tell apart from the mapped one anyway.
           vec3 q0 = dFdx(-vViewPosition), q1 = dFdy(-vViewPosition);
           vec2 st0 = dFdx(vWorldXZ), st1 = dFdy(vWorldXZ);
-          vec3 N = normalize(normal);
-          vec3 T = normalize(q0 * st1.y - q1 * st0.y);
-          vec3 B = -normalize(cross(N, T));
-          normal = normalize(mat3(T, B, N) * mapN);
+          vec3 Tc = q0 * st1.y - q1 * st0.y;
+          if (dot(Tc, Tc) > 1e-10) {
+            vec3 N = normalize(normal);
+            vec3 T = normalize(Tc);
+            vec3 B = -normalize(cross(N, T));
+            normal = normalize(mat3(T, B, N) * mapN);
+          }
         }`);
     mat.userData.shader = shader;
   };
   // three keys its program cache on this, and two materials with different
   // injected code must not share one
-  mat.customProgramCacheKey = () => 'surfaces-v1';
+  mat.customProgramCacheKey = () => 'surfaces-v2';
   return mat;
 }
 

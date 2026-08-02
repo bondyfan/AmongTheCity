@@ -273,9 +273,15 @@ export class CityWorld {
       // FIRST chunk build — a brook indexed later never got its trench
       delete this.city._wwChunks;
       // new roads may have landed over ground already shaped — bake again,
-      // from the survey, next update
-      if (this.terrain._conformed) {
-        for (const tk of [...this.terrain._conformed]) this.terrain._conformed.delete(tk);
+      // from the survey, next update. ONLY the arriving tile and its four
+      // neighbours (a border road reaches into them): clearing the whole set
+      // re-baked every loaded tile after every data tile, ~0.9 s of main
+      // thread each, which was most of the after-boot stutter.
+      if (this.terrain._conformed && t.tx !== undefined) {
+        for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          this.terrain._conformed.delete((t.tx + ox) + ',' + (t.tz + oz));
+          this.terrain._conformTried?.delete((t.tx + ox) + ',' + (t.tz + oz));
+        }
       }
     });
     // The far side of streaming: a tile that fell 9 km behind gives its

@@ -1030,6 +1030,29 @@ function trenchInto(sink, water, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, ter
  * paint four sets of white lines on the same tarmac; footpaths use it because a
  * path crossing a road is a CROSSING, not a beige strip laid over the asphalt.
  */
+// Like onCarriageway, but only counts a road CROSSING this one — the segment
+// under (x,z) has to run at a real angle (>~26°) to `self`'s direction there.
+// A parallel dual-carriageway twin or a merging slip overlaps for hundreds of
+// metres, and treating that as "covered" erased every dash on Palackého.
+function crossedBy(cell, self, x, z, dirX, dirZ, grow = 0) {
+  for (const o of cell.roads) {
+    if (o === self || !o.d) continue;
+    const half = (o.w ?? 3) / 2 + grow;
+    if (half <= 0) continue;
+    const bb = bboxOfLine(o);
+    if (x < bb[0] - half || x > bb[2] + half || z < bb[1] - half || z > bb[3] + half) continue;
+    for (let k = 0; k < o.p.length - 1; k++) {
+      const [ax, az] = o.p[k], [bx, bz] = o.p[k + 1];
+      if (distPointToSegment(x, z, ax, az, bx, bz, null) >= half) continue;
+      const ex = bx - ax, ez = bz - az;
+      const L = Math.hypot(ex, ez) || 1e-9;
+      const cross = Math.abs(dirX * (ez / L) - dirZ * (ex / L));
+      if (cross > 0.45) return true;
+    }
+  }
+  return false;
+}
+
 function onCarriageway(cell, self, x, z, grow = 0) {
   for (const o of cell.roads) {
     if (o === self || !o.d) continue;
@@ -1200,7 +1223,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
     // a wider road. Overlapping white LINES are a lattice, because a line is the
     // highest-contrast thing on the surface.
     const js = junctionsNear(f);
-    const covered = (x, z) => onCarriageway(cell, f, x, z, -0.4)
+    const covered = (x, z, dx2, dz2) => crossedBy(cell, f, x, z, dx2, dz2, -0.4)
       // …and a road running THROUGH a junction stops its lines there, the way a
       // real one stops at the give-way line rather than painting over the box.
       // The reach is the pad's HULL radius — the old node-centre radius let a
@@ -1219,7 +1242,8 @@ function roadRibbon(sink, f, terrain, cell, key) {
         const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
         const ax = q[i][0] + pax * off * side, az = q[i][1] + paz * off * side;
         const bx = q[i + 1][0] + pbx * off * side, bz = q[i + 1][1] + pbz * off * side;
-        if (covered((ax + bx) / 2, (az + bz) / 2)) continue;
+        const sL = Math.hypot(bx - ax, bz - az) || 1e-9;
+        if (covered((ax + bx) / 2, (az + bz) / 2, (bx - ax) / sL, (bz - az) / sL)) continue;
         // the stripe's own width runs along the same perpendicular as the inset
         sink.quad(
           ax - pax * EDGE_HW, ya, az - paz * EDGE_HW,
@@ -1243,7 +1267,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
       const rj = (x, z) => js2.some((j) =>
         (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 1.5) ** 2);
       if (rj(_WA.x, _WA.z) || rj(_WB.x, _WB.z)) continue;
-      if (onCarriageway(cell, f, (_WA.x + _WB.x) / 2, (_WA.z + _WB.z) / 2, -0.4)) continue;
+      if (crossedBy(cell, f, (_WA.x + _WB.x) / 2, (_WA.z + _WB.z) / 2, _WA.dx, _WA.dz, -0.4)) continue;
       const ya = LAYER_Y.marking + elev(s, _WA.x, _WA.z);
       const yb = LAYER_Y.marking + elev(s + DASH_LEN, _WB.x, _WB.z);
       const px = _WA.dz * DASH_HW, pz = -_WA.dx * DASH_HW;

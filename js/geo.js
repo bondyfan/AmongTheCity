@@ -236,12 +236,22 @@ function sampleProfile(prof, dist) {
 
 export function roadProfile(way, terrain) {
   if (!terrain || !way?.p || way.p.length < 2) return null;
-  if (way._prof && way._prof.terrain === terrain) return way._prof;
+  const c = way._prof;
+  if (c && c.terrain === terrain
+    && (c.ready || c.loads === (terrain._loads ?? 0))) return c;
   const prof = levelWay(way, terrain, way._pins ?? null);
-  // Terrain answers with a guess while a height tile is still on the way; keep
-  // the profile only once the ground under it is authoritative, and let the
-  // arriving tile rebuild the chunk with a real one.
-  if (prof && prof.ready) way._prof = prof;
+  // Terrain answers with a guess while a height tile is still on the way.
+  // The guess used to be thrown away — which meant the 24-pass levelling ran
+  // AGAIN for every roadGradeY call on an unready way: the whole boot was
+  // re-levelling the same roads thousands of times per second. So the guess
+  // is cached like any answer, stamped with the terrain load counter; the
+  // next height tile retires it, readiness makes it final, and terrain.missed
+  // still flags the chunk to rebuild.
+  if (prof) {
+    prof.loads = terrain._loads ?? 0;
+    way._prof = prof;
+    if (!prof.ready) terrain.missed = true;
+  }
   return prof;
 }
 
@@ -250,7 +260,9 @@ export function roadProfile(way, terrain) {
  * unpinned so the nodes can agree on a height, once pinned to those.
  */
 function levelWay(way, terrain, pinList) {
-  if (!pinList && way._raw && way._raw.terrain === terrain) return way._raw;
+  const rc = way._raw;
+  if (!pinList && rc && rc.terrain === terrain
+    && (rc.ready || rc.loads === (terrain._loads ?? 0))) return rc;
   const total = way._len ?? polylineLength(way.p);
   if (total < GRADE_DS * 2) return null;
   const n = Math.ceil(total / GRADE_DS) + 1;
@@ -361,8 +373,9 @@ function levelWay(way, terrain, pinList) {
       }
     }
   }
-  const prof = { terrain, ds, n, y, ground, gx, gz, total, ready };
-  if (!pinList && ready) way._raw = prof;
+  const prof = { terrain, ds, n, y, ground, gx, gz, total, ready,
+    loads: terrain._loads ?? 0 };
+  if (!pinList) way._raw = prof;
   return prof;
 }
 
