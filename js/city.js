@@ -187,6 +187,10 @@ export function conformTerrainTile(terrain, city, tx, tz) {
     }
   }
   if (profReady) terrain._conformed.add(key);
+  // an unready tile must NOT be retried every frame — a road running off the
+  // loaded world keeps its profile unready forever, and re-baking a 4800 m
+  // tile per frame is a hang. Stamp the attempt; retry only after new ground.
+  else (terrain._conformTried ??= new Map()).set(key, terrain._loads ?? 0);
   return moved > 0;
 }
 
@@ -294,6 +298,9 @@ export class CityWorld {
       // is re-marked below and re-baked from the pristine survey.
       for (const tk of this.terrain.grids.keys()) {
         if (this.terrain._conformed?.has(tk)) continue;
+        // tried while some profile was provisional, and nothing new has
+        // landed since — trying again would compute the same guess
+        if (this.terrain._conformTried?.get(tk) === (this.terrain._loads ?? 0)) continue;
         const [ttx, ttz] = tk.split(',').map(Number);
         if (conformTerrainTile(this.terrain, this.city, ttx, ttz)) {
           this._dropTileChunks(ttx, ttz);

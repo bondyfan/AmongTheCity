@@ -94,6 +94,7 @@ export class Terrain {
             const want = this.n * this.n * 2;
             if (ab.byteLength < want) throw new Error(`short: ${ab.byteLength} < ${want}`);
             this.grids.set(key, new Int16Array(ab, 0, this.n * this.n));
+            this._loads = (this._loads ?? 0) + 1;
             this._pending.delete(key);
             this._nearMemo?.clear();          // a miss may now have a better answer
             for (const cb of this._listeners) cb({ tx, tz });

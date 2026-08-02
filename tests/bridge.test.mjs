@@ -469,6 +469,7 @@ test('a junction height measured on missing ground is not remembered', () => {
   assert.ok(terrain.missed, 'the guess did not raise the flag');
   assert.ok(Math.abs(guess - 200) < 1, `guess ${guess.toFixed(1)} != 200`);
   loaded = true;
+  terrain._loads = 1;               // the height tile lands
   const real = junctionY(j, terrain);
   assert.ok(Math.abs(real - 230) < 1,
     `the boot-time guess survived: got ${real.toFixed(1)}, want 230`);

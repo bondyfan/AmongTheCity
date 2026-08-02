@@ -183,9 +183,15 @@ function blurPass(y, out, sigma, ds) {
  * corrects rather than overrides, and all the arms still meet exactly.
  */
 export function junctionY(node, terrain) {
-  if (node._ny !== undefined && node._nyT === terrain) return node._ny;
+  if (node._ny !== undefined && node._nyT === terrain
+    && (node._nyOk || node._nyL === (terrain._loads ?? 0))) return node._ny;
   node._nyT = terrain;
-  node._ny = terrain.heightAt(node.x, node.z);   // in case an arm recurses back here
+  // recursion guard: bridgeClearance below can wander back into this very
+  // node via an approach road's pins — mid-computation reads must take the
+  // provisional value, so the cache gate is satisfied UNTIL the real answer
+  // (and the real readiness) replace it at the end
+  node._nyOk = true;
+  node._ny = terrain.heightAt(node.x, node.z);
   let a = 0, n = 0, allReady = true;
   for (const arm of node.arms) {
     const prof = levelWay(arm.r, terrain, null);
@@ -205,13 +211,15 @@ export function junctionY(node, terrain) {
     const need = bridgeClearance(arm.r, terrain);
     if (need !== null && need > node._ny) { node._ny = need; node._hard = true; }
   }
-  // A height measured on ground that had not arrived yet must not outlive the
-  // ground's arrival: the cache used to be keyed on the terrain INSTANCE,
-  // which lives for the whole session, so the first — boot-time — answer won
-  // forever, and every road pinned to this node sat at cut depth for good.
-  // An unready answer is served once and forgotten; terrain.missed flags the
-  // chunk so the arriving tile rebuilds it and asks again.
-  if (!allReady) { terrain.missed = true; node._nyT = null; }
+  // A height measured on ground that had not arrived yet must not outlive
+  // the ground's arrival — but it must also not be recomputed on every ask,
+  // or the loading screen re-levels every arm of every junction per frame.
+  // So the guess IS cached, stamped with the terrain load counter: the next
+  // height tile invalidates it, readiness makes it final. terrain.missed
+  // flags the chunk so the arriving tile rebuilds it and asks again.
+  node._nyOk = allReady;
+  node._nyL = terrain._loads ?? 0;
+  if (!allReady) terrain.missed = true;
   return node._ny;
 }
 
@@ -435,7 +443,8 @@ export function bridgeDeckHeight(way, dist, terrain) {
   if (way._chain) {
     const ch = way._chain;
     let prof = ch.profile;
-    if (!prof || prof.terrain !== terrain) {
+    if (!prof || prof.terrain !== terrain
+      || (!prof.ready && prof.loads !== (terrain._loads ?? 0))) {
       const anchor = (w, end) => {
         const link = end === 0 ? w._ap0 : w._ap1;
         const y = link && roadGradeY(link.road, link.at, terrain);
@@ -524,8 +533,10 @@ export function bridgeDeckHeight(way, dist, terrain) {
         const tp = ch.tailWay.p[ch.tailEnd === 0 ? 0 : ch.tailWay.p.length - 1];
         ready = terrain.ready(hp[0], hp[1]) && terrain.ready(tp[0], tp[1]) && samplesReady;
       }
-      prof = { terrain, A, B, cones, total: ch.total };
-      if (ready) ch.profile = prof;
+      prof = { terrain, A, B, cones, total: ch.total, ready,
+        loads: terrain._loads ?? 0 };
+      ch.profile = prof;
+      if (!ready) terrain.missed = true;
     }
     const local = way._chainRev ? total - Math.max(0, Math.min(total, dist))
       : Math.max(0, Math.min(total, dist));
@@ -539,7 +550,8 @@ export function bridgeDeckHeight(way, dist, terrain) {
   }
 
   let profile = way._bridgeProfile;
-  if (!profile || profile.terrain !== terrain) {
+  if (!profile || profile.terrain !== terrain
+    || (!profile.ready && profile.loads !== (terrain._loads ?? 0))) {
     // The APPROACH heights when the junction index found them (see
     // indexJunctions), and the endpoint only as a fallback for a bridge that
     // joins nothing — a footbridge over a stream with no road at either end.
@@ -613,9 +625,11 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // Terrain answers 0 while a height tile is still on the way. Remember the
     // profile only after both approaches are authoritative; the arriving tile
     // then rebuilds the chunk and gets a fresh, correct level.
-    const ready = !terrain.ready
+    profile.ready = !terrain.ready
       || (terrain.ready(first[0], first[1]) && terrain.ready(last[0], last[1]));
-    if (ready) way._bridgeProfile = profile;
+    profile.loads = terrain._loads ?? 0;
+    way._bridgeProfile = profile;
+    if (!profile.ready) terrain.missed = true;
   }
 
   const d = Math.max(0, Math.min(total, dist));
