@@ -731,6 +731,13 @@ function wallQuad(sink, ax, az, bx, bz, yT, yB, fx, fz, r, g, b) {
   else sink.quad(bx, yT, bz, ax, yT, az, ax, yB, az, bx, yB, bz, r, g, b);
 }
 
+// wallQuad with its own top height at each end, for walls that follow ground
+function wallQuad2(sink, ax, az, bx, bz, yTa, yTb, yB, fx, fz, r, g, b) {
+  const dx = bx - ax, dz = bz - az;
+  if (dz * fx - dx * fz >= 0) sink.quad(ax, yTa, az, bx, yTb, bz, bx, yB, bz, ax, yB, az, r, g, b);
+  else sink.quad(bx, yTb, bz, ax, yTa, az, ax, yB, az, bx, yB, bz, r, g, b);
+}
+
 // Sutherland–Hodgman ring ∩ axis-aligned rect. Earcut (behind ShapeGeometry /
 // triangulateShape) is robust to the touching-hole degeneracies this can emit
 // where adjacent riverbank polygons share an edge, so results feed it as-is.
@@ -834,7 +841,10 @@ function waterLevel(f, terrain) {
   let lo = Infinity, known = 0, n = 0;
   for (let i = 0; i < ring.length; i += step) {
     n++;
-    if (!terrain.ready(ring[i][0], ring[i][1])) continue;
+    // an unmeasurable sample must RAISE THE FLAG — skipping it silently let a
+    // chunk finish "clean" and never rebuild, with the river's level measured
+    // on half its outline
+    if (!terrain.ready(ring[i][0], ring[i][1])) { terrain.missed = true; continue; }
     known++;
     const h = terrain.heightAt(ring[i][0], ring[i][1]);
     if (h < lo) lo = h;
@@ -846,7 +856,7 @@ function waterLevel(f, terrain) {
   // permanently 190 m under Prague. So a level is only remembered once the
   // ground it was measured against actually existed.
   const level = (Number.isFinite(lo) ? lo : 0) - 0.35;
-  if (known > n * 0.5) f._wy = level;
+  if (known === n) f._wy = level;   // cache NOTHING measured on missing ground
   return level;
 }
 
@@ -867,9 +877,12 @@ function skirtRing(sink, ring, key, inward, r, g, b, terrain, wy) {
       // cutting look like a cutting instead of a trench of fixed depth.
       // Absolute heights, so the chunk-wide drape must skip them.
       if (terrain) {
-        const gy = terrain.heightAt((p0x + p1x) / 2, (p0z + p1z) / 2);
-        const top = Math.max(gy + BANK_TOP, wy + 0.05);
-        wallQuad(sink, p0x, p0z, p1x, p1z, top, wy - 0.4, fx, fz, r, g, b);
+        // one height per END — a single midpoint sample across a 30 m piece
+        // left the wall top a metre off the draped ground at both ends on any
+        // sloping bank, a slit at one end and a buried lip at the other
+        const t0 = Math.max(terrain.heightAt(p0x, p0z) + BANK_TOP, wy + 0.05);
+        const t1 = Math.max(terrain.heightAt(p1x, p1z) + BANK_TOP, wy + 0.05);
+        wallQuad2(sink, p0x, p0z, p1x, p1z, t0, t1, wy - 0.4, fx, fz, r, g, b);
       } else wallQuad(sink, p0x, p0z, p1x, p1z, BANK_TOP, BANK_DEPTH, fx, fz, r, g, b);
     }
   }
@@ -1051,10 +1064,17 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // terrain relief it was levelled to ignore: metres, beside a railway
   // cutting. The road the wheels ride (roadGradeY) and the road the eyes see
   // are now the same number by construction.
+  // The frame starts its arclength at the TRIMMED mouth, but the profile is
+  // parameterised over the whole way — every sample must be offset by the
+  // trim, or the entire ribbon is drawn at profile(s − trim): a constant
+  // grade × trim below (or above) the deck the wheels ride and the pad
+  // continues, which was a ~30 cm step at the mouth of every sloping
+  // junction road.
+  const s0 = f._j0 ?? 0;
   const elev = (d, x, z) => {
-    if (f.br) return bridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len);
+    if (f.br) return bridge ? bridgeDeckHeight(f, d + s0, terrain) : bridgeElevation(d, len);
     if (!graded) return 0;
-    const gy = roadGradeY(f, d, terrain);
+    const gy = roadGradeY(f, d + s0, terrain);
     return gy === null ? terrain.heightAt(x, z) : gy;
   };
   sink.at(surfOfRoad(f));
@@ -1106,7 +1126,8 @@ function roadRibbon(sink, f, terrain, cell, key) {
         const X1 = bx + pbx * hw * e, Z1 = bz + pbz * hw * e;
         // the ribbon is fixed (absolute), so the kerb bottom samples the
         // ground itself — 5 cm into it, so a crease cannot open a slit
-        const g0 = terrain.heightAt(X0, Z0) - 0.05, g1 = terrain.heightAt(X1, Z1) - 0.05;
+        const g0 = Math.min(terrain.heightAt(X0, Z0) - 0.05, y0 - 0.02);
+        const g1 = Math.min(terrain.heightAt(X1, Z1) - 0.05, y1 - 0.02);
         sink.quad(X0, y0, Z0, X1, y1, Z1, X1, g1, Z1, X0, g0, Z0, KERB_R, KERB_G, KERB_B);
         sink.quad(X0, g0, Z0, X1, g1, Z1, X1, y1, Z1, X0, y0, Z0, KERB_R, KERB_G, KERB_B);
       }
@@ -1359,7 +1380,8 @@ function taxiPaint(sink, fr) {
 
 // ---- rails: two steel ribbons on the shared frame + sleeper quads ----
 function railWay(sink, f, terrain) {
-  const fr = ribbonFrame(f.br ? f.p : terrainResample(f.p, terrain));
+  const railBridge = !!f.br && !!terrain;
+  const fr = ribbonFrame(f.br ? bridgeResample(f.p) : terrainResample(f.p, terrain));
   if (!fr) return;
   const { q, per, along, len } = fr;
   const tram = f.t === 'tram';
@@ -1375,9 +1397,12 @@ function railWay(sink, f, terrain) {
   // sampled the ground at the centreline and re-added it at each vertex, so
   // on a cross-slope one rail rode higher than the other — the thing a real
   // track never does and the reason trains here would derail.
-  const railMark = railGraded ? sink.mark() : -1;
+  const railMark = railGraded || railBridge ? sink.mark() : -1;
   const elev = (d, x2, z2) => {
-    if (f.br) return bridgeElevation(d, len);
+    // A rail BRIDGE deck is absolute too: the legacy relative arc left the
+    // whole track to the chunk drape, which re-added the valley under every
+    // sleeper — sleepers metres below their own rails over the Labe.
+    if (f.br) return railBridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len);
     if (!railGraded) return 0;
     const gy = roadGradeY(f, d, terrain);
     return gy === null ? terrain.heightAt(x2, z2) : gy;

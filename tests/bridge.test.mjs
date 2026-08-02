@@ -96,7 +96,7 @@ test('regional data retains the Labe road and footbridge tags', () => {
 // ---------------------------------------------------------------------------
 
 const { roadProfile, roadGradeY, polylineLength, indexJunctions, indexBridgeCrossings, bridgeClearance,
-  junctionDeckY, junctionHull, pointInPolygon }
+  junctionDeckY, junctionHull, pointInPolygon, junctionY }
   = await import('../js/geo.js');
 const { levels } = await import('../js/city.js');
 const { LAYER_Y } = await import('../js/config.js');
@@ -430,4 +430,46 @@ test('the pad the mesh draws is the pad the feet stand on', () => {
   const py = junctionDeckY(j, -j.pad, 0, terrain);
   assert.ok(Math.abs(py - mouth) < 0.05,
     `pad ${py.toFixed(2)} misses its arm's deck ${mouth.toFixed(2)} at the mouth`);
+});
+
+test('a LONE bridge also keeps the ground under its deck', () => {
+  // The terrain floor existed only for chains; a single bridge=yes way
+  // slanting over a hill shoulder had the ground rising through its level
+  // middle, because its deck only knew the two banks.
+  const knoll = (x) => 200 + 2.5 * Math.exp(-((x - 25) ** 2) / (2 * 15 * 15));
+  const terrain = { res: 20, ready: () => true, heightAt: (x) => knoll(x) };
+  const way = { d: 1, t: 'primary', w: 8, br: 1, p: [[0, 0], [50, 0]] };
+  way._len = 50;
+  for (let d = 0; d <= 50; d += 2) {
+    const y = bridgeDeckHeight(way, d, terrain);
+    assert.ok(y >= knoll(d) - 0.01,
+      `deck ${y.toFixed(2)} under ground ${knoll(d).toFixed(2)} at d=${d}`);
+  }
+});
+
+test('a junction height measured on missing ground is not remembered', () => {
+  // node._ny used to be keyed on the terrain INSTANCE, which lives for the
+  // whole session — the first, boot-time answer won forever and every road
+  // pinned to the node sat at cut depth for good.
+  let loaded = false;
+  const terrain = {
+    res: 20, missed: false,
+    ready: () => loaded,
+    heightAt: () => (loaded ? 230 : 200),
+  };
+  const a = { d: 1, t: 'residential', w: 6, p: [[-80, 0], [0, 0]] };
+  const b = { d: 1, t: 'residential', w: 6, p: [[0, 0], [80, 0]] };
+  const c = { d: 1, t: 'residential', w: 5, p: [[0, 0], [0, 80]] };
+  const roads = [a, b, c];
+  for (const w of roads) w._len = polylineLength(w.p);
+  indexJunctions(roads);
+  const j = a._pins?.[0]?.node;
+  assert.ok(j, 'no junction was indexed');
+  const guess = junctionY(j, terrain);
+  assert.ok(terrain.missed, 'the guess did not raise the flag');
+  assert.ok(Math.abs(guess - 200) < 1, `guess ${guess.toFixed(1)} != 200`);
+  loaded = true;
+  const real = junctionY(j, terrain);
+  assert.ok(Math.abs(real - 230) < 1,
+    `the boot-time guess survived: got ${real.toFixed(1)}, want 230`);
 });

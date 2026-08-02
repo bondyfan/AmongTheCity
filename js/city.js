@@ -125,7 +125,15 @@ export function conformTerrainTile(terrain, city, tx, tz) {
 
   // Profiles FIRST, against the pristine survey — they are cached on the way,
   // so every later consumer (ribbons, cars, this bake) reads the same line.
-  for (const r of roads.values()) roadProfile(r, terrain);
+  // If ANY profile is provisional (a far end over a tile still loading), the
+  // bake still runs — a shaped guess beats a cliff — but the tile is NOT
+  // marked conformed, so the pass returns and re-bakes from the pristine
+  // survey once the neighbour lands. It used to mark itself done forever.
+  let profReady = true;
+  for (const r of roads.values()) {
+    const pr = roadProfile(r, terrain);
+    if (pr && !pr.ready) profReady = false;
+  }
 
   // Road-major stamping: per segment, visit only the grid samples its
   // corridor + shoulder can reach, and keep the strongest claim per sample.
@@ -178,7 +186,7 @@ export function conformTerrainTile(terrain, city, tx, tz) {
       for (const b of cell.buildings) { delete b._gy; delete b._gfall; }
     }
   }
-  terrain._conformed.add(key);
+  if (profReady) terrain._conformed.add(key);
   return moved > 0;
 }
 
@@ -247,6 +255,9 @@ export class CityWorld {
     city.onTileLoaded?.((t) => {
       this._dropCells(t.cells); this._stampFranchises();
       this._tileIn(t, true); this._flushHits();
+      // the waterway buckets were built from whatever tiles existed at the
+      // FIRST chunk build — a brook indexed later never got its trench
+      delete this.city._wwChunks;
       // new roads may have landed over ground already shaped — bake again,
       // from the survey, next update
       if (this.terrain._conformed) {
@@ -556,6 +567,26 @@ export class CityWorld {
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
     if (!cell) return ground;
     levels.reset(near).add(ground);
+    // rails too: the drawn bed is an absolute graded surface (sleepers at
+    // grade + LAYER_Y.rail), and feet that only knew the terrain sank into
+    // it — a metre, on a rail bridge
+    for (const r of cell.rails ?? []) {
+      if (!r.p || r.p.length < 2) continue;
+      let dist = 0;
+      for (let i = 0; i < r.p.length - 1; i++) {
+        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+        const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
+        if (d < 2.6) {
+          const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
+          if (r.br) levels.add(bridgeDeckHeight(r, along, this.terrain));
+          else {
+            const gy = roadGradeY(r, along, this.terrain);
+            if (gy !== null && gy !== undefined) levels.add(gy + LAYER_Y.rail);
+          }
+        }
+        dist += Math.hypot(bx - ax, bz - az);
+      }
+    }
     for (const r of cell.roads) {
       // Bridges, yes — but ALSO embanked ordinary roads: a levelled deck may
       // ride up to GRADE_FILL above the terrain, and feet that only knew the

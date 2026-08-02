@@ -186,10 +186,11 @@ export function junctionY(node, terrain) {
   if (node._ny !== undefined && node._nyT === terrain) return node._ny;
   node._nyT = terrain;
   node._ny = terrain.heightAt(node.x, node.z);   // in case an arm recurses back here
-  let a = 0, n = 0;
+  let a = 0, n = 0, allReady = true;
   for (const arm of node.arms) {
     const prof = levelWay(arm.r, terrain, null);
     if (!prof) continue;
+    if (!prof.ready) allReady = false;
     a += sampleProfile(prof, arm.s);
     n++;
   }
@@ -204,6 +205,13 @@ export function junctionY(node, terrain) {
     const need = bridgeClearance(arm.r, terrain);
     if (need !== null && need > node._ny) { node._ny = need; node._hard = true; }
   }
+  // A height measured on ground that had not arrived yet must not outlive the
+  // ground's arrival: the cache used to be keyed on the terrain INSTANCE,
+  // which lives for the whole session, so the first — boot-time — answer won
+  // forever, and every road pinned to this node sat at cut depth for good.
+  // An unready answer is served once and forgotten; terrain.missed flags the
+  // chunk so the arriving tile rebuilds it and asks again.
+  if (!allReady) { terrain.missed = true; node._nyT = null; }
   return node._ny;
 }
 
@@ -438,6 +446,8 @@ export function bridgeDeckHeight(way, dist, terrain) {
       const A = anchor(ch.headWay, ch.headEnd === 0 ? 0 : 1);
       const B = anchor(ch.tailWay, ch.tailEnd === 0 ? 0 : 1);
       const cones = [];
+      let samplesReady = true;
+      const rdy = (x, z) => { if (terrain.ready && !terrain.ready(x, z)) samplesReady = false; };
       for (const m of ch.members) {
         for (const c of m._cross ?? []) {
           // arclength of the crossing along the chain
@@ -456,6 +466,7 @@ export function bridgeDeckHeight(way, dist, terrain) {
           }
           const mLen = m._len ?? polylineLength(m.p);
           const local = m._chainRev ? mLen - sAt : sAt;
+          rdy(c.x, c.z);
           cones.push([m._chainOff + local, terrain.heightAt(c.x, c.z) + c.clear, 1]);
         }
       }
@@ -476,8 +487,9 @@ export function bridgeDeckHeight(way, dist, terrain) {
             const t = d / seg;
             const sAt = along + d;
             const local = m._chainRev ? mLen - sAt : sAt;
-            cones.push([m._chainOff + local,
-              terrain.heightAt(ax + (bx - ax) * t, az + (bz - az) * t) + FLOOR, 0]);
+            const fx2 = ax + (bx - ax) * t, fz2 = az + (bz - az) * t;
+            rdy(fx2, fz2);
+            cones.push([m._chainOff + local, terrain.heightAt(fx2, fz2) + FLOOR, 0]);
           }
           along += seg;
         }
@@ -503,11 +515,14 @@ export function bridgeDeckHeight(way, dist, terrain) {
         if (c[1] > cap) c[1] = cap;
         c[2] = g;
       }
+      // …and readiness means EVERY sampled point, not the two ends: a chain
+      // crossing three tiles used to cache a profile whose middle was measured
+      // on a tile that had not arrived, and keep it for the session.
       let ready = !terrain.ready;
       if (!ready) {
         const hp = ch.headWay.p[ch.headEnd === 0 ? 0 : ch.headWay.p.length - 1];
         const tp = ch.tailWay.p[ch.tailEnd === 0 ? 0 : ch.tailWay.p.length - 1];
-        ready = terrain.ready(hp[0], hp[1]) && terrain.ready(tp[0], tp[1]);
+        ready = terrain.ready(hp[0], hp[1]) && terrain.ready(tp[0], tp[1]) && samplesReady;
       }
       prof = { terrain, A, B, cones, total: ch.total };
       if (ready) ch.profile = prof;
@@ -558,7 +573,24 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // to the same height (junctionY), so on a well-mapped crossing these agree;
     // the floor is here for the case where they could not get there.
     const need = bridgeClearance(way, terrain);
-    const deck = Math.max(start, end, need ?? -Infinity);
+    let deck = Math.max(start, end, need ?? -Infinity);
+    // The terrain along the span is a FLOOR here just as on a chain: a lone
+    // bridge=yes way slanting across a hill shoulder had the smooth ground
+    // rising straight through its level middle, because the deck only knew
+    // the two banks and whatever it explicitly crosses.
+    {
+      let along = 0;
+      for (let k = 0; k < way.p.length - 1; k++) {
+        const [ax, az] = way.p[k], [bx, bz] = way.p[k + 1];
+        const seg = Math.hypot(bx - ax, bz - az);
+        for (let d2 = 0; d2 < seg; d2 += 6) {
+          const t = d2 / seg;
+          const h = terrain.heightAt(ax + (bx - ax) * t, az + (bz - az) * t) + 0.05;
+          if (h > deck) deck = h;
+        }
+        along += seg;
+      }
+    }
     // A FOOTBRIDGE climbs by stairs, not by a road's 6 % ramp. Held to road
     // grade, a lávka lifted 5 m to clear the street below spent 16 m climbing
     // on each side of a 40 m span — two 31 % slopes meeting at a point, which
