@@ -617,6 +617,44 @@ for (const key of tiles) {
     }
   }
 
+  // ---- OPEN the sealed mask: cut the tentacles --------------------------
+  // Scattered lobes along verges dodge MIN_AREA by hanging on diagonal
+  // one-cell threads to some genuinely large region. One erode + dilate
+  // severs the threads; the freed lobes then face MIN_AREA alone.
+  {
+    const sealed = (v) => v === PAVING || v === ASPHALT;
+    const eroded = new Uint8Array(N * N);
+    for (let j = 1; j < N - 1; j++) {
+      for (let i = 1; i < N - 1; i++) {
+        const o = j * N + i;
+        if (!sealed(mask[o])) continue;
+        let n4 = 0;
+        if (sealed(mask[o - 1])) n4++;
+        if (sealed(mask[o + 1])) n4++;
+        if (sealed(mask[o - N])) n4++;
+        if (sealed(mask[o + N])) n4++;
+        if (n4 >= 3) eroded[o] = 1;
+      }
+    }
+    const kept = new Uint8Array(N * N);
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const o = j * N + i;
+        if (!sealed(mask[o])) continue;
+        for (let dj = -1; dj <= 1 && !kept[o]; dj++) {
+          for (let di = -1; di <= 1; di++) {
+            const jj = j + dj, ii = i + di;
+            if (ii < 0 || ii >= N || jj < 0 || jj >= N) continue;
+            if (eroded[jj * N + ii]) { kept[o] = 1; break; }
+          }
+        }
+      }
+    }
+    for (let o = 0; o < N * N; o++) {
+      if (sealed(mask[o]) && !kept[o]) mask[o] = GREEN;
+    }
+  }
+
   // ---- ship it as the raster it is --------------------------------------
   // The tile sheds the nine thousand rectangles a previous version pushed
   // into `paved`; stripping them here is what un-ships them.

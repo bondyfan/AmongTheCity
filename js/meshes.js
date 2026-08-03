@@ -2852,9 +2852,13 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
 // centred on the OSM crossing node, at the road's own absolute deck height.
 function zebraInto(sink, cr, cell, terrain) {
   const [x, z] = cr.p[0];
-  let best = 42.25, road = null, ux = 0, uz = 1, s0 = 0;   // (6.5 m)² cap
+  // the crossing belongs to the road it plausibly CROSSES — scored by
+  // distance over half-width, so a wide main street beats a narrow service
+  // lane that happens to pass a metre closer (the broken diagonal zebras)
+  let bestScore = 2.2, road = null, ux = 0, uz = 1, s0 = 0;
   for (const r of cell.roads) {
     if (!r.d || !r.p || (r.w ?? 0) < 3) continue;
+    const hw2 = (r.w ?? 6) / 2;
     let along = 0;
     for (let i = 0; i < r.p.length - 1; i++) {
       const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
@@ -2862,9 +2866,9 @@ function zebraInto(sink, cr, cell, terrain) {
       let t = ((x - ax) * ex + (z - az) * ez) / L2;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
       const qx = ax + ex * t, qz = az + ez * t;
-      const d2 = (x - qx) ** 2 + (z - qz) ** 2;
+      const score = Math.sqrt((x - qx) ** 2 + (z - qz) ** 2) / hw2;
       const L = Math.sqrt(L2);
-      if (d2 < best) { best = d2; road = r; ux = ex / L; uz = ez / L; s0 = along + L * t; }
+      if (score < bestScore) { bestScore = score; road = r; ux = ex / L; uz = ez / L; s0 = along + L * t; }
       along += L;
     }
   }
