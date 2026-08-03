@@ -833,6 +833,10 @@ export function indexJunctions(roads) {
     a._cRoot ??= ra; b._cRoot ??= ra;
   };
   for (const r of roads) {
+    // a roundabout's ring is a chain of short segments with a node at every
+    // exit — exactly the shape the union rule looks for, and clustering it
+    // poured one giant pad over the whole circle, island included
+    if (r.rb) continue;
     if (!r._pins || r._pins.length < 2) continue;
     const ps = [...r._pins].sort((p1, p2) => p1.s - p2.s);
     for (let i = 0; i < ps.length - 1; i++) {

@@ -389,6 +389,7 @@ function processRoads(els, owns) {
     // the painted designation ("09/27", "06/24") — meshes paints the numbers
     if (t.aeroway === 'runway' && t.ref) r.ref = t.ref;
     if (t.oneway === 'yes' || t.oneway === '1' || t.junction === 'roundabout') r.ow = 1;
+    if (t.junction === 'roundabout') r.rb = 1;   // the ring itself, not a crossing
     else if (t.oneway === '-1') { r.p.reverse(); r.ow = 1; }
     // Keep the vertical topology. Without this flag every regional road bridge
     // is indistinguishable from an ordinary road at runtime and gets draped

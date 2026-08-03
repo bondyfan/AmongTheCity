@@ -1399,7 +1399,7 @@ function stopBars(sink, node, deckAt, terrain, ring) {
   _c.setHex(COLORS.marking);
   const mr = _c.r, mg = _c.g, mb = _c.b;
   for (const a of node.arms) {
-    if (!a.r.d || (a.r.w ?? 0) < 4.5) continue;
+    if (!a.r.d || (a.r.w ?? 0) < 4.5 || a.r.rb) continue;
     const p = a.r.p;
     const i = a.i;
     const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
@@ -1483,7 +1483,7 @@ function boxFurniture(sink, cl, ring, deckAt) {
   const mouths = [];
   for (const m of cl.members) {
     for (const a of m.arms) {
-      if (!a.r.d || (a.r.w ?? 0) < 5) continue;
+      if (!a.r.d || (a.r.w ?? 0) < 5 || a.r.rb) continue;
       const p = a.r.p;
       const i = a.i;
       const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
@@ -1572,7 +1572,9 @@ function boxFurniture(sink, cl, ring, deckAt) {
     let nIn, offAt, turnsSpec = null;
     if (r.ow) {
       nIn = r.ln ?? Math.max(1, Math.round((r.w ?? 6) / 3.4));
-      offAt = (k) => ((k + 0.5) / nIn - 0.5) * usable;
+      // count from the RIGHT edge in, matching the turn:lanes indexing — the
+      // left-to-right offsets put the right-turn glyph in the LEFT lane
+      offAt = (k) => (0.5 - (k + 0.5) / nIn) * usable;
       turnsSpec = r.tf ?? null;
     } else {
       const total = r.ln ?? ((r.lf ?? 1) + (r.lb ?? 1));
