@@ -1427,7 +1427,101 @@ function clusterPad(sink, cl, terrain) {
       0, 1, 0, _c.r, _c.g, _c.b);
   }
   for (const m of cl.members) stopBars(sink, m, deckAt, terrain, ring);
+  if (terrain) boxFurniture(sink, cl, ring, deckAt);
   if (terrain) sink.fixFrom(mark);
+}
+
+// ---- the paint INSIDE a big crossing --------------------------------------
+// What the aerial photo of náměstí Jana Pernera actually shows on the box:
+// thin GUIDE DASHES connecting each entry to its continuation across, and a
+// straight-ahead ARROW on each approach lane before the stop line. Both are
+// derived from the cluster's own arms — one generator, not per-road patches.
+function boxFurniture(sink, cl, ring, deckAt) {
+  sink.at(SURF.paint);
+  _c.setHex(COLORS.marking);
+  const mr = _c.r, mg = _c.g, mb = _c.b;
+  // gather every drivable mouth: position on the hull edge + direction INTO the box
+  const mouths = [];
+  for (const m of cl.members) {
+    for (const a of m.arms) {
+      if (!a.r.d || (a.r.w ?? 0) < 5) continue;
+      const p = a.r.p;
+      const i = a.i;
+      const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
+      let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
+      if (!a.end) {
+        const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
+        dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
+      }
+      const L = Math.hypot(dx, dz) || 1;
+      const ux = dx / L, uz = dz / L;             // away from the node
+      for (const dir of a.end ? [1] : [1, -1]) {
+        mouths.push({
+          x: m.x + ux * dir * m.pad, z: m.z + uz * dir * m.pad,
+          ix: -ux * dir, iz: -uz * dir,           // INTO the box
+          w: a.r.w ?? 6, a, node: m, dir, used: false,
+        });
+      }
+    }
+  }
+  // ---- guide dashes: LONGEST spans first --------------------------------
+  // Greedy nearest-pairing ate the mouths on 7 m hops between neighbouring
+  // member nodes — one faint dash each, invisible. The lines the aerial
+  // photo shows are the LONG crossings (west entry to east exit), so gather
+  // every admissible pair, sort by span, and let the long ones claim their
+  // mouths first. Anything under 12 m is box-internal plumbing, not a lane.
+  const pairs = [];
+  for (let i2 = 0; i2 < mouths.length; i2++) {
+    for (let j2 = i2 + 1; j2 < mouths.length; j2++) {
+      const mo = mouths[i2], other = mouths[j2];
+      const sx = other.x - mo.x, sz = other.z - mo.z;
+      const L = Math.hypot(sx, sz);
+      if (L < 12) continue;
+      const along = (sx * mo.ix + sz * mo.iz) / L;      // line runs the way we enter
+      const facing = -(other.ix * mo.ix + other.iz * mo.iz); // and they face each other
+      if (along < 0.8 || facing < 0.7) continue;
+      pairs.push([L, mo, other]);
+    }
+  }
+  pairs.sort((p1, p2) => p2[0] - p1[0]);
+  for (const [L, mo, best] of pairs) {
+    if (mo.used || best.used) continue;
+    mo.used = best.used = true;
+    const sx = best.x - mo.x, sz = best.z - mo.z;
+    const ux = sx / L, uz = sz / L;
+    const px2 = -uz, pz2 = ux;
+    const HW = 0.07;                              // thin — a guide, not a lane line
+    for (let d = 1.2; d + 1.4 < L; d += 3.6) {
+      const midx = mo.x + ux * (d + 0.7), midz = mo.z + uz * (d + 0.7);
+      if (!pointInPolygon(midx, midz, ring)) continue;   // stay ON the box
+      const y0 = deckAt(mo.x + ux * d, mo.z + uz * d) + 0.05;
+      const y1 = deckAt(mo.x + ux * (d + 1.4), mo.z + uz * (d + 1.4)) + 0.05;
+      sink.quad(
+        mo.x + ux * d - px2 * HW, y0, mo.z + uz * d - pz2 * HW,
+        mo.x + ux * (d + 1.4) - px2 * HW, y1, mo.z + uz * (d + 1.4) - pz2 * HW,
+        mo.x + ux * (d + 1.4) + px2 * HW, y1, mo.z + uz * (d + 1.4) + pz2 * HW,
+        mo.x + ux * d + px2 * HW, y0, mo.z + uz * d + pz2 * HW,
+        mr, mg, mb);
+    }
+  }
+  // ---- straight-ahead arrow on each approach lane -------------------------
+  for (const mo of mouths) {
+    // the approach lane is the RIGHT half of a two-way arm, seen driving in
+    const rx = -mo.iz, rz = mo.ix;                // right of travel-in
+    const off = mo.w / 4;
+    const ax2 = mo.x - mo.ix * 4.2 + rx * off;    // 4.2 m back from the mouth
+    const az2 = mo.z - mo.iz * 4.2 + rz * off;
+    if (pointInPolygon(ax2, az2, ring)) continue; // clustered mouths can overlap
+    const y = deckAt(ax2, az2) + 0.055;
+    const S = (u, v) => [ax2 + mo.ix * u + rx * v, az2 + mo.iz * u + rz * v];
+    const q4 = (a2, b2, c2, d2) => sink.quad(a2[0], y, a2[1], b2[0], y, b2[1],
+      c2[0], y, c2[1], d2[0], y, d2[1], mr, mg, mb);
+    q4(S(-1.1, -0.11), S(0.7, -0.11), S(0.7, 0.11), S(-1.1, 0.11));   // shaft
+    const t0 = S(0.6, -0.4), t1 = S(0.6, 0.4), tip = S(1.5, 0);       // head
+    sink.triFacing(t0[0], y, t0[1], t1[0], y, t1[1], tip[0], y, tip[1], 0, 1, 0, mr, mg, mb);
+    sink.triFacing(t1[0], y, t1[1], t0[0], y, t0[1], tip[0], y, tip[1], 0, 1, 0, mr, mg, mb);
+  }
+  sink.at(SURF.asphalt);
 }
 
 function junctionPad(sink, j, terrain) {
