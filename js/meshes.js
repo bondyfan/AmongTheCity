@@ -803,14 +803,17 @@ function clampUnderRoads(geo, drv, terrain) {
     if (x < gx0) gx0 = x; if (x > gx1) gx1 = x;
     if (z < gz0) gz0 = z; if (z > gz1) gz1 = z;
   }
-  const use = drv.filter(({ bb, hw }) =>
-    !(gx1 < bb[0] - hw || gx0 > bb[2] + hw || gz1 < bb[1] - hw || gz0 > bb[3] + hw));
+  const use = drv.filter(({ bb, hw, flare }) => {
+    const rc = hw + (flare ?? 0);
+    return !(gx1 < bb[0] - rc || gx0 > bb[2] + rc || gz1 < bb[1] - rc || gz0 > bb[3] + rc);
+  });
   if (!use.length) return geo;
   for (let i = 0; i < a.length; i += 3) {
     const x = a[i], z = a[i + 2];
-    for (const { r, bb, hw, lay } of use) {
-      if (x < bb[0] - hw || x > bb[2] + hw || z < bb[1] - hw || z > bb[3] + hw) continue;
-      const hw2 = hw * hw;
+    for (const { r, bb, hw, lay, flare } of use) {
+      const reach = hw + (flare ?? 0);
+      if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+      const rc2 = reach * reach;
       let along = 0;
       for (let k = 0; k < r.p.length - 1; k++) {
         const [ax, az] = r.p[k], [bx, bz] = r.p[k + 1];
@@ -821,11 +824,17 @@ function clampUnderRoads(geo, drv, terrain) {
         if (t < 0) t = 0; else if (t > 1) t = 1;
         const px = ax + dx * t, pz = az + dz * t;
         const ex = x - px, ez = z - pz;
-        if (ex * ex + ez * ez < hw2) {
+        const d2 = ex * ex + ez * ez;
+        if (d2 < rc2) {
           const s2 = along + L * t;
           const gy = r.br ? bridgeDeckHeight(r, s2, terrain) : roadGradeY(r, s2, terrain);
           if (gy !== null && gy !== undefined) {
-            const cap = gy + (lay ?? LAYER_Y.road) - 0.05;
+            // flat within the corridor; beyond it the cap RISES at 55 % so
+            // the bench meets the hillside as a bank, not as a one-step
+            // cliff of stretched grass ("a co toto?")
+            const d = Math.sqrt(d2);
+            const over = d > hw ? (d - hw) * 0.55 : 0;
+            const cap = gy + (lay ?? LAYER_Y.road) - 0.05 + over;
             if (a[i + 1] > cap) a[i + 1] = cap;
           }
         }
@@ -3376,12 +3385,12 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
         const corr = [];
         for (const r of cell.roads) {
           if (r.br || !r.p || r.p.length < 2) continue;
-          corr.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 2.9,
+          corr.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 2.9, flare: 5,
             lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road });
         }
         for (const r of cell.rails) {
           if (r.br || !r.p || r.p.length < 2) continue;
-          corr.push({ r, bb: bboxOfLine(r), hw: 2.2 + 2.9, lay: LAYER_Y.rail });
+          corr.push({ r, bb: bboxOfLine(r), hw: 2.2 + 2.9, flare: 5, lay: LAYER_Y.rail });
         }
         g = clampUnderRoads(g, corr, mats.terrain);
       }
