@@ -834,8 +834,19 @@ function clampUnderRoads(geo, drv, terrain) {
             // cliff of stretched grass ("a co toto?")
             const d = Math.sqrt(d2);
             const over = d > hw ? (d - hw) * 0.55 : 0;
-            const cap = gy + (lay ?? LAYER_Y.road) - 0.05 + over;
+            const top = gy + (lay ?? LAYER_Y.road);
+            const cap = top - 0.05 + over;
             if (a[i + 1] > cap) a[i + 1] = cap;
+            // …and the same shape works UPWARD: where the terrain fell away
+            // under an embanked road, the deck floated on a metre of striped
+            // kerb wall. The ground now rises to an embankment body — snug
+            // under the deck edge, falling away at the same 55 % — exactly
+            // the earthwork a real road stands on. Only for flared entries
+            // (the ground quad); bridges never enter this list.
+            if (flare) {
+              const floor = top - 0.45 - (d > hw ? (d - hw) * 0.55 : 0);
+              if (a[i + 1] < floor) a[i + 1] = floor;
+            }
           }
         }
         along += L;

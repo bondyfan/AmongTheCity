@@ -653,19 +653,27 @@ export class CityWorld {
       // terrain sank into it to the knees on a fill and to the neck on a big
       // one. Any graded deck IS the ground where it runs.
       const br = !!r.br;
-      const reach = r.w / 2 + (br ? 1.5 : 0.35);
+      const reach = r.w / 2 + (br ? 1.5 : 5);   // 5 m: the embankment bank
       const bb = lineBB(r);
       if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
       let dist = 0;
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-        if (d < r.w / 2 + (br ? 1.5 : 0.35)) {
+        const half = r.w / 2;
+        if (d < half + (br ? 1.5 : 5)) {
           const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
-          if (br) levels.add(bridgeDeckHeight(r, along, this.terrain));
+          if (br) { if (d < half + 1.5) levels.add(bridgeDeckHeight(r, along, this.terrain)); }
           else {
             const gy = roadGradeY(r, along, this.terrain);
-            if (gy !== null && gy !== undefined) levels.add(gy + LAYER_Y.road);
+            if (gy !== null && gy !== undefined) {
+              if (d < half + 0.35) levels.add(gy + LAYER_Y.road);
+              // the embankment bank the mesh draws beside the deck is
+              // standable — snug under the edge, falling at 55 %
+              const bank = gy + LAYER_Y.road - 0.45
+                - (d > half ? (d - half) * 0.55 : 0);
+              if (bank > ground) levels.add(bank);
+            }
           }
         }
         dist += Math.hypot(bx - ax, bz - az);
