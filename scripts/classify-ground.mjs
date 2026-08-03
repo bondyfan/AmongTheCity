@@ -589,12 +589,32 @@ for (const key of tiles) {
     console.log(`    → made of ${NAME[mask[j * N + i]]}`);
   }
 
+  // ---- the corridor is the ROAD'S, not the raster's ----------------------
+  // "Under a ribbon it is invisible" held only for cells fully under the
+  // ribbon. A 4 m cell whose centre sits just past the kerb pokes out as a
+  // jagged grey shard — rows of them along every street, and a ring of them
+  // bleeding into every roundabout island. Cells within half a diagonal of
+  // any corridor are cleared: the carriageway is drawn by the ribbon anyway,
+  // and the raster now ENDS at the kerb instead of chewing on it.
+  {
+    const CLEAR = 2.8;                        // half a cell diagonal past the kerb
+    const clear = new Uint8Array(N * N);
+    for (const f of tile.roads) {
+      if (!f.p || f.p.length < 2) continue;
+      stampLine(clear, tile.tx * TILE, tile.tz * TILE, f.p, (f.w ?? 3) / 2 + CLEAR, 1);
+    }
+    for (const f of tile.rails ?? []) {
+      if (!f.p || f.p.length < 2) continue;
+      stampLine(clear, tile.tx * TILE, tile.tz * TILE, f.p, 2.2 + CLEAR, 1);
+    }
+    for (let k = 0; k < N * N; k++) {
+      if (clear[k] && (mask[k] === PAVING || mask[k] === ASPHALT)) mask[k] = GREEN;
+    }
+  }
+
   // ---- ship it as the raster it is --------------------------------------
-  // No carriageway subtraction and no corridor games: the client draws this
-  // at LAYER_Y.inferred, below every levelled road, so sealed ground under a
-  // ribbon is simply invisible — which is what "under" should have meant all
-  // along. And the tile sheds the nine thousand rectangles a previous version
-  // pushed into `paved`; stripping them here is what un-ships them.
+  // The tile sheds the nine thousand rectangles a previous version pushed
+  // into `paved`; stripping them here is what un-ships them.
   const out = Buffer.allocUnsafe(N * N * 3);
   let bytes3 = 0, cells = 0;
   let run = 0, val = mask[0] === PAVING ? 1 : mask[0] === ASPHALT ? 2 : 0;

@@ -1288,8 +1288,11 @@ function roadRibbon(sink, f, terrain, cell, key) {
       const solid = typeof sep === 'object' && sep.solid;
       const step = solid ? DASH_LEN : DASH_LEN + DASH_GAP;
       const m0 = f.rb ? 0.2 : 1.2;
-      for (let s = m0; s + DASH_LEN < len - m0; s += step) {
-      walkAt(fr, s, _WA); walkAt(fr, s + DASH_LEN, _WB);
+      // a roundabout's 3 m stubs between exits can't fit a full dash — they
+      // draw one shortened dash instead of a permanent gap in the circle
+      const dl = f.rb ? Math.max(1.0, Math.min(DASH_LEN, len - 2 * m0)) : DASH_LEN;
+      for (let s = m0; s + dl <= len - m0 + 0.01; s += step) {
+      walkAt(fr, s, _WA); walkAt(fr, s + dl, _WB);
       const ox = _WA.dz * lo, oz = -_WA.dx * lo;    // this separator's offset
       // a centre line does not run through a junction either — tested at BOTH
       // ends against the pad's hull radius (a dash starting outside the old
@@ -1317,7 +1320,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
       if (!f.rb && crossedBy(cell, f, (_WA.x + _WB.x) / 2 + ox, (_WA.z + _WB.z) / 2 + oz,
         _WA.dx, _WA.dz, -0.4)) continue;
       const ya = LAYER_Y.marking + elev(s, _WA.x + ox, _WA.z + oz);
-      const yb = LAYER_Y.marking + elev(s + DASH_LEN, _WB.x + ox, _WB.z + oz);
+      const yb = LAYER_Y.marking + elev(s + dl, _WB.x + ox, _WB.z + oz);
       const px = _WA.dz * DASH_HW, pz = -_WA.dx * DASH_HW;
       sink.quad(
         _WA.x + ox - px, ya, _WA.z + oz - pz, _WB.x + ox - px, yb, _WB.z + oz - pz,
