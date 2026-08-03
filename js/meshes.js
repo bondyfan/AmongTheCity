@@ -1048,7 +1048,7 @@ function crossedBy(cell, self, x, z, dirX, dirZ, grow = 0) {
       const ex = bx - ax, ez = bz - az;
       const L = Math.hypot(ex, ez) || 1e-9;
       const cross = Math.abs(dirX * (ez / L) - dirZ * (ex / L));
-      if (cross > 0.45) return true;
+      if (cross > 0.22) return true;
     }
   }
   return false;
@@ -1354,7 +1354,7 @@ function trimEnds(p, t0 = 0, t1 = 0) {
 // because each arm's own corners are vertices of it.
 // One white transverse bar per drivable arm mouth — the stop line that makes
 // an empty junction box read as a JUNCTION instead of a hole in the paint.
-function stopBars(sink, node, deckAt, terrain) {
+function stopBars(sink, node, deckAt, terrain, ring) {
   if (!terrain) return;
   sink.at(SURF.paint);
   _c.setHex(COLORS.marking);
@@ -1374,6 +1374,10 @@ function stopBars(sink, node, deckAt, terrain) {
     for (const dir of a.end ? [1] : [1, -1]) {
       const bx = node.x + ux * dir * (node.pad + 1.1);
       const bz = node.z + uz * dir * (node.pad + 1.1);
+      // a through arm gets a candidate bar on BOTH sides of its node, and at
+      // a cluster member one of them lands INSIDE the box — those were the
+      // torn white shards in the middle of Jana Pernera
+      if (ring && pointInPolygon(bx, bz, ring)) continue;
       const hw = (a.r.w ?? 3) / 2 - 0.45;
       if (hw < 1) continue;
       const y = deckAt(bx, bz) + 0.045;
@@ -1422,7 +1426,7 @@ function clusterPad(sink, cl, terrain) {
       tp2[k + 6], deckAt(tp2[k + 6], tp2[k + 8]), tp2[k + 8],
       0, 1, 0, _c.r, _c.g, _c.b);
   }
-  for (const m of cl.members) stopBars(sink, m, deckAt, terrain);
+  for (const m of cl.members) stopBars(sink, m, deckAt, terrain, ring);
   if (terrain) sink.fixFrom(mark);
 }
 
@@ -1477,7 +1481,6 @@ function junctionPad(sink, j, terrain) {
       tp[k + 6], deckAt(tp[k + 6], tp[k + 8]), tp[k + 8],
       0, 1, 0, _c.r, _c.g, _c.b);
   }
-  stopBars(sink, j, deckAt, terrain);
   if (terrain) sink.fixFrom(mark);
 }
 
@@ -2670,12 +2673,12 @@ function zebraInto(sink, cr, cell, terrain) {
   const mr = _c.r, mg = _c.g, mb = _c.b;
   const px2 = -uz, pz2 = ux;                    // across the road
   const hw = (road.w ?? 6) / 2 - 0.25;
-  const HB = 1.5;                               // half band length along the road
+  const HB = 1.8;                               // half band length along the road
   const mark = sink.mark();
-  // bars 0.5 m wide with 0.4 m gaps, mirrored out from the centreline
-  for (let o = 0.2; o + 0.5 <= hw; o += 0.9) {
+  // bars 0.55 m wide with 0.5 m gaps, mirrored out from the centreline
+  for (let o = 0.2; o + 0.55 <= hw; o += 1.05) {
     for (const side of [-1, 1]) {
-      const c0 = o * side, c1 = (o + 0.5) * side;
+      const c0 = o * side, c1 = (o + 0.55) * side;
       sink.quad(
         x + px2 * c0 - ux * HB, y, z + pz2 * c0 - uz * HB,
         x + px2 * c1 - ux * HB, y, z + pz2 * c1 - uz * HB,
