@@ -1282,7 +1282,8 @@ function roadRibbon(sink, f, terrain, cell, key) {
       const lo = typeof sep === 'object' ? sep.off : sep;
       const solid = typeof sep === 'object' && sep.solid;
       const step = solid ? DASH_LEN : DASH_LEN + DASH_GAP;
-      for (let s = 1.2; s + DASH_LEN < len - 1.2; s += step) {
+      const m0 = f.rb ? 0.2 : 1.2;
+      for (let s = m0; s + DASH_LEN < len - m0; s += step) {
       walkAt(fr, s, _WA); walkAt(fr, s + DASH_LEN, _WB);
       const ox = _WA.dz * lo, oz = -_WA.dx * lo;    // this separator's offset
       // a centre line does not run through a junction either — tested at BOTH
@@ -1300,10 +1301,15 @@ function roadRibbon(sink, f, terrain, cell, key) {
         }
         return false;
       };
-      const rj = (x, z) => js2.some((j) =>
+      // a ROUNDABOUT ring is exempt from both silences: its lane line flows
+      // continuously through every exit node (each exit is a junction, and
+      // the ring's short segments fell entirely inside the blank radius —
+      // the gaps in the circle), and nothing "crosses" a ring but its own
+      // tangential exits
+      const rj = (x, z) => !f.rb && js2.some((j) =>
         (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 1.5) ** 2 && !through(j));
       if (rj(_WA.x + ox, _WA.z + oz) || rj(_WB.x + ox, _WB.z + oz)) continue;
-      if (crossedBy(cell, f, (_WA.x + _WB.x) / 2 + ox, (_WA.z + _WB.z) / 2 + oz,
+      if (!f.rb && crossedBy(cell, f, (_WA.x + _WB.x) / 2 + ox, (_WA.z + _WB.z) / 2 + oz,
         _WA.dx, _WA.dz, -0.4)) continue;
       const ya = LAYER_Y.marking + elev(s, _WA.x + ox, _WA.z + oz);
       const yb = LAYER_Y.marking + elev(s + DASH_LEN, _WB.x + ox, _WB.z + oz);
