@@ -1372,6 +1372,16 @@ function trimEnds(p, t0 = 0, t1 = 0) {
 // section at the pad radius. That is guaranteed simple — no self-intersection
 // to check, no inset that can fold — and it covers every arm by construction
 // because each arm's own corners are vertices of it.
+// A flat paint quad whose normal ALWAYS points up, whatever order the
+// caller derived its corners in. TriSink reads winding for the normal, so an
+// ad-hoc frame with flipped handedness rendered its quad facing DOWN — the
+// arrow shafts were there, backface-culled ("létající trojúhelníčky").
+function paintQuad(sink, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b) {
+  const ny = (bx - ax) * (dz - az) - (bz - az) * (dx - ax);
+  if (ny <= 0) sink.quad(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b);
+  else sink.quad(dx, dy, dz, cx, cy, cz, bx, by, bz, ax, ay, az, r, g, b);
+}
+
 // One white transverse bar per drivable arm mouth — the stop line that makes
 // an empty junction box read as a JUNCTION instead of a hole in the paint.
 function stopBars(sink, node, deckAt, terrain, ring) {
@@ -1403,7 +1413,7 @@ function stopBars(sink, node, deckAt, terrain, ring) {
       const y = deckAt(bx, bz) + 0.045;
       const px2 = -uz, pz2 = ux;
       const t = 0.25;                         // half thickness along the arm
-      sink.quad(
+      paintQuad(sink,
         bx - px2 * hw - ux * dir * t, y, bz - pz2 * hw - uz * dir * t,
         bx + px2 * hw - ux * dir * t, y, bz + pz2 * hw - uz * dir * t,
         bx + px2 * hw + ux * dir * t, y, bz + pz2 * hw + uz * dir * t,
@@ -1533,7 +1543,7 @@ function boxFurniture(sink, cl, ring, deckAt) {
       if (!pointInPolygon(midx, midz, ring)) continue;   // stay ON the box
       const y0 = deckAt(bx2 + ux * d, bz2 + uz * d) + 0.05;
       const y1 = deckAt(bx2 + ux * (d + 1.4), bz2 + uz * (d + 1.4)) + 0.05;
-      sink.quad(
+      paintQuad(sink,
         bx2 + ux * d - px2 * HW, y0, bz2 + uz * d - pz2 * HW,
         bx2 + ux * (d + 1.4) - px2 * HW, y1, bz2 + uz * (d + 1.4) - pz2 * HW,
         bx2 + ux * (d + 1.4) + px2 * HW, y1, bz2 + uz * (d + 1.4) + pz2 * HW,
@@ -1573,7 +1583,7 @@ function boxFurniture(sink, cl, ring, deckAt) {
       if (pointInPolygon(ax2, az2, ring)) continue;  // clustered mouths overlap
       const y = deckAt(ax2, az2) + 0.055;
       const S = (u, v) => [ax2 + mo.ix * u + rx * v, az2 + mo.iz * u + rz * v];
-      const q5 = (a2, b2, c2, d2) => sink.quad(a2[0], y, a2[1], b2[0], y, b2[1],
+      const q5 = (a2, b2, c2, d2) => paintQuad(sink, a2[0], y, a2[1], b2[0], y, b2[1],
         c2[0], y, c2[1], d2[0], y, d2[1], mr, mg, mb);
       // turn:lanes lists left→right along travel; our k counts from the right
       const g = laneTurns
@@ -2846,7 +2856,7 @@ function zebraInto(sink, cr, cell, terrain) {
   for (let o = 0.2; o + 0.55 <= hw; o += 1.05) {
     for (const side of [-1, 1]) {
       const c0 = o * side, c1 = (o + 0.55) * side;
-      sink.quad(
+      paintQuad(sink,
         x + px2 * c0 - ux * HB, y, z + pz2 * c0 - uz * HB,
         x + px2 * c1 - ux * HB, y, z + pz2 * c1 - uz * HB,
         x + px2 * c1 + ux * HB, y, z + pz2 * c1 + uz * HB,
