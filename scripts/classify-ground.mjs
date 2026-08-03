@@ -655,6 +655,44 @@ for (const key of tiles) {
     }
   }
 
+  // ---- thin-region cull: a ribbon is not a yard --------------------------
+  // The photograph sees carriageways wider than OSM's width, so a long thin
+  // band of sealed cells survives past the kerb subtraction — hundreds of
+  // metres of 1-2 cell shoulder, comfortably over MIN_AREA, sawtoothing
+  // along every rural road. A region that has NO core cell (no cell with all
+  // four neighbours sealed) is thin EVERYWHERE — a shoulder, not a surface.
+  {
+    const sealed = (v) => v === PAVING || v === ASPHALT;
+    const label = new Int32Array(N * N);
+    const stack = [];
+    let nextL = 0;
+    const hasCore = [];
+    for (let o0 = 0; o0 < N * N; o0++) {
+      if (!sealed(mask[o0]) || label[o0]) continue;
+      const L = ++nextL;
+      hasCore[L] = false;
+      stack.push(o0); label[o0] = L;
+      while (stack.length) {
+        const o = stack.pop();
+        const i = o % N, j = (o / N) | 0;
+        const nb = [];
+        if (i > 0) nb.push(o - 1);
+        if (i < N - 1) nb.push(o + 1);
+        if (j > 0) nb.push(o - N);
+        if (j < N - 1) nb.push(o + N);
+        let full = nb.length === 4;
+        for (const q of nb) {
+          if (!sealed(mask[q])) { full = false; continue; }
+          if (!label[q]) { label[q] = L; stack.push(q); }
+        }
+        if (full) hasCore[L] = true;
+      }
+    }
+    for (let o = 0; o < N * N; o++) {
+      if (label[o] && !hasCore[label[o]]) mask[o] = GREEN;
+    }
+  }
+
   // ---- ship it as the raster it is --------------------------------------
   // The tile sheds the nine thousand rectangles a previous version pushed
   // into `paved`; stripping them here is what un-ships them.
