@@ -398,6 +398,30 @@ function processRoads(els, owns) {
     if (!owns(r.p[0])) continue;
     const lanes = parseInt(t.lanes);
     if (lanes > 0) r.ln = lanes;
+    // the split of a two-way (Palackého: lanes=5 as 3 forward + 2 backward),
+    // and the per-lane turns for the approach arrows. Each lane's spec is
+    // normalised to letters from {l,t,r} — the client never parses tag soup.
+    const lf = parseInt(t['lanes:forward']);
+    if (lf > 0) r.lf = lf;
+    const lb = parseInt(t['lanes:backward']);
+    if (lb > 0) r.lb = lb;
+    const turns = (spec) => {
+      if (!spec) return undefined;
+      const enc = spec.split('|').map((lane) => {
+        let g = '';
+        for (const v of lane.split(';')) {
+          if (/left/.test(v)) g += 'l';
+          else if (/right/.test(v)) g += 'r';
+          else g += 't';
+        }
+        return [...new Set(g)].join('') || 't';
+      }).join('|');
+      return /[lr]/.test(enc) ? enc : undefined;  // all-through says nothing
+    };
+    const tf = turns(t['turn:lanes:forward'] ?? (r.ow ? t['turn:lanes'] : undefined));
+    if (tf) r.tf = tf;
+    const tb = turns(t['turn:lanes:backward']);
+    if (tb) r.tb = tb;
     if (t.name) r.n = t.name;
     out.push(r);
   }

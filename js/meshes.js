@@ -1258,8 +1258,25 @@ function roadRibbon(sink, f, terrain, cell, key) {
     _c.setHex(COLORS.marking);
     const mr = _c.r, mg = _c.g, mb = _c.b;
     const js2 = junctionsNear(f);
-    for (let s = 1.2; s + DASH_LEN < len - 1.2; s += DASH_LEN + DASH_GAP) {
+    // ---- how many lanes this carriageway carries -------------------------
+    // OSM's lanes= when tagged, else one lane per ~3.4 m of oneway width. A
+    // ONEWAY with N lanes paints N−1 separators at their real offsets — the
+    // dual carriageways of Palackého are exactly this; a two-way keeps its
+    // single centre line (per-direction splits need lanes:forward, later).
+    const lanes = f.ln ?? (f.ow ? Math.max(1, Math.round((f.w ?? 6) / 3.4)) : 2);
+    const seps = [];
+    const usable = (f.w ?? 6) - 1.2;
+    if (f.ow && lanes >= 2) {
+      for (let k2 = 1; k2 < lanes; k2++) seps.push((k2 / lanes - 0.5) * usable);
+    } else if (!f.ow && f.lf && f.lb && f.lf + f.lb >= 3) {
+      // a two-way with an asymmetric split (Palackého: 3+2) paints EVERY
+      // internal boundary — the direction divider is just the one at k=lb
+      const n = f.lf + f.lb;
+      for (let k2 = 1; k2 < n; k2++) seps.push((k2 / n - 0.5) * usable);
+    } else seps.push(0);
+    for (const lo of seps) for (let s = 1.2; s + DASH_LEN < len - 1.2; s += DASH_LEN + DASH_GAP) {
       walkAt(fr, s, _WA); walkAt(fr, s + DASH_LEN, _WB);
+      const ox = _WA.dz * lo, oz = -_WA.dx * lo;    // this separator's offset
       // a centre line does not run through a junction either — tested at BOTH
       // ends against the pad's hull radius (a dash starting outside the old
       // node radius still landed across the pad), and never painted onto
@@ -1277,13 +1294,16 @@ function roadRibbon(sink, f, terrain, cell, key) {
       };
       const rj = (x, z) => js2.some((j) =>
         (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 1.5) ** 2 && !through(j));
-      if (rj(_WA.x, _WA.z) || rj(_WB.x, _WB.z)) continue;
-      if (crossedBy(cell, f, (_WA.x + _WB.x) / 2, (_WA.z + _WB.z) / 2, _WA.dx, _WA.dz, -0.4)) continue;
-      const ya = LAYER_Y.marking + elev(s, _WA.x, _WA.z);
-      const yb = LAYER_Y.marking + elev(s + DASH_LEN, _WB.x, _WB.z);
+      if (rj(_WA.x + ox, _WA.z + oz) || rj(_WB.x + ox, _WB.z + oz)) continue;
+      if (crossedBy(cell, f, (_WA.x + _WB.x) / 2 + ox, (_WA.z + _WB.z) / 2 + oz,
+        _WA.dx, _WA.dz, -0.4)) continue;
+      const ya = LAYER_Y.marking + elev(s, _WA.x + ox, _WA.z + oz);
+      const yb = LAYER_Y.marking + elev(s + DASH_LEN, _WB.x + ox, _WB.z + oz);
       const px = _WA.dz * DASH_HW, pz = -_WA.dx * DASH_HW;
-      sink.quad(_WA.x - px, ya, _WA.z - pz, _WB.x - px, yb, _WB.z - pz,
-        _WB.x + px, yb, _WB.z + pz, _WA.x + px, ya, _WA.z + pz, mr, mg, mb);
+      sink.quad(
+        _WA.x + ox - px, ya, _WA.z + oz - pz, _WB.x + ox - px, yb, _WB.z + oz - pz,
+        _WB.x + ox + px, yb, _WB.z + oz + pz, _WA.x + ox + px, ya, _WA.z + oz + pz,
+        mr, mg, mb);
     }
   } else if (f.t === 'runway') runwayPaint(sink, fr, hw);
   else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr);
@@ -1455,11 +1475,17 @@ function boxFurniture(sink, cl, ring, deckAt) {
       }
       const L = Math.hypot(dx, dz) || 1;
       const ux = dx / L, uz = dz / L;             // away from the node
+      // travel direction at the node (a oneway flows p[0] → p[last])
+      const tvx = a.end && a.i !== 0 ? -ux : ux;
+      const tvz = a.end && a.i !== 0 ? -uz : uz;
       for (const dir of a.end ? [1] : [1, -1]) {
+        const ix = -ux * dir, iz = -uz * dir;     // INTO the box
+        const fwdIn = (ix * tvx + iz * tvz) > 0;
         mouths.push({
           x: m.x + ux * dir * m.pad, z: m.z + uz * dir * m.pad,
-          ix: -ux * dir, iz: -uz * dir,           // INTO the box
-          w: a.r.w ?? 6, a, node: m, dir, used: false,
+          ix, iz, w: a.r.w ?? 6, a, node: m, dir, used: false, fwdIn,
+          // a oneway ENTERS the box at this mouth when its travel points in
+          entering: !a.r.ow || fwdIn,
         });
       }
     }
@@ -1490,36 +1516,83 @@ function boxFurniture(sink, cl, ring, deckAt) {
     const sx = best.x - mo.x, sz = best.z - mo.z;
     const ux = sx / L, uz = sz / L;
     const px2 = -uz, pz2 = ux;
-    const HW = 0.07;                              // thin — a guide, not a lane line
-    for (let d = 1.2; d + 1.4 < L; d += 3.6) {
-      const midx = mo.x + ux * (d + 0.7), midz = mo.z + uz * (d + 0.7);
+    const HW = 0.09;
+    // one guide line per lane of the ENTERING side — the aerial photo shows
+    // the lane separators continuing across the box, not one lone line
+    const r2 = mo.a.r;
+    const lo2 = [];
+    if (r2.ow && mo.entering) {
+      const n = r2.ln ?? Math.max(1, Math.round((r2.w ?? 6) / 3.4));
+      const usable = (r2.w ?? 6) - 1.2;
+      for (let k = 1; k < n; k++) lo2.push((k / n - 0.5) * usable);
+      if (!lo2.length) lo2.push(0);
+    } else lo2.push(0);
+    for (const off of lo2) for (let d = 1.2; d + 1.4 < L; d += 3.6) {
+      const bx2 = mo.x + px2 * off, bz2 = mo.z + pz2 * off;
+      const midx = bx2 + ux * (d + 0.7), midz = bz2 + uz * (d + 0.7);
       if (!pointInPolygon(midx, midz, ring)) continue;   // stay ON the box
-      const y0 = deckAt(mo.x + ux * d, mo.z + uz * d) + 0.05;
-      const y1 = deckAt(mo.x + ux * (d + 1.4), mo.z + uz * (d + 1.4)) + 0.05;
+      const y0 = deckAt(bx2 + ux * d, bz2 + uz * d) + 0.05;
+      const y1 = deckAt(bx2 + ux * (d + 1.4), bz2 + uz * (d + 1.4)) + 0.05;
       sink.quad(
-        mo.x + ux * d - px2 * HW, y0, mo.z + uz * d - pz2 * HW,
-        mo.x + ux * (d + 1.4) - px2 * HW, y1, mo.z + uz * (d + 1.4) - pz2 * HW,
-        mo.x + ux * (d + 1.4) + px2 * HW, y1, mo.z + uz * (d + 1.4) + pz2 * HW,
-        mo.x + ux * d + px2 * HW, y0, mo.z + uz * d + pz2 * HW,
+        bx2 + ux * d - px2 * HW, y0, bz2 + uz * d - pz2 * HW,
+        bx2 + ux * (d + 1.4) - px2 * HW, y1, bz2 + uz * (d + 1.4) - pz2 * HW,
+        bx2 + ux * (d + 1.4) + px2 * HW, y1, bz2 + uz * (d + 1.4) + pz2 * HW,
+        bx2 + ux * d + px2 * HW, y0, bz2 + uz * d + pz2 * HW,
         mr, mg, mb);
     }
   }
-  // ---- straight-ahead arrow on each approach lane -------------------------
+  // ---- arrows: one PER APPROACH LANE, Czech length ------------------------
+  // "jen takový trojúhelníček a jen jeden na vozovku" — a real V9a arrow is
+  // ~5 m long and every approach lane wears its own. Exits get none.
   for (const mo of mouths) {
-    // the approach lane is the RIGHT half of a two-way arm, seen driving in
+    if (!mo.entering) continue;
+    const r = mo.a.r;
     const rx = -mo.iz, rz = mo.ix;                // right of travel-in
-    const off = mo.w / 4;
-    const ax2 = mo.x - mo.ix * 4.2 + rx * off;    // 4.2 m back from the mouth
-    const az2 = mo.z - mo.iz * 4.2 + rz * off;
-    if (pointInPolygon(ax2, az2, ring)) continue; // clustered mouths can overlap
-    const y = deckAt(ax2, az2) + 0.055;
-    const S = (u, v) => [ax2 + mo.ix * u + rx * v, az2 + mo.iz * u + rz * v];
-    const q4 = (a2, b2, c2, d2) => sink.quad(a2[0], y, a2[1], b2[0], y, b2[1],
-      c2[0], y, c2[1], d2[0], y, d2[1], mr, mg, mb);
-    q4(S(-1.1, -0.11), S(0.7, -0.11), S(0.7, 0.11), S(-1.1, 0.11));   // shaft
-    const t0 = S(0.6, -0.4), t1 = S(0.6, 0.4), tip = S(1.5, 0);       // head
-    sink.triFacing(t0[0], y, t0[1], t1[0], y, t1[1], tip[0], y, tip[1], 0, 1, 0, mr, mg, mb);
-    sink.triFacing(t1[0], y, t1[1], t0[0], y, t0[1], tip[0], y, tip[1], 0, 1, 0, mr, mg, mb);
+    const usable = (r.w ?? 6) - 1.2;
+    // how many lanes ARRIVE at this mouth, where they sit, and their turns
+    let nIn, offAt, turnsSpec = null;
+    if (r.ow) {
+      nIn = r.ln ?? Math.max(1, Math.round((r.w ?? 6) / 3.4));
+      offAt = (k) => ((k + 0.5) / nIn - 0.5) * usable;
+      turnsSpec = r.tf ?? null;
+    } else {
+      const total = r.ln ?? ((r.lf ?? 1) + (r.lb ?? 1));
+      // forward flows p[0]→p[last]; whichever direction ENTERS here owns the
+      // right-hand block of the carriageway and its own turn:lanes
+      nIn = mo.fwdIn ? (r.lf ?? Math.max(1, Math.floor(total / 2)))
+        : (r.lb ?? Math.max(1, Math.floor(total / 2)));
+      const N = Math.max(total, nIn);
+      offAt = (k) => (0.5 - (k + 0.5) / N) * usable;   // from the right edge in
+      turnsSpec = (mo.fwdIn ? r.tf : r.tb) ?? null;
+    }
+    const laneTurns = turnsSpec ? turnsSpec.split('|') : null;
+    for (let k = 0; k < nIn; k++) {
+      const off = offAt(k);
+      const ax2 = mo.x - mo.ix * 5.6 + rx * off;  // stand clear of the stop line
+      const az2 = mo.z - mo.iz * 5.6 + rz * off;
+      if (pointInPolygon(ax2, az2, ring)) continue;  // clustered mouths overlap
+      const y = deckAt(ax2, az2) + 0.055;
+      const S = (u, v) => [ax2 + mo.ix * u + rx * v, az2 + mo.iz * u + rz * v];
+      const q5 = (a2, b2, c2, d2) => sink.quad(a2[0], y, a2[1], b2[0], y, b2[1],
+        c2[0], y, c2[1], d2[0], y, d2[1], mr, mg, mb);
+      // turn:lanes lists left→right along travel; our k counts from the right
+      const g = laneTurns
+        ? (laneTurns[laneTurns.length - 1 - k] ?? 't') : 't';
+      q5(S(-2.5, -0.14), S(1.0, -0.14), S(1.0, 0.14), S(-2.5, 0.14));   // shaft
+      if (g.includes('t') || g === '') {
+        const t0 = S(0.9, -0.48), t1 = S(0.9, 0.48), tip = S(2.5, 0);
+        sink.triFacing(t0[0], y, t0[1], t1[0], y, t1[1], tip[0], y, tip[1], 0, 1, 0, mr, mg, mb);
+        sink.triFacing(t1[0], y, t1[1], t0[0], y, t0[1], tip[0], y, tip[1], 0, 1, 0, mr, mg, mb);
+      }
+      // a turn head sits at the shaft top, pointing sideways off an elbow
+      for (const [flag, side] of [['l', -1], ['r', 1]]) {
+        if (!g.includes(flag)) continue;
+        q5(S(0.7, -0.14), S(1.0, -0.14), S(1.0, 0.6 * side), S(0.7, 0.6 * side)); // elbow
+        const h0 = S(0.4, 0.62 * side), h1 = S(1.3, 0.62 * side), hp = S(0.85, 1.35 * side);
+        sink.triFacing(h0[0], y, h0[1], h1[0], y, h1[1], hp[0], y, hp[1], 0, 1, 0, mr, mg, mb);
+        sink.triFacing(h1[0], y, h1[1], h0[0], y, h0[1], hp[0], y, hp[1], 0, 1, 0, mr, mg, mb);
+      }
+    }
   }
   sink.at(SURF.asphalt);
 }
