@@ -77,6 +77,7 @@ const wantNode = (t) => !!t && (
   // tag (hlavní silnice arrives as traffic_sign=CZ:P2 on a node)
   || t.highway === 'give_way' || t.highway === 'stop'
   || t.traffic_sign !== undefined
+  || t.highway === 'crossing'       // přechody — zebras on every mapped arm
 );
 
 // ---- tile writer -----------------------------------------------------------

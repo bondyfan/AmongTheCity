@@ -9,7 +9,8 @@
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
-  roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull } from './geo.js';
+  roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull,
+  clustersIn, clusterHull, clusterDeckY } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain, groundFor } from './terrain.js';
@@ -524,21 +525,30 @@ export class CityWorld {
   // pad to the terrain a metre and a half below and stood in it up to the
   // neck. Same shape, same height function, now load-bearing.
   _padLevels(x, z) {
-    const M = 16;                            // no pad reaches this far over a border
+    const M = 40;                            // a CLUSTER can reach this far over a border
     const ci = Math.floor(x / CHUNK), cj = Math.floor(z / CHUNK);
     const lx = x - ci * CHUNK, lz = z - cj * CHUNK;
     const xs = lx < M ? [0, -1] : lx > CHUNK - M ? [0, 1] : [0];
     const zs = lz < M ? [0, -1] : lz > CHUNK - M ? [0, 1] : [0];
     for (const dx of xs) {
       for (const dz of zs) {
-        const js = junctionsIn((ci + dx) + ',' + (cj + dz));
-        if (!js) continue;
-        for (const j of js) {
+        const key2 = (ci + dx) + ',' + (cj + dz);
+        const js = junctionsIn(key2);
+        if (js) for (const j of js) {
+          if (j._cluster) continue;              // its cluster answers instead
           const r = j.padR ?? 6;
           if ((x - j.x) ** 2 + (z - j.z) ** 2 > r * r) continue;
           const ring = junctionHull(j);
           if (!ring || !pointInPolygon(x, z, ring)) continue;
           levels.add(junctionDeckY(j, x, z, this.terrain) + LAYER_Y.road + 0.012);
+        }
+        const cls = clustersIn(key2);
+        if (cls) for (const cl of cls) {
+          const r = cl.padR;
+          if ((x - cl.x) ** 2 + (z - cl.z) ** 2 > r * r) continue;
+          const ring = clusterHull(cl);
+          if (!ring || !pointInPolygon(x, z, ring)) continue;
+          levels.add(clusterDeckY(cl, x, z, this.terrain) + LAYER_Y.road + 0.012);
         }
       }
     }

@@ -725,6 +725,22 @@ function processSigns(els, owns) {
   return out;
 }
 
+// ---------- pedestrian crossings (zebra points) -----------------------------
+function processCrossings(els, owns) {
+  const out = [], seen = new Set();
+  for (const el of els) {
+    if (el.type !== 'node' || el.tags?.highway !== 'crossing') continue;
+    // unmarked crossings have no paint to draw
+    if (el.tags.crossing === 'unmarked' || el.tags.crossing_ref === 'unmarked') continue;
+    const k = 'node/' + el.id;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const pt = [px(el.lon), pz(el.lat)];
+    if (owns(pt)) out.push(pt);
+  }
+  return out;
+}
+
 // ---------- traffic signals (new layer — semafory for traffic v3) ----------
 function processSignals(els, owns) {
   const out = [], seen = new Set();
@@ -753,7 +769,7 @@ const OUT_DIR = process.env.OUT_DIR || 'public/data';
 mkdirSync(`${OUT_DIR}/tiles`, { recursive: true });
 const manifestTiles = [];
 const totals = { buildings: 0, roads: 0, rails: 0, water: 0, waterways: 0,
-  green: 0, paved: 0, trees: 0, pois: 0, signals: 0, signs: 0 };
+  green: 0, paved: 0, trees: 0, pois: 0, signals: 0, signs: 0, crossings: 0 };
 let emitted = 0, empty = 0, bytes = 0;
 
 // Some rivers are single OSM multipolygons tens of kilometres long. They live
@@ -811,6 +827,7 @@ const rawTiles = readdirSync(RAW_DIR)
       pois: processPois(els, owns),
       signals: processSignals(els, owns),
       signs: processSigns(els, owns),
+      crossings: processCrossings(els, owns),
     };
     let n = 0;
     for (const key of Object.keys(totals)) { n += tile[key].length; totals[key] += tile[key].length; }

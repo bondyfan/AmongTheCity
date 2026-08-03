@@ -816,6 +816,94 @@ export function indexJunctions(roads) {
     if (!list) JUNCTIONS.set(k, list = []);
     if (!list.some((o) => o.x === e.x && o.z === e.z)) list.push(e);
   }
+
+  // ---- CLUSTERS: several nodes, one real crossing ------------------------
+  // A dual carriageway crossing a dual carriageway is FOUR nodes a few
+  // metres apart, and four separate pads leave slivers of ground, mismatched
+  // shades and orphaned paint between them — the "bordel" at náměstí Jana
+  // Pernera. Two nodes joined by a SHORT stretch of the same way (the link
+  // between carriageways) belong to one crossing; union-find over the pin
+  // lists gives the components, and each multi-node component becomes one
+  // CLUSTER that meshes draws (and physics stands on) as a single surface.
+  const CLUSTER_LINK = 32;
+  const find = (n) => { while (n._cRoot && n._cRoot !== n) n = n._cRoot; return n; };
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) rb._cRoot = ra;
+    a._cRoot ??= ra; b._cRoot ??= ra;
+  };
+  for (const r of roads) {
+    if (!r._pins || r._pins.length < 2) continue;
+    const ps = [...r._pins].sort((p1, p2) => p1.s - p2.s);
+    for (let i = 0; i < ps.length - 1; i++) {
+      if (ps[i + 1].s - ps[i].s < CLUSTER_LINK
+        && ps[i].node.pad !== undefined && ps[i + 1].node.pad !== undefined) {
+        union(ps[i].node, ps[i + 1].node);
+      }
+    }
+  }
+  const groups = new Map();
+  for (const list2 of JUNCTIONS.values()) {
+    for (const e of list2) {
+      if (!e._cRoot) continue;
+      const root = find(e);
+      let g = groups.get(root);
+      if (!g) groups.set(root, g = []);
+      if (!g.includes(e)) g.push(e);
+    }
+  }
+  for (const members of groups.values()) {
+    if (members.length < 2) { for (const m of members) m._cluster = null; continue; }
+    let cx = 0, cz = 0;
+    for (const m of members) { cx += m.x; cz += m.z; }
+    cx /= members.length; cz /= members.length;
+    let padR = 0;
+    for (const m of members) padR = Math.max(padR, Math.hypot(m.x - cx, m.z - cz) + m.padR);
+    const cl = { members, x: cx, z: cz, padR, pad: padR };
+    // a later tile can re-form a cluster these nodes already belonged to —
+    // retire the old record or the chunk draws the crossing twice
+    for (const m of members) {
+      const old = m._cluster;
+      if (old && old !== cl) {
+        const l = CLUSTERS.get(chunkKey(old.x, old.z));
+        const i = l ? l.indexOf(old) : -1;
+        if (i >= 0) l.splice(i, 1);
+      }
+      m._cluster = cl;
+    }
+    const ck = chunkKey(cx, cz);
+    let clist = CLUSTERS.get(ck);
+    if (!clist) CLUSTERS.set(ck, clist = []);
+    clist.push(cl);
+  }
+  // the union-find marks are scoped to THIS call — a later tile must not see
+  // half-built roots on nodes it never touched
+  for (const list2 of JUNCTIONS.values()) for (const e of list2) delete e._cRoot;
+}
+
+/** Junction clusters, bucketed like the pads. */
+export function clustersIn(chunkK) { return CLUSTERS.get(chunkK) ?? null; }
+
+/** The cluster's one footprint: convex hull of every member's hull points. */
+export function clusterHull(cl) {
+  if (cl._ring !== undefined) return cl._ring;
+  const pts = [];
+  for (const m of cl.members) {
+    const r = junctionHull(m);
+    if (r) pts.push(...r);
+  }
+  return (cl._ring = pts.length >= 3 ? convexHull(pts) : null);
+}
+
+/** The cluster's surface height at (x, z): the deck of the nearest arm of any
+ * member — the same pointwise continuation a single pad uses. */
+export function clusterDeckY(cl, x, z, terrain) {
+  let best = Infinity, y = null;
+  for (const m of cl.members) {
+    const d2 = (x - m.x) ** 2 + (z - m.z) ** 2;
+    if (d2 < best) { best = d2; y = junctionDeckY(m, x, z, terrain); }
+  }
+  return y ?? terrain.heightAt(x, z);
 }
 
 // ---- what a bridge is a bridge OVER -------------------------------------
@@ -1077,6 +1165,8 @@ export function junctionDeckY(node, x, z, terrain) {
 
 /** Junction pads, bucketed by chunk key. meshes.js asks for its own. */
 export const JUNCTIONS = new Map();
+const CLUSTERS = new Map();
+
 export function junctionsIn(chunkK) { return JUNCTIONS.get(chunkK) ?? null; }
 
 export function polylineLength(p) {
@@ -1117,7 +1207,7 @@ function bucketize(index, list, kind, touched) {
   for (const f of list) {
     const ring = forEachCellOf(f, (key) => {
       let cell = index.get(key);
-      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [] });
+      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [], crossings: [] });
       cell[kind].push(f);
       touched?.add(key);
     });
@@ -1177,6 +1267,9 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   // trees so bucketize can hand each chunk its own posts
   const signs = (data.signs ?? []).map((g) => ({ p: [g.p], k: g.k, _id: ++next }));
   bucketize(city.chunkIndex, signs, 'signs', touched);
+  // pedestrian crossings — bare [x,z] zebra points on the way
+  const crossings = (data.crossings ?? []).map((c) => ({ p: [c], _id: ++next }));
+  bucketize(city.chunkIndex, crossings, 'crossings', touched);
   return { roads, signals, heavy };
 }
 

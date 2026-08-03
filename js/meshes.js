@@ -32,6 +32,7 @@ import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
 import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
   junctionsIn, distPointToSegment, roadProfile, roadGradeY, junctionDeckY, junctionHull,
+  clustersIn, clusterHull, clusterDeckY,
   GRADE_CUT } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
@@ -1264,8 +1265,18 @@ function roadRibbon(sink, f, terrain, cell, key) {
       // node radius still landed across the pad), and never painted onto
       // another carriageway lying over this one: the diagonal white chaos at
       // every dual-carriageway crossing was exactly these two leaks.
+      // a junction only silences the dashes of roads that END there or pass
+      // as strangers — a THROUGH arm keeps its line as the sparse guide
+      // dashes every real signalised box paints across the middle
+      const through = (j) => {
+        const nodes = j.members ?? [j];
+        for (const nd of nodes) {
+          for (const a2 of nd.arms) if (a2.r === f && !a2.end) return true;
+        }
+        return false;
+      };
       const rj = (x, z) => js2.some((j) =>
-        (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 1.5) ** 2);
+        (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 1.5) ** 2 && !through(j));
       if (rj(_WA.x, _WA.z) || rj(_WB.x, _WB.z)) continue;
       if (crossedBy(cell, f, (_WA.x + _WB.x) / 2, (_WA.z + _WB.z) / 2, _WA.dx, _WA.dz, -0.4)) continue;
       const ya = LAYER_Y.marking + elev(s, _WA.x, _WA.z);
@@ -1295,6 +1306,11 @@ function junctionsNear(f) {
     for (let cz = c0z; cz <= c1z; cz++) {
       const js = junctionsIn(cx + ',' + cz);
       if (js) for (const j of js) out.push(j);
+      // clusters carry x/z/padR like a node, so the same radius tests apply —
+      // and they cover the space BETWEEN their member nodes, where orphaned
+      // dashes used to survive
+      const cls3 = clustersIn(cx + ',' + cz);
+      if (cls3) for (const cl of cls3) out.push(cl);
     }
   }
   return (f._jsNear = out);
@@ -1336,7 +1352,82 @@ function trimEnds(p, t0 = 0, t1 = 0) {
 // section at the pad radius. That is guaranteed simple — no self-intersection
 // to check, no inset that can fold — and it covers every arm by construction
 // because each arm's own corners are vertices of it.
+// One white transverse bar per drivable arm mouth — the stop line that makes
+// an empty junction box read as a JUNCTION instead of a hole in the paint.
+function stopBars(sink, node, deckAt, terrain) {
+  if (!terrain) return;
+  sink.at(SURF.paint);
+  _c.setHex(COLORS.marking);
+  const mr = _c.r, mg = _c.g, mb = _c.b;
+  for (const a of node.arms) {
+    if (!a.r.d || (a.r.w ?? 0) < 4.5) continue;
+    const p = a.r.p;
+    const i = a.i;
+    const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
+    let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
+    if (!a.end) {
+      const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
+      dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
+    }
+    const L = Math.hypot(dx, dz) || 1;
+    const ux = dx / L, uz = dz / L;
+    for (const dir of a.end ? [1] : [1, -1]) {
+      const bx = node.x + ux * dir * (node.pad + 1.1);
+      const bz = node.z + uz * dir * (node.pad + 1.1);
+      const hw = (a.r.w ?? 3) / 2 - 0.45;
+      if (hw < 1) continue;
+      const y = deckAt(bx, bz) + 0.045;
+      const px2 = -uz, pz2 = ux;
+      const t = 0.25;                         // half thickness along the arm
+      sink.quad(
+        bx - px2 * hw - ux * dir * t, y, bz - pz2 * hw - uz * dir * t,
+        bx + px2 * hw - ux * dir * t, y, bz + pz2 * hw - uz * dir * t,
+        bx + px2 * hw + ux * dir * t, y, bz + pz2 * hw + uz * dir * t,
+        bx - px2 * hw + ux * dir * t, y, bz - pz2 * hw + uz * dir * t,
+        mr, mg, mb);
+    }
+  }
+  sink.at(SURF.asphalt);
+}
+
+// The pad of a whole CLUSTER — several nodes, one surface. Same recipe as a
+// single pad (hull fan, pointwise deck, widest arm's colour) over the union;
+// what it buys is everything BETWEEN the member nodes: no slivers of ground,
+// no mismatched shades, no orphaned paint inside the crossing.
+function clusterPad(sink, cl, terrain) {
+  sink.at(SURF.asphalt);
+  const ring = clusterHull(cl);
+  if (!ring) return;
+  let padT = 'residential', padW = 0;
+  for (const m of cl.members) {
+    for (const a of m.arms) {
+      if (a.r.d && (a.r.w ?? 0) > padW && COLORS.road[a.r.t]) { padW = a.r.w; padT = a.r.t; }
+    }
+  }
+  _c.setHex(COLORS.road[padT] ?? COLORS.road.residential);
+  const lift = LAYER_Y.road + 0.012;
+  const fan = [];
+  for (let i = 1; i < ring.length - 1; i++) {
+    fan.push(ring[0][0], 0, ring[0][1],
+      ring[i][0], 0, ring[i][1],
+      ring[i + 1][0], 0, ring[i + 1][1]);
+  }
+  const tp2 = tessTriangles(fan, fan.length / 9, 4);
+  const deckAt = (x, z) => (terrain ? clusterDeckY(cl, x, z, terrain) : 0) + lift;
+  const mark = sink.mark();
+  for (let k = 0; k < tp2.length; k += 9) {
+    sink.triFacing(
+      tp2[k], deckAt(tp2[k], tp2[k + 2]), tp2[k + 2],
+      tp2[k + 3], deckAt(tp2[k + 3], tp2[k + 5]), tp2[k + 5],
+      tp2[k + 6], deckAt(tp2[k + 6], tp2[k + 8]), tp2[k + 8],
+      0, 1, 0, _c.r, _c.g, _c.b);
+  }
+  for (const m of cl.members) stopBars(sink, m, deckAt, terrain);
+  if (terrain) sink.fixFrom(mark);
+}
+
 function junctionPad(sink, j, terrain) {
+  if (j._cluster) return;                   // drawn as one surface by clusterPad
   sink.at(SURF.asphalt);
   const ring = junctionHull(j);
   if (!ring) return;
@@ -1386,6 +1477,7 @@ function junctionPad(sink, j, terrain) {
       tp[k + 6], deckAt(tp[k + 6], tp[k + 8]), tp[k + 8],
       0, 1, 0, _c.r, _c.g, _c.b);
   }
+  stopBars(sink, j, deckAt, terrain);
   if (terrain) sink.fixFrom(mark);
 }
 
@@ -2549,6 +2641,52 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
 // carriageway every LAMP_STEP meters and alternating sides. Two instanced
 // meshes per chunk (post + head); the head material is emissive so dusk turns
 // the whole city on for free — no lights, no shadow cost.
+// One zebra: white longitudinal bars side by side across the carriageway,
+// centred on the OSM crossing node, at the road's own absolute deck height.
+function zebraInto(sink, cr, cell, terrain) {
+  const [x, z] = cr.p[0];
+  let best = 42.25, road = null, ux = 0, uz = 1, s0 = 0;   // (6.5 m)² cap
+  for (const r of cell.roads) {
+    if (!r.d || !r.p || (r.w ?? 0) < 3) continue;
+    let along = 0;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+      const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9;
+      let t = ((x - ax) * ex + (z - az) * ez) / L2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const qx = ax + ex * t, qz = az + ez * t;
+      const d2 = (x - qx) ** 2 + (z - qz) ** 2;
+      const L = Math.sqrt(L2);
+      if (d2 < best) { best = d2; road = r; ux = ex / L; uz = ez / L; s0 = along + L * t; }
+      along += L;
+    }
+  }
+  if (!road || !terrain) return;
+  const gy = road.br ? bridgeDeckHeight(road, s0, terrain) : roadGradeY(road, s0, terrain);
+  if (gy === null || gy === undefined) return;
+  const y = gy + LAYER_Y.marking + 0.02;
+  sink.at(SURF.paint);
+  _c.setHex(COLORS.marking);
+  const mr = _c.r, mg = _c.g, mb = _c.b;
+  const px2 = -uz, pz2 = ux;                    // across the road
+  const hw = (road.w ?? 6) / 2 - 0.25;
+  const HB = 1.5;                               // half band length along the road
+  const mark = sink.mark();
+  // bars 0.5 m wide with 0.4 m gaps, mirrored out from the centreline
+  for (let o = 0.2; o + 0.5 <= hw; o += 0.9) {
+    for (const side of [-1, 1]) {
+      const c0 = o * side, c1 = (o + 0.5) * side;
+      sink.quad(
+        x + px2 * c0 - ux * HB, y, z + pz2 * c0 - uz * HB,
+        x + px2 * c1 - ux * HB, y, z + pz2 * c1 - uz * HB,
+        x + px2 * c1 + ux * HB, y, z + pz2 * c1 + uz * HB,
+        x + px2 * c0 + ux * HB, y, z + pz2 * c0 + uz * HB,
+        mr, mg, mb);
+    }
+  }
+  sink.fixFrom(mark);
+}
+
 // one sign: post + panel, all vertex-coloured triangles in the chunk sink
 function signPost(sink, sg, cell) {
   const [x, z] = sg.p[0];
@@ -3130,6 +3268,8 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // …and the surfaces where they meet, filling what the trims left behind
     const js = junctionsIn(key);
     if (js) for (const j of js) junctionPad(sink, j, mats.terrain);
+    const cls2 = clustersIn(key);
+    if (cls2) for (const cl of cls2) clusterPad(sink, cl, mats.terrain);
   }
   // Roads, rails, kerbs, lane paint, bank skirts and bridge parapets all land
   // in this one sink, and every one of them is authored as a height ABOVE the
@@ -3216,6 +3356,12 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       signPost(sink, sg3, cell);
     }
     void mark0;
+  }
+  if (!shell && cell.crossings?.length) {
+    for (const cr of cell.crossings) {
+      if (cr._home !== key) continue;
+      zebraInto(sink, cr, cell, mats.terrain);
+    }
   }
 
   // -- trees: two InstancedMeshes (trunks / crowns) sharing transforms --

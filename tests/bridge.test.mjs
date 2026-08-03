@@ -96,7 +96,7 @@ test('regional data retains the Labe road and footbridge tags', () => {
 // ---------------------------------------------------------------------------
 
 const { roadProfile, roadGradeY, polylineLength, indexJunctions, indexBridgeCrossings, bridgeClearance,
-  junctionDeckY, junctionHull, pointInPolygon, junctionY }
+  junctionDeckY, junctionHull, pointInPolygon, junctionY, clustersIn, clusterHull, clusterDeckY }
   = await import('../js/geo.js');
 const { levels } = await import('../js/city.js');
 const { LAYER_Y } = await import('../js/config.js');
@@ -473,4 +473,32 @@ test('a junction height measured on missing ground is not remembered', () => {
   const real = junctionY(j, terrain);
   assert.ok(Math.abs(real - 230) < 1,
     `the boot-time guess survived: got ${real.toFixed(1)}, want 230`);
+});
+
+test('a dual x dual crossing is ONE cluster with one surface', () => {
+  // Four nodes a few metres apart used to mean four pads with slivers of
+  // ground, mismatched shades and orphaned paint between them. Nodes joined
+  // by a short link way now form one cluster: one hull, one deck.
+  const terrain = { res: 20, ready: () => true, heightAt: () => 200 };
+  // OSM splits every way at a junction, so the crossing arrives as segments
+  // ENDING at the four nodes (0,0) (14,0) (0,14) (14,14)
+  const R = (p) => ({ d: 1, t: 'primary', w: 7, p });
+  const roads = [
+    R([[-80, 0], [0, 0]]), R([[0, 0], [14, 0]]), R([[14, 0], [80, 0]]),
+    R([[80, 14], [14, 14]]), R([[14, 14], [0, 14]]), R([[0, 14], [-80, 14]]),
+    R([[0, -60], [0, 0]]), R([[0, 0], [0, 14]]), R([[0, 14], [0, 74]]),
+    R([[14, -60], [14, 0]]), R([[14, 0], [14, 14]]), R([[14, 14], [14, 74]]),
+  ];
+  for (const w of roads) w._len = polylineLength(w.p);
+  indexJunctions(roads);
+  const cls = clustersIn('0,0') ?? clustersIn('-1,0') ?? clustersIn('0,-1') ?? clustersIn('-1,-1');
+  assert.ok(cls && cls.length >= 1, 'no cluster formed at the dual crossing');
+  const cl = cls[0];
+  assert.ok(cl.members.length >= 2, `only ${cl.members.length} nodes clustered`);
+  const ring = clusterHull(cl);
+  assert.ok(ring && ring.length >= 3, 'cluster has no footprint');
+  // the point BETWEEN the nodes — the old sliver zone — is inside the hull
+  assert.ok(pointInPolygon(7, 7, ring), 'the middle of the crossing is not covered');
+  const y = clusterDeckY(cl, 7, 7, terrain);
+  assert.ok(Number.isFinite(y) && Math.abs(y - 200) < 2, `cluster deck ${y} is nowhere near grade`);
 });

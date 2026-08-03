@@ -1245,25 +1245,60 @@ export class Traffic {
     // junctions at the seams, kilometres from anyone.)
     const cands = [];
     for (const n of this._nodes.values()) {
-      if (n._sg || n.deg < 3 || !n.ns || !n.ew) continue;
+      // any main-class arm qualifies a node for CONSIDERATION — the strict
+      // both-bearings test moves into the no-owner branch below, because a
+      // node beside a real OSM signal deserves poles even when the cross
+      // street is residential (OSM already said the crossing is signalised)
+      if (n._sg || n.deg < 3) continue;
+      if (!(n.ns && n.ns.size) && !(n.ew && n.ew.size)) continue;
       cands.push(n);
     }
     if (!cands.length) return null;
     cands.sort((a, b) => (q4(a.x) - q4(b.x)) || (q4(a.z) - q4(b.z)));
     for (const n of cands) {
+      let owner = null, ownerD = SYNTH_CLEAR;   // a real cluster (or an earlier synthetic
+      this._jgrid.near(n.x, n.z, (j) => {       // one) within SYNTH_CLEAR owns this crossing
+        const d = dist(j.x - n.x, j.z - n.z);
+        if (d < ownerD) { ownerD = d; owner = j; }
+      });
+      if (owner) {
+        // …but OSM routinely maps ONE signal node for a whole signalised
+        // crossing, leaving the owner a single lonely pole. Top it up with
+        // the same per-approach stop points — attached to the owner
+        // DIRECTLY, not through _growSignals: a Jana-Pernera-sized box is
+        // wider than the cluster radius, and clustering would either drop
+        // the far approaches or found a rival controller with its own green.
+        n._sg = 1;
+        let added = false;
+        for (const e of n.inn) {
+          if (e.len < SIG_MIN_EDGE) continue;
+          const pose = poseAt(e, e.len - Math.min(SYNTH_BACK, e.len * 0.45), 0);
+          let dup = false;
+          for (const sg of owner.sigs) {
+            if (dist(sg.x - pose.x, sg.z - pose.z) < 6) { dup = true; break; }
+          }
+          if (dup) continue;
+          owner.sigs.push(this._makePole(pose.x, pose.z, owner.group));
+          added = true;
+        }
+        if (added) {
+          owner.st0 = owner.st1 = -1;
+          made++;
+          (grown ??= new Set()).add(owner);
+        }
+        continue;
+      }
+      // NO owner: this would FOUND a signal cluster, and that keeps the
+      // strict rule — two distinct roads crossing, an arterial among them,
+      // mains in both bearing buckets.
+      if (!n.ns || !n.ew) { continue; }
       let distinct = n.ns.size;                 // union of the two bucket sets —
       for (const r of n.ew) if (!n.ns.has(r)) distinct++;  // one road bent 90° isn't a crossing
       if (distinct < 2) continue;
-      // …and the crossing must involve an ARTERIAL — see SIG_MAJOR above
       let major = false;
       for (const r of n.ns) if (SIG_MAJOR.test(r.t)) { major = true; break; }
       if (!major) for (const r of n.ew) if (SIG_MAJOR.test(r.t)) { major = true; break; }
       if (!major) { n._sg = 1; continue; }
-      let owned = false;                        // a real cluster (or an earlier synthetic
-      this._jgrid.near(n.x, n.z, (j) => {       // one) within SYNTH_CLEAR owns this crossing
-        if (dist(j.x - n.x, j.z - n.z) < SYNTH_CLEAR) owned = true;
-      });
-      if (owned) { n._sg = 1; continue; }
       // one stop-line point per approach, planted a few meters back up the
       // incoming edge. Capping at 45 % of the edge keeps the point past the
       // halfway mark, so _makePole's "which direction does this pole serve"
