@@ -131,6 +131,7 @@ export class Terrain {
     let g = this.grids.get(tx + ',' + tz);
     if (!g) {
       this.missed = true;
+      this._missTiles?.add(tx + ',' + tz);   // which tile the guess is waiting on
       const near = this._nearestGrid(tx, tz);
       if (!near) return 0;                    // nothing within 9 km: flat world
       g = near.g; tx = near.tx; tz = near.tz;

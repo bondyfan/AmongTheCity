@@ -222,7 +222,10 @@ export class CityWorld {
     // A height map landing changes the SHAPE of ground that has already been
     // meshed, so the chunks over it have to be rebuilt — the same treatment a
     // feature tile gets when it arrives late.
-    this.terrain.onTileLoaded(() => this._dropGuessedChunks());
+    this.terrain.onTileLoaded((t) => {
+      (this._arrivedTiles ??= new Set()).add(t.tx + ',' + t.tz);
+      this._dropGuessedChunks();
+    });
     // …and how tall whatever stands on it is, which is where half the trees in
     // this world come from — OSM's landuse misses the other half entirely.
     this.canopy = new Canopy(city.tile ?? 4800, 10);
@@ -253,7 +256,8 @@ export class CityWorld {
     this.farChunks = 0;         // ground-only ring beyond that
     this._detail = new Map();   // key -> the LOD it was built at ('full'|'shell'|'ground')
     this._px = new Map();       // key -> the ortho detail tier it was built with
-    this._hadTerrain = new Map(); // key -> was the ground known when it was built
+    this._hadTerrain = new Map();
+    this._missBy = new Map(); // key -> was the ground known when it was built
     this._tileT = 0;            // ensureTiles throttle — 1 Hz, fetches run km ahead
     // Region tiles can land AFTER their chunks were already built: the boot
     // frames raise empty spawn cells before the first fetch returns, and long
@@ -387,6 +391,7 @@ export class CityWorld {
       // reports whether ANY vertex it placed was sampled against a height map
       // that had not arrived. Either way the chunk is a guess and must rebuild.
       this._hadTerrain.set(key, hadTerrain && !group?.userData.guessedGround);
+      this._missBy.set(key, group?.userData.missTiles ?? null);
     }
     // drop cells far behind us (hysteresis +2 so the edge doesn't flicker)
     for (const [key, group] of this.built) {
@@ -400,6 +405,7 @@ export class CityWorld {
         this._detail.delete(key);
         this._px.delete(key);
         this._hadTerrain.delete(key);
+        this._missBy.delete(key);
       }
     }
   }
@@ -445,6 +451,8 @@ export class CityWorld {
     if (now - (this._guessDropAt ?? 0) < 1500) return;
     this._guessDropAt = now;
     this._guessDropWanted = false;
+    const arrived = this._arrivedTiles;
+    this._arrivedTiles = null;
     const keys = [];
     for (const key of this.built.keys()) {
       // ONLY the chunks that were meshed on ground somebody had to GUESS. A
@@ -461,6 +469,10 @@ export class CityWorld {
       // (userData.guessedGround), so this can simply ask every chunk whether it
       // is still waiting for ground — wherever that ground turned out to be.
       if (this._hadTerrain.get(key)) continue;
+      // a chunk that knows WHICH tiles it guessed on only rebuilds when one
+      // of them actually arrived; unknown guesses stay conservative
+      const miss = this._missBy.get(key);
+      if (miss && arrived && !miss.some((tk) => arrived.has(tk))) continue;
       keys.push(key);
     }
     if (keys.length) this._dropCells(keys);

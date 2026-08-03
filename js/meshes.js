@@ -864,7 +864,12 @@ function waterLevel(f, terrain) {
     // an unmeasurable sample must RAISE THE FLAG — skipping it silently let a
     // chunk finish "clean" and never rebuild, with the river's level measured
     // on half its outline
-    if (!terrain.ready(ring[i][0], ring[i][1])) { terrain.missed = true; continue; }
+    if (!terrain.ready(ring[i][0], ring[i][1])) {
+      terrain.missed = true;
+      terrain._missTiles?.add(Math.floor(ring[i][0] / terrain.tile) + ','
+        + Math.floor(ring[i][1] / terrain.tile));
+      continue;
+    }
     known++;
     const h = terrain.heightAt(ring[i][0], ring[i][1]);
     if (h < lo) lo = h;
@@ -3231,7 +3236,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // "was the ground known?" was answered from the chunk's own centre, and a
   // chunk whose centre was fine but whose geometry reached into nothing was
   // never rebuilt — it kept its guess for the rest of the session.
-  if (mats.terrain) mats.terrain.missed = false;
+  if (mats.terrain) { mats.terrain.missed = false; mats.terrain._missTiles = new Set(); }
   if (mats.canopy) mats.canopy.missed = false;
   if (mats.ground) mats.ground.missed = false;
   const key = cx + ',' + cz;
@@ -3252,6 +3257,12 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // …read AFTER every vertex has been placed, which is the point
     group.userData.guessedGround = !!mats.terrain?.missed || !!mats.canopy?.missed
       || !!mats.ground?.missed;
+    // …and WHICH height tiles the guesses were waiting on, so the streamer
+    // can rebuild this chunk when THOSE arrive instead of on every arrival —
+    // the drop-everything waves were most of the driving stutter
+    const mt = mats.terrain?._missTiles;
+    group.userData.missTiles = mt?.size ? [...mt] : null;
+    if (mats.terrain) mats.terrain._missTiles = null;
     return group;
   };
   if (groundOnly) {
