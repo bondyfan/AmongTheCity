@@ -49,7 +49,12 @@ const SPAN = TILE / 2;                  // …covering this many metres (2 m/px)
 // Tuned against the Pardubice station square, where the paved strips between
 // the footways are about ten metres wide: closing with a radius of 2 (an 8 m
 // erosion) ate them and put the grass fallback back up from 22 % to 42 %.
-const MIN_AREA = 80;                    // m² — under this it is a shadow
+// Under this a sealed region is NOISE, not a surface. 80 m² let every
+// mis-read shadow and apron scrap through as a lone angular tile on the
+// grass — the rule that keeps the world clean is: the raster only speaks
+// when it has something the size of an actual yard to say. Real driveways
+// smaller than this are lost, and that is the right trade.
+const MIN_AREA = 300;                   // m²
 const WMS = 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer';
 const UA = 'AmongTheCity-dev/0.7 (three.js game prototype; contact: bondyfanfrankwild@gmail.com)';
 const DIR = 'public/data/tiles';
