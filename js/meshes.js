@@ -1270,11 +1270,19 @@ function roadRibbon(sink, f, terrain, cell, key) {
       for (let k2 = 1; k2 < lanes; k2++) seps.push((k2 / lanes - 0.5) * usable);
     } else if (!f.ow && f.lf && f.lb && f.lf + f.lb >= 3) {
       // a two-way with an asymmetric split (Palackého: 3+2) paints EVERY
-      // internal boundary — the direction divider is just the one at k=lb
+      // internal boundary. The DIRECTION divider (the one at k = lb,
+      // counted from the left) is SOLID — drawn dashed it read as one more
+      // lane of the same direction.
       const n = f.lf + f.lb;
-      for (let k2 = 1; k2 < n; k2++) seps.push((k2 / n - 0.5) * usable);
+      for (let k2 = 1; k2 < n; k2++) {
+        seps.push({ off: (k2 / n - 0.5) * usable, solid: k2 === f.lb });
+      }
     } else seps.push(0);
-    for (const lo of seps) for (let s = 1.2; s + DASH_LEN < len - 1.2; s += DASH_LEN + DASH_GAP) {
+    for (const sep of seps) {
+      const lo = typeof sep === 'object' ? sep.off : sep;
+      const solid = typeof sep === 'object' && sep.solid;
+      const step = solid ? DASH_LEN : DASH_LEN + DASH_GAP;
+      for (let s = 1.2; s + DASH_LEN < len - 1.2; s += step) {
       walkAt(fr, s, _WA); walkAt(fr, s + DASH_LEN, _WB);
       const ox = _WA.dz * lo, oz = -_WA.dx * lo;    // this separator's offset
       // a centre line does not run through a junction either — tested at BOTH
@@ -1304,6 +1312,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
         _WA.x + ox - px, ya, _WA.z + oz - pz, _WB.x + ox - px, yb, _WB.z + oz - pz,
         _WB.x + ox + px, yb, _WB.z + oz + pz, _WA.x + ox + px, ya, _WA.z + oz + pz,
         mr, mg, mb);
+      }
     }
   } else if (f.t === 'runway') runwayPaint(sink, fr, hw);
   else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr);
