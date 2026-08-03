@@ -801,12 +801,19 @@ export function indexJunctions(roads) {
     for (const a of e.arms) wMax = Math.max(wMax, (a.r.w ?? 3) / 2);
     e.pad = wMax + 0.6;
     e.padR = Math.hypot(e.pad, wMax) + 0.1;  // bounding radius of the hull corners
-    for (const a of e.arms) {
-      if (!a.end) continue;                       // a through-road runs straight on
-      const trim = Math.min(e.pad, a.r._len * J_MAX_TRIM);
-      if (trim < 0.4) continue;
-      if (a.i === 0) a.r._j0 = Math.max(a.r._j0 ?? 0, trim);
-      else a.r._j1 = Math.max(a.r._j1 ?? 0, trim);
+    // A node ON a roundabout ring is not a crossing that needs filling: its
+    // pad's convex hull bulged INTO the island as a clean-edged asphalt
+    // quad. No pad, and no trims either — the exit ribbon runs right onto
+    // the ring and the overlap is the same asphalt.
+    e._ring = e.arms.some((a) => a.r.rb);
+    if (!e._ring) {
+      for (const a of e.arms) {
+        if (!a.end) continue;                     // a through-road runs straight on
+        const trim = Math.min(e.pad, a.r._len * J_MAX_TRIM);
+        if (trim < 0.4) continue;
+        if (a.i === 0) a.r._j0 = Math.max(a.r._j0 ?? 0, trim);
+        else a.r._j1 = Math.max(a.r._j1 ?? 0, trim);
+      }
     }
     // Bucketed by the chunk that holds the CENTRE, so a junction straddling a
     // chunk border is drawn once. A chunk build then costs one map lookup

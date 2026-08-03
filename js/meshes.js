@@ -1290,8 +1290,9 @@ function roadRibbon(sink, f, terrain, cell, key) {
       const m0 = f.rb ? 0.2 : 1.2;
       // a roundabout's 3 m stubs between exits can't fit a full dash — they
       // draw one shortened dash instead of a permanent gap in the circle
-      const dl = f.rb ? Math.max(1.0, Math.min(DASH_LEN, len - 2 * m0)) : DASH_LEN;
-      for (let s = m0; s + dl <= len - m0 + 0.01; s += step) {
+      const dl = f.rb ? Math.max(1.0, Math.min(2.2, len - 2 * m0)) : DASH_LEN;
+      const step2 = f.rb ? dl + 2.2 : step;
+      for (let s = m0; s + dl <= len - m0 + 0.01; s += step2) {
       walkAt(fr, s, _WA); walkAt(fr, s + dl, _WB);
       const ox = _WA.dz * lo, oz = -_WA.dx * lo;    // this separator's offset
       // a centre line does not run through a junction either — tested at BOTH
@@ -1634,6 +1635,7 @@ function boxFurniture(sink, cl, ring, deckAt) {
 
 function junctionPad(sink, j, terrain) {
   if (j._cluster) return;                   // drawn as one surface by clusterPad
+  if (j._ring) return;                      // a roundabout node needs no pad
   sink.at(SURF.asphalt);
   const ring = junctionHull(j);
   if (!ring) return;

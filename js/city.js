@@ -547,7 +547,7 @@ export class CityWorld {
         const key2 = (ci + dx) + ',' + (cj + dz);
         const js = junctionsIn(key2);
         if (js) for (const j of js) {
-          if (j._cluster) continue;              // its cluster answers instead
+          if (j._cluster || j._ring) continue;   // cluster answers / no pad drawn
           const r = j.padR ?? 6;
           if ((x - j.x) ** 2 + (z - j.z) ** 2 > r * r) continue;
           const ring = junctionHull(j);
