@@ -852,6 +852,14 @@ function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
   if (!use.length) return geo;
   for (let i = 0; i < a.length; i += 3) {
     const x = a[i] + offX, z = a[i + 2] + offZ;
+    // TWO-PHASE, because corridors overlap: the tightest ceiling over all
+    // roads, the tallest embankment floor over all roads — and the floor may
+    // never outgrow the ceiling. Applied sequentially, a HIGH road processed
+    // after a LOW one raised the ground with its embankment body right back
+    // OVER the low road's asphalt — a bridge ramp beside the Labe stood the
+    // photograph 3 m above a primary's lanes, and every dual carriageway on
+    // a cross-slope grew the reported green tongue out of its median.
+    let minCap = Infinity, maxFloor = -Infinity;
     for (const { r, bb, hw, lay, flare } of use) {
       const reach = hw + (flare ?? 0);
       if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
@@ -878,7 +886,7 @@ function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
             const over = d > hw ? (d - hw) * 0.55 : 0;
             const top = gy + (lay ?? LAYER_Y.road);
             const cap = top - 0.05 + over;
-            if (a[i + 1] > cap) a[i + 1] = cap;
+            if (cap < minCap) minCap = cap;
             // …and the same shape works UPWARD: where the terrain fell away
             // under an embanked road, the deck floated on a metre of striped
             // kerb wall. The ground now rises to an embankment body — snug
@@ -887,13 +895,19 @@ function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
             // (the ground quad); bridges never enter this list.
             if (flare) {
               const floor = top - 0.45 - (d > hw ? (d - hw) * 0.55 : 0);
-              if (a[i + 1] < floor) a[i + 1] = floor;
+              if (floor > maxFloor) maxFloor = floor;
             }
           }
         }
         along += L;
       }
     }
+    // apply: ceiling first, and the embankment floor is itself CEILINGED by
+    // every other road's cap — ground rises into a bank only where no lower
+    // carriageway needs the space
+    if (a[i + 1] > minCap) a[i + 1] = minCap;
+    const floor2 = Math.min(maxFloor, minCap);
+    if (floor2 > -Infinity && a[i + 1] < floor2) a[i + 1] = floor2;
   }
   geo.attributes.position.needsUpdate = true;
   geo.computeVertexNormals();
@@ -3626,16 +3640,19 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       const c2 = dx2 === 0 && dz2 === 0 ? cell
         : city.chunkIndex.get((cx + dx2) + ',' + (cz + dz2));
       if (!c2) continue;
+      // the flat band reaches 4.5 m past the kerb: the ground and the photo
+      // sample every 4 m, and a shorter band let the chord between a capped
+      // vertex and a rising one arch centimetres over the lane edge
       for (const r of c2.roads) {
         if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
         seen.add(r);
-        corr.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 2.9, flare: 5,
+        corr.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 4.5, flare: 5,
           lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road });
       }
       for (const r of c2.rails) {
         if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
         seen.add(r);
-        corr.push({ r, bb: bboxOfLine(r), hw: 2.2 + 2.9, flare: 5, lay: LAYER_Y.rail });
+        corr.push({ r, bb: bboxOfLine(r), hw: 2.2 + 4.5, flare: 5, lay: LAYER_Y.rail });
       }
     }
   }
