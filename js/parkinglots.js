@@ -94,6 +94,8 @@ export class ParkingLots {
     this.parked = parked;      // main's enterable-car array (shared reference)
     this._t = 0;
     this._count = 0;
+    this._virgin = true;      // first sweep fills freely — it runs under the
+                              // boot overlay's fade, before anyone can watch
   }
 
   update(dt, pos, t01) {
@@ -101,6 +103,8 @@ export class ParkingLots {
     if (this._t > 0) return;
     this._t = SCAN_DT;
     const occ = occAt(t01);
+    const virgin = this._virgin;
+    this._virgin = false;
     for (const lot of this.city.paved) {
       if (lot.t !== 'parking' || !lot.o?.length) continue;
       const [fx, fz] = lot.o[0];
@@ -114,7 +118,7 @@ export class ParkingLots {
         const want = rnd(st.x, st.z, 'occ') < occ;
         if (want === !!st.car) continue;
         const dd = Math.hypot(st.x - pos.x, st.z - pos.z);
-        if (dd < NOTICE_R) continue;             // never on camera
+        if (!virgin && dd < NOTICE_R) continue;   // never on camera
         if (want) {
           if (this._count >= GLOBAL_CAP) continue;
           const kind = KINDS[(rnd(st.x, st.z, 'k') * KINDS.length) | 0];
