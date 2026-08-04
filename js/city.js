@@ -318,7 +318,12 @@ export class CityWorld {
       // Earthworks: one tile per pass, so a bake never stalls a frame. A tile
       // that gains roads later (its data tile arriving after its height map)
       // is re-marked below and re-baked from the pristine survey.
-      for (const tk of this.terrain.grids.keys()) {
+      // the FOCUS tile first: the boot gate waits for the ground under the
+      // player, and insertion order used to conform five far tiles before it
+      const fk = Math.floor(focus.x / (this.city.tile || 4800)) + ','
+        + Math.floor(focus.z / (this.city.tile || 4800));
+      for (const tk of [fk, ...this.terrain.grids.keys()]) {
+        if (!this.terrain.grids.get(tk)) continue;
         if (this.terrain._conformed?.has(tk)) continue;
         // tried while some profile was provisional, and nothing new has
         // landed since — trying again would compute the same guess
@@ -442,9 +447,12 @@ export class CityWorld {
     if (!this.terrain.ready?.(pos.x, pos.z)) return false;
     const tk = Math.floor(pos.x / this.city.tile) + ',' + Math.floor(pos.z / this.city.tile);
     if (this.city.tile && !this.terrain._conformed?.has(tk)) return false;
-    if (this.queue.length) return false;
     if (this._guessDropWanted) return false;     // guessed chunks awaiting redo
-    return this.ready(pos);
+    // every windowed cell BUILT — not "queue empty": arriving photo
+    // supertiles re-queue built chunks for sharper textures indefinitely,
+    // and waiting for that silence held the overlay at 99 % for minutes
+    const { built, total } = this.bootProgress(pos);
+    return built >= total && this.ready(pos);
   }
 
   // built / wanted counts over the whole streaming window, for the boot label
