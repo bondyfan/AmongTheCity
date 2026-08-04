@@ -431,6 +431,34 @@ export class CityWorld {
     return true;
   }
 
+  // The FULL boot gate: everything the first playable frame will show, built
+  // before the overlay drops. The 3×3 `ready` above let the player in while
+  // the other forty-odd view cells were still streaming, so play began inside
+  // the stutter instead of after it. "Fully loaded" here means: the height
+  // map under the spawn is present AND conformed to its roads, every cell the
+  // ring scan wants is built, and the build queue has gone quiet — including
+  // the guessed-ground rebuilds the arriving terrain triggered.
+  readyFull(pos) {
+    if (!this.terrain.ready?.(pos.x, pos.z)) return false;
+    const tk = Math.floor(pos.x / this.city.tile) + ',' + Math.floor(pos.z / this.city.tile);
+    if (this.city.tile && !this.terrain._conformed?.has(tk)) return false;
+    if (this.queue.length) return false;
+    if (this._guessDropWanted) return false;     // guessed chunks awaiting redo
+    return this.ready(pos);
+  }
+
+  // built / wanted counts over the whole streaming window, for the boot label
+  bootProgress(pos) {
+    const fx = Math.floor(pos.x / CHUNK), fz = Math.floor(pos.z / CHUNK);
+    const r = this.viewChunks + this.shellChunks + this.farChunks;
+    let built = 0, total = 0;
+    for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+      total++;
+      if (this.built.has((fx + dx) + ',' + (fz + dz))) built++;
+    }
+    return { built, total };
+  }
+
   // Every built chunk inside one world tile, dropped so the streamer rebuilds
   // it — used when a height map lands after its ground was already meshed flat.
   /** Which tier a cell `ring` rings out deserves. */
