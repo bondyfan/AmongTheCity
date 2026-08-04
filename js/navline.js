@@ -33,8 +33,17 @@ const REBUILD = 45;           // m of progress before the window is rebuilt. 400
 const MAX_PTS = 224;          // ribbon spine points (2 vertices each)
 const MIN_STEP = 3;           // m — OSM polylines can carry a point every 30 cm on a
                               // curve; at 3 m a 1.8 m ribbon is still perfectly smooth
-const FADE_IN = 13;           // m of alpha ramp at the near end…
+const FADE_IN = 9;            // m of alpha ramp at the near end…
 const FADE_OUT = 55;          // …and at the far end, so the window's cut is invisible
+// The near end is measured from the CAR, not from the window, and it is
+// re-shaded every frame. The geometry can only afford to move once every
+// REBUILD metres, so a near-end fade baked in at build time meant the line
+// stayed put while the car drove into and then past it — up to 45 m of route
+// painted BEHIND the driver, which reads as "the satnav is showing me where I
+// have already been". Alpha is the one thing cheap enough to move per frame
+// (two floats per spine point, ~450 of them), so the line's head rides the car
+// while its geometry stays still.
+const SHADE_STEP = 0.4;       // m of travel before the alphas are rewritten
 const TILE_V = 6;             // m of route per texture repeat
 const SCROLL = 0.55;          // repeats per second — the flow toward the destination
 const LIFT = LAYER_Y.marking - LAYER_Y.road + 0.02;   // above the road DECK
@@ -116,6 +125,10 @@ export class NavLine {
     this._builtAt = -1e9;             // the _s the current window was cut at
     this._visible = true;             // the caller's on/off (driving or not)
     this._bd = 0; this._bi = 0; this._bs = 0;   // _scan results, kept off the stack
+    // the built window, kept so _shade can re-fade it without rebuilding
+    this._sp = new Float32Array(MAX_PTS);       // arclength of every spine point
+    this._m = 0; this._s1 = 0; this._fadeEnd = false;
+    this._shadedAt = -1e9;
   }
 
   // ---- geometry, cut once at maximum size ----
@@ -161,6 +174,7 @@ export class NavLine {
     if (route === this._route) return;
     this._route = (route && route.length >= 2) ? route : null;
     this._builtAt = -1e9;
+    this._shadedAt = -1e9; this._m = 0;
     this._i = 0; this._s = 0;
     if (!this._route) { this.group.visible = false; this._cum = null; return; }
     const n = this._route.length;
@@ -187,6 +201,9 @@ export class NavLine {
     // rebuild when the car has eaten into the window (or on a new route, where
     // _builtAt is −∞). Driving BACKWARDS past the window start counts too.
     if (this._s - this._builtAt > REBUILD || this._s < this._builtAt) this._rebuild(world);
+    // …and between rebuilds, walk the head of the line forward with the car so
+    // nothing is ever painted behind it
+    else if (this._m > 1 && Math.abs(this._s - this._shadedAt) > SHADE_STEP) this._shade();
     // the flow: offset DOWN, because a feature sits where uv = (T − offset), so
     // a shrinking offset carries the pattern toward the destination
     const t = flowTexture();
@@ -225,7 +242,7 @@ export class NavLine {
     const s0 = Math.max(0, this._s - BEHIND);
     const s1 = Math.min(total, s0 + WINDOW);
     this._builtAt = this._s;
-    if (s1 - s0 < 0.5) { this.group.visible = false; return; }
+    if (s1 - s0 < 0.5) { this._m = 0; this.group.visible = false; return; }
     // …the far end only fades if the route CONTINUES past the window; a route
     // that ends here ends at the destination and should stop crisply
     const fadeEnd = s1 < total - 0.5;
@@ -263,10 +280,10 @@ export class NavLine {
     if (m >= MAX_PTS || (m > 1 && s1 - P[m - 1].s < MIN_STEP)) m--;
     const last = P[m++];
     last.x = _tmp.x; last.z = _tmp.z; last.s = s1;
-    if (m < 2) { this.group.visible = false; return; }
+    if (m < 2) { this._m = 0; this.group.visible = false; return; }
 
     // --- ribbon: two vertices per spine point, mitred at the corners ---
-    const pos = this._pos, uv = this._uv, col = this._col;
+    const pos = this._pos, uv = this._uv, sp = this._sp;
     for (let k = 0; k < m; k++) {
       const p = P[k];
       // tangents either side of the point; the ends have only one
@@ -290,25 +307,42 @@ export class NavLine {
       const cos = nx * iz + nz * -ix;
       const w = HALF / Math.max(0.42, Math.abs(cos));
       const y = (world && world.surfaceY) ? world.surfaceY(p.x, p.z).y + LIFT : FLAT_Y;
-      const sl = p.s - s0;
-      let a = Math.min(1, sl / FADE_IN);
-      if (fadeEnd) a = Math.min(a, (s1 - p.s) / FADE_OUT);
-      a = Math.max(0, Math.min(1, a));
-      a = a * a * (3 - 2 * a);                     // smoothstep, so the tail dissolves
-      const v3 = k * 6, v2 = k * 4, v4 = k * 8;
+      const v3 = k * 6, v2 = k * 4;
       pos[v3] = p.x + nx * w; pos[v3 + 1] = y; pos[v3 + 2] = p.z + nz * w;
       pos[v3 + 3] = p.x - nx * w; pos[v3 + 4] = y; pos[v3 + 5] = p.z - nz * w;
       const v = (p.s - vBase) / TILE_V;
       uv[v2] = 0; uv[v2 + 1] = v; uv[v2 + 2] = 1; uv[v2 + 3] = v;
-      col[v4] = 1; col[v4 + 1] = 1; col[v4 + 2] = 1; col[v4 + 3] = a;
-      col[v4 + 4] = 1; col[v4 + 5] = 1; col[v4 + 6] = 1; col[v4 + 7] = a;
+      sp[k] = p.s;
     }
+    this._m = m; this._s1 = s1; this._fadeEnd = fadeEnd;
     const g = this.mesh.geometry;
     g.attributes.position.needsUpdate = true;
     g.attributes.uv.needsUpdate = true;
-    g.attributes.color.needsUpdate = true;
     g.setDrawRange(0, (m - 1) * 6);
+    this._shade();
     this.group.visible = true;
+  }
+
+  // Alpha only, for the window that is already built. The near end is cut at
+  // the CAR's own arclength — everything behind it goes to zero and the first
+  // FADE_IN metres ahead ramp in, so the line grows out from under the bumper
+  // and never trails behind. The far end still dissolves into the window's cut
+  // the way it always did, and both are the same smoothstep.
+  _shade() {
+    if (!this.mesh || this._m < 2) return;
+    const col = this._col, sp = this._sp, m = this._m;
+    const sCar = this._s, s1 = this._s1, fadeEnd = this._fadeEnd;
+    for (let k = 0; k < m; k++) {
+      let a = (sp[k] - sCar) / FADE_IN;
+      if (fadeEnd) a = Math.min(a, (s1 - sp[k]) / FADE_OUT);
+      a = Math.max(0, Math.min(1, a));
+      a = a * a * (3 - 2 * a);
+      const v4 = k * 8;
+      col[v4] = 1; col[v4 + 1] = 1; col[v4 + 2] = 1; col[v4 + 3] = a;
+      col[v4 + 4] = 1; col[v4 + 5] = 1; col[v4 + 6] = 1; col[v4 + 7] = a;
+    }
+    this._shadedAt = sCar;
+    this.mesh.geometry.attributes.color.needsUpdate = true;
   }
 
   dispose() {

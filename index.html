@@ -36,6 +36,11 @@
     <!-- waypoint compass: an arrow that turns toward the map marker, with the
          distance under it. Rotation comes from a CSS var main.js writes. -->
     <div id="waypoint-hud" class="hidden"><span class="wp-arrow">➤</span><span class="wp-dist"></span></div>
+    <!-- the trip: how long until we get there and how far it is BY ROAD. The
+         compass above shows the straight line, which is the wrong number the
+         moment there is a river or a motorway junction between you and the pin
+         (main.js fills both from navigation.js). -->
+    <div id="nav-hud" class="hidden"><span class="nv-eta"></span><span class="nv-dist"></span></div>
     <div id="pod" class="hidden"></div>
     <div id="reticle" class="hidden"><span></span></div>
     <canvas id="minimap" width="220" height="220"></canvas>

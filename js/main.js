@@ -1535,6 +1535,56 @@ function updateNavigation(dt) {
       navLine.update(dt, player.pos.x, player.pos.z, world);
     } else navLine.clear();
   }
+  updateTripHud();
+}
+
+// ---- the trip readout: time left and the distance BY ROAD ----------------
+// The compass at the top of the screen shows the straight line, which is the
+// number a bird would use. This is the one a driver needs: navigation.js has
+// already integrated the route in both metres and seconds, so both figures are
+// reads, not calculations.
+//
+// The clock is only shown while DRIVING. The seconds come from the road's own
+// speed limits, so on foot they would promise a 40-minute walk in four — and a
+// confidently wrong ETA is worse than none. The distance is honest either way.
+let _tripTxt = '';
+function updateTripHud() {
+  const el = $id('nav-hud');
+  if (!el) return;
+  const m = navigation?.route ? navigation.remainingM : null;
+  if (m == null || !Number.isFinite(m)) {
+    if (!el.classList.contains('hidden')) { el.classList.add('hidden'); _tripTxt = ''; }
+    return;
+  }
+  const t = game.car && Number.isFinite(navigation.etaS) ? navigation.etaS : null;
+  // A partial route stops short of the pin and pads the rest with a straight
+  // line, so both numbers are a floor rather than an answer — say so with the
+  // one character that means "about" in every language on the map.
+  const approx = navigation.partial ? '≈' : '';
+  const txt = (t === null ? '' : approx + fmtEta(t)) + '\n' + approx + fmtRoadDist(m);
+  if (txt === _tripTxt) return;                 // ~1 DOM write a second, not 60
+  _tripTxt = txt;
+  const nl = txt.indexOf('\n');
+  el.querySelector('.nv-eta').textContent = txt.slice(0, nl);
+  el.querySelector('.nv-dist').textContent = txt.slice(nl + 1);
+  el.classList.remove('hidden');
+}
+
+// "3 min", "48 min", "1 h 20 min" — never seconds, which would flicker, and
+// never "0 min", which reads as "you have arrived" while you are still driving.
+function fmtEta(s) {
+  const mins = Math.max(1, Math.round(s / 60));
+  if (mins < 60) return mins + ' min';
+  return Math.floor(mins / 60) + ' h ' + (mins % 60) + ' min';
+}
+
+// Rounded the way a satnav rounds: to 10 m up close (a 3 m tick would never
+// settle), to 100 m within the kilometre, and to whole kilometres once the
+// tenth stopped meaning anything.
+function fmtRoadDist(m) {
+  if (m >= 10000) return Math.round(m / 1000) + ' km po silnici';
+  if (m >= 1000) return (m / 1000).toFixed(1) + ' km po silnici';
+  return Math.round(m / 10) * 10 + ' m po silnici';
 }
 
 // ---------- FPS meter (Settings → Hra → Zobrazit FPS) ----------

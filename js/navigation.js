@@ -83,6 +83,25 @@ const PIN_K = 3;              // how dearly a candidate pays for the metres stil
                               // stopping 100 m short, and it measurably stopped
                               // short. 3 means "a 300 m detour to finish at the
                               // door is worth it, a 3 km one is not".
+// ---- the ETA ------------------------------------------------------------
+// The router already costs every edge in SECONDS (len/speed), so the arrival
+// time is not a second model of the world — it is the same number the search
+// minimised, carried through to the polyline and read off at the driver's
+// position. Two corrections turn free-flow seconds into an honest estimate:
+//
+//   TIME_K   nobody drives a route at the speed limit end to end. Junctions,
+//            give-ways, the slow crawl out of a housing estate and the
+//            accelerating back up to 90 all cost time the edge costs do not
+//            model. 1.25 is the factor that made a measured Pardubice→Sezemice
+//            run land within a minute; it is a fudge, and it is labelled one.
+//   GAP_V    a PARTIAL route stops short and remainingM already adds the
+//            straight line to the pin. That last stretch has no road to take a
+//            speed from, so it is charged at a slow one — it is usually a field
+//            track or an unstreamed lane, never a motorway.
+const TIME_K = 1.25;
+const GAP_V = 11;             // m/s ≈ 40 km/h for the unmapped tail
+const MIN_V = 2.8;            // m/s floor, so a broken speed cannot divide by ~0
+
 const TURN_MIN = 0.38;        // rad (~22°) — below this a junction is "carrying on"
 const TURN_PASSED = 2;        // m past a junction before it stops being "next"
 const MIN_VMAX = 8;           // m/s floor for the heuristic on an empty graph
@@ -157,7 +176,8 @@ export class Navigation {
 
     // ---- public contract ----
     this.route = null;          // [[x,z]…] world polyline, or null
-    this.remainingM = null;     // metres left, or null
+    this.remainingM = null;     // metres left ALONG THE ROAD, or null
+    this.etaS = null;           // seconds left at the modelled speeds, or null
     this.nextTurn = null;       // { dist, dir, street } | null — one reused object
     this.destination = null;    // {x,z} | null
     this.partial = false;       // true when the route stops short of the pin
@@ -187,6 +207,8 @@ export class Navigation {
 
     // ---- route tracking ----
     this._cum = null;           // arclength at every route point
+    this._cumT = null;          // …and the free-flow seconds to reach it
+    this._gapT = 0;             // seconds charged for a partial route's tail
     this._i = 0; this._s = 0;   // current segment index + arclength along the route
     this._joints = [];          // turn markers { s, dir, street }
     this._ji = 0;               // cursor into them
@@ -522,14 +544,22 @@ export class Navigation {
   // Everything is expressed in the segment's FORWARD arclength so one walk
   // serves both directions; the endpoints are interpolated so a route can start
   // and end in the middle of a segment.
-  _emit(out, e, s0, s1) {
-    const seg = e.seg, pts = seg.pts;
+  //
+  // `spd` grows in lockstep with `out`: spd[i] is the speed of the piece of
+  // road the driver is on while travelling INTO point i, which is what makes
+  // the arclength→time integral in reroute() a straight parallel walk. At a
+  // splice the arriving edge's last point and the leaving edge's first point
+  // are the same place, pushPt drops the second, and the junction point keeps
+  // the ARRIVING speed — correct, because the interval that ends there was
+  // driven on the old road and the next interval already carries the new one.
+  _emit(out, spd, e, s0, s1) {
+    const seg = e.seg, pts = seg.pts, v = seg.speed;
     const f0 = e.rev ? seg.len - s0 : s0, f1 = e.rev ? seg.len - s1 : s1;
     fwdPoint(seg, f0, _pa); fwdPoint(seg, f1, _pb);
-    pushPt(out, _pa.x, _pa.z);
-    if (f1 >= f0) for (let i = _pa.i + 1; i <= _pb.i; i++) pushPt(out, pts[i][0], pts[i][1]);
-    else for (let i = _pa.i; i > _pb.i; i--) pushPt(out, pts[i][0], pts[i][1]);
-    pushPt(out, _pb.x, _pb.z);
+    pushPt(out, spd, _pa.x, _pa.z, v);
+    if (f1 >= f0) for (let i = _pa.i + 1; i <= _pb.i; i++) pushPt(out, spd, pts[i][0], pts[i][1], v);
+    else for (let i = _pa.i; i > _pb.i; i--) pushPt(out, spd, pts[i][0], pts[i][1], v);
+    pushPt(out, spd, _pb.x, _pb.z, v);
   }
 
   // Turn instruction at a junction: the angle from the arriving tangent to the
@@ -550,12 +580,12 @@ export class Navigation {
   // Walk the came-from chain back to the seed, then lay the polyline down in
   // travel order: partial start segment, whole edges, partial end segment.
   _build(A, res) {
-    const out = [], joints = [];
+    const out = [], spd = [], joints = [];
     if (res.direct) {                            // same segment, pin straight ahead
       const e = res.direct, c = res.directCand;
       const sIn = e.rev ? A.seg.len - A.s : A.s, tIn = e.rev ? c.seg.len - c.s : c.s;
-      this._emit(out, e, sIn, tIn);
-      return { pts: out, joints, complete: true };
+      this._emit(out, spd, e, sIn, tIn);
+      return { pts: out, spd, joints, complete: true };
     }
     const end = res.goalNode >= 0 ? res.goalNode : res.bestNode;
     if (end < 0) return null;
@@ -570,38 +600,39 @@ export class Navigation {
     if (!_chain.length) return null;
     const head = _chain[0];
     const sIn = head.rev ? A.seg.len - A.s : A.s;
-    this._emit(out, head, sIn, head.seg.len);
+    this._emit(out, spd, head, sIn, head.seg.len);
     for (let i = 1; i < _chain.length; i++) {
       const e = _chain[i], prev = _chain[i - 1];
       const dir = this._joint(prev, e, prev.b);
       if (dir) joints.push({ idx: out.length - 1, dir, street: e.seg.name });
-      this._emit(out, e, 0, e.seg.len);
+      this._emit(out, spd, e, 0, e.seg.len);
     }
     const complete = res.goalNode >= 0 && res.goalEdge != null;
     if (complete) {                              // splice the tail onto the pin
       const f = res.goalEdge, c = res.goalCand, tIn = f.rev ? c.seg.len - c.s : c.s;
       const dir = this._joint(_chain[_chain.length - 1], f, f.a);
       if (dir) joints.push({ idx: out.length - 1, dir, street: f.seg.name });
-      this._emit(out, f, 0, tIn);
+      this._emit(out, spd, f, 0, tIn);
     }
-    return { pts: out, joints, complete };
+    return { pts: out, spd, joints, complete };
   }
 
   // ======================= public API ======================================
 
   setDestination(x, z) {
     this.destination = { x, z };
-    this.route = null; this.remainingM = null; this.nextTurn = null;
+    this.route = null; this.remainingM = null; this.etaS = null; this.nextTurn = null;
     this._since = 1e9;                           // route on the very next update
     this._retryIn = PARTIAL_RETRY;
   }
 
   clear() {
     this.destination = null;
-    this.route = null; this.remainingM = null; this.nextTurn = null;
+    this.route = null; this.remainingM = null; this.etaS = null; this.nextTurn = null;
     this.partial = false; this.offRoute = 0; this.stats.partial = false;
-    this._joints.length = 0; this._cum = null; this._i = 0; this._s = 0; this._ji = 0;
-    this._gap = 0; this._retryIn = PARTIAL_RETRY;
+    this._joints.length = 0; this._cum = null; this._cumT = null;
+    this._i = 0; this._s = 0; this._ji = 0;
+    this._gap = 0; this._gapT = 0; this._retryIn = PARTIAL_RETRY;
   }
 
   // Compute a fresh route from (x,z) to the standing destination. Public so a
@@ -630,9 +661,16 @@ export class Navigation {
     // far to the turn, am I still on the line) is then a subtraction
     const n = built.pts.length;
     const cum = this._cum = new Float64Array(n);
+    // …and the SAME pass in seconds, at each piece's own speed. One array more
+    // makes the ETA the same kind of question as "how far is left": a
+    // subtraction, not a model that has to be re-run every frame.
+    const cumT = this._cumT = new Float64Array(n);
+    const spd = built.spd;
     for (let i = 1; i < n; i++) {
       const dx = built.pts[i][0] - built.pts[i - 1][0], dz = built.pts[i][1] - built.pts[i - 1][1];
-      cum[i] = cum[i - 1] + Math.sqrt(dx * dx + dz * dz);
+      const d = Math.sqrt(dx * dx + dz * dz);
+      cum[i] = cum[i - 1] + d;
+      cumT[i] = cumT[i - 1] + d / Math.max(MIN_V, spd[i] || 0);
     }
     this._joints.length = 0;
     for (const j of built.joints)
@@ -643,6 +681,7 @@ export class Navigation {
     const last = built.pts[n - 1];
     this._gap = this.partial
       ? Math.sqrt((dest.x - last[0]) ** 2 + (dest.z - last[1]) ** 2) : 0;
+    this._gapT = this._gap / GAP_V;
     this._track(x, z, true);
     return true;
   }
@@ -687,6 +726,15 @@ export class Navigation {
     }
     this._i = this._bi; this._s = this._bs; this.offRoute = this._bd;
     this.remainingM = (this._cum[n - 1] - this._bs) + this._gap;
+    // Time left: the same subtraction on the time axis. _bs landed part-way
+    // along piece _bi, so the seconds already spent on that piece come from the
+    // same fraction of it — the two arrays are indexed identically by
+    // construction, which is the whole reason for carrying spd through _emit.
+    const cum = this._cum, cumT = this._cumT;
+    const i = this._bi, L = cum[i + 1] - cum[i];
+    const f = L > 1e-6 ? (this._bs - cum[i]) / L : 0;
+    const tAt = cumT[i] + f * (cumT[i + 1] - cumT[i]);
+    this.etaS = Math.max(0, cumT[n - 1] - tAt) * TIME_K + this._gapT;
     // next instruction: the cursor walks with the driver, forwards normally and
     // backwards if they reversed, so this is O(1) amortised on a 40 km route
     const J = this._joints;
@@ -721,11 +769,12 @@ function fwdPoint(seg, s, out) {
 // consecutive duplicates are guaranteed at every splice (the interpolated end
 // of one edge IS the start of the next) and would make zero-length ribbon
 // quads downstream, so they are dropped here rather than in navline
-function pushPt(out, x, z) {
+function pushPt(out, spd, x, z, v) {
   const n = out.length;
   if (n) {
     const p = out[n - 1];
     if (Math.abs(p[0] - x) < 1e-3 && Math.abs(p[1] - z) < 1e-3) return;
   }
   out.push([x, z]);
+  spd.push(v);
 }

@@ -172,6 +172,30 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
 }
 #waypoint-hud.hidden { display: none; }
 
+/* ---- trip readout: time left, then the distance BY ROAD ----
+   Bottom centre is the one strip of HUD nothing else claims — the minimap owns
+   the left, the speedo the right — so the number you glance at while driving
+   never has to be hunted for. Same double text-shadow as the speedo, because
+   it has to survive a white wall and a night street with no panel behind it. */
+#nav-hud {
+  /* clear of #controls-hint, which runs along the bottom rail */
+  position: absolute; left: 50%; bottom: 44px; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  pointer-events: none; z-index: 12; text-align: center;
+  text-shadow: 0 2px 8px rgba(0,0,0,.9);
+}
+#nav-hud.hidden { display: none; }
+#nav-hud .nv-eta {
+  font: 800 22px/1.1 system-ui, sans-serif; color: #7fe3ff;   /* the nav line's own cyan */
+  letter-spacing: .5px;
+}
+#nav-hud .nv-dist { font: 600 13px/1.2 system-ui, sans-serif; color: #dfe6f2; opacity: .88; }
+#nav-hud .nv-eta:empty, #nav-hud .nv-dist:empty { display: none; }
+@media (max-width: 720px) {
+  #nav-hud { bottom: 12px; }        /* the controls hint is hidden there */
+  #nav-hud .nv-eta { font-size: 18px; }
+}
+
 
 /* ---- FPS meter (Settings → Hra → Zobrazit FPS) ---- */
 #fps-meter {

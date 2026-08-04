@@ -34,13 +34,23 @@ const PLACES_URL = 'data/places.json';
 const OVERVIEW_URL = 'data/overview.json';
 const TAU = Math.PI * 2;
 
-// ZOOM_MAX was 12 when the world was the 30×38 km agglomeration, where 12×
-// meant a 2.5 km view — street scale. v8 stretched the world to 144 km across,
-// which quietly turned the SAME number into a 12 km view: a 100 m street is
-// 2 px long there, so no street name could ever fit its street and the labels
-// below would have been a feature you cannot see. The range now reaches the
-// scale it always described.
-const ZOOM_MIN = 1, ZOOM_MAX = 40;
+// A zoom CEILING expressed as a multiplier is a promise the world keeps
+// breaking: 12× meant a 2.5 km view on the 30×38 km agglomeration and a 12 km
+// view once v8 stretched the world to 144 km across, and 40× still bottomed
+// out around 3 km — a city block wide enough to read, but never a street you
+// can follow. So the floor is stated in the only unit that means the same
+// thing on every world: METRES ACROSS THE CANVAS. 140 m is a street with its
+// side turnings, which is the scale the street-name layer was written for.
+// The multiplier that produces it is derived per layout (_zoomMax); the hard
+// cap behind it is only a backstop against a degenerate k0.
+const ZOOM_MIN = 1, ZOOM_HARD = 4000;
+const VIEW_MIN = 140;        // m across the canvas at the deepest zoom
+// Opening the map on the whole region answers "where am I in the country",
+// which is the question you ask once. Every other time you open it you are
+// driving somewhere and the answer you want is the next few junctions — so
+// the map now OPENS at street-legible scale around the player and zooms OUT
+// to the region, rather than the other way round.
+const HOME_RADIUS = 5000;    // m — half the span the first view covers
 // Bitmap budget. 4096 px is the safe texture-ish ceiling for a 2D canvas on
 // weak GPUs; the pixel cap is the memory one (9 Mpx ≈ 36 MB of backing store).
 const OFF_MAX_SIDE = 4096;
@@ -301,6 +311,7 @@ export class WorldMap {
 
     this._open = false;
     this._justOpened = false;
+    this._homed = false;          // has the home view ever been applied?
     this._rt = 0;                 // pending debounced render timer
     // 0, not 1: _layout() only rebuilds the font strings when the DPR CHANGES,
     // so seeding this with a plausible DPR meant that on any ordinary 1× display
@@ -426,10 +437,18 @@ export class WorldMap {
     this._heliMine = !!(heli && player && player.inCar === heli);
     if (this._justOpened) {
       this._justOpened = false;
-      // Opening keeps the view you left behind — unless you have driven off
-      // it, in which case dropping you somewhere else on the region would be
-      // baffling. Then (and on the very first open) centre on the player.
-      if (this._px !== undefined && !this._inView(this._px, this._pz)) this._centerOnPlayer();
+      // Opening keeps the view you left behind — but only while you are still
+      // ON it. The first open, and every one where you have since driven off
+      // the view, snap back to the home view: centred on the player at
+      // HOME_RADIUS, which is street scale, and zoom out from there. Dropping
+      // somebody on a region overview (or on a rectangle of country they left
+      // ten minutes ago) is not an answer to "where am I".
+      //
+      // _homed is what makes the FIRST open home even when the player happens
+      // to be standing inside the initial region fit — at zoom 1 everybody is.
+      if (this._px !== undefined && (!this._homed || !this._inView(this._px, this._pz))) {
+        this._homed = this._homeView();
+      }
     }
     this._draw();
   }
@@ -545,7 +564,34 @@ export class WorldMap {
     }
     // zoom 1 = the whole region inside the canvas
     this.k0 = Math.min(cv.width / rw, cv.height / rh);
+    // k0 just moved (a resize, or the region growing as tiles land), and the
+    // zoom ceiling is derived from it — so a view that was legal a moment ago
+    // may now be past the floor.
+    this.zoom = clamp(this.zoom, ZOOM_MIN, this._zoomMax());
     this._clampView();
+  }
+
+  // The deepest zoom this canvas may reach: the one that puts VIEW_MIN metres
+  // across it. Derived rather than constant, because k0 depends on both the
+  // canvas size and how much region has streamed in.
+  _zoomMax() {
+    const w = this.cv.width;
+    if (!w || !this.k0) return ZOOM_HARD;
+    return clamp(w / (this.k0 * VIEW_MIN), ZOOM_MIN, ZOOM_HARD);
+  }
+
+  // Centre on the player at HOME_RADIUS — the view the map opens with. The
+  // shorter canvas axis is the one fitted, so the radius is a real promise in
+  // both directions rather than one that only holds across the wide side.
+  _homeView() {
+    if (this._px === undefined) return false;
+    this.cx = this._px; this.cz = this._pz;
+    const cv = this.cv;
+    const kWant = Math.min(cv.width, cv.height) / (HOME_RADIUS * 2);
+    this.zoom = clamp(kWant / this.k0, ZOOM_MIN, this._zoomMax());
+    this._clampView();
+    this._schedule(16);
+    return true;
   }
 
   // ------------------------------------------------------------- bounds ----
@@ -772,7 +818,7 @@ export class WorldMap {
     if (!kOld) return;
     const wx = this.cx + (sx - cv.width / 2) / kOld;
     const wz = this.cz + (sy - cv.height / 2) / kOld;
-    const zoom = clamp(this.zoom * Math.exp(-dy * 0.0016), ZOOM_MIN, ZOOM_MAX);
+    const zoom = clamp(this.zoom * Math.exp(-dy * 0.0016), ZOOM_MIN, this._zoomMax());
     if (zoom === this.zoom) return;
     this.zoom = zoom;
     const kNew = this.k0 * this.zoom;
@@ -1661,7 +1707,13 @@ export class WorldMap {
     const fk = this.followUid ? this.followUid + '|' + this.followName : '';
     if (zr === this._zr && dr === this._dr && pn === this._pr && fk === this._fk) return;
     this._zr = zr; this._dr = dr; this._pr = pn; this._fk = fk;
-    let txt = this.bs > 0 ? 'přiblížení ' + (zr / 10).toFixed(1) + '×' : 'vykresluji mapu…';
+    // A multiplier stopped being a readable number the moment the ceiling
+    // became "140 m across": "612×" says nothing, "1.2 km napříč" is the same
+    // fact in the unit the player is actually driving in.
+    const vw = this.k0 * this.zoom ? this.cv.width / (this.k0 * this.zoom) : 0;
+    let txt = this.bs > 0
+      ? (vw >= 1000 ? (vw / 1000).toFixed(1) + ' km' : Math.round(vw) + ' m') + ' napříč'
+      : 'vykresluji mapu…';
     if (dr >= 0) {
       const m = dr * 10;
       // While chasing, the destination has a name — "cíl 2.4 km" says nothing
