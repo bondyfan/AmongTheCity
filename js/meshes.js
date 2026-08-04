@@ -2895,7 +2895,23 @@ function zebraInto(sink, cr, cell, terrain) {
   if (!road || !terrain) return;
   const gy = road.br ? bridgeDeckHeight(road, s0, terrain) : roadGradeY(road, s0, terrain);
   if (gy === null || gy === undefined) return;
-  const y = gy + LAYER_Y.marking + 0.02;
+  // a crossing INSIDE a junction (every OSM zebra at a big box is) must ride
+  // ABOVE the pad, whose deck comes from the NEAREST arm — a few cm higher
+  // than this crossing's own road, and the pad swallowed the stripes whole
+  let y = gy + LAYER_Y.marking + 0.02;
+  const ck = chunkKey(x, z);
+  for (const j of junctionsIn(ck) ?? []) {
+    if (j._cluster || j._ring) continue;
+    if ((x - j.x) ** 2 + (z - j.z) ** 2 > (j.padR ?? 6) ** 2) continue;
+    y = Math.max(y, junctionDeckY(j, x, z, terrain) + LAYER_Y.road + 0.012 + 0.05);
+  }
+  for (const cl of clustersIn(ck) ?? []) {
+    if ((x - cl.x) ** 2 + (z - cl.z) ** 2 > cl.padR ** 2) continue;
+    const ring = clusterHull(cl);
+    if (ring && pointInPolygon(x, z, ring)) {
+      y = Math.max(y, clusterDeckY(cl, x, z, terrain) + LAYER_Y.road + 0.012 + 0.05);
+    }
+  }
   sink.at(SURF.paint);
   _c.setHex(COLORS.marking);
   const mr = _c.r, mg = _c.g, mb = _c.b;
