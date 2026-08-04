@@ -333,7 +333,11 @@ class TriSink {
 const WOOD_SURF = new Set(['wood', 'forest', 'scrub', 'nature_reserve']);
 const FARM_SURF = new Set(['farmland', 'farmyard', 'orchard', 'vineyard', 'allotments', 'greenhouse_horticulture']);
 const MEADOW_SURF = new Set(['meadow', 'grassland', 'heath', 'village_green', 'recreation_ground']);
-const surfOfGreen = (f) => (WOOD_SURF.has(f.t) ? SURF.forest
+// a clay court and a running track are not grass underfoot
+const HARD_SPORT = new Set(['tennis', 'basketball', 'volleyball', 'handball',
+  'athletics', 'hockey', 'multi']);
+const surfOfGreen = (f) => (f.sp && HARD_SPORT.has(f.sp) ? SURF.paving
+  : WOOD_SURF.has(f.t) ? SURF.forest
   : FARM_SURF.has(f.t) ? SURF.farm
   : MEADOW_SURF.has(f.t) ? SURF.meadow
   : SURF.grass);

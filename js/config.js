@@ -74,6 +74,12 @@ export const COLORS = {
   // verge, because that is the difference you actually see from the road.
   green: { park: 0x6fa05a, wood: 0x4e7a44, grass: 0x7fa863, pitch: 0x6f9e75,
     cemetery: 0x7a9468, bush: 0x4f7340 },
+  // …and what a pitch is FOR. Every one of the 1 996 of them was the same
+  // green rectangle; the sport tag was in the tiles the whole time. Clay is
+  // clay, a running track is red, a pool is water.
+  sport: { tennis: 0xa8562f, basketball: 0x4a6f8f, volleyball: 0xb5813f,
+    beachvolleyball: 0xd6c08a, athletics: 0x9c3f2e, handball: 0x5a7a95,
+    soccer: 0x5f9457, football: 0x5f9457, hockey: 0x8f939a, multi: 0x6b7f8c },
   // airport concrete is paler and greyer than street asphalt — it is concrete,
   // not tarmac, and that contrast is most of what makes an airfield read as one
   // `platform` is the ground in front of a station — bus stands, the forecourt,
