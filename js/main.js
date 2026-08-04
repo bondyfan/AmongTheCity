@@ -1321,6 +1321,7 @@ function updateBlockers() {
   return _blockers;
 }
 const _blockers = [];
+const _hulls = [];
 
 // ---------- horizon: how far the world is built, and where the haze sits ----
 // Two rules, and the second is the one that was broken:
@@ -2102,6 +2103,23 @@ async function boot() {
   // standing on, and one built before it is set is one built underground.
   vehicles.world = world;
   traffic = new Traffic(city, vehicles, world);
+  // world.collide() pushes anything on foot out of these. Every hull in the
+  // world: NPC traffic, parked, lot cars, and the player's own abandoned car.
+  // Skipping the car the player is DRIVING is the whole exception — you are
+  // inside it — and so is the one they are climbing into.
+  world.carHulls = () => {
+    _hulls.length = 0;
+    const px = player.pos.x, pz = player.pos.z;
+    const push = (c) => {
+      if (!c || c === game.car || c === player.inCar || c === player.boarding?.veh) return;
+      const dx = c.x - px, dz = c.z - pz;
+      if (dx * dx + dz * dz > 900) return;                    // 30 m is plenty on foot
+      _hulls.push(c);
+    };
+    for (const c of parked) push(c);
+    if (traffic) for (const c of traffic.cars) push(c);
+    return _hulls;
+  };
   // Settlement factor for traffic density: buildings within the cell's 3×3
   // chunk neighbourhood, saturating around a small-town block. A hamlet's
   // lane spawns the odd car; the same metres of asphalt in a sídliště spawn
@@ -2134,6 +2152,7 @@ async function boot() {
   minimap = new Minimap($id('minimap'), city);
   trains = new Trains(scene, city);
   worldMap = new WorldMap(city, minimap);
+  window.__wm = worldMap; window.__city = city;   // TEMP probe
   initNavigation(city);   // lazy + optional; never blocks the boot
   peds = new Pedestrians(scene, city, world.terrain);
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact

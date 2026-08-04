@@ -759,6 +759,9 @@ export class Traffic {
     // optional chaining because bare test fixtures pass {roads:[…]} without it
     this.addTile({ roads: city.roads ?? [], signals: city.signals ?? [] });
     city.onTileLoaded?.((t) => this.addTile(t));
+    // a pole placed before its height map landed guessed its ground; the road
+    // conform then moves that ground again. Re-seat them whenever either lands.
+    world?.terrain?.onTileLoaded?.(() => this._regroundSignals());
   }
 
   now() { return this.clock ? this.clock() : worldT(); }
@@ -1377,7 +1380,12 @@ export class Traffic {
       pz = pose.z + dx * w2;
     }
     const g = new THREE.Group();
-    g.position.set(px, 0, pz);
+    // ON THE GROUND. This said `0` — and this world is drawn in ABSOLUTE
+    // elevation, so every traffic light in the country stood at sea level:
+    // 220 m under the asphalt at Pardubice, 380 under Prague. They were built,
+    // lit, phase-cycling and parented to the scene the whole time, buried
+    // inside the terrain solid. "stále nikde nejsou semafory" was literal.
+    g.position.set(px, this._groundAt(px, pz), pz);
     // lamps are authored on the head's −z face; forward of a mesh yawed by h
     // is (−sin h, −cos h), and we want that pointing AGAINST travel (at the
     // drivers rolling up), so sin h = dx, cos h = dz
@@ -1394,7 +1402,7 @@ export class Traffic {
     for (const c of g.children) { c.updateMatrix(); c.matrixAutoUpdate = false; }
     g.updateMatrix(); g.matrixAutoUpdate = false;
     group.add(g);
-    return { x, z, b: Math.abs(dz) >= Math.abs(dx) ? 0 : 1, lamps };
+    return { x, z, b: Math.abs(dz) >= Math.abs(dx) ? 0 : 1, lamps, mesh: g };
   }
 
   // govern edge `e` by junction `jn` if e ENDS at it and no closer junction
@@ -2222,6 +2230,9 @@ export class Traffic {
     // frame happened to land.
     const fx = -Math.sin(p.sh), fz = -Math.cos(p.sh);
     let hard = false, held = false, leader = null, leadD = 1e9;
+    // …and whether a PHYSICAL hull is in the way, which is a different thing
+    // from being held by flow: flow resolves itself, a parked car does not.
+    let blocked = false;
     for (const other of this.cars) {
       const o = other.ai;
       if (!o || o === p) continue;
@@ -2266,7 +2277,7 @@ export class Traffic {
       if (fwd <= 0 || fwd > TRAFFIC.lookAhead) continue;
       if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
       const gap = fwd - this._obst[i + 2];
-      if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; }
+      if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; blocked = true; }
       else { const fv = (gap - TRAFFIC.stopGap) / 2;
              if (fv < tgt) { tgt = fv; held = true; } }
     }
@@ -2307,15 +2318,23 @@ export class Traffic {
     let arc = p.sR + car.speed * dt;
     if (arc >= Snom) { arc = Snom; const nv = p.ghost ? 0 : this._nomV(p); if (car.speed > nv) car.speed = nv; }
     if (!p.ghost && arc < Snom - LAG_MAX) {
-      // Dragged forward against the brakes. This is the failure mode, not a
-      // feature: something (a player parked across the lane, eleven seconds of
-      // it) has held this car so far behind the shared world that we would
-      // rather it drive through the obstruction than stand a block away from
-      // where the other client draws it. vehicles.js will read the resulting
-      // overlap as a collision, which is a fair description of what parking
-      // across a road does.
-      arc = Snom - LAG_MAX;
-      car.speed = Math.max(car.speed, (arc - p.sR) / dt);
+      // Dragged forward against the brakes: this car has fallen so far behind
+      // the shared schedule that the two clients would draw it a block apart.
+      //
+      // But NOT through a hull. That is what this used to do — eleven seconds
+      // after you left your car in the lane, the queue behind it was hauled
+      // forward and drove straight through, which is the whole "auta stále
+      // projíždějí jako ghosts mým autem" report. A car physically stopped by
+      // something solid LEAVES the shared population instead: it becomes a
+      // local ghost, keeps its nose against the obstruction like a real
+      // driver, and the sweeper retires it once nobody is looking. Desync is
+      // the honest answer here — the obstruction is local to this client.
+      if (blocked) {
+        if (!p.ghost) { p.ghost = 1; p.ghostT = 0; this._ghosts.add(p); }
+      } else {
+        arc = Snom - LAG_MAX;
+        car.speed = Math.max(car.speed, (arc - p.sR) / dt);
+      }
     }
     this._setRendered(p, arc);
 
@@ -2361,6 +2380,20 @@ export class Traffic {
 
   /** Ground under a point. 0 for the bare {roads:[…]} fixtures the tests use. */
   _groundAt(x, z) { return this.world?.terrain?.heightAt(x, z) ?? 0; }
+
+  // Poles freeze their matrix (hundreds of static meshes render for free that
+  // way), so re-seating one means writing position.y AND updating the matrix
+  // by hand — a plain assignment would move nothing on screen.
+  _regroundSignals() {
+    for (const jn of this._junctions) {
+      for (const s of jn.sigs) {
+        const m = s.mesh;
+        if (!m) continue;
+        const y = this._groundAt(m.position.x, m.position.z);
+        if (Math.abs(y - m.position.y) > 0.05) { m.position.y = y; m.updateMatrix(); }
+      }
+    }
+  }
 
   // ---- diagnostics / test seams ------------------------------------------
 

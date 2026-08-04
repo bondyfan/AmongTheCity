@@ -794,9 +794,35 @@ export class CityWorld {
   // and (once shot at) holes. Cars and the helicopter never pass it, so for
   // them a building stays the impenetrable footprint it always was.
   collide(pos, radius, opts) {
-    const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
-    if (!cell) return false;
     let pushed = false;
+    // A CAR IS A SOLID OBJECT, even for someone on foot. Walking through a
+    // parked Octavia was the same lie as an NPC driving through it, and it
+    // stayed in for exactly as long as nobody thought of the pavement as
+    // geometry. Hulls come from main.js (see world.carHulls) — every vehicle
+    // in the world, whoever owns it.
+    const hulls = this.carHulls?.();
+    if (hulls) {
+      for (const c of hulls) {
+        const dx = pos.x - c.x, dz = pos.z - c.z;
+        if (dx * dx + dz * dz > 64) continue;                 // 8 m gate
+        // the hull as two discs down its axis, like driveStep's own model
+        const fx = -Math.sin(c.heading), fz = -Math.cos(c.heading);
+        const rr = c.wid * 0.55 + radius;
+        const back = c.len / 2 - c.wid * 0.55;
+        for (const s2 of [-back, back]) {
+          const cx = c.x + fx * s2, cz = c.z + fz * s2;
+          const ex = pos.x - cx, ez = pos.z - cz;
+          const d2 = ex * ex + ez * ez;
+          if (d2 >= rr * rr || d2 < 1e-9) continue;
+          const d = Math.sqrt(d2);
+          pos.x = cx + (ex / d) * rr;
+          pos.z = cz + (ez / d) * rr;
+          pushed = true;
+        }
+      }
+    }
+    const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
+    if (!cell) return pushed;
     const walker = !!opts?.interior;
     if (walker) {
       pushed = this.interiors.pushOut(pos, radius,

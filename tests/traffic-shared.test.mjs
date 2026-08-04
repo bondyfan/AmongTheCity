@@ -322,3 +322,29 @@ test('stealing a car empties its slot instead of cloning it', () => {
   for (let i = 0; i < 60 * 8; i++) { B.at(40 + i / 60); B.t.update(1 / 60, { x: 0, z: 0 }, null); }
   assert.ok(![...B.t.cars].some((c) => c.ai.key === key), 'claimSlot did not hold the slot');
 });
+
+test('a traffic light stands on the ground, not at sea level', async () => {
+  // Every semafor in the country was built at y = 0 while this world is drawn
+  // in ABSOLUTE elevation — 220 m under the asphalt at Pardubice, 380 under
+  // Prague. They were lit, phase-cycling, parented to the scene, and buried
+  // inside the terrain solid for the whole life of the feature: "stále nikde
+  // nejsou semafory" was the literal truth.
+  const THREE = await import('three');
+  const GROUND = 221.4;
+  const road = { _id: 1, t: 'primary', w: 9, v: 50, d: 1,
+    p: [[-60, 0], [0, 0], [60, 0]] };
+  const cross = { _id: 2, t: 'secondary', w: 8, v: 50, d: 1,
+    p: [[0, -60], [0, 0], [0, 60]] };
+  const scene = new THREE.Scene();
+  const city = { roads: [road, cross], signals: [[0, 0]] };
+  const world = { terrain: { heightAt: () => GROUND } };
+  const t = new Traffic(city, { scene, cars: new Set() }, world);
+  const poles = t._junctions.flatMap((j) => j.sigs);
+  assert.ok(poles.length >= 2, `only ${poles.length} poles at a signalised crossroads`);
+  for (const s of poles) {
+    assert.ok(s.mesh, 'a pole must hand back its mesh so late terrain can re-seat it');
+    assert.ok(Math.abs(s.mesh.position.y - GROUND) < 0.2,
+      `pole at y=${s.mesh.position.y} with the ground at ${GROUND} — buried by`
+      + ` ${(GROUND - s.mesh.position.y).toFixed(0)} m`);
+  }
+});
