@@ -28,7 +28,7 @@
 // inside a `.panel`, so panning and zooming the map never also spins the game
 // camera underneath.
 
-import { COLORS } from './config.js';
+import { COLORS, CHUNK } from './config.js';
 
 const PLACES_URL = 'data/places.json';
 const OVERVIEW_URL = 'data/overview.json';
@@ -50,7 +50,36 @@ const VIEW_MIN = 140;        // m across the canvas at the deepest zoom
 // driving somewhere and the answer you want is the next few junctions — so
 // the map now OPENS at street-legible scale around the player and zooms OUT
 // to the region, rather than the other way round.
-const HOME_RADIUS = 5000;    // m — half the span the first view covers
+const HOME_RADIUS = 2000;    // m — half the span the first view covers
+
+// ---- windowed feature access --------------------------------------------
+// The city keeps its own CHUNK-metre spatial index (geo.js buckets every
+// layer into it), and a render only ever draws the features inside the bitmap
+// window. Scanning the flat arrays instead cost the SAME ~50 ms whether the
+// view was 290 km or 140 m across — 38 k buildings and 22 k roads bbox-tested
+// for a window that holds four of them — and that flat cost, hit on every pan
+// and every zoom step, IS the stutter. Below CELL_MAX cells the index wins by
+// two orders of magnitude; above it, the empty-cell lookups outnumber the
+// features and the flat scan is the cheaper answer again.
+const CELL_MAX = 40000;      // ≈ a 24 km window at CHUNK = 120 m
+// The base layer is a 4096 px raster of a 290 km region — 71 m per pixel. Blown
+// up past this multiple it is a smear, and a smear is exactly what "the other
+// city doesn't load" looks like: there IS no streamed detail out there and
+// never will be until you drive to it, but the overview's own vectors (the
+// motorway web, the rivers, the built-up blocks) are geometry and stay crisp at
+// any scale. So past this ratio the base layer is drawn, not blitted.
+const OV_SHARP = 1.5;
+const OV_PX = 4096;          // long side of the cached base-layer raster
+// The base layer is immutable — a file, loaded once, never streamed — so it can
+// afford its own spatial index, and the vector path is then as cheap as the
+// live layers' chunk walk. Cells are coarse because its features are: a
+// motorway run is kilometres long and a built-up block is 200 m.
+const OV_CELL = 2000;        // m
+const OV_CELL_MAX = 1600;    // cells before the flat scan is the cheaper answer
+// …and past this much window the vectors stop being a saving at all: nearly
+// every feature survives, so drawing them IS the 421 ms the raster exists to
+// avoid. Wider than this the blit wins, blur and all.
+const OV_VEC_MAX = 26000;    // m of bitmap window
 // Bitmap budget. 4096 px is the safe texture-ish ceiling for a 2D canvas on
 // weak GPUs; the pixel cap is the memory one (9 Mpx ≈ 36 MB of backing store).
 const OFF_MAX_SIDE = 4096;
@@ -150,11 +179,27 @@ const DASH = [7, 7];         // the waypoint thread — allocated once, never pe
 // Deliberately not from COLORS — that palette describes the world (asphalt,
 // water, plaster) and chrome must never blend into it.
 const WP_COLOR = '#ffd21a';
-// Batched paths are the whole trick behind a fast region render, but ONE path
-// holding 163 000 building footprints is a rasterizer's worst case, so every
-// batch is flushed after this many shapes. Still ~10 draw calls instead of
-// ~200 000, and no single path the GPU has to think twice about.
-const FLUSH_N = 12000;
+// Batched paths are the whole trick behind a fast region render — but the
+// batch has to be SMALL, and this number was three orders of magnitude too
+// big. Measured in the real browser on the real data, filling all 38 292
+// footprints:
+//
+//     flush every    8      16      32     128     512    12000
+//     fill (ms)    7.7     8.7    11.3    27.7    91.5     6513
+//
+// Canvas2D charges superlinearly for the SIZE of a path, and it charges it at
+// construction: the 12 000-shape batch spent 6 477 of those 6 513 ms inside
+// moveTo/lineTo, before a single pixel was filled. That was most of every map
+// render, and it is what "the map keeps stuttering" was.
+//
+// Strokes are flat across the whole range (4.5–5.1 ms), so the roads pay
+// nothing for the smaller batch; only fills care.
+//
+// One deliberate consequence: two overlapping shapes in different batches are
+// two fills, not one merged region, so a translucent wash (BLD_WASH) stacks
+// where footprints overlap instead of merging. Every other layer here fills
+// opaque, and a denser block reading a shade darker is not a lie.
+const FLUSH_N = 16;
 
 // 0xrrggbb → '#rrggbb' with a brightness factor. Copied from minimap.js rather
 // than exported from it so the two files stay independent, but the numbers are
@@ -340,6 +385,16 @@ export class WorldMap {
     this._slPos = new Float64Array(STREET_MAX * 2); // …and where, for the repeat rule
     this._sfont = '';
     this._buckets = new Map();    // reused across renders: key → feature array
+    // ---- chunk-window state (see _win) ----
+    this._cx0 = 0; this._cz0 = 0; this._cx1 = -1; this._cz1 = -1;
+    this._useCells = false;
+    this._pick = [];              // the picked features, reused every call
+    this._pv = 0;                 // pick stamp — a feature spans several cells
+    this._ovIdx = null;           // …and the same for the base layer (see _ovIndex)
+    this._ovPick = []; this._ovv = 0; this._ovCells = false;
+    this._ocx0 = 0; this._ocz0 = 0; this._ocx1 = -1; this._ocz1 = -1;
+    this._bkey = null;            // memo key for _computeBounds
+    this._noDetail = false;       // is the view outside every streamed tile?
     // last status values — the head line is rebuilt only when one of them
     // changes. _fk starts null rather than '' so the very first _status()
     // cannot compare equal to "not following anybody" and skip its paint.
@@ -601,11 +656,31 @@ export class WorldMap {
   // the real rectangle, because a region 45 km wide is not a circle-shaped
   // island. The per-feature bbox is the SAME `_mmbb` cache the minimap fills,
   // so this is O(features) with four array reads each after the first pass.
+  // MEMOISED, and that is not an optimisation detail: _render() calls this
+  // first, it was 22 ms of every render — the single most expensive thing the
+  // map did — and its answer is a CONSTANT. The manifest lists every tile in
+  // the region before a byte of it has streamed and never grows; places.json
+  // arrives once. So the work is redone only when one of those two changes.
   _computeBounds() {
+    const city = this.city;
+    const mt = city.manifestTiles ?? city.tiles;
+    const T = city.tile;
+    const manifest = T && Array.isArray(mt) && mt.length;
+    // In manifest mode the tile rectangles ARE the region and the live arrays
+    // can only fill in inside them (a smoothed border road pokes out by
+    // centimetres, and the ≥300 m pad below swallows that many times over), so
+    // the O(features) scan buys nothing. Legacy mode has no manifest, so it
+    // still scans — and re-scans whenever the arrays grew.
+    const key = manifest
+      ? 'm' + mt.length + ':' + (this.places?.length ?? 0)
+      : 'l' + (city.roads?.length ?? 0) + ':' + (city.water?.length ?? 0)
+        + ':' + (city.green?.length ?? 0) + ':' + (this.places?.length ?? 0);
+    if (key === this._bkey) return;
+    this._bkey = key;
     let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
-    const scan = (list, key) => {
+    const scan = (list, k) => {
       for (const f of list ?? []) {
-        const bb = this._bb(f, f[key]);
+        const bb = this._bb(f, f[k]);
         if (!bb) continue;
         if (bb[0] < minX) minX = bb[0];
         if (bb[1] < minZ) minZ = bb[1];
@@ -613,17 +688,17 @@ export class WorldMap {
         if (bb[3] > maxZ) maxZ = bb[3];
       }
     };
-    scan(this.city.roads, 'p');
-    scan(this.city.water, 'o');
-    scan(this.city.green, 'o');
+    if (!manifest) {
+      scan(city.roads, 'p');
+      scan(city.water, 'o');
+      scan(city.green, 'o');
+    }
     // The loaded arrays only cover the tiles streamed so far, so fitting to
     // them alone showed Pardubice and hid the other 400 settlements — the map
     // is meant to answer "where is Sezemice from here", which it cannot do if
     // Sezemice is off the edge. The MANIFEST knows the whole region up front,
     // so take the bounds from there and let the geometry fill in as it loads.
-    const mt = this.city.manifestTiles ?? this.city.tiles;
-    const T = this.city.tile;
-    if (T && Array.isArray(mt) && mt.length) {
+    if (manifest) {
       for (const t of mt) {
         if (t.tx * T < minX) minX = t.tx * T;
         if (t.tz * T < minZ) minZ = t.tz * T;
@@ -969,6 +1044,8 @@ export class WorldMap {
     // fattest stroke many times over at any scale this map ever uses
     this._wx0 = x0 - 200; this._wz0 = z0 - 200;
     this._wx1 = x0 + ow / s + 200; this._wz1 = z0 + oh / s + 200;
+    this._cellWindow();
+    this._noDetail = !this._viewHasTile();
 
     const g = this.offg, city = this.city;
     g.setTransform(1, 0, 0, 1, 0, 0);
@@ -978,7 +1055,7 @@ export class WorldMap {
 
     // The world base layer goes down FIRST, so streamed detail paints over it
     // wherever it exists and the rest of the country is still a country.
-    this._blitOverview(g, x0, z0, s, ow, oh);
+    this._baseLayer(g, x0, z0, s, ow, oh);
 
     // Same layer order as the minimap so the two read as one map: greens and
     // paved surfaces, then water, then the built fabric, then rails, then the
@@ -988,10 +1065,12 @@ export class WorldMap {
     // forest big enough to navigate by. Below POLY_S they are noise you pay
     // for, so they wait until you are zoomed in enough to read them.
     if (s >= POLY_S) {
-      this._polys(city.green, f => css(COLORS.green[f.t] ?? COLORS.green.grass, 0.9));
-      this._polys(city.paved, f => css(COLORS.paved[f.t] ?? COLORS.paved.parking, 1));
+      this._polys(this._win('green', city.green),
+        f => css(COLORS.green[f.t] ?? COLORS.green.grass, 0.9));
+      this._polys(this._win('paved', city.paved),
+        f => css(COLORS.paved[f.t] ?? COLORS.paved.parking, 1));
     }
-    this._polys(city.water, () => css(COLORS.water, 0.85));
+    this._polys(this._win('water', city.water), () => css(COLORS.water, 0.85));
     // waterways are polylines (the Chrudimka arms, mill races). One batched
     // stroke at a nominal 5 m: their real `w` varies by a metre or two, which
     // is invisible here and not worth a stroke call per stream.
@@ -1006,14 +1085,14 @@ export class WorldMap {
     }
     if (any) { g.lineWidth = Math.max(1, 5 * s); g.stroke(); }
 
-    this._buildings(g, city, x0, z0, s);
+    this._buildings(g, this._win('buildings', city.buildings), x0, z0, s);
 
     // rails: one thin dark thread — the station corridors are a landmark
     g.strokeStyle = css(COLORS.rail, 1.6);
     g.lineWidth = Math.max(0.8, 2.2 * s);
     g.beginPath();
     any = false;
-    for (const f of city.rails ?? []) {
+    for (const f of this._win('rails', city.rails)) {
       const bb = this._bb(f, f.p);
       if (!bb || !this._visBB(bb)) continue;
       this._line(g, f.p, x0, z0, s);
@@ -1021,13 +1100,13 @@ export class WorldMap {
     }
     if (any) g.stroke();
 
-    this._roads(g, city, x0, z0, s);
+    this._roads(g, this._win('roads', city.roads), x0, z0, s);
     // Street-label candidates are picked HERE, with the geometry, and not per
     // frame: the region holds hundreds of thousands of ways and the frame loop
     // may only ever touch the few hundred that survive this pass. They are
     // clipped to the BITMAP window rather than the view, so the small pans and
     // the one zoom step the bitmap already absorbs keep their names too.
-    this._collectStreets(city, x0, z0, x1, z1, k);
+    this._collectStreets(this._win('roads', city.roads), x0, z0, x1, z1, k);
     this._zr = -1;               // force the status line to repaint the zoom
   }
 
@@ -1044,7 +1123,6 @@ export class WorldMap {
   // drawn on top of it anyway.
   _overviewBitmap() {
     if (this._ovBmp || !this.ov) return this._ovBmp;
-    const OV_PX = 4096;
     const w = Math.max(1, this.rx1 - this.rx0), h = Math.max(1, this.rz1 - this.rz0);
     const sc = OV_PX / Math.max(w, h);
     const cw = Math.max(2, Math.round(w * sc)), ch = Math.max(2, Math.round(h * sc));
@@ -1068,6 +1146,49 @@ export class WorldMap {
     }
     this._ovBmp = { cv, x0: this.rx0, z0: this.rz0, s: sc, w: cw, h: ch };
     return this._ovBmp;
+  }
+
+  // The base layer, by whichever route is honest at this scale.
+  //
+  // The cached raster is 4096 px over a 290 km region — 71 m per pixel. That is
+  // ample when the whole country is on screen, and it is why the map opens in
+  // a frame instead of half a second. Zoom in on a town nobody has driven to,
+  // though, and there is no streamed detail to paint over it: you are looking
+  // at that raster magnified thirty times, which is a grey-green smear and
+  // reads as "the map is broken". The overview is VECTORS underneath — the
+  // motorway web, the railways, the rivers, the built-up blocks — so past
+  // OV_SHARP it is drawn at the bitmap's own resolution instead. Far fewer
+  // features survive a window that small, so it costs less than the blit saved.
+  _baseLayer(g, x0, z0, s, ow, oh) {
+    if (!this.ov) return;
+    // The scale test is answered WITHOUT building the raster: opening the map
+    // straight into a 2 km home view would otherwise pay half a second to
+    // rasterise a base layer this render is not going to use.
+    const blurry = s > this._ovScale() * OV_SHARP;
+    const narrow = (this._wx1 - this._wx0) <= OV_VEC_MAX;
+    if (blurry && narrow) this._overview(g, x0, z0, s);
+    else this._blitOverview(g, x0, z0, s, ow, oh);
+  }
+
+  // px per metre the cached base-layer raster is (or would be) built at
+  _ovScale() {
+    return OV_PX / Math.max(1, this.rx1 - this.rx0, this.rz1 - this.rz0);
+  }
+
+  // Is any tile that has actually STREAMED overlapping the bitmap window? The
+  // answer drives one line of status text, because "there are no buildings
+  // here" and "the map is broken" look identical otherwise. Manifest tiles are
+  // in the low hundreds and this runs once per render, not per frame.
+  _viewHasTile() {
+    const mt = this.city.manifestTiles, T = this.city.tile;
+    if (!T || !Array.isArray(mt)) return true;      // legacy: it is all resident
+    for (const t of mt) {
+      if (t.state < 2) continue;                    // 0 idle / 1 in flight
+      if ((t.tx + 1) * T < this._wx0 || t.tx * T > this._wx1) continue;
+      if ((t.tz + 1) * T < this._wz0 || t.tz * T > this._wz1) continue;
+      return true;
+    }
+    return false;
   }
 
   // Blit the window of the pre-rendered base layer that this bitmap covers.
@@ -1094,28 +1215,132 @@ export class WorldMap {
   _overview(g, x0, z0, s) {
     const ov = this.ov;
     if (!ov) return;
-    this._polys(ov.green, () => css(COLORS.green.wood, 0.78));
-    this._polys(ov.water, () => css(COLORS.water, 0.8));
+    this._ovCellWindow();
+    this._polys(this._ovWin('green', ov.green), () => css(COLORS.green.wood, 0.78));
+    this._polys(this._ovWin('water', ov.water), () => css(COLORS.water, 0.8));
     // built-up area: runs of 200 m cells that hold at least one building. At
     // region zoom this is what makes a town look like a town — the same wash
     // _buildings paints when a real footprint is under a pixel.
-    this._polys(ov.urban, () => BLD_WASH);
+    this._polys(this._ovWin('urban', ov.urban), () => BLD_WASH);
     g.strokeStyle = css(COLORS.rail, 1.4);
     g.lineWidth = Math.max(0.7, 2 * s);
     g.beginPath();
     let any = false;
-    for (const f of ov.rails) {
+    for (const f of this._ovWin('rails', ov.rails)) {
       const bb = this._bb(f, f.p);
       if (!bb || !this._visBB(bb)) continue;
       this._line(g, f.p, x0, z0, s);
       any = true;
     }
     if (any) g.stroke();
-    this._roads(g, { roads: ov.roads }, x0, z0, s);
+    this._roads(g, this._ovWin('roads', ov.roads), x0, z0, s);
+  }
+
+  // ---- the base layer's own spatial index ---------------------------------
+  // Built lazily on the first vector draw and never invalidated: overview.json
+  // does not stream and does not grow. Keyed exactly the way geo.js keys the
+  // city's chunks, one cell holding one array per layer.
+  _ovIndex() {
+    if (this._ovIdx || !this.ov) return this._ovIdx;
+    const idx = new Map();
+    const add = (list, kind, ptsKey) => {
+      for (const f of list ?? []) {
+        const bb = this._bb(f, f[ptsKey]);
+        if (!bb) continue;
+        for (let cx = Math.floor(bb[0] / OV_CELL); cx <= Math.floor(bb[2] / OV_CELL); cx++)
+          for (let cz = Math.floor(bb[1] / OV_CELL); cz <= Math.floor(bb[3] / OV_CELL); cz++) {
+            const k = cx + ',' + cz;
+            let cell = idx.get(k);
+            if (!cell) idx.set(k, cell = { roads: [], rails: [], water: [], green: [], urban: [] });
+            cell[kind].push(f);
+          }
+      }
+    };
+    add(this.ov.roads, 'roads', 'p');
+    add(this.ov.rails, 'rails', 'p');
+    add(this.ov.water, 'water', 'o');
+    add(this.ov.green, 'green', 'o');
+    add(this.ov.urban, 'urban', 'o');
+    this._ovIdx = idx;
+    return idx;
+  }
+
+  _ovCellWindow() {
+    this._ocx0 = Math.floor(this._wx0 / OV_CELL); this._ocx1 = Math.floor(this._wx1 / OV_CELL);
+    this._ocz0 = Math.floor(this._wz0 / OV_CELL); this._ocz1 = Math.floor(this._wz1 / OV_CELL);
+    const n = (this._ocx1 - this._ocx0 + 1) * (this._ocz1 - this._ocz0 + 1);
+    this._ovCells = n > 0 && n <= OV_CELL_MAX;
+  }
+
+  _ovWin(kind, flat) {
+    if (!this._ovCells) return flat ?? [];
+    const idx = this._ovIndex();
+    if (!idx) return flat ?? [];
+    const out = this._ovPick;
+    out.length = 0;
+    const stamp = ++this._ovv;
+    for (let cx = this._ocx0; cx <= this._ocx1; cx++) {
+      for (let cz = this._ocz0; cz <= this._ocz1; cz++) {
+        const cell = idx.get(cx + ',' + cz);
+        if (!cell) continue;
+        const list = cell[kind];
+        for (let i = 0; i < list.length; i++) {
+          const f = list[i];
+          if (f._wmov === stamp) continue;
+          f._wmov = stamp;
+          out.push(f);
+        }
+      }
+    }
+    return out;
   }
 
   _visBB(bb) {
     return bb[2] >= this._wx0 && bb[0] <= this._wx1 && bb[3] >= this._wz0 && bb[1] <= this._wz1;
+  }
+
+  // Decide, once per render, whether this window is small enough to be worth
+  // asking the city's chunk index for. Called after _wx0…_wz1 are set.
+  _cellWindow() {
+    this._cx0 = Math.floor(this._wx0 / CHUNK); this._cx1 = Math.floor(this._wx1 / CHUNK);
+    this._cz0 = Math.floor(this._wz0 / CHUNK); this._cz1 = Math.floor(this._wz1 / CHUNK);
+    const n = (this._cx1 - this._cx0 + 1) * (this._cz1 - this._cz0 + 1);
+    this._useCells = !!this.city.chunkIndex && n > 0 && n <= CELL_MAX;
+  }
+
+  // The features of one layer that can touch the window. Either the flat array
+  // (whole-region renders, where every feature is a candidate anyway) or the
+  // chunk index walked cell by cell.
+  //
+  // A feature spans as many cells as its bbox covers, so it would be handed
+  // back once per cell — and these lists go into BATCHED paths where drawing a
+  // polygon twice is not merely wasted work but a wrong fill under the nonzero
+  // rule. Hence the visit stamp: an integer compare per occurrence, no Set.
+  //
+  // The returned array is REUSED. That is safe because every consumer copies
+  // what it wants into _buckets (or draws immediately) before the next call —
+  // and it is why nothing here allocates on the render path.
+  _win(kind, flat) {
+    if (!this._useCells) return flat ?? [];
+    const idx = this.city.chunkIndex;
+    const out = this._pick;
+    out.length = 0;
+    const stamp = ++this._pv;
+    for (let cx = this._cx0; cx <= this._cx1; cx++) {
+      for (let cz = this._cz0; cz <= this._cz1; cz++) {
+        const cell = idx.get(cx + ',' + cz);
+        if (!cell) continue;
+        const list = cell[kind];
+        if (!list) continue;
+        for (let i = 0; i < list.length; i++) {
+          const f = list[i];
+          if (f._wmv === stamp) continue;
+          f._wmv = stamp;
+          out.push(f);
+        }
+      }
+    }
+    return out;
   }
 
   // One path per COLOUR instead of one per polygon: 21 k green polygons as
@@ -1190,8 +1415,7 @@ export class WorldMap {
   // pixel), zoomed in we fill the real outline like the minimap does. Both go
   // into ONE path with one fill — rects and outlines alike are convex-ish and
   // wound consistently by the API/data, so overlaps merge under nonzero.
-  _buildings(g, city, ox, oz, s) {
-    const list = city.buildings;
+  _buildings(g, list, ox, oz, s) {
     if (!list || !list.length) return;
     const outline = s >= 0.06;            // a 20 m house is ≥ 1.2 px — worth drawing
     g.fillStyle = outline ? BLD_FILL : BLD_WASH;
@@ -1215,8 +1439,7 @@ export class WorldMap {
   // 70 000). Per-way widths from the data are dropped on purpose: at map scale
   // the difference between a 5.5 m and a 6.5 m residential street is far under
   // a pixel, and one stroke per class is what makes a region render fast.
-  _roads(g, city, ox, oz, s) {
-    const list = city.roads;
+  _roads(g, list, ox, oz, s) {
     if (!list || !list.length) return;
     const buckets = this._buckets;
     for (const arr of buckets.values()) arr.length = 0;
@@ -1351,10 +1574,9 @@ export class WorldMap {
   // can stop at the first STREET_MAX that fit and know it stopped on the most
   // important ones. Nothing here allocates — the candidate arrays were built
   // once and are rewritten in place.
-  _collectStreets(city, x0, z0, x1, z1, k) {
+  _collectStreets(list, x0, z0, x1, z1, k) {
     this._stN = 0;
     if (this.zoom < STREET_ZOOM) return;         // contract: from 3× in
-    const list = city.roads;
     if (!list || !list.length) return;
     // Cheap pre-filter before the run scan: a name is roughly half its font
     // size per character wide, so a road with no straight run near that length
@@ -1704,7 +1926,8 @@ export class WorldMap {
     // The chase is part of the memo key, or picking a friend to follow would
     // leave the head line advertising the previous destination until the
     // distance happened to tick over.
-    const fk = this.followUid ? this.followUid + '|' + this.followName : '';
+    const fk = (this.followUid ? this.followUid + '|' + this.followName : '')
+      + (this._noDetail ? '|nd' : '');
     if (zr === this._zr && dr === this._dr && pn === this._pr && fk === this._fk) return;
     this._zr = zr; this._dr = dr; this._pr = pn; this._fk = fk;
     // A multiplier stopped being a readable number the moment the ceiling
@@ -1721,6 +1944,12 @@ export class WorldMap {
       txt += ' · ' + (this.followUid ? 'sleduješ ' + (this.followName || 'hráče') + ' ' : 'cíl ')
         + (m >= 1000 ? (m / 1000).toFixed(1) + ' km' : m + ' m');
     }
+    // The world streams around the PLAYER, not around the map view: a town
+    // nobody has driven to has no buildings and no side streets, and never
+    // will until somebody goes there. Without saying so, panning to Prague and
+    // finding only the trunk roads looks exactly like a map that failed to
+    // load — which is what it was reported as.
+    if (this._noDetail) txt += ' · jen přehledová mapa — detail se načte, až sem dojedeš';
     // the head count belongs on the map itself: this is where a player looks
     // to find out where everyone is, so it is also where "everyone" is counted
     if (pn > 0) txt += ' · ' + czPlayers(pn) + ' na mapě';

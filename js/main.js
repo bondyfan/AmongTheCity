@@ -2152,7 +2152,6 @@ async function boot() {
   minimap = new Minimap($id('minimap'), city);
   trains = new Trains(scene, city);
   worldMap = new WorldMap(city, minimap);
-  window.__wm = worldMap; window.__city = city;   // TEMP probe
   initNavigation(city);   // lazy + optional; never blocks the boot
   peds = new Pedestrians(scene, city, world.terrain);
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact

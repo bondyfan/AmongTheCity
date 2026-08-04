@@ -826,6 +826,100 @@ function processPower(els, owns) {
   return out;
 }
 
+// ---------- street furniture: everything standing on a Czech pavement -------
+// ONE point layer for every prop, keyed by kind, because the runtime wants one
+// instanced pass per kind and not eight bucketized layers. Positions are what
+// a surveyor walked to, so nothing here is guessed.
+const FURN = [
+  [(t) => t.highway === 'street_lamp', 'lamp'],
+  [(t) => t.amenity === 'bench', 'bench'],
+  [(t) => t.amenity === 'waste_basket', 'bin'],
+  [(t) => t.amenity === 'recycling' && t.recycling_type !== 'centre', 'recycling'],
+  [(t) => t.amenity === 'post_box', 'postbox'],
+  [(t) => t.amenity === 'bicycle_parking', 'bikerack'],
+  [(t) => t.amenity === 'picnic_table', 'picnic'],
+  [(t) => t.amenity === 'shelter', 'shelter'],
+  [(t) => t.amenity === 'drinking_water', 'fountain'],
+  [(t) => t.historic === 'wayside_cross' || t.historic === 'wayside_shrine', 'cross'],
+  [(t) => t.historic === 'memorial' || t.historic === 'monument', 'memorial'],
+  [(t) => t.tourism === 'artwork', 'statue'],
+  [(t) => /^(lift_gate|swing_gate)$/.test(t.barrier ?? ''), 'liftgate'],
+  [(t) => /^(gate|wicket_gate)$/.test(t.barrier ?? ''), 'gate'],
+  [(t) => /^(bollard|block|cycle_barrier)$/.test(t.barrier ?? ''), 'bollard'],
+];
+function processFurniture(els, owns) {
+  const out = [], seen = new Set();
+  for (const el of els) {
+    if (el.type !== 'node' || !el.tags) continue;
+    const key = 'node/' + el.id;
+    if (seen.has(key)) continue;
+    let k = null;
+    for (const [test, kind] of FURN) if (test(el.tags)) { k = kind; break; }
+    if (!k) continue;
+    seen.add(key);
+    const pt = [px(el.lon), pz(el.lat)];
+    if (!owns(pt)) continue;
+    const r = { p: pt, k };
+    // a bench and a shelter both FACE something; OSM says which way when the
+    // surveyor bothered, and a direction beats a guess from the nearest road
+    const dir = parseFloat(el.tags.direction);
+    if (Number.isFinite(dir)) r.a = Math.round(dir);
+    out.push(r);
+  }
+  return out;
+}
+
+// ---------- traffic calming: retardéry on the carriageway -------------------
+function processCalming(els, owns) {
+  const out = [], seen = new Set();
+  for (const el of els) {
+    if (el.type !== 'node') continue;
+    const c = el.tags?.traffic_calming;
+    if (!/^(bump|hump|table|cushion)$/.test(c ?? '')) continue;
+    const key = 'node/' + el.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const pt = [px(el.lon), pz(el.lat)];
+    if (owns(pt)) out.push({ p: pt, k: c });
+  }
+  return out;
+}
+
+// ---------- barriers: the lines that divide one plot from the next ----------
+// A fence is a LINE, not an area: 11 903 of them in the home region, and the
+// world had none, so every garden ran into its neighbour's and industrial
+// yards had no edge at all. Simplified hard (0.6 m) — a fence is straight
+// between its posts and nobody reads its wobble.
+const BARRIER_KIND = {
+  fence: 'fence', wall: 'wall', retaining_wall: 'retaining', city_wall: 'citywall',
+  guard_rail: 'guard', jersey_barrier: 'jersey', handrail: 'handrail',
+};
+function processBarriers(els, owns) {
+  const out = [], seen = new Set();
+  for (const el of els) {
+    if (el.type !== 'way' || !el.geometry?.length) continue;
+    const t = el.tags ?? {};
+    let k = BARRIER_KIND[t.barrier];
+    // a noise barrier is tagged wall=noise_barrier on a barrier=wall
+    if (k === 'wall' && t.wall === 'noise_barrier') k = 'noise';
+    if (!k) continue;
+    const key = 'way/' + el.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const p = simplify(ring(el.geometry), 0.6);
+    if (p.length < 2 || !owns(p[0])) continue;
+    const r = { p, k };
+    const h = parseFloat(t.height);
+    if (h > 0.3 && h < 12) r.h = +h.toFixed(1);
+    // chain link and railings are see-through; a paling fence is not.
+    // NOT `o` — that name means "outer ring" everywhere else in this pipeline,
+    // and geo.js' bucketizer reads f.o as the polygon to walk.
+    if (/^(chain_link|wire|railing|metal)$/.test(t.fence_type ?? '')) r.se = 1;
+    out.push(r);
+  }
+  return out;
+}
+
 // ---------- run: every raw tile on disk ----------
 // Driven by the directory, not by a rectangle: the world's shape lives in
 // world-area.mjs and a partially-finished split is simply a smaller world.
@@ -840,7 +934,8 @@ const OUT_DIR = process.env.OUT_DIR || 'public/data';
 mkdirSync(`${OUT_DIR}/tiles`, { recursive: true });
 const manifestTiles = [];
 const totals = { buildings: 0, roads: 0, rails: 0, water: 0, waterways: 0,
-  green: 0, paved: 0, trees: 0, pois: 0, signals: 0, signs: 0, crossings: 0, power: 0 };
+  green: 0, paved: 0, trees: 0, pois: 0, signals: 0, signs: 0, crossings: 0, power: 0,
+  furniture: 0, calming: 0, barriers: 0 };
 let emitted = 0, empty = 0, bytes = 0;
 
 // Some rivers are single OSM multipolygons tens of kilometres long. They live
@@ -900,6 +995,9 @@ const rawTiles = readdirSync(RAW_DIR)
       signs: processSigns(els, owns),
       crossings: processCrossings(els, owns),
       power: processPower(els, owns),
+      furniture: processFurniture(els, owns),
+      calming: processCalming(els, owns),
+      barriers: processBarriers(els, owns),
     };
     let n = 0;
     for (const key of Object.keys(totals)) { n += tile[key].length; totals[key] += tile[key].length; }

@@ -36,6 +36,7 @@ import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKe
   GRADE_CUT } from './geo.js';
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
+import { furnitureInto } from './furniture.js';
 import { entranceOf, brandOf } from './interiors.js';
 import { INTERIOR } from './config.js';
 
@@ -3282,6 +3283,139 @@ function busStopInto(sink, x, z, cell) {
   }
 }
 
+// ---- fences, walls, noise barriers: the lines that divide one plot ---------
+// 88 200 of them across the world, and until now the world had none — every
+// garden ran into its neighbour's and an industrial yard had no edge at all.
+// Drawn as a double-sided ribbon standing on the ground, following the terrain
+// at 2 m so a fence on a slope steps with the hill instead of floating off it.
+// Posts every ~2.5 m on the solid kinds; the see-through ones (chain link,
+// railings) are a thinner sheet in a paler tone, which reads correctly at the
+// distance you ever see them from.
+const BARRIER_SPEC = {
+  fence:     { h: 1.7, col: 0x8a7a5f, post: 0x6e6047, step: 2.5 },
+  wall:      { h: 2.0, col: 0x9a9489, post: null,     step: 0 },
+  retaining: { h: 1.4, col: 0x8d8880, post: null,     step: 0 },
+  citywall:  { h: 4.5, col: 0x8f8779, post: null,     step: 0 },
+  noise:     { h: 3.2, col: 0x7d8288, post: 0x5a5f65, step: 4.0 },
+  guard:     { h: 0.75, col: 0xa9adb2, post: 0x6f757b, step: 4.0 },
+  jersey:    { h: 0.9, col: 0xb4b0a6, post: null,     step: 0 },
+  handrail:  { h: 1.0, col: 0x9298a0, post: 0x6f757b, step: 2.0 },
+};
+function barrierInto(sink, f, terrain) {
+  const spec = BARRIER_SPEC[f.k];
+  if (!spec || !f.p || f.p.length < 2 || !terrain) return;
+  const H = f.h ?? spec.h;
+  sink.at(SURF.concrete);
+  _c.setHex(spec.col);
+  const r = _c.r, g = _c.g, b = _c.b;
+  const mark = sink.mark();
+  const thin = f.se ? 0.02 : 0.06;          // see-through kinds are a sheet
+  for (let i = 0; i < f.p.length - 1; i++) {
+    const [ax, az] = f.p[i], [bx, bz] = f.p[i + 1];
+    const L = Math.hypot(bx - ax, bz - az);
+    if (L < 0.2 || L > 400) continue;       // a broken vertex is not a fence
+    const n = Math.max(1, Math.min(60, Math.ceil(L / 2)));
+    const ux = (bx - ax) / L, uz = (bz - az) / L;
+    const px2 = -uz * thin, pz2 = ux * thin;
+    for (let k = 0; k < n; k++) {
+      const t0 = k / n, t1 = (k + 1) / n;
+      const x0 = ax + (bx - ax) * t0, z0 = az + (bz - az) * t0;
+      const x1 = ax + (bx - ax) * t1, z1 = az + (bz - az) * t1;
+      const g0 = terrain.heightAt(x0, z0) - 0.1, g1 = terrain.heightAt(x1, z1) - 0.1;
+      // both faces, so a fence reads from the garden as well as from the street
+      for (const e of [1, -1]) {
+        sink.quad(x0 + px2 * e, g0, z0 + pz2 * e, x1 + px2 * e, g1, z1 + pz2 * e,
+          x1 + px2 * e, g1 + H, z1 + pz2 * e, x0 + px2 * e, g0 + H, z0 + pz2 * e, r, g, b);
+        sink.quad(x0 + px2 * e, g0 + H, z0 + pz2 * e, x1 + px2 * e, g1 + H, z1 + pz2 * e,
+          x1 + px2 * e, g1, z1 + pz2 * e, x0 + px2 * e, g0, z0 + pz2 * e, r, g, b);
+      }
+      // and a cap, so the top is not a paper edge seen from above
+      sink.quad(x0 - px2, g0 + H, z0 - pz2, x1 - px2, g1 + H, z1 - pz2,
+        x1 + px2, g1 + H, z1 + pz2, x0 + px2, g0 + H, z0 + pz2, r, g, b);
+    }
+    // posts, on the kinds that have them
+    if (spec.post && spec.step) {
+      _c.setHex(spec.post);
+      const pr = _c.r, pg = _c.g, pb = _c.b;
+      const np = Math.min(40, Math.floor(L / spec.step));
+      for (let k2 = 0; k2 <= np; k2++) {
+        const t = np ? k2 / np : 0;
+        const x2 = ax + (bx - ax) * t, z2 = az + (bz - az) * t;
+        const gy = terrain.heightAt(x2, z2) - 0.1;
+        const w = 0.05;
+        for (const [ox, oz] of [[ux, uz], [-uz, ux]]) {
+          for (const flip of [1, -1]) {
+            sink.quad(x2 - ox * w * flip, gy, z2 - oz * w * flip,
+              x2 + ox * w * flip, gy, z2 + oz * w * flip,
+              x2 + ox * w * flip, gy + H + 0.06, z2 + oz * w * flip,
+              x2 - ox * w * flip, gy + H + 0.06, z2 - oz * w * flip, pr, pg, pb);
+          }
+        }
+      }
+      _c.setHex(spec.col);
+    }
+  }
+  sink.fixFrom(mark);
+}
+
+// ---- retardéry: a ridge across the carriageway -----------------------------
+// A bump is 8 cm of asphalt and it changes how a residential street DRIVES,
+// which is what makes it worth its four quads. Bound to the road the OSM node
+// sits on so it spans the actual lanes and tilts with the deck.
+function bumpInto(sink, node, cell, terrain) {
+  const [x, z] = node.p[0];
+  let road = null, ux = 0, uz = 1, s0 = 0, best = 6 * 6;
+  for (const r of cell.roads) {
+    if (!r.d || !r.p || r.p.length < 2) continue;
+    let along = 0;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+      const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9;
+      let t = ((x - ax) * ex + (z - az) * ez) / L2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const d2 = (x - (ax + ex * t)) ** 2 + (z - (az + ez * t)) ** 2;
+      const L = Math.sqrt(L2);
+      if (d2 < best) { best = d2; road = r; ux = ex / L; uz = ez / L; s0 = along + L * t; }
+      along += L;
+    }
+  }
+  if (!road || !terrain) return;
+  const gy = road.br ? bridgeDeckHeight(road, s0, terrain) : roadGradeY(road, s0, terrain);
+  if (gy === null || gy === undefined) return;
+  const y = gy + LAYER_Y.road;
+  const hw = (road.w ?? 6) / 2 - 0.1;
+  const px2 = -uz, pz2 = ux;
+  // a table is long and flat, a bump is short and abrupt
+  const half = node.k === 'table' ? 2.2 : node.k === 'hump' ? 1.6 : 0.9;
+  const rise = node.k === 'table' ? 0.10 : 0.08;
+  sink.at(SURF.asphalt);
+  _c.setHex(0x53565b);
+  const r0 = _c.r, g0 = _c.g, b0 = _c.b;
+  const mark = sink.mark();
+  const P = (o, w) => [x + ux * o + px2 * w, z + uz * o + pz2 * w];
+  for (const seg of [[-half, 0], [0, half]]) {
+    const [a, b] = seg;
+    const ya = a === 0 ? y + rise : y;
+    const yb = b === 0 ? y + rise : y;
+    const [ax0, az0] = P(a, -hw), [ax1, az1] = P(a, hw);
+    const [bx0, bz0] = P(b, -hw), [bx1, bz1] = P(b, hw);
+    paintQuad(sink, ax0, ya, az0, bx0, yb, bz0, bx1, yb, bz1, ax1, ya, az1, r0, g0, b0);
+  }
+  // the white warning chevrons Czech bumps carry
+  sink.at(SURF.paint);
+  _c.setHex(COLORS.marking);
+  const mr = _c.r, mg = _c.g, mb = _c.b;
+  for (let i = -2; i <= 2; i++) {
+    const w0 = i * (hw / 2.6), w1 = w0 + hw / 5.5;
+    if (Math.abs(w1) > hw) continue;
+    const [q0x, q0z] = P(-0.25, w0), [q1x, q1z] = P(-0.25, w1);
+    const [q2x, q2z] = P(0.25, w1), [q3x, q3z] = P(0.25, w0);
+    paintQuad(sink, q0x, y + rise + 0.012, q0z, q1x, y + rise + 0.012, q1z,
+      q2x, y + rise + 0.012, q2z, q3x, y + rise + 0.012, q3z, mr, mg, mb);
+  }
+  sink.fixFrom(mark);
+}
+
 // one sign: post + panel, all vertex-coloured triangles in the chunk sink
 function signPost(sink, sg, cell) {
   const [x, z] = sg.p[0];
@@ -3967,6 +4101,18 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     if (city.pois) for (const poi of city.pois) {
       if (poi.t === 'bus_stop' && chunkKey(poi.p[0], poi.p[1]) === key)
         busStopInto(sink, poi.p[0], poi.p[1], cell);
+    }
+    // …and everything else a Czech street has standing on it (js/furniture.js)
+    furnitureInto(sink, cell, key, mats.terrain,
+      (hex) => { _c.setHex(hex); return [_c.r, _c.g, _c.b]; },
+      (x, z, i) => rnd(Math.abs(Math.round(x * 7 + z * 13)) + i * 9176, i), chunkKey);
+    // fences, walls, noise barriers — the lines that divide one plot from the
+    // next, and the reason a town stops looking like houses dropped in a field
+    if (cell.barriers) for (const b of cell.barriers) {
+      if (b._home === key) barrierInto(sink, b, mats.terrain);
+    }
+    if (cell.calming) for (const cm of cell.calming) {
+      if (cm._home === key) bumpInto(sink, cm, cell, mats.terrain);
     }
     const cls2 = clustersIn(key);
     if (cls2) for (const cl of cls2) clusterPad(sink, cl, mats.terrain);

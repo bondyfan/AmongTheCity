@@ -182,3 +182,34 @@ test('a huge sliver polygon is ground down evenly, not one corner at a time', ()
   assert.ok(maxEdge <= 40,
     `a ${maxEdge.toFixed(0)} m edge survived tessellation — the budget died depth-first again`);
 });
+
+test('street furniture stands on the ground, not on twice the ground', () => {
+  // Props are placed at terrain.heightAt already, so they are ABSOLUTE and the
+  // chunk-wide drape must skip them. Without the fix mark a 7 m lamp mast in
+  // Pardubice came out 228 m tall, because the drape added the 221 m ground a
+  // second time — the same class of bug that once buried every traffic light.
+  const props = [
+    { p: [[30, 30]], k: 'lamp', _id: 91, _home: '0,0' },
+    { p: [[40, 40]], k: 'bench', _id: 92, _home: '0,0' },
+    { p: [[50, 50]], k: 'recycling', _id: 93, _home: '0,0' },
+  ];
+  const cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [],
+    trees: [], furniture: props, calming: [], barriers: [] };
+  const city = { chunkIndex: new Map([['0,0', cell]]), tile: 4800 };
+  const mats = makeMaterials();
+  mats.terrain = { res: 20, ready: () => true, heightAt: () => GROUND, missed: false };
+  mats.trees = false; mats.facades = false; mats.ortho = null;
+  const g = buildChunkMeshes(city, 0, 0, mats, 'full');
+  assert.ok(g, 'nothing built');
+  let top = -Infinity;
+  for (const m of g.children) {
+    const pos = m.geometry?.attributes?.position;
+    if (!pos || m.isInstancedMesh) continue;
+    for (let i = 0; i < pos.count; i++) top = Math.max(top, pos.getY(i));
+  }
+  // the tallest prop here is the 7 m lamp mast, so nothing may reach 10 m up
+  assert.ok(top < GROUND + 10,
+    `furniture reaches ${(top - GROUND).toFixed(0)} m above a ${GROUND} m ground`
+    + ' — the drape lifted it a second time');
+  assert.ok(top > GROUND + 5, `nothing tall was drawn at all (top ${top})`);
+});

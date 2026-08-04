@@ -1218,7 +1218,7 @@ function bucketize(index, list, kind, touched) {
   for (const f of list) {
     const ring = forEachCellOf(f, (key) => {
       let cell = index.get(key);
-      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [], crossings: [], power: [] });
+      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [], crossings: [], power: [], furniture: [], calming: [], barriers: [] });
       cell[kind].push(f);
       touched?.add(key);
     });
@@ -1286,6 +1286,17 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   const power = stamp(data.power);
   bucketize(city.chunkIndex, power, 'power', touched);
   appendAll(city.power, power);
+  // street furniture — every prop is a point, wrapped like trees so bucketize
+  // can hand each chunk its own benches, bins, lamps and crosses
+  const furniture = (data.furniture ?? []).map((f) => ({ p: [f.p], k: f.k, a: f.a, _id: ++next }));
+  bucketize(city.chunkIndex, furniture, 'furniture', touched);
+  // retardéry ride the road they sit on, so they are points too
+  const calming = (data.calming ?? []).map((c) => ({ p: [c.p], k: c.k, _id: ++next }));
+  bucketize(city.chunkIndex, calming, 'calming', touched);
+  // fences and walls are POLYLINES: one owner chunk per line, like a road
+  const barriers = stamp(data.barriers);
+  bucketize(city.chunkIndex, barriers, 'barriers', touched);
+  appendAll(city.barriers, barriers);
   return { roads, signals, heavy };
 }
 
@@ -1322,7 +1333,7 @@ export async function loadCity(url) {
     origin: data.origin, mPerLat: data.mPerLat, mPerLon: data.mPerLon,
     tile: data.tile, // manifest tile size in meters (undefined in legacy mode)
     buildings: [], roads: [], rails: [], water: [], waterways: [], power: [],
-    green: [], paved: [], trees: [], pois: [], signals: [],
+    green: [], paved: [], trees: [], pois: [], signals: [], barriers: [],
     chunkIndex: new Map(), _nextId: 1,
   };
   // tile-arrival listeners: cb({roads, signals, tx, tz, cells}) fires AFTER a

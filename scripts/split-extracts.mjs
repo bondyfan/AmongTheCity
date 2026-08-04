@@ -59,6 +59,11 @@ const wantWay = (t) => !!t && (
   || t.place === 'square'
   || t.natural === 'tree_row'
   || t.barrier === 'hedge'          // a clipped hedge is a green wall, not a fence
+  // plot boundaries. 11 903 fences in the home region — the most common way in
+  // the extract after roads and buildings, and every parcel bled into the next
+  // without them
+  || /^(fence|wall|retaining_wall|city_wall|guard_rail|jersey_barrier|handrail)$/.test(t.barrier ?? '')
+  || t.amenity === 'shelter'        // bus shelters mapped as an outline
   // transmission lines: every vertex of the way IS a tower (that is how they
   // are mapped), so the way geometry alone places pylons and strings wires
   || /^(line|minor_line)$/.test(t.power ?? '')
@@ -73,6 +78,14 @@ const wantRelation = (t) => !!t && (
   || YARD_LANDUSE.test(t.landuse ?? '')
 );
 
+// Everything a Czech street actually has standing on it. Each of these is a
+// node somebody surveyed to the metre, and every one of them was being thrown
+// away: a town with no benches, no bins, no recycling bells and no lamp posts
+// reads as a film set between takes.
+const FURNITURE_AMENITY = /^(bench|waste_basket|recycling|post_box|bicycle_parking|picnic_table|shelter|drinking_water)$/;
+const FURNITURE_HISTORIC = /^(wayside_cross|wayside_shrine|memorial|monument)$/;
+const BARRIER_NODE = /^(gate|lift_gate|swing_gate|wicket_gate|bollard|block|cycle_barrier)$/;
+
 const wantNode = (t) => !!t && (
   t.natural === 'tree' || t.highway === 'traffic_signals' || t.highway === 'bus_stop'
   || t.railway === 'station' || POI_AMENITY.test(t.amenity ?? '')
@@ -82,6 +95,12 @@ const wantNode = (t) => !!t && (
   || t.highway === 'give_way' || t.highway === 'stop'
   || t.traffic_sign !== undefined
   || t.highway === 'crossing'       // přechody — zebras on every mapped arm
+  || t.highway === 'street_lamp'    // 2 048 lamps in the home region alone
+  || FURNITURE_AMENITY.test(t.amenity ?? '')
+  || FURNITURE_HISTORIC.test(t.historic ?? '')
+  || t.tourism === 'artwork'        // statues on squares
+  || BARRIER_NODE.test(t.barrier ?? '')
+  || t.traffic_calming !== undefined // retardéry
 );
 
 // ---- tile writer -----------------------------------------------------------
