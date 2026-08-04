@@ -143,3 +143,42 @@ test('a green median cannot rise above the deck of the road it lies in', () => {
   assert.ok(inCorridor >= 4, `only ${inCorridor} median vertices landed in the corridor`);
   assert.equal(breaches, 0, `${breaches} of ${inCorridor} median vertices stand above the deck`);
 });
+
+test('a huge sliver polygon is ground down evenly, not one corner at a time', () => {
+  // A 5 ha meadow strip in Polabiny came out of earcut as a fan of slivers,
+  // one of them 287 m long. The tess budget (TESS_MAX) was spent depth-first:
+  // one corner refined to 6 m, the rest emitted exactly as earcut left it.
+  // drape() then lifted that sliver at its three corners only, and the chord
+  // between them cut through a rise in the ground — a leaning grass-green
+  // wall taller than the player, reported as "co ta zelená čára?". The work
+  // queue is a max-heap now: when the budget runs out, what remains is
+  // uniformly as fine as the budget could afford, never a monster.
+  //
+  // The fixture is that field, abstracted: a long jagged strip, far bigger
+  // than one budget can fully refine, whose earcut fan is all slivers.
+  const ring = [];
+  const L = 900, W = 130, TEETH = 6;
+  for (let i = 0; i <= TEETH; i++) ring.push([(L / TEETH) * i, i % 2 ? 25 : 0]);
+  for (let i = TEETH; i >= 0; i--) ring.push([(L / TEETH) * i, i % 2 ? W : W - 25]);
+  const g = chunkWith([], [{ t: 'grass', o: ring }]);
+  assert.ok(g, 'nothing built');
+  let maxEdge = 0, tris = 0;
+  for (const m of g.children) {
+    const pos = m.geometry?.attributes?.position, sf = m.geometry?.attributes?.surf;
+    if (!pos || !sf) continue;
+    for (let i = 0; i + 2 < pos.count; i += 3) {
+      if (sf.getX(i) !== SURF.grass) continue;
+      let ground = true;
+      for (let k = 0; k < 3; k++) if (Math.abs(pos.getY(i + k) - (GROUND + LAYER_Y.green)) > 1e-3) ground = false;
+      if (!ground) continue;
+      tris++;
+      for (let k = 0; k < 3; k++) {
+        const a = i + k, b = i + ((k + 1) % 3);
+        maxEdge = Math.max(maxEdge, Math.hypot(pos.getX(b) - pos.getX(a), pos.getZ(b) - pos.getZ(a)));
+      }
+    }
+  }
+  assert.ok(tris > 1000, `only ${tris} grass triangles — the fixture missed the fill path`);
+  assert.ok(maxEdge <= 40,
+    `a ${maxEdge.toFixed(0)} m edge survived tessellation — the budget died depth-first again`);
+});

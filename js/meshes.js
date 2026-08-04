@@ -565,35 +565,74 @@ const TESS_MAX = 6000;      // triangles per polygon — a runaway backstop
  * terrainTess() repeats one flat colour, carveOrtho() recomputes UVs from x/z —
  * and both are cheaper to derive from the finished positions than to interpolate
  * through the recursion.
+ *
+ * The work order is a max-heap on longest edge, not a stack. With a stack the
+ * TESS_MAX budget was spent depth-first: one corner of a big meadow ground to
+ * 6 m while the rest stayed exactly as earcut left it — and earcut leaves
+ * slivers hundreds of metres long, which drape() then lifts at their three
+ * corners only. One of those stood out of a Polabiny field as a leaning green
+ * wall taller than the player. Splitting the globally longest triangle first
+ * means an exhausted budget leaves the whole polygon uniformly as fine as the
+ * budget could afford, and the final worst edge is as short as it can be.
+ * When the budget is never hit the output set is identical either way —
+ * bisecting a triangle depends on nothing outside that triangle.
  */
 function tessTriangles(src, triCount, edge) {
-  const out = [];
-  const stack = [];
+  // heap entries: [d2 of longest ground-plane edge, its corner index k, ...tri]
+  // (y is a constant layer offset at this stage, so edges are measured in XZ)
+  const heap = [];
+  const measure = (t) => {
+    const d0 = (t[3] - t[0]) ** 2 + (t[5] - t[2]) ** 2;
+    const d1 = (t[6] - t[3]) ** 2 + (t[8] - t[5]) ** 2;
+    const d2 = (t[0] - t[6]) ** 2 + (t[2] - t[8]) ** 2;
+    const k = d0 >= d1 && d0 >= d2 ? 0 : d1 >= d2 ? 1 : 2;
+    t[9] = k === 0 ? d0 : k === 1 ? d1 : d2;
+    t[10] = k;
+    return t;
+  };
+  const push = (t) => {
+    let i = heap.length;
+    heap.push(t);
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heap[p][9] >= t[9]) break;
+      heap[i] = heap[p]; heap[p] = t; i = p;
+    }
+  };
+  const pop = () => {
+    const top = heap[0], last = heap.pop();
+    if (heap.length) {
+      heap[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let m = i;
+        if (l < heap.length && heap[l][9] > heap[m][9]) m = l;
+        if (r < heap.length && heap[r][9] > heap[m][9]) m = r;
+        if (m === i) break;
+        heap[i] = heap[m]; heap[m] = last; i = m;
+      }
+    }
+    return top;
+  };
   for (let i = 0; i < triCount; i++) {
     const o = i * 9;
-    stack.push([src[o], src[o + 1], src[o + 2], src[o + 3], src[o + 4],
-      src[o + 5], src[o + 6], src[o + 7], src[o + 8]]);
+    push(measure([src[o], src[o + 1], src[o + 2], src[o + 3], src[o + 4],
+      src[o + 5], src[o + 6], src[o + 7], src[o + 8], 0, 0]));
   }
   const e2 = edge * edge;
   let budget = TESS_MAX;
-  while (stack.length) {
-    const t = stack.pop();
-    // longest edge measured in the GROUND plane: y here is a constant layer
-    // offset (or zero), so it says nothing about how big the triangle is
-    const d = [0, 1, 2].map((k) => {
-      const a = k * 3, b = ((k + 1) % 3) * 3;
-      return (t[b] - t[a]) ** 2 + (t[b + 2] - t[a + 2]) ** 2;
-    });
-    const k = d[0] >= d[1] && d[0] >= d[2] ? 0 : d[1] >= d[2] ? 1 : 2;
-    if (d[k] <= e2 || budget <= 0) { out.push(t); continue; }
+  while (heap.length && heap[0][9] > e2 && budget > 0) {
     budget--;
+    const t = pop();
+    const k = t[10];
     const a = k * 3, b = ((k + 1) % 3) * 3, c = ((k + 2) % 3) * 3;
     const mx = (t[a] + t[b]) / 2, my = (t[a + 1] + t[b + 1]) / 2, mz = (t[a + 2] + t[b + 2]) / 2;
-    stack.push([t[a], t[a + 1], t[a + 2], mx, my, mz, t[c], t[c + 1], t[c + 2]]);
-    stack.push([mx, my, mz, t[b], t[b + 1], t[b + 2], t[c], t[c + 1], t[c + 2]]);
+    push(measure([t[a], t[a + 1], t[a + 2], mx, my, mz, t[c], t[c + 1], t[c + 2], 0, 0]));
+    push(measure([mx, my, mz, t[b], t[b + 1], t[b + 2], t[c], t[c + 1], t[c + 2], 0, 0]));
   }
-  const p = new Float32Array(out.length * 9);
-  for (let i = 0; i < out.length; i++) p.set(out[i], i * 9);
+  const p = new Float32Array(heap.length * 9);
+  for (let i = 0; i < heap.length; i++) p.set(heap[i].slice(0, 9), i * 9);
   return p;
 }
 
