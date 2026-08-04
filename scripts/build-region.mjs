@@ -424,6 +424,9 @@ function processRoads(els, owns) {
     const tb = turns(t['turn:lanes:backward']);
     if (tb) r.tb = tb;
     if (t.name) r.n = t.name;
+    // trolejbusy: the wires over the street are half of what makes Pardubice
+    // look like Pardubice, and OSM maps them per way
+    if (/^(yes|both)$/.test(t.trolley_wire ?? '')) r.tw = 1;
     out.push(r);
   }
   return out;
@@ -761,6 +764,8 @@ function processCrossings(els, owns) {
     if (seen.has(k)) continue;
     seen.add(k);
     const pt = [px(el.lon), pz(el.lat)];
+    // a refuge island in the middle — [x, z, 1] stays shape-compatible
+    if (el.tags['crossing:island'] === 'yes') pt.push(1);
     if (owns(pt)) out.push(pt);
   }
   return out;

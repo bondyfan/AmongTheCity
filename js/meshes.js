@@ -3049,8 +3049,12 @@ function zebraInto(sink, cr, cell, terrain) {
   const hw = (road.w ?? 6) / 2 - 0.25;
   const HB = 1.8;                               // half band length along the road
   const mark = sink.mark();
+  // a refuge island in the middle, where OSM says the crossing has one: the
+  // zebra then starts beyond it rather than painting stripes over a kerb
+  const island = cr.p[0].length > 2;
+  const iw = island ? 1.15 : 0;
   // bars 0.55 m wide with 0.5 m gaps, mirrored out from the centreline
-  for (let o = 0.2; o + 0.55 <= hw; o += 1.05) {
+  for (let o = 0.2 + iw; o + 0.55 <= hw; o += 1.05) {
     for (const side of [-1, 1]) {
       const c0 = o * side, c1 = (o + 0.55) * side;
       paintQuad(sink,
@@ -3133,6 +3137,103 @@ function wireSpan(sink, ax, az, bx, bz, minor, kV, terrain) {
       sink.quad(lx, ly + W, lz, cx, cy + W, cz, cx, cy - W, cz, lx, ly - W, lz, r, g, b);
       lx = cx; lz = cz; ly = cy;
     }
+  }
+  sink.fixFrom(mark);
+  if (island) islandInto(sink, x, z, ux, uz, terrain, y - LAYER_Y.marking + LAYER_Y.road);
+}
+
+// ---- trolejbusy: masts along the kerb, a pair of wires over each direction --
+// OSM tags the wire on the WAY (trolley_wire=yes), so the geometry is the road
+// centreline and the rest is Czech practice: contact wire 5.5 m up, two wires
+// 0.6 m apart per direction, masts every 32 m alternating kerbs with a span
+// bracket reaching over. Absolute heights (fixFrom), like every other fixture.
+const TW_H = 5.5, TW_GAP = 0.6, TW_STEP = 32;
+function trolleyInto(sink, f, terrain) {
+  if (!f.p || f.p.length < 2 || !terrain) return;
+  const mark = sink.mark();
+  sink.at(SURF.concrete);
+  _c.setHex(0x6f7378);
+  const mr = _c.r, mg = _c.g, mb = _c.b;
+  _c.setHex(0x2a2c30);
+  const wr = _c.r, wg = _c.g, wb = _c.b;
+  const half = (f.w ?? 7) / 2;
+  // the wire pairs ride either side of the centreline (one per direction);
+  // a narrow street carries a single pair down the middle
+  const offs = half > 4.5 ? [-half * 0.5, half * 0.5] : [0];
+  let carry = (f._id % 13) * 2;
+  for (let i = 0; i < f.p.length - 1; i++) {
+    const [ax, az] = f.p[i], [bx, bz] = f.p[i + 1];
+    let dx = bx - ax, dz = bz - az;
+    const L = Math.hypot(dx, dz);
+    if (L < 0.01) continue;
+    dx /= L; dz /= L;
+    const px = -dz, pz = dx;
+    // the wires themselves, one straight run per segment per direction
+    for (const o of offs) {
+      for (const w of [-TW_GAP / 2, TW_GAP / 2]) {
+        const c = o + w;
+        const x0w = ax + px * c, z0w = az + pz * c;
+        const x1w = bx + px * c, z1w = bz + pz * c;
+        const y0 = terrain.heightAt(x0w, z0w) + TW_H;
+        const y1 = terrain.heightAt(x1w, z1w) + TW_H;
+        // a thin double-sided ribbon reads as a wire from the street
+        sink.quad(x0w, y0 - 0.035, z0w, x1w, y1 - 0.035, z1w,
+          x1w, y1 + 0.035, z1w, x0w, y0 + 0.035, z0w, wr, wg, wb);
+        sink.quad(x0w, y0 + 0.035, z0w, x1w, y1 + 0.035, z1w,
+          x1w, y1 - 0.035, z1w, x0w, y0 - 0.035, z0w, wr, wg, wb);
+      }
+    }
+    // masts, this chunk only — the wires above are drawn from the way's home
+    for (let d = TW_STEP - carry; d < L; d += TW_STEP) {
+      const mx0 = ax + dx * d, mz0 = az + dz * d;
+      const side = ((f._id + Math.round(d / TW_STEP)) & 1) ? 1 : -1;
+      const mx = mx0 + px * side * (half + 0.8), mz = mz0 + pz * side * (half + 0.8);
+      const g = terrain.heightAt(mx, mz);
+      const top = g + TW_H + 0.9;
+      for (const [ox, oz] of [[px, pz], [dx, dz]]) {
+        for (const flip of [1, -1]) {
+          sink.quad(mx - ox * 0.09 * flip, g - 0.3, mz - oz * 0.09 * flip,
+            mx + ox * 0.09 * flip, g - 0.3, mz + oz * 0.09 * flip,
+            mx + ox * 0.07 * flip, top, mz + oz * 0.07 * flip,
+            mx - ox * 0.07 * flip, top, mz - oz * 0.07 * flip, mr, mg, mb);
+        }
+      }
+      // the bracket reaching over the carriageway to the far wire pair
+      const reach = half + 0.8 + (offs.length > 1 ? half * 0.5 : 0);
+      const ex = mx - px * side * reach, ez = mz - pz * side * reach;
+      const by = top - 0.25;
+      for (const flip of [1, -1]) {
+        sink.quad(mx, by - 0.06 * flip, mz, ex, by - 0.06 * flip, ez,
+          ex, by + 0.06 * flip, ez, mx, by + 0.06 * flip, mz, mr, mg, mb);
+      }
+    }
+    carry = (carry + L) % TW_STEP;
+  }
+  sink.fixFrom(mark);
+}
+
+// ---- refuge island: the kerbed slab a crossing splits around ---------------
+// OSM says crossing:island=yes on the node; the shape is Czech practice — a
+// 2 m wide, 5 m long paved slab on the centreline with a 12 cm kerb face.
+function islandInto(sink, x, z, ux, uz, terrain, deckY) {
+  const px2 = -uz, pz2 = ux;
+  const HL = 2.6, HW = 1.0, KERB = 0.12;
+  const top = deckY + KERB;
+  const mark = sink.mark();
+  sink.at(SURF.paving);
+  _c.setHex(0xa8a49c);
+  const r = _c.r, g = _c.g, b = _c.b;
+  const P = (a, c) => [x + ux * a + px2 * c, z + uz * a + pz2 * c];
+  const c0 = P(-HL, -HW), c1 = P(HL, -HW), c2 = P(HL, HW), c3 = P(-HL, HW);
+  paintQuad(sink, c0[0], top, c0[1], c1[0], top, c1[1],
+    c2[0], top, c2[1], c3[0], top, c3[1], r, g, b);
+  _c.setHex(0x8e8a83);
+  const kr = _c.r, kg = _c.g, kb = _c.b;
+  const ring = [c0, c1, c2, c3];
+  for (let i = 0; i < 4; i++) {
+    const a = ring[i], c = ring[(i + 1) % 4];
+    sink.quad(a[0], top, a[1], c[0], top, c[1], c[0], deckY - 0.02, c[1], a[0], deckY - 0.02, a[1], kr, kg, kb);
+    sink.quad(a[0], deckY - 0.02, a[1], c[0], deckY - 0.02, c[1], c[0], top, c[1], a[0], top, a[1], kr, kg, kb);
   }
   sink.fixFrom(mark);
 }
@@ -3804,6 +3905,10 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     }
     if (cell.crossings) for (const cr of cell.crossings) {
       if (cr._home === key) zebraInto(sink, cr, cell, mats.terrain);
+    }
+    // trolejové vedení, drawn WHOLE from the way's home chunk like its ribbon
+    for (const r of cell.roads) {
+      if (r.tw && r._home === key) trolleyInto(sink, r, mats.terrain);
     }
     // pylons + wires: towers on this chunk's vertices, spans owned by their
     // midpoint's chunk — same one-owner rule every linear feature uses
