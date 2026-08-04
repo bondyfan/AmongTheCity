@@ -30,9 +30,9 @@ const RAW_DIR = process.env.RAW_DIR || 'data/raw-region';  // overridable for dr
 const OSM_DIR = 'data/raw-osm';
 
 // ---- which elements the game wants (mirrors fetch-region.mjs' query) --------
-const GREEN_LANDUSE = /^(grass|forest|meadow|recreation_ground|cemetery|allotments|village_green|orchard|farmland)$/;
+const GREEN_LANDUSE = /^(grass|forest|meadow|recreation_ground|cemetery|allotments|village_green|orchard|farmland|flowerbed)$/;
 const GREEN_LEISURE = /^(park|garden|pitch|playground|golf_course|stadium)$/;
-const GREEN_NATURAL = /^(wood|scrub|grassland)$/;
+const GREEN_NATURAL = /^(wood|scrub|grassland|shrubbery)$/;
 const RAILWAY = /^(rail|tram|light_rail)$/;
 const WATERWAY = /^(river|stream|canal)$/;
 const POI_AMENITY = /^(fuel|hospital|police|fire_station)$/;
@@ -58,6 +58,7 @@ const wantWay = (t) => !!t && (
   || (t.amenity === 'parking' && !/underground|multi-storey/.test(t.parking ?? ''))
   || t.place === 'square'
   || t.natural === 'tree_row'
+  || t.barrier === 'hedge'          // a clipped hedge is a green wall, not a fence
   // transmission lines: every vertex of the way IS a tower (that is how they
   // are mapped), so the way geometry alone places pylons and strings wires
   || /^(line|minor_line)$/.test(t.power ?? '')

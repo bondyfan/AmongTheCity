@@ -69,7 +69,11 @@ export const CLOCK = {
 // ---- palette (low-poly flat look, borrowed from the Woods art direction) ----
 export const COLORS = {
   groundBase: 0x8f9484,      // suburb gray-green base plane
-  green: { park: 0x6fa05a, wood: 0x4e7a44, grass: 0x7fa863, pitch: 0x6f9e75, cemetery: 0x7a9468 },
+  // `bush` is ornamental planting — a clipped hedge, a shrubbery, the flower
+  // bed in the middle of a roundabout. Deeper and less yellow than a mown
+  // verge, because that is the difference you actually see from the road.
+  green: { park: 0x6fa05a, wood: 0x4e7a44, grass: 0x7fa863, pitch: 0x6f9e75,
+    cemetery: 0x7a9468, bush: 0x4f7340 },
   // airport concrete is paler and greyer than street asphalt — it is concrete,
   // not tarmac, and that contrast is most of what makes an airfield read as one
   // `platform` is the ground in front of a station — bus stands, the forecourt,

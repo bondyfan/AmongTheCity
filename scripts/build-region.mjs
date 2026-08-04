@@ -530,13 +530,19 @@ const YARD_LANDUSE = /^(railway|industrial|depot|port)$/;
 const ZONE_LANDUSE = /^(railway|industrial|depot|port|quarry|commercial|retail|construction|brownfield|landfill)$/;
 const isZone = (t) => ZONE_LANDUSE.test(t.landuse ?? '');
 const zoneKind = (t) => (/^(railway|industrial|depot|port|quarry)$/.test(t.landuse ?? '') ? 'works' : 'urban');
-const GREEN_LANDUSE = /^(grass|forest|meadow|recreation_ground|cemetery|allotments|village_green|orchard|farmland)$/;
+const GREEN_LANDUSE = /^(grass|forest|meadow|recreation_ground|cemetery|allotments|village_green|orchard|farmland|flowerbed)$/;
 const GREEN_LEISURE = /^(park|garden|pitch|playground|golf_course|stadium)$/;
-const GREEN_NATURAL = /^(wood|scrub|grassland)$/;
+const GREEN_NATURAL = /^(wood|scrub|grassland|shrubbery)$/;
 const isGreen = (t) => GREEN_LANDUSE.test(t.landuse ?? '')
-  || GREEN_LEISURE.test(t.leisure ?? '') || GREEN_NATURAL.test(t.natural ?? '');
+  || GREEN_LEISURE.test(t.leisure ?? '') || GREEN_NATURAL.test(t.natural ?? '')
+  || t.barrier === 'hedge';
+// `bush` is the ornamental class: a clipped hedge, a shrubbery, a flower bed —
+// the greenery that fills a traffic island and the middle of a roundabout. It
+// renders as low shrubs rather than lawn, which is what tells a kept planting
+// apart from a verge somebody mows.
 const greenKind = (t) =>
-  t.leisure === 'park' || t.leisure === 'garden' ? 'park'
+  t.barrier === 'hedge' || t.natural === 'shrubbery' || t.landuse === 'flowerbed' ? 'bush'
+  : t.leisure === 'park' || t.leisure === 'garden' ? 'park'
   : t.landuse === 'forest' || t.natural === 'wood' ? 'wood'
   : t.leisure === 'pitch' || t.leisure === 'playground' || t.leisure === 'stadium' ? 'pitch'
   : t.landuse === 'cemetery' ? 'cemetery'

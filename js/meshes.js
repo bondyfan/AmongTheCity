@@ -3559,6 +3559,45 @@ function scatterForest(f, x0, z0, x1, z1, waters, out) {
   }
 }
 
+// Ornamental planting — a shrubbery, a clipped hedge, the bed in the middle of
+// a roundabout. Same machinery as the forest, at 2.4 m spacing and knee-to-
+// shoulder height, so an island reads as PLANTED rather than as mown verge.
+const BUSH_STEP = 2.4, BUSH_CAP = 220;
+function scatterBushes(f, x0, z0, x1, z1, waters, out) {
+  if (f.t !== 'bush' || !f.o || f.o.length < 3) return;
+  const ring = clipRingToRect(f.o, x0, z0, x1, z1);
+  if (!ring) return;
+  const holes = [];
+  for (const h of f.i ?? []) {
+    if (h.length < 3) continue;
+    const ch = clipRingToRect(h, x0, z0, x1, z1);
+    if (ch) holes.push(ch);
+  }
+  let ax = 1e9, bx = -1e9, az = 1e9, bz = -1e9;
+  for (const [x, z] of ring) {
+    if (x < ax) ax = x; if (x > bx) bx = x;
+    if (z < az) az = z; if (z > bz) bz = z;
+  }
+  let n = 0;
+  const gi0 = Math.floor(ax / BUSH_STEP), gj0 = Math.floor(az / BUSH_STEP);
+  for (let gi = gi0; gi * BUSH_STEP < bx; gi++) {
+    for (let gj = gj0; gj * BUSH_STEP < bz; gj++) {
+      if (n >= BUSH_CAP) return;
+      const seed = forestSeed(f._id, gi, gj);
+      const x = (gi + 0.5 + 0.34 * (rnd(seed, 1) - 0.5)) * BUSH_STEP;
+      const z = (gj + 0.5 + 0.34 * (rnd(seed, 2) - 0.5)) * BUSH_STEP;
+      if (x < x0 || x >= x1 || z < z0 || z >= z1) continue;
+      if (!pointInPolygon(x, z, ring)) continue;
+      let ok = true;
+      for (const h of holes) if (pointInPolygon(x, z, h)) { ok = false; break; }
+      if (ok && waters.length && inWater(x, z, waters)) ok = false;
+      if (!ok) continue;
+      out.push({ x, z, seed, forest: false, bush: true, h: 0.9 + rnd(seed, 3) * 0.8 });
+      n++;
+    }
+  }
+}
+
 // ---- the chunk builder ----
 // groundOnly builds the FAR tier: nothing but the aerial photo on a quad.
 // From a helicopter the ortho already shows the roads, roofs and fields, so a
@@ -4020,7 +4059,10 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   if (scatter) {
     for (const t of cell.trees) if (t._home === key)
       trees.push({ x: t.p[0][0], z: t.p[0][1], seed: t._id, forest: false });
-    for (const f of cell.green) scatterForest(f, x0, z0, x1, z1, wet, trees);
+    for (const f of cell.green) {
+      scatterForest(f, x0, z0, x1, z1, wet, trees);
+      scatterBushes(f, x0, z0, x1, z1, wet, trees);
+    }
     scatterCanopy(cell, x0, z0, x1, z1, wet, mats.canopy, trees);
   }
   if (trees.length) {
@@ -4036,9 +4078,14 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // model's own reading, so a 25 m spruce stand comes out 25 m and a 4 m
       // hedgerow comes out 4, instead of both being a random draw. The template
       // is TREE_H metres tall at scale 1, so the scale is just the ratio.
-      const s = t.h ? Math.max(0.45, Math.min(2.4, t.h / TREE_H))
-        : t.forest ? 1.05 + rnd(id, 4) * 0.70 : 0.70 + rnd(id, 4) * 0.42;
-      const yk = t.h ? 1 : t.forest ? 1.0 + rnd(id, 6) * 0.45 : 0.88 + rnd(id, 6) * 0.30;
+      // the 0.45 floor keeps a MEASURED tree from collapsing to a shrub when
+      // the surface model reads it short; a bush is a shrub on purpose
+      const s = t.bush ? t.h / TREE_H
+        : t.h ? Math.max(0.45, Math.min(2.4, t.h / TREE_H))
+          : t.forest ? 1.05 + rnd(id, 4) * 0.70 : 0.70 + rnd(id, 4) * 0.42;
+      // …and it is WIDER than it is tall, which is what makes it read as a
+      // bush rather than a bonsai tree
+      const yk = t.bush ? 0.8 : t.h ? 1 : t.forest ? 1.0 + rnd(id, 6) * 0.45 : 0.88 + rnd(id, 6) * 0.30;
       _v.set(t.x, mats.terrain ? mats.terrain.heightAt(t.x, t.z) : 0, t.z);
       _q.setFromAxisAngle(_up, rnd(id, 5) * Math.PI * 2);
       _s.set(s, s * yk, s);
