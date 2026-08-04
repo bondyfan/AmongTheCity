@@ -167,6 +167,7 @@ let camDist = CAM_DIST_0;
 const camSmooth = new THREE.Vector3();
 let _camSpeedK = 0;   // eased |speed|/vmax for boom+FOV — see updateCamera
 let _camPullT = 1;    // eased occlusion boom factor (1 = full length)
+const _camPrevT = new THREE.Vector3();   // last frame's target, for the rigid carry
 let camInit = false;
 const BASE_FOV = 55;
 
@@ -473,6 +474,18 @@ function updateCamera(dt) {
   const groundY = world.heightAt(px, pz, py) + 0.5;
   const want = new THREE.Vector3(px, indoors ? py : Math.max(py, groundY), pz);
   if (!camInit) { camSmooth.copy(want); camInit = true; }
+  // The boom is RIGID to the target's own translation: carry the smoothed
+  // camera by exactly how far the target moved this frame, and let the lerp
+  // below handle only yaw, pitch and boom-length changes. Without this the
+  // lerp trailed the car by speed/9 (~4 m flat out), and every build hitch
+  // paid that lag back in one step — the "zoomne k autu a zase odzoomne"
+  // pump. A jump over ~40 m is a teleport: snap, don't fly across the map.
+  else {
+    const mdx = tx - _camPrevT.x, mdy = ty - _camPrevT.y, mdz = tz - _camPrevT.z;
+    if (mdx * mdx + mdy * mdy + mdz * mdz > 40 * 40) camSmooth.copy(want);
+    else camSmooth.x += mdx, camSmooth.y += mdy, camSmooth.z += mdz;
+  }
+  _camPrevT.set(tx, ty, tz);
   // dt is CAPPED for the smoothing: a 150 ms hitch frame used to saturate the
   // lerp and snap the camera the whole trailing distance in one step — the
   // other half of the zoom-pop. The camera pays a hitch back over the next
@@ -1374,6 +1387,9 @@ function updateHorizon(dt) {
   // of a 700 m/s aircraft is a hole in the world.
   world.chunksPerFrame = game.jet ? 16 : alt > 20 ? 8 : 2;
   world.buildBudgetMs = game.jet ? 9 : 7;
+  // in the air throughput wins over smoothness — the world must exist under a
+  // 200 m/s jet; on the ground the cooldown keeps the hitches apart
+  if (game.mode === 'play') world.buildCooldownMs = game.jet || alt > 20 ? 0 : 130;
   // The aerial photo picks its resolution from distance to the same LOOK-AHEAD
   // point the chunk streamer uses, so the full-detail ring sits over the ground
   // you are about to cross rather than the ground behind you.
@@ -2226,6 +2242,9 @@ async function boot() {
   });
 
   game.mode = 'play';
+  // builds pace themselves from here on — during boot the queue must drain
+  // flat out, in play a 130 ms gap between bites is what "smooth" feels like
+  world.buildCooldownMs = 130;
   $id('hud').classList.remove('hidden');
   const ov = $id('enter-overlay');
   ov.classList.add('fade');

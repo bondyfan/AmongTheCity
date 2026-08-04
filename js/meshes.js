@@ -3802,6 +3802,13 @@ export const chunkBase = (cx, cz) => [cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK
 export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   const groundOnly = lod === true || lod === 'ground';
   const shell = lod === 'shell';
+  // 'roads': ribbons and nothing else. A 3 km rural way draws WHOLE from the
+  // chunk holding its first vertex, and that chunk can be a kilometre past
+  // the streaming ring — so the road you are driving on simply was not there
+  // ("nenačítá se vozovka"). The streamer builds those far homes at this
+  // tier: roads, rails, fences, junction pads — no ground, no buildings, no
+  // props, nothing the real cell will draw again when its turn comes.
+  const roadsOnly = lod === 'roads';
   // Terrain.heightAt raises `missed` whenever it is asked about ground it does
   // not have. Clearing it here and reading it back at the end is how a chunk
   // learns that it was built on a guess — which matters because a feature is
@@ -3938,7 +3945,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       }
     }
   }
-  if (!flooded) {
+  if (!flooded && !roadsOnly) {
     orthoGround = mats.ortho?.orthoGroundMesh?.(cx, cz) ?? null;
     if (orthoGround) {
       // carving replaces the unit quad with a world-space ShapeGeometry and
@@ -3983,8 +3990,8 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
 
   // -- green/paved fills: only on the flat ground — the photo already shows
   // every lawn and parking lot, painting solid color on top would undo it --
-  const scatter = mats.trees !== false && !shell;
-  if (!orthoGround && !shell) {
+  const scatter = mats.trees !== false && !shell && !roadsOnly;
+  if (!orthoGround && !shell && !roadsOnly) {
     // A wood keeps its fill (the trees don't close ranks, and a bare base plane
     // between the trunks would be worse) but it goes to forest-floor tone —
     // meadow green glowing through a canopy is exactly what made these read as
@@ -4081,19 +4088,19 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // before sink.geo() below turns it into geometry. The first version
     // appended them after that line: thirty zebra bars per chunk, emitted
     // into a bucket nobody ever poured out again.
-    if (cell.signs) for (const sg3 of cell.signs) {
+    if (!roadsOnly && cell.signs) for (const sg3 of cell.signs) {
       if (sg3._home === key) signPost(sink, sg3, cell);
     }
-    if (cell.crossings) for (const cr of cell.crossings) {
+    if (!roadsOnly && cell.crossings) for (const cr of cell.crossings) {
       if (cr._home === key) zebraInto(sink, cr, cell, mats.terrain);
     }
     // trolejové vedení, drawn WHOLE from the way's home chunk like its ribbon
     for (const r of cell.roads) {
-      if (r.tw && r._home === key) trolleyInto(sink, r, mats.terrain);
+      if (r.tw && r._home === key && !roadsOnly) trolleyInto(sink, r, mats.terrain);
     }
     // pylons + wires: towers on this chunk's vertices, spans owned by their
     // midpoint's chunk — same one-owner rule every linear feature uses
-    if (cell.power && mats.terrain) for (const pw of cell.power) {
+    if (!roadsOnly && cell.power && mats.terrain) for (const pw of cell.power) {
       for (let i = 0; i < pw.p.length; i++) {
         const [vx, vz] = pw.p[i];
         if (chunkKey(vx, vz) === key) pylonInto(sink, vx, vz, !!pw.m, pw.v ?? 0, mats.terrain);
@@ -4106,12 +4113,12 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     }
     // zastávky: the poi list is small and unbucketized — a linear scan per
     // chunk build is cheaper than teaching the index a fourth node layer
-    if (city.pois) for (const poi of city.pois) {
+    if (!roadsOnly && city.pois) for (const poi of city.pois) {
       if (poi.t === 'bus_stop' && chunkKey(poi.p[0], poi.p[1]) === key)
         busStopInto(sink, poi.p[0], poi.p[1], cell);
     }
     // …and everything else a Czech street has standing on it (js/furniture.js)
-    furnitureInto(sink, cell, key, mats.terrain,
+    if (!roadsOnly) furnitureInto(sink, cell, key, mats.terrain,
       (hex) => { _c.setHex(hex); return [_c.r, _c.g, _c.b]; },
       (x, z, i) => rnd(Math.abs(Math.round(x * 7 + z * 13)) + i * 9176, i), chunkKey);
     // fences, walls, noise barriers — the lines that divide one plot from the
@@ -4119,7 +4126,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     if (cell.barriers) for (const b of cell.barriers) {
       if (b._home === key) barrierInto(sink, b, mats.terrain);
     }
-    if (cell.calming) for (const cm of cell.calming) {
+    if (!roadsOnly && cell.calming) for (const cm of cell.calming) {
       if (cm._home === key) bumpInto(sink, cm, cell, mats.terrain);
     }
     const cls2 = clustersIn(key);
@@ -4150,12 +4157,12 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // -- buildings: facade walls or v1 extrudes, one casting mesh either way --
   // Shells get the plain extrude: a window atlas costs a texture bind and a
   // second material for detail nobody can resolve from 700 m up.
-  const bm = buildBuildingsMesh(city, cx, cz,
+  const bm = roadsOnly ? null : buildBuildingsMesh(city, cx, cz,
     shell ? { ...mats, facades: false, shellLod: true } : mats);
   if (bm) group.add(bm);
 
   // -- street lamps along the wider drivable roads --
-  if (mats.lamps !== false && !shell) {
+  if (mats.lamps !== false && !shell && !roadsOnly) {
     const spots = [];
     for (const r of cell.roads) {
       if (!r.d || r.w < LAMP_MIN_W || r._home !== key) continue;

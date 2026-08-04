@@ -237,3 +237,38 @@ test('a chunk carrying a power line builds without throwing', () => {
   // a 110 kV pylon is 32 m, so the line has to reach well above the ground
   assert.ok(top > GROUND + 20, `nothing tall was drawn (top ${(top - GROUND).toFixed(1)} m)`);
 });
+
+test("the 'roads' tier draws ribbons and nothing a real cell will draw again", () => {
+  // A 3 km rural way draws WHOLE from its home chunk, which can sit a
+  // kilometre past the streaming ring — the road under the car simply was
+  // not built ("nenačítá se vozovka" at Pohránov). The streamer overlays
+  // those far homes at this tier: it must produce the carriageway, and it
+  // must NOT produce buildings, props or ground the real cell owns.
+  const road = { _id: 1, t: 'residential', w: 6, v: 30, d: 1, _home: '0,0',
+    p: [[5, 60], [115, 60]] };
+  const bld = { _id: 2, o: [[30, 20], [50, 20], [50, 40], [30, 40]], h: 6, _home: '0,0' };
+  const props = [{ p: [[80, 30]], k: 'bench', _id: 3, _home: '0,0' }];
+  const cell = { buildings: [bld], roads: [road], rails: [], water: [], green: [],
+    paved: [], trees: [], signs: [], crossings: [], furniture: props, calming: [],
+    barriers: [{ _id: 4, k: 'fence', p: [[10, 100], [110, 100]], _home: '0,0' }] };
+  const city = { chunkIndex: new Map([['0,0', cell]]), tile: 4800, pois: [] };
+  const mats = makeMaterials();
+  mats.terrain = { res: 20, ready: () => true, heightAt: () => GROUND, missed: false };
+  mats.trees = false; mats.facades = false; mats.ortho = null;
+  const g = buildChunkMeshes(city, 0, 0, mats, 'roads');
+  assert.ok(g, 'nothing built');
+  let asphalt = 0, fence = 0, tall = 0;
+  for (const m of g.children) {
+    const pos = m.geometry?.attributes?.position, sf = m.geometry?.attributes?.surf;
+    if (!pos || m.isInstancedMesh) continue;
+    for (let i = 0; i < pos.count; i++) {
+      if (sf?.getX(i) === SURF.asphalt) asphalt++;
+      const y = pos.getY(i) - GROUND;
+      if (y > 1.5 && y < 2.1) fence++;              // the 1.7 m fence top
+      if (y > 3) tall++;                            // a building would reach 6 m
+    }
+  }
+  assert.ok(asphalt > 10, `no carriageway in the roads tier (${asphalt} asphalt verts)`);
+  assert.ok(fence > 0, 'the fence should ride along — it is a long linear way too');
+  assert.equal(tall, 0, `${tall} verts above 3 m — a building or prop leaked into the roads tier`);
+});

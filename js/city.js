@@ -338,8 +338,28 @@ export class CityWorld {
       // far less reach than the ground — and it is four times the samples.
       this.canopy.ensure(focus.x, focus.z, 2000);
       this.ground.ensure(focus.x, focus.z, 2000);
+      this._sweepFarRibbons(focus);
     }
-    const fx = Math.floor(focus.x / CHUNK), fz = Math.floor(focus.z / CHUNK);
+    // The ring centre leads a moving player by ~2.2 s of travel (capped at
+    // two chunks), so the cells ahead build while they are still far — the
+    // pop-in happens out in the fog and the hitch happens before you are
+    // close enough to care. Velocity is eased and a teleport resets it.
+    {
+      const dt2 = Math.max(1e-3, dt);
+      const vx = (focus.x - (this._lfx ?? focus.x)) / dt2;
+      const vz = (focus.z - (this._lfz ?? focus.z)) / dt2;
+      this._lfx = focus.x; this._lfz = focus.z;
+      if (Math.hypot(vx, vz) > 90) { this._fvx = 0; this._fvz = 0; }
+      else {
+        this._fvx = (this._fvx ?? 0) + (vx - (this._fvx ?? 0)) * 0.12;
+        this._fvz = (this._fvz ?? 0) + (vz - (this._fvz ?? 0)) * 0.12;
+      }
+    }
+    const LOOK = 2.2, LOOK_MAX = 2 * CHUNK;
+    let lx = (this._fvx ?? 0) * LOOK, lz = (this._fvz ?? 0) * LOOK;
+    const ll = Math.hypot(lx, lz);
+    if (ll > LOOK_MAX) { lx *= LOOK_MAX / ll; lz *= LOOK_MAX / ll; }
+    const fx = Math.floor((focus.x + lx) / CHUNK), fz = Math.floor((focus.z + lz) / CHUNK);
     const outer = this.viewChunks + this.shellChunks + this.farChunks;
     // enqueue missing cells in view, nearest first. Cells inside viewChunks
     // want full detail; the ring beyond wants the cheap ground-only tier, and
@@ -374,7 +394,15 @@ export class CityWorld {
     // for the most cells per second. chunksPerFrame stays as the hard cap so a
     // pathologically cheap area cannot spin the loop forever.
     const budget = performance.now() + this.buildBudgetMs;
-    for (let i = 0; i < this.chunksPerFrame && this.queue.length; i++) {
+    // A chunk build is ATOMIC — 30 to 150 ms of main thread in one bite — so
+    // the guarantee of one build per frame meant single-digit fps for as long
+    // as the queue had anything in it, which while driving is always. The
+    // cooldown spaces the bites out: one hitch every ~130 ms reads as a
+    // living world streaming in, the same hitches back to back read as
+    // "seká se to". Zero during boot and in flight, where throughput wins.
+    const coolOff = this.buildCooldownMs
+      && performance.now() - (this._lastBuildAt ?? 0) < this.buildCooldownMs;
+    for (let i = 0; !coolOff && i < this.chunksPerFrame && this.queue.length; i++) {
       // always build at least one — otherwise a frame that arrived late never
       // makes progress and the world stops streaming altogether
       if (i > 0 && performance.now() > budget) break;
@@ -391,12 +419,23 @@ export class CityWorld {
       if (group) this.scene.add(group);
       this.built.set(key, group ?? null);
       this._detail.set(key, lod);
+      // the real cell now draws its own ribbons — the far overlay for this
+      // home must go NOW, not at the next sweep, or the two z-fight
+      if (lod === 'full') {
+        const far = this._farRibbons?.get(key);
+        if (far) {
+          this.scene.remove(far);
+          far.traverse((o) => o.geometry?.dispose?.());
+          this._farRibbons.delete(key);
+        }
+      }
       this._px.set(key, this.mats.ortho?.tierOf?.(cx, cz));
       // The centre having ground is necessary but not sufficient: buildChunkMeshes
       // reports whether ANY vertex it placed was sampled against a height map
       // that had not arrived. Either way the chunk is a guess and must rebuild.
       this._hadTerrain.set(key, hadTerrain && !group?.userData.guessedGround);
       this._missBy.set(key, group?.userData.missTiles ?? null);
+      this._lastBuildAt = performance.now();
     }
     // drop cells far behind us (hysteresis +2 so the edge doesn't flicker)
     for (const [key, group] of this.built) {
@@ -453,6 +492,53 @@ export class CityWorld {
     // and waiting for that silence held the overlay at 99 % for minutes
     const { built, total } = this.bootProgress(pos);
     return built >= total && this.ready(pos);
+  }
+
+  // ---- far ribbons: the road you are ON must exist, wherever its home is --
+  // A way draws WHOLE from the chunk of its first vertex, and a 3 km rural
+  // road's home is routinely a kilometre past the streaming ring — so the
+  // carriageway under the car simply was not built until you drove most of
+  // the way along it. Once a second this sweep looks at every view-ring cell,
+  // finds linear features whose home cell is neither built nor already
+  // overlaid, and builds that home at the 'roads' tier: ribbons only, a few
+  // milliseconds each. The overlay retires when the real cell reaches full
+  // detail (which draws the same ribbons) or when nothing in view needs it.
+  _sweepFarRibbons(focus) {
+    const fx = Math.floor(focus.x / CHUNK), fz = Math.floor(focus.z / CHUNK);
+    this._farRibbons ??= new Map();          // homeKey -> group
+    const needed = new Set();
+    for (let dx = -this.viewChunks; dx <= this.viewChunks; dx++) {
+      for (let dz = -this.viewChunks; dz <= this.viewChunks; dz++) {
+        const cell = this.city.chunkIndex.get((fx + dx) + ',' + (fz + dz));
+        if (!cell) continue;
+        for (const list of [cell.roads, cell.rails, cell.barriers]) {
+          for (const f of list ?? []) {
+            const hk = f._home;
+            if (hk && this._detail.get(hk) !== 'full') needed.add(hk);
+          }
+        }
+      }
+    }
+    // build at most two per pass — a pass runs at 1 Hz, and a rural ribbon
+    // build is milliseconds, so this never becomes the stutter it is curing
+    let builds = 0;
+    for (const hk of needed) {
+      if (this._farRibbons.has(hk) || builds >= 2) continue;
+      const [cx, cz] = hk.split(',').map(Number);
+      const group = buildChunkMeshes(this.city, cx, cz, this.mats, 'roads');
+      this._farRibbons.set(hk, group ?? null);
+      if (group) this.scene.add(group);
+      builds++;
+    }
+    // retire what nothing needs any more — or what the real chunk now draws
+    for (const [hk, group] of this._farRibbons) {
+      if (needed.has(hk) && this._detail.get(hk) !== 'full') continue;
+      if (group) {
+        this.scene.remove(group);
+        group.traverse((o) => o.geometry?.dispose?.());
+      }
+      this._farRibbons.delete(hk);
+    }
   }
 
   // built / wanted counts over the whole streaming window, for the boot label
