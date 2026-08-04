@@ -383,6 +383,13 @@ function processRoads(els, owns) {
       // and dirt half the time, a `service` road behind a block is often sett,
       // and guessing from the class gets both wrong — see SURFACE above.
       s: surfaceOf(t) ?? undefined };
+    // The POSTED limit beats the class guess. 15 351 ways in the home region
+    // carry maxspeed and the builder was throwing every one away, so the 30
+    // zones in the centre, the 70 on the ring and the 90 on regional roads all
+    // drove at a number invented from the highway class.
+    const ms = parseInt(t.maxspeed, 10);
+    if (ms > 0 && ms <= 130) r.v = ms;
+    else if (/^(CZ:)?(living_street|walk)$/.test(t.maxspeed ?? '')) r.v = 20;
     const w = parseFloat(t.width);
     // a runway's own `width` tag is 45–60 m, well past the 30 m road sanity cap
     if (w > 1 && w < (t.aeroway ? 90 : 30)) r.w = +w.toFixed(1);
@@ -503,7 +510,8 @@ function processAreas(els, select, keep, owns) {
     if (el.type === 'way' && el.geometry) {
       const o = ring(el.geometry);
       if (closed(o) && Math.abs(area(o.slice(0, -1))) > 25 && owns(o[0]))
-        out.push({ o: simplifyRing(o.slice(0, -1), eps), t: kind, s: surfaceOf(t) ?? undefined });
+        out.push({ o: simplifyRing(o.slice(0, -1), eps), t: kind, s: surfaceOf(t) ?? undefined,
+          sp: SPORTS.test(t.sport ?? '') ? t.sport : undefined });
     } else if (el.type === 'relation') {
       for (const poly of assembleRelation(el))
         if (Math.abs(area(poly.o)) > 25 && owns(poly.o[0]))
@@ -540,6 +548,10 @@ const isGreen = (t) => GREEN_LANDUSE.test(t.landuse ?? '')
 // the greenery that fills a traffic island and the middle of a roundabout. It
 // renders as low shrubs rather than lawn, which is what tells a kept planting
 // apart from a verge somebody mows.
+// what a pitch is FOR — every one of the 1 996 pitches renders as the same
+// green rectangle today, and the tag that tells tennis from football has been
+// sitting in the raw tiles the whole time
+const SPORTS = /^(tennis|soccer|football|basketball|volleyball|beachvolleyball|athletics|handball|hockey|multi)$/;
 const greenKind = (t) =>
   t.barrier === 'hedge' || t.natural === 'shrubbery' || t.landuse === 'flowerbed' ? 'bush'
   : t.leisure === 'park' || t.leisure === 'garden' ? 'park'
