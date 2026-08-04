@@ -195,11 +195,14 @@ export function initOrtho(terrain = null) {
     // north again. North meets north with NO extra flip; the windowed v just
     // counts lz rows DOWN from 1: v ∈ [1−(lz+1)/S, 1−lz/S].
     const lx = cx - sx * S, lz = cz - sz * S;
-    // Six segments a side, because the terrain samples are 20 m apart and a
-    // chunk is 120 m: every vertex of this quad lands exactly on a height
-    // sample, so the photo lies on the ground rather than near it, and two
-    // neighbouring photos share their edge vertices and cannot crack apart.
-    const SEG = 6;
+    // Thirty segments a side — 4 m, the same pitch the flat ground draws at.
+    // Six used to be enough when the height field was faceted at its 20 m
+    // samples, but heightAt is C1-smooth now AND the photo must dive under
+    // levelled roads (meshes.js clamps it beneath every corridor): at 20 m a
+    // whole cutting fits between two vertices and the photo's grass lay ON
+    // the carriageway. 30 divides by 6, so every old sample point is still a
+    // vertex, and neighbouring photos still share their edge lattice exactly.
+    const SEG = 30;
     const geo = new THREE.PlaneGeometry(CHUNK, CHUNK, SEG, SEG);
     geo.rotateX(-Math.PI / 2);             // face up; local +y → world −z (north)
     const uv = geo.attributes.uv;

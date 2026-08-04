@@ -831,15 +831,17 @@ function clipSeg(ax, az, bx, bz, x0, z0, x1, z1) {
 // already, and under a bridge the deck is metres up, where min() changes
 // nothing.
 const _cl = { x: 0, z: 0, t: 0 };      // distPointToSegment's reusable answer
-function clampUnderRoads(geo, drv, terrain) {
+function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
   if (!geo || !drv?.length || !terrain) return geo;
   const a = geo.attributes.position.array;
   // corridors that cannot touch this geometry are dropped ONCE, not per
   // vertex, and the per-segment test is squared distance with no allocation —
   // this runs for every fill and every ground quad of every chunk build.
+  // offX/offZ translate a LOCAL-frame geometry (the uncarved photo quad,
+  // built around its own centre) into world space for the tests.
   let gx0 = 1e9, gz0 = 1e9, gx1 = -1e9, gz1 = -1e9;
   for (let i = 0; i < a.length; i += 3) {
-    const x = a[i], z = a[i + 2];
+    const x = a[i] + offX, z = a[i + 2] + offZ;
     if (x < gx0) gx0 = x; if (x > gx1) gx1 = x;
     if (z < gz0) gz0 = z; if (z > gz1) gz1 = z;
   }
@@ -849,7 +851,7 @@ function clampUnderRoads(geo, drv, terrain) {
   });
   if (!use.length) return geo;
   for (let i = 0; i < a.length; i += 3) {
-    const x = a[i], z = a[i + 2];
+    const x = a[i] + offX, z = a[i + 2] + offZ;
     for (const { r, bb, hw, lay, flare } of use) {
       const reach = hw + (flare ?? 0);
       if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
@@ -3609,6 +3611,34 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // otherwise — both carved with the water holes; a fully flooded cell needs
   // no ground at all (the river surface and its banks are the geometry) --
   let orthoGround = null;
+  // the road/rail corridors the ground must dive under — used by BOTH ground
+  // kinds. The photo used to skip this and lay its grass over every cutting:
+  // "Proč je někde terén/tráva přes vozovku???" was the aerial photograph,
+  // draped on raw terrain that arches back over a levelled deck.
+  const corr = [];
+  if (cell && !shell && mats.terrain) {
+    // gathered from the 3×3 neighbourhood, not this cell alone: a corridor
+    // reaches ~11 m past its road's bbox (kerb band + flare), so a way whose
+    // bbox stops just across the border still governs ground on THIS side —
+    // missing it left 8 cm of photo grass on the lane at chunk seams
+    const seen = new Set();
+    for (let dx2 = -1; dx2 <= 1; dx2++) for (let dz2 = -1; dz2 <= 1; dz2++) {
+      const c2 = dx2 === 0 && dz2 === 0 ? cell
+        : city.chunkIndex.get((cx + dx2) + ',' + (cz + dz2));
+      if (!c2) continue;
+      for (const r of c2.roads) {
+        if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
+        seen.add(r);
+        corr.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 2.9, flare: 5,
+          lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road });
+      }
+      for (const r of c2.rails) {
+        if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
+        seen.add(r);
+        corr.push({ r, bb: bboxOfLine(r), hw: 2.2 + 2.9, flare: 5, lay: LAYER_Y.rail });
+      }
+    }
+  }
   if (!flooded) {
     orthoGround = mats.ortho?.orthoGroundMesh?.(cx, cz) ?? null;
     if (orthoGround) {
@@ -3616,6 +3646,14 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // zeroes .position, so only the UNcarved tile is still local
       if (holes.length) carveOrtho(orthoGround, x0, z0, x1, z1, holes, mats.terrain);
       else orthoGround.userData.localGeom = true;
+      if (corr.length && mats.terrain) {
+        const g2 = orthoGround.geometry;
+        clampUnderRoads(g2, corr, mats.terrain,
+          orthoGround.userData.localGeom ? orthoGround.position.x : 0,
+          orthoGround.userData.localGeom ? orthoGround.position.z : 0);
+        g2.attributes.position.needsUpdate = true;
+        g2.computeVertexNormals();
+      }
       orthoGround.receiveShadow = true;
       group.add(orthoGround);
     } else {
@@ -3639,19 +3677,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // chord between two outside vertices arch over a 3 m track — the flat
       // band it cuts is the road's shoulder, which the conform already
       // flattens at the coarser scale.
-      if (g && !shell && mats.terrain) {
-        const corr = [];
-        for (const r of cell.roads) {
-          if (r.br || !r.p || r.p.length < 2) continue;
-          corr.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 2.9, flare: 5,
-            lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road });
-        }
-        for (const r of cell.rails) {
-          if (r.br || !r.p || r.p.length < 2) continue;
-          corr.push({ r, bb: bboxOfLine(r), hw: 2.2 + 2.9, flare: 5, lay: LAYER_Y.rail });
-        }
-        g = clampUnderRoads(g, corr, mats.terrain);
-      }
+      if (g && corr.length) g = clampUnderRoads(g, corr, mats.terrain);
       if (g) flat.push(g);
     }
   }
