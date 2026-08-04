@@ -272,7 +272,7 @@ export class CityWorld {
     this._stampFranchises();
     this._initHits();
     city.onTileLoaded?.((t) => {
-      this._dropCells(t.cells); this._stampFranchises();
+      this._requeueCells(t.cells); this._stampFranchises();
       this._tileIn(t, true); this._flushHits();
       // the waterway buckets were built from whatever tiles existed at the
       // FIRST chunk build — a brook indexed later never got its trench
@@ -402,14 +402,19 @@ export class CityWorld {
     // "seká se to". Zero during boot and in flight, where throughput wins.
     const coolOff = this.buildCooldownMs
       && performance.now() - (this._lastBuildAt ?? 0) < this.buildCooldownMs;
-    for (let i = 0; !coolOff && i < this.chunksPerFrame && this.queue.length; i++) {
+    for (let i = 0; i < this.chunksPerFrame && this.queue.length; i++) {
       // always build at least one — otherwise a frame that arrived late never
       // makes progress and the world stops streaming altogether
       if (i > 0 && performance.now() > budget) break;
-      const key = this.queue.shift();
-      this._queued.delete(key);
+      const key = this.queue[0];
       const [cx, cz] = key.split(',').map(Number);
       const ring = Math.max(Math.abs(cx - fx), Math.abs(cz - fz));
+      // the cooldown yields only to a FIRST build right under the player —
+      // a hole in the ground beats a hitch, but everything already standing
+      // (in-place rebuilds included) can wait its 130 ms
+      if (coolOff && !(ring <= 2 && !this.built.has(key))) break;
+      this.queue.shift();
+      this._queued.delete(key);
       if (ring > outer) continue;               // drifted out while queued
       const lod = this._lodAt(ring);
       const prev = this.built.get(key);         // upgrading a far tile in place
@@ -597,12 +602,35 @@ export class CityWorld {
       if (miss && arrived && !miss.some((tk) => arrived.has(tk))) continue;
       keys.push(key);
     }
-    if (keys.length) this._dropCells(keys);
+    if (keys.length) this._requeueCells(keys);
   }
 
-  // Drop the built groups of specific cells (a freshly indexed tile put new
-  // features in them) — the ring scan in update() re-enqueues any that are
-  // still in view, and out-of-view ones simply rebuild when approached.
+  // Re-BUILD, don't re-MOVE. Dropping a built chunk blanks it until its turn
+  // in the queue comes round again, and with the build cooldown that turn is
+  // seconds away — a conform wave used to erase the road under the car for
+  // five seconds at a time ("občas to takhle vypadá na 5 s"). Stale cells are
+  // pushed to the FRONT of the queue instead, and the build loop replaces the
+  // old group in place: the world is briefly out of date, never absent.
+  // Cells beyond the streaming window still drop the old way — blanking what
+  // nobody can see is free, and keeping it stale forever is not.
+  _requeueCells(cells) {
+    if (!cells) return;
+    const fx = Math.floor((this._lfx ?? 0) / CHUNK), fz = Math.floor((this._lfz ?? 0) / CHUNK);
+    const outer = this.viewChunks + this.shellChunks + this.farChunks;
+    const gone = [];
+    for (const key of cells) {
+      if (!this.built.has(key)) continue;
+      const [cx, cz] = key.split(',').map(Number);
+      if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > outer) { gone.push(key); continue; }
+      if (this._queued.has(key)) continue;
+      this.queue.unshift(key);
+      this._queued.add(key);
+    }
+    if (gone.length) this._dropCells(gone);
+  }
+
+  // Drop the built groups of specific cells — the REMOVAL path, for tiles
+  // that actually unloaded. Anything merely stale goes through _requeueCells.
   _dropCells(cells) {
     if (!cells) return;
     for (const key of cells) {
@@ -621,15 +649,13 @@ export class CityWorld {
     const T = this.terrain.tile;
     const c0x = Math.floor((tx * T) / CHUNK), c1x = Math.floor(((tx + 1) * T) / CHUNK);
     const c0z = Math.floor((tz * T) / CHUNK), c1z = Math.floor(((tz + 1) * T) / CHUNK);
-    for (const [key, group] of [...this.built]) {
+    const keys = [];
+    for (const key of this.built.keys()) {
       const [cx, cz] = key.split(',').map(Number);
       if (cx < c0x || cx >= c1x || cz < c0z || cz >= c1z) continue;
-      if (group) {
-        this.scene.remove(group);
-        group.traverse((o) => { o.geometry?.dispose?.(); });
-      }
-      this.built.delete(key);
+      keys.push(key);
     }
+    this._requeueCells(keys);
   }
 
   // Drop every built chunk so the next update() rebuilds it — used when a
