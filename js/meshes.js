@@ -3521,6 +3521,16 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // …and the surfaces where they meet, filling what the trims left behind
     const js = junctionsIn(key);
     if (js) for (const j of js) junctionPad(sink, j, mats.terrain);
+    // signs and zebras write into the SAME sink — and they must do it HERE,
+    // before sink.geo() below turns it into geometry. The first version
+    // appended them after that line: thirty zebra bars per chunk, emitted
+    // into a bucket nobody ever poured out again.
+    if (cell.signs) for (const sg3 of cell.signs) {
+      if (sg3._home === key) signPost(sink, sg3, cell);
+    }
+    if (cell.crossings) for (const cr of cell.crossings) {
+      if (cr._home === key) zebraInto(sink, cr, cell, mats.terrain);
+    }
     const cls2 = clustersIn(key);
     if (cls2) for (const cl of cls2) clusterPad(sink, cl, mats.terrain);
   }
@@ -3602,21 +3612,6 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // travel direction it governs and turned to face the oncoming driver — the
   // same convention traffic.js uses for its signal poles. Relative heights;
   // the chunk drape stands them on the ground.
-  if (!shell && cell.signs?.length) {
-    const mark0 = sink.mark();
-    for (const sg3 of cell.signs) {
-      if (sg3._home !== key) continue;
-      signPost(sink, sg3, cell);
-    }
-    void mark0;
-  }
-  if (!shell && cell.crossings?.length) {
-    for (const cr of cell.crossings) {
-      if (cr._home !== key) continue;
-      zebraInto(sink, cr, cell, mats.terrain);
-    }
-  }
-
   // -- trees: two InstancedMeshes (trunks / crowns) sharing transforms --
   // Mapped street trees (natural=tree points, rendered from their home cell)
   // and FOREST trees (scattered through every wooded polygon that reaches into
