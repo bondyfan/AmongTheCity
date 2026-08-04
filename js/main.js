@@ -163,6 +163,8 @@ let camPitch = 0.26;         // radians above horizontal
 const CAM_DIST_0 = 14;      // ⌘0 comes back here
 let camDist = CAM_DIST_0;
 const camSmooth = new THREE.Vector3();
+let _camSpeedK = 0;   // eased |speed|/vmax for boom+FOV — see updateCamera
+let _camPullT = 1;    // eased occlusion boom factor (1 = full length)
 let camInit = false;
 const BASE_FOV = 55;
 
@@ -358,7 +360,13 @@ function updateCamera(dt) {
     wantYaw = c.heading;
     // same reasoning as the FP lens above: an absolute speed yardstick, not
     // the kind's own top speed
-    const speedK = Math.min(1, Math.abs(c.speed) / CAR.vmax);
+    // EASED, not instantaneous: a hitch frame or a collision scrub dips
+    // |speed| for a frame or two, and an instant speedK pumped the boom 3 m
+    // in and back out — the "camera zooms for a moment" stutter. 3/s catches
+    // real acceleration fine and ignores anything shorter than a blink.
+    const speedK0 = Math.min(1, Math.abs(c.speed) / CAR.vmax);
+    _camSpeedK += (speedK0 - _camSpeedK) * Math.min(1, dt * 3);
+    const speedK = _camSpeedK;
     dist = camDist + 1.6 + speedK * 3.2;
     height = 2.4 + speedK * 1.1;
     tx = c.x; ty = (c.mesh?.position.y ?? 0) + 1.1; tz = c.z;
@@ -431,24 +439,43 @@ function updateCamera(dt) {
   // from full length until the camera sits in air: the same trick every
   // third-person game uses, done against the interior's own boxes rather than
   // a raycast, because the boxes are already in a spatial hash.
+  // MIN_T is a floor, not an option: collapsing the boom onto the target
+  // makes lookAt() aim the camera at its own position, which renders as one
+  // flat grey wall. 0.2 of a 3.4 m boom is 0.7 m, close enough to clear a
+  // 1.5 m stairwell and still be a camera.
+  //
+  // The march target is computed every frame, but the boom FACTOR is eased:
+  // in fast (a wall is a wall — clipping through it is worse than a jolt),
+  // out slowly (nothing justifies leaping 4 m backwards in one frame). The
+  // old code also re-tested with a SMALLER pad (0.24) than the entry test
+  // (0.28), so grazing contact flickered between full boom and an 18 % cut —
+  // the direct source of the reported zoom-pop. The march pad is now the
+  // larger one, so a spot that trips the entry test also holds the pull.
+  let wantT = 1;
   if (!flying && world.interiors?.occupied(px, py, pz, 0.28)) {
     const bx = px - tx, by = py - ty, bz = pz - tz;
-    // MIN_T is a floor, not an option: collapsing the boom onto the target
-    // makes lookAt() aim the camera at its own position, which renders as one
-    // flat grey wall — the bug this replaces. 0.2 of a 3.4 m boom is 0.7 m,
-    // close enough to clear a 1.5 m wide stairwell and still be a camera.
     const MIN_T = 0.2;
     let t = 0.82;
-    for (; t > MIN_T; t -= 0.1)
-      if (!world.interiors.occupied(tx + bx * t, ty + by * t, tz + bz * t, 0.24)) break;
-    t = Math.max(MIN_T, t);
-    px = tx + bx * t; py = ty + by * t; pz = tz + bz * t;
+    for (; t > MIN_T; t -= 0.05)
+      if (!world.interiors.occupied(tx + bx * t, ty + by * t, tz + bz * t, 0.32)) break;
+    wantT = Math.max(MIN_T, t);
   }
-  // keep the camera above ground/bridge decks
-  const groundY = world.heightAt(px, pz) + 0.5;
+  _camPullT += (wantT - _camPullT) * Math.min(1, dt * (wantT < _camPullT ? 10 : 1.6));
+  if (_camPullT < 0.999) {
+    px = tx + (px - tx) * _camPullT;
+    py = ty + (py - ty) * _camPullT;
+    pz = tz + (pz - tz) * _camPullT;
+  }
+  // keep the camera above ground/bridge decks — `py` as the near hint, so a
+  // viaduct deck OVERHEAD no longer wins and pops the camera onto the bridge
+  const groundY = world.heightAt(px, pz, py) + 0.5;
   const want = new THREE.Vector3(px, indoors ? py : Math.max(py, groundY), pz);
   if (!camInit) { camSmooth.copy(want); camInit = true; }
-  camSmooth.lerp(want, Math.min(1, dt * 9));
+  // dt is CAPPED for the smoothing: a 150 ms hitch frame used to saturate the
+  // lerp and snap the camera the whole trailing distance in one step — the
+  // other half of the zoom-pop. The camera pays a hitch back over the next
+  // few frames instead of all at once.
+  camSmooth.lerp(want, Math.min(1, Math.min(dt, 0.045) * 9));
   camera.position.copy(camSmooth);
   camShake();
   camera.lookAt(tx, ty, tz);
@@ -1276,6 +1303,23 @@ function updateActors() {
   return _actors;
 }
 
+// Parked cars as traffic obstacles. A car the player abandons mid-lane joins
+// `parked`, and NPC traffic used to drive straight through it — `_obst` held
+// players only, so anything standing still was a ghost. Every parked hull in
+// braking reach goes in; the 400 m gate keeps the list at village size (NPCs
+// only exist near the player anyway, so a farther obstacle brakes nobody).
+function updateBlockers() {
+  _blockers.length = 0;
+  const px = player.pos.x, pz = player.pos.z;
+  for (const c of parked) {
+    const dx = c.x - px, dz = c.z - pz;
+    if (dx * dx + dz * dz > 400 * 400) continue;
+    _blockers.push({ x: c.x, z: c.z, half: (c.len ?? 4.4) / 2 + 0.35 });
+  }
+  return _blockers;
+}
+const _blockers = [];
+
 // ---------- horizon: how far the world is built, and where the haze sits ----
 // Two rules, and the second is the one that was broken:
 //   1. From the air you see kilometres, so the streamed radius grows with
@@ -2056,6 +2100,17 @@ async function boot() {
   // standing on, and one built before it is set is one built underground.
   vehicles.world = world;
   traffic = new Traffic(city, vehicles, world);
+  // Settlement factor for traffic density: buildings within the cell's 3×3
+  // chunk neighbourhood, saturating around a small-town block. A hamlet's
+  // lane spawns the odd car; the same metres of asphalt in a sídliště spawn
+  // a street's worth. Deterministic across clients — same tiles, same count.
+  traffic.urbanAt = (x, z) => {
+    let b = 0;
+    const cx = Math.floor(x / 120), cz = Math.floor(z / 120);
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++)
+      b += city.chunkIndex.get((cx + dx) + ',' + (cz + dz))?.buildings?.length ?? 0;
+    return Math.min(1, 0.15 + b / 45);
+  };
   // ---- the peers' vehicles (F8/F9) ----
   // Built even in single player: the fleet is empty, update() is a no-op over
   // an empty Map, and every `ghosts?.` site below then has one shape instead
@@ -2125,12 +2180,22 @@ async function boot() {
   // warm up: build the spawn's neighbourhood before revealing the city.
   // Exceptions here used to vanish (setTimeout swallows them out of the
   // promise chain) and left the overlay spinning forever — route them out.
+  // FULLY loaded, then play: every view cell built, terrain present and
+  // conformed, queue quiet. The old 3×3 gate revealed the game with forty
+  // cells still streaming, so the first minute of play was the loading
+  // stutter. The failsafe cap stays (rim spawns can never conform), but at a
+  // ceiling that means minutes, not the gate.
   let warmFrames = 0;
+  const label = $id('enter-label');
   await new Promise((resolve, reject) => {
     const warm = () => {
       try {
         for (let i = 0; i < 6; i++) world.update(1 / 60, player.pos);
-        if (world.ready(player.pos) || ++warmFrames > 200) resolve();
+        if (label && (warmFrames & 7) === 0) {
+          const { built, total } = world.bootProgress(player.pos);
+          label.textContent = `Přijíždíte do Pardubic… ${Math.min(99, Math.round(built / total * 100))} %`;
+        }
+        if (world.readyFull(player.pos) || ++warmFrames > 1500) resolve();
         else setTimeout(warm, 0); // setTimeout, not rAF — hidden tabs still boot
       } catch (err) { reject(err); }
     };
@@ -2412,6 +2477,7 @@ function stepGame(dt) {
   traffic.setViewer(view);
   peds.setViewer(view);
   traffic.actors = updateActors();
+  traffic.blockers = updateBlockers();
   traffic.update(dt, player.pos, game.car);
   // ragdoll physics needs to know what can hit a pedestrian: every SHARED AI
   // car plus whatever the player is driving, refreshed per frame because the

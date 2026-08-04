@@ -337,6 +337,7 @@ const CELL_HALF_DIAG = 181.02;         // Math.SQRT2 * CELL / 2, precomputed
 // almost no road per cell and therefore almost no traffic, for free — that is
 // the per-place density main.js used to fake with a building count.
 const MPC = 160;
+const MAJOR_RE = /^(motorway|trunk|primary|secondary|tertiary)(_link)?$/;
 const SLOT_MAX = 8;                    // per cell — a motorway interchange must not
                                        // fabricate thirty cars out of ramp geometry
 // How long one slot holds a car before the next generation takes over. Long,
@@ -729,6 +730,8 @@ export class Traffic {
     // for itself. Ghost cars must NOT be pushed into this.cars; this list is
     // read-only to us and never touched by the follow bookkeeping.
     this.actors = null;
+    this.blockers = null;   // parked hulls from main.js — see _obst below
+    this.urbanAt = null;    // (x,z) -> 0.15..1 settlement factor, wired by main.js
     this.clock = null;              // test seam: () => shared seconds. null = worldT()
     this._nodes = new Map();        // keyOf(x,z) → { x, z, out: [] }
     this._usage = new Map();        // keyOf → {n, last}: PERSISTENT so later tiles
@@ -1122,10 +1125,12 @@ export class Traffic {
     const ci = Math.floor(e.mx / CELL), cj = Math.floor(e.mz / CELL);
     const k = ci + ',' + cj;
     let c = this._cells.get(k);
-    if (!c) this._cells.set(k, c = { ci, cj, edges: [], len: 0, sorted: null });
+    if (!c) this._cells.set(k, c = { ci, cj, edges: [], len: 0, lenMajor: 0, sorted: null });
     c.edges.push(e);
     c.len += e.len;
+    if (MAJOR_RE.test(t)) c.lenMajor += e.len;
     c.sorted = null;                              // order is rebuilt on demand
+    c._u = undefined;                             // urban factor: recount on growth
   }
 
   _cellEdges(c) {
@@ -1143,7 +1148,13 @@ export class Traffic {
   _slots(c) {
     const k = this._densK;
     if (k <= 0) return 0;
-    const f = c.len * k / MPC;
+    // A kilometre of village lane owes the world far fewer cars than a
+    // kilometre of Palackého. Major-class length keeps full weight (a trunk
+    // through empty fields still carries traffic); residential length is
+    // scaled by how built-up the square actually is, which is what separates
+    // a sídliště from a hamlet with the same metres of asphalt.
+    if (c._u === undefined) c._u = this.urbanAt ? this.urbanAt(c.ci * CELL + CELL / 2, c.cj * CELL + CELL / 2) : 1;
+    const f = (c.lenMajor + (c.len - c.lenMajor) * c._u) * k / MPC;
     // SLOT_MAX exists to stop a motorway interchange fabricating thirty cars
     // out of ramp geometry — that is a statement about ROAD LENGTH, so it has
     // to scale with the density knob, or the knob stops working. It did stop
@@ -1429,7 +1440,10 @@ export class Traffic {
       const crs = edge.ldx * o.fdz - edge.ldz * o.fdx;
       if (Math.abs(Math.atan2(crs, dot)) < STRAIGHT) _straight.push(o);
     }
-    if (!_cand.length) return edge.twin ?? null;  // oneway trap → null → route ends
+    // Dead end (or oneway trap): the trip is over HERE. Turning on a heel and
+    // driving back down the same street read as a glitch, because it is one —
+    // real cul-de-sac visitors park, and the retire grace does exactly that.
+    if (!_cand.length) return null;
     // city traffic mostly flows through; side streets soak up the remainder
     const pool = (_straight.length && rnd01(hash32(h, 0x5f1)) < 0.7) ? _straight : _cand;
     return pool[(rnd01(hash32(h, 0xb17)) * pool.length) | 0];
@@ -1613,7 +1627,9 @@ export class Traffic {
     const i0 = (rnd01(hash32(seed, 1)) * arr.length) | 0;
     for (let n = 0; n < 4 && n < arr.length; n++) {
       const cand = arr[(i0 + n) % arr.length];
-      if (cand.len >= 14) { e = cand; break; }
+      // never mint a car on the last edge of a cul-de-sac: it would be born
+      // driving into the wall and spend its whole life parked at the end
+      if (cand.len >= 14 && cand.a.deg > 1 && cand.b.deg > 1) { e = cand; break; }
     }
     if (!e) return;
     const sIn = 2 + rnd01(hash32(seed, 2)) * (e.len - 4);
@@ -1924,6 +1940,14 @@ export class Traffic {
     } else {
       this._obst.push(playerCar ? playerCar.x : playerPos.x,
         playerCar ? playerCar.z : playerPos.z, playerCar ? 3.9 : 2.3);
+    }
+    // …and every parked hull main.js reports (the player's abandoned car
+    // included). Same wall rule as players: a car standing on the lane stops
+    // the queue, whoever left it there.
+    if (this.blockers) {
+      for (const b of this.blockers)
+        if (Number.isFinite(b?.x) && Number.isFinite(b?.z))
+          this._obst.push(b.x, b.z, b.half ?? 2.6);
     }
 
     // ---- fixed steps on a SHARED grid ----
