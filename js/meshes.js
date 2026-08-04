@@ -77,6 +77,7 @@ const EDGE_MIN_W = 4.0;                      // narrower than this and paint wou
 // give-way line sits a metre or two off the crossing, so that is what this is.
 const EDGE_END = 2.2;
 const FOOT_CLASSES = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestrian', 'track']);
+const _fdrv = [];   // scratch: drivable roads near the footway being ribboned
 
 // facade rhythm: one window bay per 2.7 m of wall, one atlas row per storey.
 // The 2048×1024 atlas is an 8×4 grid of 256×256 cells; each cell holds a BAND
@@ -1208,9 +1209,59 @@ function roadRibbon(sink, f, terrain, cell, key) {
     }
     return false;
   };
+  // A path MEETS a road, it does not step onto it. Both are draped onto their
+  // own idea of the ground, so at the join the path ended a hand above or
+  // below the asphalt lip — the "cesta jde prostě před tu vozovku" report.
+  // Near a drivable carriageway every path vertex is blended toward that
+  // road's own deck (a touch below it), which turns the last few metres of
+  // the path into a ramp that lands exactly on the kerb line — on flats a
+  // no-op, on an embanked road the path climbs to meet it. Bridges keep
+  // their absolute decks.
+  let footY = null;
+  if (foot && !f.br && terrain) {
+    const BLEND = 3.5;
+    const fb = bboxOfLine(f);
+    _fdrv.length = 0;
+    for (const r of cell.roads) {
+      if (!r.d || !r.p || r === f) continue;
+      const rb2 = bboxOfLine(r), m = (r.w ?? 6) / 2 + BLEND;
+      if (rb2[2] < fb[0] - m || rb2[0] > fb[2] + m || rb2[3] < fb[1] - m || rb2[1] > fb[3] + m) continue;
+      _fdrv.push(r);
+    }
+    if (_fdrv.length) {
+      footY = new Array(q.length);
+      for (let i = 0; i < q.length; i++) {
+        const X = q[i][0], Z = q[i][1];
+        let y = baseY + elev(along[i], X, Z);
+        let bestW = 0, bestT = 0;
+        for (const r of _fdrv) {
+          const hwr = (r.w ?? 6) / 2;
+          let al = 0;
+          for (let k2 = 0; k2 < r.p.length - 1; k2++) {
+            const [ax2, az2] = r.p[k2], [bx2, bz2] = r.p[k2 + 1];
+            const ex = bx2 - ax2, ez = bz2 - az2, L2 = ex * ex + ez * ez || 1e-9;
+            let t = ((X - ax2) * ex + (Z - az2) * ez) / L2;
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            const d = Math.hypot(X - (ax2 + ex * t), Z - (az2 + ez * t));
+            const L = Math.sqrt(L2);
+            if (d < hwr + BLEND) {
+              const w = d <= hwr ? 1 : 1 - (d - hwr) / BLEND;
+              if (w > bestW) {
+                const gy2 = r.br ? bridgeDeckHeight(r, al + L * t, terrain) : roadGradeY(r, al + L * t, terrain);
+                if (gy2 !== null && gy2 !== undefined) { bestW = w; bestT = gy2 + LAYER_Y.road - 0.04; }
+              }
+            }
+            al += L;
+          }
+        }
+        if (bestW > 0) y += (bestT - y) * bestW;
+        footY[i] = y;
+      }
+    }
+  }
   for (let i = 0; i < q.length - 1; i++) {
-    const y0 = baseY + elev(along[i], q[i][0], q[i][1]);
-    const y1 = baseY + elev(along[i + 1], q[i + 1][0], q[i + 1][1]);
+    const y0 = footY ? footY[i] : baseY + elev(along[i], q[i][0], q[i][1]);
+    const y1 = footY ? footY[i + 1] : baseY + elev(along[i + 1], q[i + 1][0], q[i + 1][1]);
     const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
     const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
     if (foot && crossesRoad(ax, az, bx, bz)) continue;
@@ -2914,8 +2965,32 @@ function zebraInto(sink, cr, cell, terrain) {
   // the crossing belongs to the road it plausibly CROSSES — scored by
   // distance over half-width, so a wide main street beats a narrow service
   // lane that happens to pass a metre closer (the broken diagonal zebras)
-  let bestScore = 2.2, road = null, ux = 0, uz = 1, s0 = 0;
+  // FIRST: the road whose polyline actually CONTAINS this node. An OSM
+  // crossing node lies ON its road's way, so a vertex within arm's reach is
+  // the ground truth — proximity scoring (below, as fallback for simplified
+  // polylines) sometimes bound the zebra to a parallel street and painted the
+  // bars at that street's angle, which is the "zebra at a weird angle in a
+  // weird place" report. The axis at a vertex averages the two adjacent
+  // segments, so a crossing on a gentle bend gets the tangent, not a kink.
+  let bestScore = 2.2, road = null, ux = 0, uz = 1, s0 = 0, vBest = 0.5 * 0.5, vW = 0;
   for (const r of cell.roads) {
+    if (!r.d || !r.p || (r.w ?? 0) < 3) continue;
+    let along = 0;
+    for (let i = 0; i < r.p.length; i++) {
+      const [vx, vz] = r.p[i];
+      if (i > 0) along += Math.hypot(vx - r.p[i - 1][0], vz - r.p[i - 1][1]);
+      const d2 = (x - vx) ** 2 + (z - vz) ** 2;
+      if (d2 > vBest) continue;
+      const w = r.w ?? 6;
+      if (d2 === vBest && w <= vW) continue;      // ties: the wider road wins
+      const [px0, pz0] = r.p[Math.max(0, i - 1)], [px1, pz1] = r.p[Math.min(r.p.length - 1, i + 1)];
+      const ex = px1 - px0, ez = pz1 - pz0, L = Math.hypot(ex, ez);
+      if (L < 1e-6) continue;
+      vBest = d2; vW = w; road = r; ux = ex / L; uz = ez / L; s0 = along; bestScore = 0;
+    }
+  }
+  // FALLBACK: nearest plausible carriageway, scored by distance over half-width
+  if (!road) for (const r of cell.roads) {
     if (!r.d || !r.p || (r.w ?? 0) < 3) continue;
     const hw2 = (r.w ?? 6) / 2;
     let along = 0;

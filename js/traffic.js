@@ -315,8 +315,8 @@ const SIG_VIS2 = 800 * 800;   // pole meshes render within 800 m of the player (
 // both gridlocked the traffic on permanent red waves and put ~1200 pole meshes
 // into the scene (measured: 12 fps). Pardubice signalizes its arterials, not
 // every pair of sběrné komunikace.
-const SIG_CLASS = /^(primary|secondary|tertiary)$/;
-const SIG_MAJOR = /^(primary|secondary)$/;           // one of these must be present
+const SIG_CLASS = /^(trunk|primary|secondary|tertiary)$/;
+const SIG_MAJOR = /^(trunk|primary|secondary)$/;     // one of these must be present
 const SYNTH_CLEAR = 45;       // an existing controller this close owns the crossing already
 const SYNTH_BACK = 12;        // fabricated stop-line points stand this far up each approach
 
@@ -1048,6 +1048,11 @@ export class Traffic {
     if (SIG_CLASS.test(road.t)) {
       (Math.abs(fwd.fdz) >= Math.abs(fwd.fdx) ? (fwd.a.ns ??= new Set()) : (fwd.a.ew ??= new Set())).add(road);
       (Math.abs(fwd.ldz) >= Math.abs(fwd.ldx) ? (fwd.b.ns ??= new Set()) : (fwd.b.ew ??= new Set())).add(road);
+      // leaving directions, per arm — the compass buckets above are blind to
+      // two mains crossing at 45° (both land in one bucket), so the founding
+      // gate measures real angles from these instead
+      (fwd.a.dirs ??= []).push([fwd.fdx, fwd.fdz, road]);
+      (fwd.b.dirs ??= []).push([-fwd.ldx, -fwd.ldz, road]);
     }
     if (!road.ow) {
       // two-way street: a mirrored twin walks it the other way. off0 is the
@@ -1261,7 +1266,7 @@ export class Traffic {
       // node beside a real OSM signal deserves poles even when the cross
       // street is residential (OSM already said the crossing is signalised)
       if (n._sg || n.deg < 3) continue;
-      if (!(n.ns && n.ns.size) && !(n.ew && n.ew.size)) continue;
+      if (!n.dirs || !n.dirs.length) continue;
       cands.push(n);
     }
     if (!cands.length) return null;
@@ -1300,16 +1305,28 @@ export class Traffic {
         continue;
       }
       // NO owner: this would FOUND a signal cluster, and that keeps the
-      // strict rule — two distinct roads crossing, an arterial among them,
-      // mains in both bearing buckets.
-      if (!n.ns || !n.ew) { continue; }
-      let distinct = n.ns.size;                 // union of the two bucket sets —
-      for (const r of n.ew) if (!n.ns.has(r)) distinct++;  // one road bent 90° isn't a crossing
-      if (distinct < 2) continue;
-      let major = false;
-      for (const r of n.ns) if (SIG_MAJOR.test(r.t)) { major = true; break; }
-      if (!major) for (const r of n.ew) if (SIG_MAJOR.test(r.t)) { major = true; break; }
-      if (!major) { n._sg = 1; continue; }
+      // strict rule — two DISTINCT main roads genuinely crossing, an arterial
+      // among them. Measured as arm angles, not compass buckets: the old
+      // ns/ew test never saw a diagonal crossing (both mains in one bucket)
+      // and Czech grids are full of 45° streets. "Crossing" = some pair of
+      // arms from different roads separated by 50°–130° — a Y-fork is not a
+      // crossing, and neither is one road bending through the node.
+      if (!n.dirs || n.dirs.length < 2) continue;
+      let crossing = false, major = false;
+      for (let i = 0; i < n.dirs.length && !crossing; i++) {
+        for (let j = i + 1; j < n.dirs.length; j++) {
+          if (n.dirs[i][2] === n.dirs[j][2]) continue;
+          const dot = n.dirs[i][0] * n.dirs[j][0] + n.dirs[i][1] * n.dirs[j][1];
+          const crs = n.dirs[i][0] * n.dirs[j][1] - n.dirs[i][1] * n.dirs[j][0];
+          const a = Math.abs(Math.atan2(crs, dot));
+          if (a > 0.87 && a < 2.27) { crossing = true; break; }   // 50°–130°
+        }
+      }
+      if (!crossing) continue;
+      for (const [, , r] of n.dirs) if (SIG_MAJOR.test(r.t)) { major = true; break; }
+      // NOT stamped on failure: the arterial arm may arrive with a later
+      // tile, and a stamp here would blind the node to it forever
+      if (!major) continue;
       // one stop-line point per approach, planted a few meters back up the
       // incoming edge. Capping at 45 % of the edge keeps the point past the
       // halfway mark, so _makePole's "which direction does this pole serve"
