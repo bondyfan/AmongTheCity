@@ -3071,6 +3071,11 @@ function zebraInto(sink, cr, cell, terrain) {
     }
   }
   sink.fixFrom(mark);
+  // …and the refuge island the stripes were kept clear of. This call used to
+  // sit at the tail of wireSpan(), where `island` does not exist — so every
+  // chunk carrying a power line threw ReferenceError and stopped building
+  // halfway, which is a whole missing neighbourhood per bad pylon.
+  if (island) islandInto(sink, x, z, ux, uz, terrain, y - LAYER_Y.marking + LAYER_Y.road);
 }
 
 // ---- transmission lines: a pylon at every vertex, wires sagging between ----
@@ -3144,7 +3149,6 @@ function wireSpan(sink, ax, az, bx, bz, minor, kV, terrain) {
     }
   }
   sink.fixFrom(mark);
-  if (island) islandInto(sink, x, z, ux, uz, terrain, y - LAYER_Y.marking + LAYER_Y.road);
 }
 
 // ---- trolejbusy: masts along the kerb, a pair of wires over each direction --

@@ -213,3 +213,27 @@ test('street furniture stands on the ground, not on twice the ground', () => {
     + ' — the drape lifted it a second time');
   assert.ok(top > GROUND + 5, `nothing tall was drawn at all (top ${top})`);
 });
+
+test('a chunk carrying a power line builds without throwing', () => {
+  // A call to islandInto() once sat at the tail of wireSpan(), where the
+  // variable it tested does not exist. Every chunk with a transmission line
+  // in it threw ReferenceError and stopped building halfway — a whole missing
+  // neighbourhood per pylon, and the error only ever showed in the browser.
+  const cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [],
+    trees: [], signs: [], crossings: [], furniture: [], calming: [], barriers: [],
+    power: [{ p: [[10, 10], [70, 40], [110, 90]], v: 110, _id: 71, _home: '0,0' }] };
+  const city = { chunkIndex: new Map([['0,0', cell]]), tile: 4800, pois: [] };
+  const mats = makeMaterials();
+  mats.terrain = { res: 20, ready: () => true, heightAt: () => GROUND, missed: false };
+  mats.trees = false; mats.facades = false; mats.ortho = null;
+  const g = buildChunkMeshes(city, 0, 0, mats, 'full');
+  assert.ok(g, 'the chunk built nothing at all');
+  let top = -Infinity;
+  for (const m of g.children) {
+    const pos = m.geometry?.attributes?.position;
+    if (!pos || m.isInstancedMesh) continue;
+    for (let i = 0; i < pos.count; i++) top = Math.max(top, pos.getY(i));
+  }
+  // a 110 kV pylon is 32 m, so the line has to reach well above the ground
+  assert.ok(top > GROUND + 20, `nothing tall was drawn (top ${(top - GROUND).toFixed(1)} m)`);
+});
