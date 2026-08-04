@@ -1218,7 +1218,7 @@ function bucketize(index, list, kind, touched) {
   for (const f of list) {
     const ring = forEachCellOf(f, (key) => {
       let cell = index.get(key);
-      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [], crossings: [] });
+      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [], crossings: [], power: [] });
       cell[kind].push(f);
       touched?.add(key);
     });
@@ -1281,6 +1281,11 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   // pedestrian crossings — bare [x,z] zebra points on the way
   const crossings = (data.crossings ?? []).map((c) => ({ p: [c], _id: ++next }));
   bucketize(city.chunkIndex, crossings, 'crossings', touched);
+  // transmission lines — every vertex is a pylon, wires hang between them.
+  // Bucketized like any polyline so each chunk raises its own towers.
+  const power = stamp(data.power);
+  bucketize(city.chunkIndex, power, 'power', touched);
+  appendAll(city.power, power);
   return { roads, signals, heavy };
 }
 
@@ -1316,7 +1321,7 @@ export async function loadCity(url) {
     name: data.name ?? 'Region',
     origin: data.origin, mPerLat: data.mPerLat, mPerLon: data.mPerLon,
     tile: data.tile, // manifest tile size in meters (undefined in legacy mode)
-    buildings: [], roads: [], rails: [], water: [], waterways: [],
+    buildings: [], roads: [], rails: [], water: [], waterways: [], power: [],
     green: [], paved: [], trees: [], pois: [], signals: [],
     chunkIndex: new Map(), _nextId: 1,
   };

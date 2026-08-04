@@ -58,6 +58,9 @@ const wantWay = (t) => !!t && (
   || (t.amenity === 'parking' && !/underground|multi-storey/.test(t.parking ?? ''))
   || t.place === 'square'
   || t.natural === 'tree_row'
+  // transmission lines: every vertex of the way IS a tower (that is how they
+  // are mapped), so the way geometry alone places pylons and strings wires
+  || /^(line|minor_line)$/.test(t.power ?? '')
 );
 
 // Relations only matter as multipolygons — a building, a lake, a forest whose

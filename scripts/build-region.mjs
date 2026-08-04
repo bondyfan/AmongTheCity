@@ -780,6 +780,29 @@ function processSignals(els, owns) {
   return out;
 }
 
+// ---------- transmission lines (pylons + wires) -----------------------------
+// Every vertex of a power way IS a tower — that is how they are mapped — so
+// the polyline is NOT simplified: dropping a vertex would drop a pylon and
+// leave a 700 m wire with nothing holding it up.
+function processPower(els, owns) {
+  const out = [], seen = new Set();
+  for (const el of els) {
+    if (el.type !== 'way' || !/^(line|minor_line)$/.test(el.tags?.power ?? '')) continue;
+    if (el.tags.location === 'underground') continue;
+    const key = 'way/' + el.id;
+    if (seen.has(key) || !el.geometry?.length) continue;
+    seen.add(key);
+    const p = el.geometry.map((g) => [px(g.lon), pz(g.lat)]);
+    if (p.length < 2 || !owns(p[0])) continue;
+    const r = { p: p.map(([x, z]) => [+x.toFixed(1), +z.toFixed(1)]) };
+    if (el.tags.power === 'minor_line') r.m = 1;
+    const v = parseInt(el.tags.voltage, 10);
+    if (Number.isFinite(v)) r.v = Math.round(v / 1000);   // kV, enough for height
+    out.push(r);
+  }
+  return out;
+}
+
 // ---------- run: every raw tile on disk ----------
 // Driven by the directory, not by a rectangle: the world's shape lives in
 // world-area.mjs and a partially-finished split is simply a smaller world.
@@ -794,7 +817,7 @@ const OUT_DIR = process.env.OUT_DIR || 'public/data';
 mkdirSync(`${OUT_DIR}/tiles`, { recursive: true });
 const manifestTiles = [];
 const totals = { buildings: 0, roads: 0, rails: 0, water: 0, waterways: 0,
-  green: 0, paved: 0, trees: 0, pois: 0, signals: 0, signs: 0, crossings: 0 };
+  green: 0, paved: 0, trees: 0, pois: 0, signals: 0, signs: 0, crossings: 0, power: 0 };
 let emitted = 0, empty = 0, bytes = 0;
 
 // Some rivers are single OSM multipolygons tens of kilometres long. They live
@@ -853,6 +876,7 @@ const rawTiles = readdirSync(RAW_DIR)
       signals: processSignals(els, owns),
       signs: processSigns(els, owns),
       crossings: processCrossings(els, owns),
+      power: processPower(els, owns),
     };
     let n = 0;
     for (const key of Object.keys(totals)) { n += tile[key].length; totals[key] += tile[key].length; }

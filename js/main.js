@@ -45,6 +45,7 @@ import { connectCity, queueEvent, getPlayerName, CityNetWS } from './netcity.js'
 //   is he in" — see F8 below.
 // netui:      the HUD that can say "you are alone now" out loud.
 import { tod, setEpoch, setSoloTime } from './worldclock.js';
+import { ParkingLots } from './parkinglots.js';
 import { localUid, strHash } from './identity.js';
 import { makeGhostCars } from './netvehicles.js';
 import { makeNetUI } from './netui.js';
@@ -91,6 +92,7 @@ const game = {
 };
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
+let parkingLots = null;
 let peds = null;
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
 let clouds = null;                // the sky to fly the machines through
@@ -2169,6 +2171,9 @@ async function boot() {
   vehicles.dust = world.interiors.dust;
 
   placeParkedCars(city);
+  // …and every OTHER parking lot in the country: stalls that fill at night
+  // and empty by mid-morning, streamed around the player (js/parkinglots.js)
+  parkingLots = new ParkingLots(city, vehicles, world, parked);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)
   orthoMgr = initOrtho(world.terrain);   // the photo lies ON the ground now
@@ -2479,6 +2484,7 @@ function stepGame(dt) {
   traffic.actors = updateActors();
   traffic.blockers = updateBlockers();
   traffic.update(dt, player.pos, game.car);
+  parkingLots?.update(dt, player.pos, tod());
   // ragdoll physics needs to know what can hit a pedestrian: every SHARED AI
   // car plus whatever the player is driving, refreshed per frame because the
   // player's car changes identity on every E. Ghosts are filtered out here and

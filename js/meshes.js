@@ -3048,6 +3048,123 @@ function zebraInto(sink, cr, cell, terrain) {
   sink.fixFrom(mark);
 }
 
+// ---- transmission lines: a pylon at every vertex, wires sagging between ----
+// Absolute heights + fixFrom: a wire must hang on ITS towers' tops, not ride
+// whatever the ground under each sampled point happens to do.
+function pylonInto(sink, x, z, minor, kV, terrain) {
+  const g = terrain.heightAt(x, z);
+  const H = minor ? 10 : kV >= 200 ? 42 : kV >= 100 ? 32 : 25;
+  const mark = sink.mark();
+  sink.at(SURF.concrete);
+  _c.setHex(minor ? 0x6d6257 : 0x8a8d92);       // wood pole vs galvanised steel
+  const r = _c.r, gg = _c.g, b = _c.b;
+  const wB = minor ? 0.16 : H * 0.055;          // tapering mast, crossed fins
+  const wT = minor ? 0.12 : 0.5;
+  for (const [ox, oz] of [[1, 0], [0, 1]]) {
+    for (const flip of [1, -1]) {
+      sink.quad(
+        x - ox * wB * flip, g - 0.4, z - oz * wB * flip,
+        x + ox * wB * flip, g - 0.4, z + oz * wB * flip,
+        x + ox * wT * flip, g + H, z + oz * wT * flip,
+        x - ox * wT * flip, g + H, z - oz * wT * flip, r, gg, b);
+    }
+  }
+  if (!minor) {
+    // one crossarm, both windings, 2 m under the peak
+    const aw = kV >= 200 ? 9 : 6.5;
+    const ay = g + H - 2;
+    for (const flip of [1, -1]) {
+      sink.quad(x - aw / 2, ay - 0.3 * flip, z, x + aw / 2, ay - 0.3 * flip, z,
+        x + aw / 2, ay + 0.3 * flip, z, x - aw / 2, ay + 0.3 * flip, z, r, gg, b);
+      sink.quad(x, ay - 0.3 * flip, z - aw / 2, x, ay - 0.3 * flip, z + aw / 2,
+        x, ay + 0.3 * flip, z + aw / 2, x, ay + 0.3 * flip, z - aw / 2, r, gg, b);
+    }
+  } else {
+    const ay = g + H - 0.6;
+    for (const flip of [1, -1]) {
+      sink.quad(x - 1.2, ay - 0.08 * flip, z, x + 1.2, ay - 0.08 * flip, z,
+        x + 1.2, ay + 0.08 * flip, z, x - 1.2, ay + 0.08 * flip, z, r, gg, b);
+    }
+  }
+  sink.fixFrom(mark);
+}
+
+// one span of conductors between two towers: thin vertical ribbons with a
+// catenary sag, drawn double-sided so they read from below and from the bank
+function wireSpan(sink, ax, az, bx, bz, minor, kV, terrain) {
+  const span = Math.hypot(bx - ax, bz - az);
+  if (span < 4 || span > 900) return;            // a broken vertex is not a span
+  const Ha = (minor ? 10 : kV >= 200 ? 42 : kV >= 100 ? 32 : 25);
+  const yA = terrain.heightAt(ax, az) + Ha - (minor ? 0.7 : 2.1);
+  const yB = terrain.heightAt(bx, bz) + Ha - (minor ? 0.7 : 2.1);
+  const sag = Math.min(9, Math.max(0.7, span * (minor ? 0.02 : 0.032)));
+  const ux = (bx - ax) / span, uz = (bz - az) / span;
+  const px = -uz, pz = ux;                       // across the span
+  const offs = minor ? [-1.0, 0, 1.0] : (kV >= 200 ? [-3.6, -1.9, 1.9, 3.6] : [-2.6, 0, 2.6]);
+  const N = Math.max(4, Math.min(16, Math.round(span / 18)));
+  const mark = sink.mark();
+  sink.at(SURF.concrete);
+  _c.setHex(0x33363b);
+  const r = _c.r, g = _c.g, b = _c.b;
+  const W = 0.05;                                // ribbon half-height
+  for (const o of offs) {
+    let lx = ax + px * o, lz = az + pz * o, ly = yA;
+    for (let i = 1; i <= N; i++) {
+      const t = i / N;
+      const cx = ax + (bx - ax) * t + px * o, cz = az + (bz - az) * t + pz * o;
+      const cy = yA + (yB - yA) * t - sag * 4 * t * (1 - t);
+      sink.quad(lx, ly - W, lz, cx, cy - W, cz, cx, cy + W, cz, lx, ly + W, lz, r, g, b);
+      sink.quad(lx, ly + W, lz, cx, cy + W, cz, cx, cy - W, cz, lx, ly - W, lz, r, g, b);
+      lx = cx; lz = cz; ly = cy;
+    }
+  }
+  sink.fixFrom(mark);
+}
+
+// the označník: a pole with the blue zastávka flag, facing the nearest road
+function busStopInto(sink, x, z, cell) {
+  let dx = 0, dz = -1, best = 30 * 30;
+  for (const r of cell.roads) {
+    if (!r.d || !r.p) continue;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+      const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9;
+      let t = ((x - ax) * ex + (z - az) * ez) / L2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const d2 = (x - (ax + ex * t)) ** 2 + (z - (az + ez * t)) ** 2;
+      if (d2 < best) { best = d2; const L = Math.sqrt(L2); dx = ex / L; dz = ez / L; }
+    }
+  }
+  sink.at(SURF.concrete);
+  _c.setHex(0x8a8d92);
+  const pr = _c.r, pg = _c.g, pb = _c.b;
+  const ux = -dz, uz = dx;                       // panel plane faces along travel
+  for (const [ox, oz] of [[ux, uz], [dx, dz]]) {
+    for (const flip of [1, -1]) {
+      sink.quad(x - ox * 0.03 * flip, 0, z - oz * 0.03 * flip,
+        x + ox * 0.03 * flip, 0, z + oz * 0.03 * flip,
+        x + ox * 0.03 * flip, 3.0, z + oz * 0.03 * flip,
+        x - ox * 0.03 * flip, 3.0, z - oz * 0.03 * flip, pr, pg, pb);
+    }
+  }
+  _c.setHex(0x1a5fb4);                           // IJ4 blue flag, both faces
+  const br = _c.r, bg = _c.g, bb = _c.b;
+  _c.setHex(0xf2f0ea);
+  const wr = _c.r, wg = _c.g, wb = _c.b;
+  for (const flip of [1, -1]) {
+    const fx = dx * flip, fz = dz * flip;
+    sink.triFacing(x - ux * 0.34, 2.92, z - uz * 0.34, x + ux * 0.34, 2.92, z + uz * 0.34,
+      x + ux * 0.34, 2.42, z + uz * 0.34, fx, 0, fz, br, bg, bb);
+    sink.triFacing(x - ux * 0.34, 2.92, z - uz * 0.34, x + ux * 0.34, 2.42, z + uz * 0.34,
+      x - ux * 0.34, 2.42, z - uz * 0.34, fx, 0, fz, br, bg, bb);
+    // the bus glyph, abstracted to a white slab with a windscreen gap
+    sink.triFacing(x - ux * 0.2, 2.78, z - uz * 0.2, x + ux * 0.2, 2.78, z + uz * 0.2,
+      x + ux * 0.2, 2.56, z + uz * 0.2, fx, 0, fz, wr, wg, wb);
+    sink.triFacing(x - ux * 0.2, 2.78, z - uz * 0.2, x + ux * 0.2, 2.56, z + uz * 0.2,
+      x - ux * 0.2, 2.56, z - uz * 0.2, fx, 0, fz, wr, wg, wb);
+  }
+}
+
 // one sign: post + panel, all vertex-coloured triangles in the chunk sink
 function signPost(sink, sg, cell) {
   const [x, z] = sg.p[0];
@@ -3644,6 +3761,25 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     }
     if (cell.crossings) for (const cr of cell.crossings) {
       if (cr._home === key) zebraInto(sink, cr, cell, mats.terrain);
+    }
+    // pylons + wires: towers on this chunk's vertices, spans owned by their
+    // midpoint's chunk — same one-owner rule every linear feature uses
+    if (cell.power && mats.terrain) for (const pw of cell.power) {
+      for (let i = 0; i < pw.p.length; i++) {
+        const [vx, vz] = pw.p[i];
+        if (chunkKey(vx, vz) === key) pylonInto(sink, vx, vz, !!pw.m, pw.v ?? 0, mats.terrain);
+        if (i > 0) {
+          const [ux2, uz2] = pw.p[i - 1];
+          if (chunkKey((ux2 + vx) / 2, (uz2 + vz) / 2) === key)
+            wireSpan(sink, ux2, uz2, vx, vz, !!pw.m, pw.v ?? 0, mats.terrain);
+        }
+      }
+    }
+    // zastávky: the poi list is small and unbucketized — a linear scan per
+    // chunk build is cheaper than teaching the index a fourth node layer
+    if (city.pois) for (const poi of city.pois) {
+      if (poi.t === 'bus_stop' && chunkKey(poi.p[0], poi.p[1]) === key)
+        busStopInto(sink, poi.p[0], poi.p[1], cell);
     }
     const cls2 = clustersIn(key);
     if (cls2) for (const cl of cls2) clusterPad(sink, cl, mats.terrain);
