@@ -11,7 +11,7 @@ import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
   roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull,
   clustersIn, clusterHull, clusterDeckY } from './geo.js';
-import { makeMaterials, buildChunkMeshes, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
+import { makeMaterials, buildChunkMeshes, buildChunkMeshesGen, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain, groundFor } from './terrain.js';
 import { Canopy } from './canopy.js';
@@ -369,6 +369,12 @@ export class CityWorld {
       for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue; // ring only
         const key = (fx + dx) + ',' + (fz + dz);
+        // the cell being SLICED right now is in neither `built` nor the
+        // queue — without this skip the scan re-enqueued it every frame of
+        // its flight and every multi-frame build was followed by a full
+        // duplicate rebuild. If it deserves better by the time it lands,
+        // the very next scan sees the fresh `built` entry and re-queues it.
+        if (key === this._inflight?.key) continue;
         const have = this.built.has(key);
         // A cell already built at a LOWER tier than it now deserves is
         // re-queued, so flying down toward a distant suburb fills it in rather
@@ -393,54 +399,43 @@ export class CityWorld {
     // flying fast over a city, because the fast machines are the ones that ask
     // for the most cells per second. chunksPerFrame stays as the hard cap so a
     // pathologically cheap area cannot spin the loop forever.
+    //
+    // A chunk build used to be ATOMIC — 29 to 319 ms of main thread in one
+    // bite (measured over Palackého), and the cooldown could only space the
+    // bites apart, never shrink them: every arriving chunk was a dropped
+    // frame ("když jedu rychle, tak se to posekává"). The builder is a
+    // generator now: it yields between features, the pump below runs slices
+    // until the frame budget is gone, and the finished group swaps in whole.
+    // One chunk in flight at a time; the cooldown still spaces chunk STARTS.
     const budget = performance.now() + this.buildBudgetMs;
-    // A chunk build is ATOMIC — 30 to 150 ms of main thread in one bite — so
-    // the guarantee of one build per frame meant single-digit fps for as long
-    // as the queue had anything in it, which while driving is always. The
-    // cooldown spaces the bites out: one hitch every ~130 ms reads as a
-    // living world streaming in, the same hitches back to back read as
-    // "seká se to". Zero during boot and in flight, where throughput wins.
+    if (this._inflight) this._pumpBuild(budget, fx, fz, outer);
     const coolOff = this.buildCooldownMs
       && performance.now() - (this._lastBuildAt ?? 0) < this.buildCooldownMs;
-    for (let i = 0; i < this.chunksPerFrame && this.queue.length; i++) {
-      // always build at least one — otherwise a frame that arrived late never
+    for (let i = 0; i < this.chunksPerFrame && !this._inflight && this.queue.length; i++) {
+      // always start at least one — otherwise a frame that arrived late never
       // makes progress and the world stops streaming altogether
       if (i > 0 && performance.now() > budget) break;
       const key = this.queue[0];
       const [cx, cz] = key.split(',').map(Number);
       const ring = Math.max(Math.abs(cx - fx), Math.abs(cz - fz));
       // the cooldown yields only to a FIRST build right under the player —
-      // a hole in the ground beats a hitch, but everything already standing
-      // (in-place rebuilds included) can wait its 130 ms
+      // a hole in the ground beats a wait, but everything already standing
+      // (in-place rebuilds included) can wait its turn
       if (coolOff && !(ring <= 2 && !this.built.has(key))) break;
       this.queue.shift();
       this._queued.delete(key);
       if (ring > outer) continue;               // drifted out while queued
       const lod = this._lodAt(ring);
-      const prev = this.built.get(key);         // upgrading a far tile in place
-      if (prev) { this.scene.remove(prev); prev.traverse(o => o.geometry?.dispose?.()); }
-      const hadTerrain = this.terrain.ready(cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2);
-      const group = buildChunkMeshes(this.city, cx, cz, this.mats, lod);
-      if (group) this.scene.add(group);
-      this.built.set(key, group ?? null);
-      this._detail.set(key, lod);
-      // the real cell now draws its own ribbons — the far overlay for this
-      // home must go NOW, not at the next sweep, or the two z-fight
-      if (lod === 'full') {
-        const far = this._farRibbons?.get(key);
-        if (far) {
-          this.scene.remove(far);
-          far.traverse((o) => o.geometry?.dispose?.());
-          this._farRibbons.delete(key);
-        }
-      }
-      this._px.set(key, this.mats.ortho?.tierOf?.(cx, cz));
-      // The centre having ground is necessary but not sufficient: buildChunkMeshes
-      // reports whether ANY vertex it placed was sampled against a height map
-      // that had not arrived. Either way the chunk is a guess and must rebuild.
-      this._hadTerrain.set(key, hadTerrain && !group?.userData.guessedGround);
-      this._missBy.set(key, group?.userData.missTiles ?? null);
-      this._lastBuildAt = performance.now();
+      this._inflight = {
+        key, cx, cz, lod,
+        gen: buildChunkMeshesGen(this.city, cx, cz, this.mats, lod),
+        hadTerrain: this.terrain.ready(cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2),
+        // the guess-tracking flags live on SHARED material objects; a paused
+        // build stashes its own copies here — see _pumpBuild
+        missed: false, missTiles: null, canopyMissed: false, groundMissed: false,
+        started: false, stale: false,
+      };
+      this._pumpBuild(budget, fx, fz, outer);
     }
     // drop cells far behind us (hysteresis +2 so the edge doesn't flicker)
     for (const [key, group] of this.built) {
@@ -457,6 +452,92 @@ export class CityWorld {
         this._missBy.delete(key);
       }
     }
+  }
+
+  // Run slices of the in-flight chunk build until the budget runs out — at
+  // least one slice always, so a late frame still makes progress. The
+  // builder's guess-tracking flags (`missed`, `_missTiles`) live on the
+  // SHARED terrain/canopy/ground objects, and everything else — the
+  // far-ribbon sweep, interior re-meshes, the camera's ground probe —
+  // samples the same terrain between slices. A paused build therefore
+  // stashes its flags aside and a resume puts them back: our chunk must
+  // neither inherit their misses nor donate its own.
+  _pumpBuild(budget, fx, fz, outer) {
+    const inf = this._inflight;
+    const t = this.mats.terrain, cn = this.mats.canopy, gr = this.mats.ground;
+    if (inf.started) {
+      if (t) { t.missed = inf.missed; t._missTiles = inf.missTiles; }
+      if (cn) cn.missed = inf.canopyMissed;
+      if (gr) gr.missed = inf.groundMissed;
+    }
+    inf.started = true;
+    let it;
+    do { it = inf.gen.next(); } while (!it.done && performance.now() < budget);
+    if (!it.done) {
+      if (t) { inf.missed = t.missed; inf.missTiles = t._missTiles; t.missed = false; t._missTiles = null; }
+      if (cn) { inf.canopyMissed = cn.missed; cn.missed = false; }
+      if (gr) { inf.groundMissed = gr.missed; gr.missed = false; }
+      return;
+    }
+    this._inflight = null;
+    const { key, cx, cz, lod } = inf;
+    const group = it.value ?? null;
+    const ring = Math.max(Math.abs(cx - fx), Math.abs(cz - fz));
+    if (ring > outer) {                          // drifted out while building
+      group?.traverse((o) => o.geometry?.dispose?.());
+      // a data tile landed mid-build: the OLD group may still sit in `built`
+      // (eviction hysteresis is outer+2), drawn from pre-tile data — hand it
+      // to _requeueCells, which drops what lies beyond the ring, so the
+      // return trip rebuilds it fresh instead of trusting a stale cell
+      if (inf.stale) this._requeueCells([key]);
+      return;
+    }
+    const prev = this.built.get(key);            // rebuilt / upgraded in place
+    if (prev) { this.scene.remove(prev); prev.traverse(o => o.geometry?.dispose?.()); }
+    if (group) this.scene.add(group);
+    this.built.set(key, group);
+    this._detail.set(key, lod);
+    // the real cell now draws its own ribbons — the far overlay for this
+    // home must go NOW, not at the next sweep, or the two z-fight
+    if (lod === 'full') {
+      const far = this._farRibbons?.get(key);
+      if (far) {
+        this.scene.remove(far);
+        far.traverse((o) => o.geometry?.dispose?.());
+        this._farRibbons.delete(key);
+      }
+    }
+    // the photo tier the ground mesh was ACTUALLY built with — captured at
+    // the fetch slice, because tierOf moves with the focus and finalize can
+    // be dozens of frames later: recording the finalize-time tier here let a
+    // chunk built with the 512 px photo register as 2400 px and keep the
+    // blurry tile against sharp neighbours forever
+    this._px.set(key, group?.userData.px !== undefined
+      ? group.userData.px : this.mats.ortho?.tierOf?.(cx, cz));
+    // The centre having ground is necessary but not sufficient: the builder
+    // reports whether ANY vertex it placed was sampled against a height map
+    // that had not arrived. Either way the chunk is a guess and must rebuild.
+    this._hadTerrain.set(key, inf.hadTerrain && !group?.userData.guessedGround);
+    this._missBy.set(key, group?.userData.missTiles ?? null);
+    // Three ways a build spread over frames can already be out of date the
+    // moment it lands: a height tile it guessed against ARRIVED mid-build
+    // (the guessed-chunk sweep consumed that arrival before this chunk
+    // registered its guess, so it would wait forever); a region tile added
+    // features / interiors re-meshed this cell while it was in flight
+    // (`stale`); or a canopy/ground raster landed mid-build — those record
+    // no tile list, so the terrain check cannot see them. The raster case
+    // retries ONCE per cell (the miss may be a neighbour tile that will
+    // never load, and retrying on a present centre tile forever would be a
+    // rebuild loop).
+    const mx = cx * CHUNK + CHUNK / 2, mz = cz * CHUNK + CHUNK / 2;
+    const rasterHealed = (this.mats.canopy?.missed && this.canopy?.ready?.(mx, mz))
+      || (this.mats.ground?.missed && this.ground?.ready?.(mx, mz));
+    if (inf.stale
+      || group?.userData.missTiles?.some((tk) => this.terrain.grids?.get(tk))
+      || (rasterHealed && !(this._rasterRetried ??= new Set()).has(key)
+        && this._rasterRetried.add(key)))
+      this._requeueCells([key]);
+    this._lastBuildAt = performance.now();
   }
 
   // A running index is all the bookkeeping the franchise pass needs — until
@@ -619,6 +700,9 @@ export class CityWorld {
     const outer = this.viewChunks + this.shellChunks + this.farChunks;
     const gone = [];
     for (const key of cells) {
+      // the cell being SLICED right now is in neither `built` nor the queue —
+      // mark it and its finalize re-queues itself with the fresh data
+      if (key === this._inflight?.key) { this._inflight.stale = true; continue; }
       if (!this.built.has(key)) continue;
       const [cx, cz] = key.split(',').map(Number);
       if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > outer) { gone.push(key); continue; }
@@ -649,6 +733,12 @@ export class CityWorld {
     const T = this.terrain.tile;
     const c0x = Math.floor((tx * T) / CHUNK), c1x = Math.floor(((tx + 1) * T) / CHUNK);
     const c0z = Math.floor((tz * T) / CHUNK), c1z = Math.floor(((tz + 1) * T) / CHUNK);
+    // a FIRST build in flight is in neither `built` nor the queue, so the
+    // scan below cannot see it — but its early slices sampled the heights
+    // this conform just moved. Mark it stale; finalize re-queues it.
+    const inf = this._inflight;
+    if (inf && inf.cx >= c0x && inf.cx < c1x && inf.cz >= c0z && inf.cz < c1z)
+      inf.stale = true;
     const keys = [];
     for (const key of this.built.keys()) {
       const [cx, cz] = key.split(',').map(Number);
@@ -1214,6 +1304,12 @@ export class CityWorld {
   // ground, roads, lamps, trees — is untouched, which is what makes promoting
   // a building to boxes a sub-millisecond event instead of a chunk rebuild.
   _rebuildBuildings(key) {
+    // a sliced build of this very chunk may be in flight, and its buildings
+    // slice may already have read `hidden` — whatever we patch below lives
+    // in the OLD group and dies at the swap. Mark the flight stale so the
+    // finalize re-queues the chunk and the rebuild reads the set as it is
+    // then; the patch still goes ahead so the interim frames look right.
+    if (this._inflight?.key === key) this._inflight.stale = true;
     const group = this.built.get(key);
     if (!group) return;
     const old = group.getObjectByName('buildings');

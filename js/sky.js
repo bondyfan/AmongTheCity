@@ -203,6 +203,9 @@ export function makeSky(scene) {
   sun.shadow.camera.top = 90; sun.shadow.camera.bottom = -90;
   sun.shadow.camera.near = 1;
   sun.shadow.camera.far = 280;
+  // ~2 texels of the 2048 map over the 180 m box — enough to keep flat roofs
+  // and roadways free of shadow acne without visibly detaching thin casters
+  sun.shadow.normalBias = 0.15;
   scene.add(hemi, sun, sun.target);
   return {
     dome, hemi, sun, target: sun.target,
@@ -219,7 +222,7 @@ const _fogC = new THREE.Color(), _horC = new THREE.Color(), _zenC = new THREE.Co
 // Drive the whole atmosphere from tod (0..1). Call once per frame, after the
 // camera has moved. Sets scene.fog + scene.background, all dome uniforms, the
 // hemi/sun intensities and colours, and parks the shadow sun on the camera.
-export function updateSky(sky, tod, camera, scene) {
+export function updateSky(sky, tod, camera, scene, groundY = camera.position.y - 6) {
   const { dome, hemi, sun } = sky;
   // the cloud-drift clock advances on wall time, clamped so a hidden tab
   // doesn't teleport the cloud field when rAF resumes
@@ -295,12 +298,18 @@ export function updateSky(sky, tod, camera, scene) {
   u.uCloudAmt.value = sky.cloudAmt;
 
   // park the shadow rig on the camera so shadows always cover what you see.
-  // The light's HEIGHT is floored just above the ground: once the sun is down
-  // its intensity is zero anyway, and a light placed below the streets would
-  // throw the whole ortho shadow frustum upside down.
+  // Heights are RELATIVE to groundY — the terrain under the camera. This is
+  // an absolute-elevation world (Pardubice streets lie at ~220 m ASL), and
+  // the Woods' rig parked at y = 0..140 put the whole shadow frustum a
+  // hundred metres under the pavement: diffuse light looked right (only the
+  // direction matters there), so every flag read "on" while not one surface
+  // ever fell inside the shadow map — "stíny vůbec nefungují". The light's
+  // height above ground keeps its old floor: once the sun is down its
+  // intensity is zero anyway, and a light below the streets would throw the
+  // whole ortho shadow frustum upside down.
   sun.position.set(
     camera.position.x + dir.x * 140,
-    Math.max(0.12, dir.y) * 140,
+    groundY + Math.max(0.12, dir.y) * 140,
     camera.position.z + dir.z * 140);
-  sun.target.position.set(camera.position.x, 0, camera.position.z);
+  sun.target.position.set(camera.position.x, groundY, camera.position.z);
 }

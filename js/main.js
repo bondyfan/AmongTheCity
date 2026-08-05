@@ -1388,8 +1388,10 @@ function updateHorizon(dt) {
   world.chunksPerFrame = game.jet ? 16 : alt > 20 ? 8 : 2;
   world.buildBudgetMs = game.jet ? 9 : 7;
   // in the air throughput wins over smoothness — the world must exist under a
-  // 200 m/s jet; on the ground the cooldown keeps the hitches apart
-  if (game.mode === 'play') world.buildCooldownMs = game.jet || alt > 20 ? 0 : 130;
+  // 200 m/s jet; on the ground a short cooldown between chunk STARTS keeps
+  // build work from monopolising every frame (each build is now sliced over
+  // frames by the streamer, so the gap no longer needs to hide whole hitches)
+  if (game.mode === 'play') world.buildCooldownMs = game.jet || alt > 20 ? 0 : 60;
   // The aerial photo picks its resolution from distance to the same LOOK-AHEAD
   // point the chunk streamer uses, so the full-detail ring sits over the ground
   // you are about to cross rather than the ground behind you.
@@ -2243,8 +2245,9 @@ async function boot() {
 
   game.mode = 'play';
   // builds pace themselves from here on — during boot the queue must drain
-  // flat out, in play a 130 ms gap between bites is what "smooth" feels like
-  world.buildCooldownMs = 130;
+  // flat out; in play each build is sliced over frames, so the cooldown only
+  // spaces chunk starts (breathing room, not hitch-hiding)
+  world.buildCooldownMs = 60;
   $id('hud').classList.remove('hidden');
   const ov = $id('enter-overlay');
   ov.classList.add('fade');
@@ -2315,7 +2318,7 @@ function tick(src) {
     // blur too, with the toggle still reading "on"
     const wantPost = game.mode === 'play'
       && (gs.bloom !== false || gs.rays !== false || gs.mblur !== false
-        || gs.flare !== false);
+        || gs.flare !== false || gs.ao !== false);
     if (wantPost && !postfx) {
       postfx = new PostFX(renderer);
       postfx.setSize(renderer.domElement.width, renderer.domElement.height);
@@ -2327,7 +2330,10 @@ function tick(src) {
         const dayK = Math.min(1, Math.max(0, (sky.sun?.intensity ?? 0) / 1.4));
         if (dayK > 0.02) rays = { dir: sky.sunDir, color: sky.sun.color, strength: dayK * 0.7 };
       }
-      postfx.render(scene, camera, { ssao: false, bloom: gs.bloom !== false, rays, canopy: null,
+      // SSAO was fully built, plumbed through the composite — and hard-coded
+      // OFF at this one call site, which is why "ambient occlusion nefunguje".
+      postfx.render(scene, camera, { ssao: gs.ao !== false, bloom: gs.bloom !== false, rays, canopy: null,
+        aoStrength: 0.34, aoFloor: 0.25, aoRadius: 1.7,
         motionBlur: gs.mblur === false ? 0 : motionBlurAmount(),
         blurAniso: game.jet ? MB_ANISO_JET : MB_ANISO_GROUND,
         flare: gs.flare === false ? 0 : flareAmount() });
@@ -2586,7 +2592,11 @@ function stepGame(dt) {
 
   updateCamera(dt);
   placeReticle();          // after the camera: a lagging sight reads as drift
-  updateSky(sky, tod(), camera, scene);
+  // the shadow rig parks on the camera, but its HEIGHTS must be anchored to
+  // the real ground — this world lives at absolute elevation (~220 m ASL),
+  // and the default y≈0 anchor put the whole shadow frustum underground
+  updateSky(sky, tod(), camera, scene,
+    world?.terrain?.heightAt?.(camera.position.x, camera.position.z) ?? (camera.position.y - 6));
   updateHud(dt);
 
   // ---- net: server co-op pump (menu → Multiplayer only; null in single) ----

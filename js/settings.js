@@ -275,6 +275,7 @@ export function initSettings(apply) {
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
     toggleRow('facades', 'Textury fasád'),
     toggleRow('grass', 'Tráva (3D stébla)'),
+    toggleRow('ao', 'Ambient occlusion (stíny v koutech)'),
     toggleRow('bloom', 'Bloom (záře světel)'),
     toggleRow('rays', 'Sluneční paprsky'),
     toggleRow('mblur', 'Motion blur (rozmaz při rychlosti)'),

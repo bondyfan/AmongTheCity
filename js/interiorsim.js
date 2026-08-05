@@ -95,6 +95,14 @@ export class Interiors {
     // wrecks keep coming down for a few seconds after the hit
     for (const m of this.models.values()) if (m.settle > 0) m.update(dt);
     this._occupantStep(dt);
+    // The hitch budget, per FRAME rather than per scan: at most one shell
+    // build and one building-batch re-mesh. A single shell can cost ~12 ms
+    // of main thread and a re-mesh ~6, and the scan used to land six shells
+    // plus every dirty chunk's re-mesh in ONE frame every quarter second —
+    // most of the "posekává se to při rychlé jízdě" that wasn't the chunk
+    // streamer's own atomic builds.
+    this._stepShellQ();
+    this._drainChunks(1);
     this._scanT -= dt;
     if (this._scanT > 0) return;
     this._scanT = 1 / Math.max(1, I.buildPerSec) * 2;
@@ -102,6 +110,7 @@ export class Interiors {
     // interiors switched off: keep the wrecks (they are the player's own doing)
     // and shed everything else
     if (!this.enabled) {
+      this._shellQ = null; this._shellPending?.clear();
       for (const [id, m] of this.models) if (!m.damaged) this._drop(id);
       this._flushChunks();
       return;
@@ -154,10 +163,11 @@ export class Interiors {
       this.activate(f);
     }
     // Nearest first through both tiers in one pass: the closest few (on foot)
-    // get rooms and people, everything else out to shellR gets the shell. Two
-    // interior builds and I.shellPerScan shell builds per scan is the hitch
-    // budget — a building over budget keeps its slot and builds next scan.
-    let builtFull = 0, builtShell = 0;
+    // get rooms and people, everything else out to shellR gets the shell.
+    // Interior builds stay inline (two per scan, on foot only — walking pace
+    // never stacks them); SHELLS are only QUEUED here, and stand up one per
+    // frame in _stepShellQ, which is where the hitch budget actually lives.
+    let builtFull = 0;
     for (const [d, f] of cands) {
       if (keep.size >= maxShell) break;
       if (keep.has(f._id)) continue;
@@ -188,29 +198,21 @@ export class Interiors {
         full.add(f._id);
         if (!m || !m.interiorBuilt) {
           if (builtFull >= 2) continue;
-          if (!m) builtShell++;             // a fresh full build carries a shell too
           this.activate(f);
           builtFull++;
         } else if (!m.populated) this._populate(m);
       } else if (!m) {
-        if (builtShell >= I.shellPerScan) continue;
-        // Chunk affinity: a chunk's building batch is re-meshed once per scan
-        // however many buildings it lost, so the budget should FINISH one
-        // chunk before starting the next — six buildings from six different
-        // chunks re-mesh six batches this scan and six more next scan, while
-        // six from one chunk cost a single rebuild. Prefer candidates whose
-        // home chunk is already dirty this scan.
-        if (builtShell > 0 && this._dirty?.size && !this._dirty.has(f._home)) {
-          let pending = false;
-          for (const [, g] of cands)
-            if (!keep.has(g._id) && !this.models.has(g._id) && this._dirty.has(g._home)) { pending = true; break; }
-          if (pending) { keep.delete(f._id); continue; }
+        // no model yet: queue it for the per-frame builder. A queued
+        // building KEEPS its slot (counts toward maxShell) so the ring's
+        // cap holds; the shell stands up within a few frames of here. The
+        // pending cap bounds the backlog — anything past it gives its slot
+        // back and re-candidates next scan.
+        const pend = this._shellPending ??= new Set();
+        if (!pend.has(f._id)) {
+          if (pend.size >= I.shellPerScan * 2) { keep.delete(f._id); continue; }
+          pend.add(f._id);
+          (this._shellQ ??= []).push(f);
         }
-        // null = the ground under it has not arrived. Do not spend the budget
-        // on it and do not KEEP it — the chunk mesh is still drawing it, and
-        // the next scan will try again once the height map lands.
-        if (!this._model(f)) { keep.delete(f._id); continue; }
-        builtShell++;
       }
     }
     // Occupants exist only in the full tier: boarding a car empties the rooms
@@ -238,7 +240,9 @@ export class Interiors {
     }
     doomed.sort((a, b) => b[0] - a[0]);
     for (const [, id] of doomed.slice(0, I.shellPerScan * 2)) this._drop(id);
-    this._flushChunks();
+    // no flush here: the chunks these builds and drops dirtied re-mesh one
+    // per frame in _drainChunks — a batch a frame or two out of date is
+    // invisible, all of them in this frame was a hitch
   }
 
   /**
@@ -355,6 +359,37 @@ export class Interiors {
     if (!this._dirty || !this._dirty.size) return;
     for (const key of this._dirty) this.world._rebuildBuildings?.(key);
     this._dirty.clear();
+  }
+
+  // Shells stand up ONE per frame, from the queue the scan filled — that is
+  // still up to 60/s where churn at 130 km/h needs about 4. Pop past stale
+  // entries (model already built, drifted out of range) until one actually
+  // builds. _model may still answer null (ground not loaded); the pending
+  // mark is cleared either way, so the next scan simply re-queues it.
+  _stepShellQ() {
+    const q = this._shellQ;
+    if (!q?.length || !this.enabled) return;
+    const shellR = Math.max(this.drawR, I.activateR);
+    while (q.length) {
+      const f = q.shift();
+      this._shellPending.delete(f._id);
+      if (this.models.has(f._id)) continue;
+      if (this.focus && bbDist(f._bb ??= bboxOf(f.o), this.focus.x, this.focus.z) > shellR) continue;
+      this._model(f);
+      break;
+    }
+  }
+
+  // …and the chunks those builds and drops dirtied re-mesh at the same
+  // cadence. damage() still flushes everything at once — a rocket hit must
+  // show this frame, and rockets are rare.
+  _drainChunks(n) {
+    if (!this._dirty?.size) return;
+    for (const key of this._dirty) {
+      if (n-- <= 0) break;
+      this._dirty.delete(key);
+      this.world._rebuildBuildings?.(key);
+    }
   }
 
   // ---- damage -----------------------------------------------------------

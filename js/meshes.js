@@ -836,7 +836,14 @@ function clipSeg(ax, az, bx, bz, x0, z0, x1, z1) {
 // already, and under a bridge the deck is metres up, where min() changes
 // nothing.
 const _cl = { x: 0, z: 0, t: 0 };      // distPointToSegment's reusable answer
-function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
+// A GENERATOR, because this is the single most expensive loop of a chunk
+// build: every vertex tests every corridor's every segment, and one big park
+// fill against a downtown 3×3's roads was 96 ms in a single call — the
+// worst of the driving stutter after the builds themselves were sliced. The
+// vertex loop carries no cross-vertex state, so it can pause anywhere;
+// buildChunkMeshesGen delegates with yield* and the streamer's budget does
+// the rest. clampUnderRoads below stays as the drain-it-all wrapper.
+function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
   if (!geo || !drv?.length || !terrain) return geo;
   const a = geo.attributes.position.array;
   // corridors that cannot touch this geometry are dropped ONCE, not per
@@ -855,7 +862,9 @@ function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
     return !(gx1 < bb[0] - rc || gx0 > bb[2] + rc || gz1 < bb[1] - rc || gz0 > bb[3] + rc);
   });
   if (!use.length) return geo;
+  let sinceYield = 0;
   for (let i = 0; i < a.length; i += 3) {
+    if (++sinceYield >= 200) { sinceYield = 0; yield; }
     const x = a[i] + offX, z = a[i + 2] + offZ;
     // TWO-PHASE, because corridors overlap: the tightest ceiling over all
     // roads, the tallest embankment floor over all roads — and the floor may
@@ -917,6 +926,12 @@ function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
   geo.attributes.position.needsUpdate = true;
   geo.computeVertexNormals();
   return geo;
+}
+function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
+  const g = clampUnderRoadsGen(geo, drv, terrain, offX, offZ);
+  let it;
+  do { it = g.next(); } while (!it.done);
+  return it.value;
 }
 
 // ---- water: sunken surface + earthy bank walls cut through the ground ----
@@ -3799,7 +3814,15 @@ export const chunkBase = (cx, cz) => [cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK
  * `true` and `false` still mean 'ground' and 'full', because the streamer used
  * to pass a boolean and the tests still do.
  */
-export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
+// The build is a GENERATOR: it yields between features so the streamer can
+// spread one chunk's 30–300 ms of meshing across many frames (js/city.js
+// pumps it against a per-frame budget — one atomic build was one dropped
+// frame, and while driving the queue is never empty). Nothing touches the
+// scene until the generator RETURNS, so a paused build is invisible and the
+// old group stays up in place. buildChunkMeshes below drains it in one go
+// for callers that want the old synchronous behaviour (the far-ribbon
+// overlay, interior re-meshes, tests).
+export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   const groundOnly = lod === true || lod === 'ground';
   const shell = lod === 'shell';
   // 'roads': ribbons and nothing else. A 3 km rural way draws WHOLE from the
@@ -3848,6 +3871,10 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   };
   if (groundOnly) {
     const g = mats.ortho?.orthoGroundMesh?.(cx, cz);
+    // record the tier the photo was FETCHED at — the streamer's staleness
+    // check must compare against what the mesh actually carries, and by the
+    // time a sliced build finalizes the focus (and tierOf) has moved on
+    group.userData.px = mats.ortho?.tierOf?.(cx, cz);
     if (g) { g.userData.localGeom = true; group.add(g); return done(); }
     // No photo AND no data means we are off the edge of the world (ortho.js
     // clamps its requests to the region) — the apron is the right answer there,
@@ -3905,10 +3932,14 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     skirtRing(sink, f.o, key, true, kr, kg, kb, mats.terrain, wy);
     for (const h of f.i ?? []) if (h.length >= 3)
       skirtRing(sink, h, key, false, kr, kg, kb, mats.terrain, wy);
+    yield;
   }
   if (mats.terrain) sink.fixFrom(bankMark);   // bank skirts resolved absolutely
   const ww = wwBuckets(city).get(key);
-  if (ww) for (const f of ww) trenchInto(sink, water, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, mats.terrain);
+  if (ww) for (const f of ww) {
+    trenchInto(sink, water, holes, f, cell, x0, z0, x1, z1, kr, kg, kb, mats.terrain);
+    yield;
+  }
 
   // -- ground: aerial photo when the ortho manager has the tile, flat quad
   // otherwise — both carved with the water holes; a fully flooded cell needs
@@ -3946,7 +3977,9 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     }
   }
   if (!flooded && !roadsOnly) {
+    yield;
     orthoGround = mats.ortho?.orthoGroundMesh?.(cx, cz) ?? null;
+    group.userData.px = mats.ortho?.tierOf?.(cx, cz);  // tier AS FETCHED — see above
     if (orthoGround) {
       // carving replaces the unit quad with a world-space ShapeGeometry and
       // zeroes .position, so only the UNcarved tile is still local
@@ -3954,7 +3987,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       else orthoGround.userData.localGeom = true;
       if (corr.length && mats.terrain) {
         const g2 = orthoGround.geometry;
-        clampUnderRoads(g2, corr, mats.terrain,
+        yield* clampUnderRoadsGen(g2, corr, mats.terrain,
           orthoGround.userData.localGeom ? orthoGround.position.x : 0,
           orthoGround.userData.localGeom ? orthoGround.position.z : 0);
         g2.attributes.position.needsUpdate = true;
@@ -3983,7 +4016,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       // chord between two outside vertices arch over a 3 m track — the flat
       // band it cuts is the road's shoulder, which the conform already
       // flattens at the coarser scale.
-      if (g && corr.length) g = clampUnderRoads(g, corr, mats.terrain);
+      if (g && corr.length) g = yield* clampUnderRoadsGen(g, corr, mats.terrain);
       if (g) flat.push(g);
     }
   }
@@ -4036,6 +4069,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     };
     for (const [list, y, pick, kind] of polyKinds) for (const f of list) {
       if (f._home !== key || f.o.length < 3) continue;
+      yield;
       // A fill that touches a drivable corridor is tessellated FINER than the
       // corridor is wide. The clamp below works on vertices, and the default
       // 12 m tessellation let one triangle bridge a 6 m carriageway with all
@@ -4046,7 +4080,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       const drv = drvFor(fb);
       const nearRoad = drv.some(({ bb, hw }) =>
         !(fb[2] < bb[0] - hw || fb[0] > bb[2] + hw || fb[3] < bb[1] - hw || fb[1] > bb[3] + hw));
-      const g = clampUnderRoads(
+      const g = yield* clampUnderRoadsGen(
         drape(terrainTess(shapePoly(f.o, f.i, y, pick(f), kind(f)), nearRoad ? 3.5 : undefined),
           mats.terrain),
         drv, mats.terrain);
@@ -4062,11 +4096,12 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
         .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25,
           lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road }));
       for (const r of mats.ground.rectsIn(x0, z0)) {
+        yield;
         const col = r.c === 2 ? COLORS.inferred.asphalt : COLORS.inferred.paving;
         const sc = r.c === 2 ? SURF.asphalt : SURF.paving;
         const nearRoad = drvR.some(({ bb, hw }) =>
           !(r.x1 < bb[0] - hw || r.x0 > bb[2] + hw || r.z1 < bb[1] - hw || r.z0 > bb[3] + hw));
-        const g = clampUnderRoads(drape(terrainTess(shapePoly(
+        const g = yield* clampUnderRoadsGen(drape(terrainTess(shapePoly(
           [[r.x0, r.z0], [r.x1, r.z0], [r.x1, r.z1], [r.x0, r.z1]],
           null, LAYER_Y.inferred, col, sc), nearRoad ? 3.5 : undefined), mats.terrain), drvR, mats.terrain);
         if (g) flat.push(g);
@@ -4079,11 +4114,12 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // has every road in it, at better fidelity than the ribbon, and the ribbon is
   // the single most expensive thing in a rural chunk.
   if (!shell) {
-    for (const f of cell.roads) if (f._home === key) roadRibbon(sink, f, mats.terrain, cell, key);
-    for (const f of cell.rails) if (f._home === key) railWay(sink, f, mats.terrain);
+    for (const f of cell.roads) if (f._home === key) { roadRibbon(sink, f, mats.terrain, cell, key); yield; }
+    for (const f of cell.rails) if (f._home === key) { railWay(sink, f, mats.terrain); yield; }
     // …and the surfaces where they meet, filling what the trims left behind
     const js = junctionsIn(key);
     if (js) for (const j of js) junctionPad(sink, j, mats.terrain);
+    yield;
     // signs and zebras write into the SAME sink — and they must do it HERE,
     // before sink.geo() below turns it into geometry. The first version
     // appended them after that line: thirty zebra bars per chunk, emitted
@@ -4094,6 +4130,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     if (!roadsOnly && cell.crossings) for (const cr of cell.crossings) {
       if (cr._home === key) zebraInto(sink, cr, cell, mats.terrain);
     }
+    yield;
     // trolejové vedení, drawn WHOLE from the way's home chunk like its ribbon
     for (const r of cell.roads) {
       if (r.tw && r._home === key && !roadsOnly) trolleyInto(sink, r, mats.terrain);
@@ -4101,6 +4138,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // pylons + wires: towers on this chunk's vertices, spans owned by their
     // midpoint's chunk — same one-owner rule every linear feature uses
     if (!roadsOnly && cell.power && mats.terrain) for (const pw of cell.power) {
+      yield;
       for (let i = 0; i < pw.p.length; i++) {
         const [vx, vz] = pw.p[i];
         if (chunkKey(vx, vz) === key) pylonInto(sink, vx, vz, !!pw.m, pw.v ?? 0, mats.terrain);
@@ -4117,6 +4155,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
       if (poi.t === 'bus_stop' && chunkKey(poi.p[0], poi.p[1]) === key)
         busStopInto(sink, poi.p[0], poi.p[1], cell);
     }
+    yield;
     // …and everything else a Czech street has standing on it (js/furniture.js)
     if (!roadsOnly) furnitureInto(sink, cell, key, mats.terrain,
       (hex) => { _c.setHex(hex); return [_c.r, _c.g, _c.b]; },
@@ -4124,7 +4163,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     // fences, walls, noise barriers — the lines that divide one plot from the
     // next, and the reason a town stops looking like houses dropped in a field
     if (cell.barriers) for (const b of cell.barriers) {
-      if (b._home === key) barrierInto(sink, b, mats.terrain);
+      if (b._home === key) { barrierInto(sink, b, mats.terrain); yield; }
     }
     if (!roadsOnly && cell.calming) for (const cm of cell.calming) {
       if (cm._home === key) bumpInto(sink, cm, cell, mats.terrain);
@@ -4138,8 +4177,19 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // hillside in a single pass, and the layering they were given (LAYER_Y) is
   // preserved because the terrain is ADDED to it rather than replacing it.
   // Bridges keep working for the same reason: their deck is already a lift.
+  yield;
   const sg = sink.geo();
-  if (sg) flat.push(drape(sg, mats.terrain, sink.fixed));
+  // The sink — kerbs, fences, props, pylons, everything with a HEIGHT — gets
+  // its own mesh so it can CAST. It used to merge into flatMesh below, whose
+  // "ground catches, never casts" then silenced every fence and bench in the
+  // world: shadow mapping was on, the sun tracked the camera, and nothing at
+  // street level threw a shadow ("stíny vůbec nefungují").
+  if (sg) {
+    const sinkMesh = new THREE.Mesh(drape(sg, mats.terrain, sink.fixed), mats.flat);
+    sinkMesh.castShadow = true;
+    sinkMesh.receiveShadow = true;
+    group.add(sinkMesh);
+  }
   if (water.length) {
     const waterMesh = new THREE.Mesh(mergeSurfaceGeometries(water), mats.water);
     waterMesh.receiveShadow = true;
@@ -4149,6 +4199,7 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     group.add(waterMesh);
   }
   if (flat.length) {
+    yield;
     const flatMesh = new THREE.Mesh(mergeSurfaceGeometries(flat), mats.flat);
     flatMesh.receiveShadow = true;              // ground catches, never casts
     group.add(flatMesh);
@@ -4157,12 +4208,14 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // -- buildings: facade walls or v1 extrudes, one casting mesh either way --
   // Shells get the plain extrude: a window atlas costs a texture bind and a
   // second material for detail nobody can resolve from 700 m up.
+  yield;
   const bm = roadsOnly ? null : buildBuildingsMesh(city, cx, cz,
     shell ? { ...mats, facades: false, shellLod: true } : mats);
   if (bm) group.add(bm);
 
   // -- street lamps along the wider drivable roads --
   if (mats.lamps !== false && !shell && !roadsOnly) {
+    yield;
     const spots = [];
     for (const r of cell.roads) {
       if (!r.d || r.w < LAMP_MIN_W || r._home !== key) continue;
@@ -4218,11 +4271,13 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
   // of meshes. Settings can switch the whole lot off (mats.trees === false).
   const trees = [];
   if (scatter) {
+    yield;
     for (const t of cell.trees) if (t._home === key)
       trees.push({ x: t.p[0][0], z: t.p[0][1], seed: t._id, forest: false });
     for (const f of cell.green) {
       scatterForest(f, x0, z0, x1, z1, wet, trees);
       scatterBushes(f, x0, z0, x1, z1, wet, trees);
+      yield;
     }
     scatterCanopy(cell, x0, z0, x1, z1, wet, mats.canopy, trees);
   }
@@ -4231,6 +4286,10 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     const trunk = new THREE.InstancedMesh(tg, mats.trunk, trees.length);
     const crown = new THREE.InstancedMesh(cg, mats.crown, trees.length);
     for (let i = 0; i < trees.length; i++) {
+      // instancing is cheap per tree, but a floodplain cell holds thousands —
+      // every scratch var below is fully re-set each iteration, so the slice
+      // boundary is safe
+      if (i > 0 && (i % 500) === 0) yield;
       const t = trees[i], id = t.seed;
       // forest stock grows taller and leaner than the pruned boulevard rows
       // (≈11–25 m against 7–12 m) and its crowns go deeper, darker green —
@@ -4266,4 +4325,11 @@ export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
     group.add(trunk, crown);
   }
   return done();
+}
+
+export function buildChunkMeshes(city, cx, cz, mats, lod = 'full') {
+  const gen = buildChunkMeshesGen(city, cx, cz, mats, lod);
+  let it;
+  do { it = gen.next(); } while (!it.done);
+  return it.value;
 }

@@ -1010,6 +1010,9 @@ export class Vehicles {
     // 221 m underground, which reads exactly like "the spawn button does
     // nothing".
     const y0 = this.world?.surfaceY ? this.world.surfaceY(x, z).y : 0;
+    // a car without a shadow floats — every hull and wheel casts, and the
+    // body receives so a bridge's shade falls across the bonnet
+    group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
     const car = { mesh: group, wheels, x, z, heading, speed: 0, steer: 0,
       kind, color, len: K.len, wid: K.wid, ai: null,
       y: y0, _lat: 0, _pv: 0, _acc: 0, _roll: 0, _pitch: 0, _rammedT: 0,
