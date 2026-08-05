@@ -54,7 +54,13 @@ import { GrassMask } from './grassmask.js';
 //      already driven a dozen metres past — half the margin was spent before
 //      the ring was even on screen. The centre is now placed where the eye
 //      will be, not where it was.
-const REBUILD_AT = 7;       // m of travel before the ring is rebuilt
+// …and NOTHING here may allocate per rebuild. The scratch buffers are sized
+// from the layer's own geometry, which never changes, so they are built once
+// and refilled forever. Allocating them per ring cost 9.4 MB a time, and at
+// 100 km/h with the rebuild interval below that is ~30 MB/s of garbage — the
+// major collections that followed are the one-to-two-second freezes with the
+// engine note stuck on one tone.
+const REBUILD_AT = 10;      // m of travel before the ring is rebuilt
 const BUDGET_MS = 1.2;      // per frame, shared by the mask and the fill
 const LEAD_T = 0.55;        // s of travel the ring centre is placed ahead
 const LEAD_MAX = 16;        // …never more than this, or a jet flings it away
@@ -71,10 +77,14 @@ const TIP = new THREE.Color(0x86ab55);
 // the note above — a blade is only ever added to the buffer beyond fade1,
 // where its scale is zero and nobody can see it arrive.
 const LAYERS = [
-  { name: 'turf', blades: 5, radius: 26, spacing: 0.24, hMul: 0.45, width: 0.012, lean: 0.34,
-    fade0: 10, fade1: 16 },
+  // turf is the filler BETWEEN the tufts and is only ever seen close up, so it
+  // buys its drift margin with spacing rather than with instances: at 0.24 m
+  // over a 26 m disc it was 37 000 of them, most of which are scaled to
+  // nothing at any moment.
+  { name: 'turf', blades: 5, radius: 26, spacing: 0.30, hMul: 0.45, width: 0.012, lean: 0.34,
+    fade0: 9, fade1: 15 },
   { name: 'tuft', blades: 7, radius: 52, spacing: 0.55, hMul: 1.00, width: 0.020, lean: 0.34,
-    fade0: 32, fade1: 40 },
+    fade0: 31, fade1: 39 },
 ];
 
 /** One tuft at the origin, one unit tall: tapered strips, splayed and twisted. */
@@ -172,14 +182,23 @@ export class Grass {
     this._needRefill = false;       // a fill hit ground the mask did not have yet
     // one material per layer: they fade over different distances, and the
     // fade lives in the shader
-    this.layers = LAYERS.map((L) => ({
-      ...L,
-      geo: tuftGeometry(L.blades, L.width, L.lean),
-      mat: grassMaterial(L.fade0, L.fade1),
-      mesh: null,
-      cap: 0,
-      pending: null,
-    }));
+    this.layers = LAYERS.map((L) => {
+      // The worst case is the whole disc surviving the mask, and it is a
+      // constant — so the scratch is allocated ONCE here and refilled for the
+      // life of the session, and the InstancedMesh is sized to the same
+      // number so it never has to be disposed and rebuilt either.
+      const cap = Math.ceil((Math.PI * L.radius * L.radius) / (L.spacing * L.spacing)) + 64;
+      return {
+        ...L,
+        geo: tuftGeometry(L.blades, L.width, L.lean),
+        mat: grassMaterial(L.fade0, L.fade1),
+        mesh: null,
+        cap,
+        mats: new Float32Array(cap * 16),
+        cols: new Float32Array(cap * 3),
+        pending: null,
+      };
+    });
     this._eye = new THREE.Vector2();
     this._px = null; this._pz = null;   // last eye position, for the velocity
     this._vx = 0; this._vz = 0;         // …eased, so a hitch cannot fling the ring
@@ -207,9 +226,8 @@ export class Grass {
     if (!L.mesh) return;
     this.scene.remove(L.mesh);
     L.mesh.dispose?.();
-    L.mesh = null;
-    L.cap = 0;
-  }
+    L.mesh = null;   // …but NOT L.cap: it is the layer's fixed size, and the
+  }                  // scratch buffers are cut to it for the whole session
 
   /** Called every frame with the eye's ground position. */
   update(x, z, dt) {
@@ -265,17 +283,14 @@ export class Grass {
     const cz = ez + (v > 0.01 ? this._vz / v : 0) * lead;
     for (const L of this.layers) {
       const step = L.spacing;
-      // Worst case is the whole disc surviving every mask — allocate for it
-      // once so a fill never reallocates halfway through.
-      const cap = Math.ceil((Math.PI * L.radius * L.radius) / (step * step)) + 64;
       L.pending = {
         cx, cz, ex, ez,
         i0: Math.floor((cx - L.radius) / step), i1: Math.ceil((cx + L.radius) / step),
         j0: Math.floor((cz - L.radius) / step), j1: Math.ceil((cz + L.radius) / step),
         j: Math.floor((cz - L.radius) / step),
-        n: 0, cap,
-        mats: new Float32Array(cap * 16),
-        cols: new Float32Array(cap * 3),
+        n: 0, cap: L.cap,
+        // the layer's own scratch, not a fresh pair — see the note at the top
+        mats: L.mats, cols: L.cols,
       };
     }
     // Ask the mask for every chunk the widest ring touches, before it is needed
@@ -360,9 +375,11 @@ export class Grass {
 
   /** Publish a finished scratch buffer — the one visible change, all at once. */
   _swap(L, P) {
-    if (!L.mesh || P.n > L.cap) {
-      this._drop(L);
-      L.cap = Math.max(P.n, 64);
+    // Built at the layer's FIXED cap, once. It used to be sized to whatever
+    // the build that created it happened to produce, so the next slightly
+    // fuller ring disposed the mesh and reallocated both GPU buffers — every
+    // few seconds while driving, on top of the scratch churn.
+    if (!L.mesh) {
       L.mesh = new THREE.InstancedMesh(L.geo, L.mat, L.cap);
       L.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(L.cap * 3), 3);
       L.mesh.frustumCulled = false;      // the ring is around the camera anyway

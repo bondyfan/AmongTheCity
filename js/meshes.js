@@ -967,9 +967,26 @@ const LEVEL_SIGMA = 95;      // m — how far along the bank a level looks
 const LEVEL_TAU = 0.7;       // m — how sharply the soft minimum bites
 const LEVEL_STEP = 28;       // m — spacing of the samples along the outline
 
-/** Ground samples along a body's outline, cached per feature. */
+/**
+ * Ground samples along a body's outline, cached per feature and BUCKETED by
+ * LEVEL_SIGMA. The bucketing is not an optimisation, it is the difference
+ * between working and not: a query that scanned every sample cost O(vertices ×
+ * samples), and the Labe carries ~1 400 outline vertices, so one chunk of it
+ * measured 369 ms — a third of a second of frozen main thread, inside a single
+ * un-yielded slice. Only the samples within a couple of windows can carry any
+ * weight anyway, since the kernel is a Gaussian.
+ */
 function waterSamples(f, terrain) {
-  if (f._ws && f._wsFull) return f._ws;
+  // Cached until the ground CHANGES. A partial profile — the normal case while
+  // a chunk is meshed ahead of its height map — used to be refused by the
+  // cache, so the whole outline was re-walked on every single query, i.e. per
+  // water vertex and per skirt piece. On the Labe that is 1 447 vertices
+  // re-sampled tens of thousands of times for one chunk, and it is the stall
+  // you feel driving into ground that has not landed yet. Keying on the
+  // terrain's load counter keeps the incomplete answer for exactly as long as
+  // it is the best one available, and recomputes once when a tile arrives.
+  const loads = terrain._loads ?? 0;
+  if (f._ws && (f._wsFull || f._wsLoads === loads)) return f._ws;
   const out = [];
   let missing = false;
   for (const ring of [f.o, ...(f.i ?? [])]) {
@@ -993,12 +1010,21 @@ function waterSamples(f, terrain) {
       }
     }
   }
-  f._ws = out;
-  // DO NOT CACHE A GUESS. A chunk can be meshed before its height map lands —
-  // that is the normal case at boot — and a profile measured on half a river
-  // must be thrown away when the rest of the ground arrives.
+  // index them: cell key -> flat sample offsets that fall in it
+  const grid = new Map();
+  for (let i = 0; i < out.length; i += 3) {
+    const k = Math.floor(out[i] / LEVEL_SIGMA) + ',' + Math.floor(out[i + 1] / LEVEL_SIGMA);
+    let a = grid.get(k);
+    if (!a) grid.set(k, a = []);
+    a.push(i);
+  }
+  f._ws = { s: out, grid };
+  f._wsLoads = loads;
+  // …and a profile measured on half a river is still thrown away once the rest
+  // of the ground arrives: `missing` is what makes the chunk rebuild, and the
+  // load counter above is what makes this recompute when it does.
   f._wsFull = !missing;
-  return out;
+  return f._ws;
 }
 
 /**
@@ -1006,18 +1032,28 @@ function waterSamples(f, terrain) {
  * one number for a whole body (the tree scatter's "is this wet") can pass the
  * body's own centre.
  */
+const _wsHit = [];       // scratch: sample offsets in reach of one query
 function waterLevelAt(f, x, z, terrain) {
   if (!terrain) return WATER_Y;
-  const s = waterSamples(f, terrain);
+  const { s, grid } = waterSamples(f, terrain);
   if (!s.length) return 0 - 0.35;
   // widen until something is in reach — a chunk in the middle of a lake can be
   // further from the outline than one window
   for (let r = LEVEL_SIGMA; ; r *= 2) {
     const r2 = r * r, s2 = (r / 2) ** 2;
+    const c = Math.ceil(r / LEVEL_SIGMA);
+    const cx = Math.floor(x / LEVEL_SIGMA), cz = Math.floor(z / LEVEL_SIGMA);
+    _wsHit.length = 0;
     let lo = Infinity;
-    for (let i = 0; i < s.length; i += 3) {
-      const d2 = (s[i] - x) ** 2 + (s[i + 1] - z) ** 2;
-      if (d2 <= r2 && s[i + 2] < lo) lo = s[i + 2];
+    for (let dx2 = -c; dx2 <= c; dx2++) for (let dz2 = -c; dz2 <= c; dz2++) {
+      const a = grid.get((cx + dx2) + ',' + (cz + dz2));
+      if (!a) continue;
+      for (const i of a) {
+        const d2 = (s[i] - x) ** 2 + (s[i + 1] - z) ** 2;
+        if (d2 > r2) continue;
+        _wsHit.push(i, d2);
+        if (s[i + 2] < lo) lo = s[i + 2];
+      }
     }
     if (!Number.isFinite(lo)) {
       if (r > 40000) return 0 - 0.35;
@@ -1026,12 +1062,10 @@ function waterLevelAt(f, x, z, terrain) {
     // log-sum-exp soft minimum, offset by `lo` so the exponentials cannot
     // overflow; weights fall off with distance so the field is smooth
     let wsum = 0, esum = 0;
-    for (let i = 0; i < s.length; i += 3) {
-      const d2 = (s[i] - x) ** 2 + (s[i + 1] - z) ** 2;
-      if (d2 > r2) continue;
-      const w = Math.exp(-d2 / s2);
+    for (let k = 0; k < _wsHit.length; k += 2) {
+      const w = Math.exp(-_wsHit[k + 1] / s2);
       wsum += w;
-      esum += w * Math.exp(-(s[i + 2] - lo) / LEVEL_TAU);
+      esum += w * Math.exp(-(s[_wsHit[k] + 2] - lo) / LEVEL_TAU);
     }
     return lo - LEVEL_TAU * Math.log(esum / wsum) - 0.35;
   }
@@ -1039,8 +1073,17 @@ function waterLevelAt(f, x, z, terrain) {
 
 function skirtRing(sink, ring, key, inward, r, g, b, terrain, wyAt) {
   const sgn = (polygonArea(ring) > 0 ? 1 : -1) * (inward ? 1 : -1);
+  // The ring is the WHOLE body — the Labe carries 1 447 vertices running for
+  // kilometres — and every chunk it touches used to subdivide all of them just
+  // to throw away the pieces that landed elsewhere. Measured at 377 ms for one
+  // chunk, in a single un-yielded slice: a third of a second of frozen frame.
+  // A segment that cannot reach this cell is rejected by four comparisons.
+  const [kcx, kcz] = key.split(',').map(Number);
+  const bx0 = kcx * CHUNK, bz0 = kcz * CHUNK, bx1 = bx0 + CHUNK, bz1 = bz0 + CHUNK;
   for (let i = 0; i < ring.length; i++) {
     const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
+    if (Math.max(ax, bx) < bx0 || Math.min(ax, bx) > bx1
+      || Math.max(az, bz) < bz0 || Math.min(az, bz) > bz1) continue;
     const L = Math.hypot(bx - ax, bz - az);
     if (L < 1e-6) continue;
     const n = Math.ceil(L / SKIRT_MAX), fx = -sgn * (bz - az), fz = sgn * (bx - ax);
