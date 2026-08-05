@@ -260,7 +260,7 @@ test('brand signage carries the wordmark contract', () => {
   // (trim red on the yellow fascia), or the sign changes ink at the tier swap.
   // The franchises are stamped at runtime, so stamp them here the same way
   // city.js does before looking one up.
-  stampFranchises(city.buildings);
+  stampFranchises(city.buildings, city);
   const mcd = city.buildings.find(b => /mcdonald/i.test(b.n ?? ''));
   // Earlier tests built plans for every building BEFORE the stamp — in the
   // game the stamp runs at tile load, before any plan exists, so drop the
@@ -281,7 +281,7 @@ test('a fast-food pavilion is glass where it faces the car park', () => {
   // krabice". The fix is a real pavilion shell — the entrance run must be
   // mostly GLASS (by facade area, panes vs solid pieces), under a cladding
   // band, with the mullions thin enough not to eat the frontage.
-  stampFranchises(city.buildings);
+  stampFranchises(city.buildings, city);
   const mcd = city.buildings.find(b => /mcdonald/i.test(b.n ?? ''));
   assert.ok(mcd, "the franchise stamp produced no McDonald's");
   delete mcd._plan; delete mcd._use; mcd._brand = undefined;   // stale caches
@@ -366,12 +366,24 @@ test('the franchise stamp is rare, and only ever lands on retail', () => {
   const fresh = JSON.parse(
     readFileSync(new URL('../public/data/pardubice.json', import.meta.url), 'utf8'));
   const before = fresh.buildings.filter((b) => b.n).length;
-  stampFranchises(fresh.buildings);
+  stampFranchises(fresh.buildings, fresh);
   const stamped = fresh.buildings.filter(
     (b) => /mcdonald/i.test(b.n ?? '') || /\bkfc\b/i.test(b.n ?? ''));
   assert.ok(stamped.length <= 6,
     `${stamped.length} fast-food restaurants stamped on one town — Pardubice has about three`);
   assert.ok(stamped.length >= 1, 'a town this size has at least one');
+  // …and each one stands at a SITE — a station or a hypermarket car park —
+  // rather than wherever a hash happened to land it
+  const anchors = [
+    ...fresh.pois.filter((p) => p.t === 'station').map((p) => p.p),
+    ...fresh.paved.filter((p) => p.t === 'parking' && p.o?.length >= 3)
+      .map((p) => [p.o.reduce((a, q) => a + q[0], 0) / p.o.length,
+        p.o.reduce((a, q) => a + q[1], 0) / p.o.length]),
+  ];
+  for (const b of stamped) {
+    const d = Math.min(...anchors.map((a) => Math.hypot(a[0] - b.o[0][0], a[1] - b.o[0][1])));
+    assert.ok(d < 300, `a ${b.n} stands ${Math.round(d)} m from any station or car park`);
+  }
   for (const b of stamped) {
     assert.ok(['retail', 'commercial', 'supermarket', 'kiosk', 'shop'].includes(b.t),
       `a franchise was stamped on building=${b.t}, which is not a shop`);

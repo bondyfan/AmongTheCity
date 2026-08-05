@@ -186,8 +186,7 @@ const FRANCHISES = [
   // Pardubice (~29 × 29 km, 35 000 buildings) this lands 4 McDonald's and
   // 1 KFC, which is about what that area really has. The old 34/53 on the old
   // host pool made 24 of them in the ONE Pardubice tile.
-  { name: "McDonald's", every: 30, minArea: 150, maxArea: 1400, maxH: 9 },
-  { name: 'KFC', every: 41, minArea: 150, maxArea: 1400, maxH: 9 },
+  { name: "McDonald's" }, { name: "McDonald's" }, { name: 'KFC' },   // 2 : 1, as in life
 ];
 // SHOPS ONLY. `civic` used to be in here, and `civic` is the classifier's
 // catch-all — both a common OSM tag and the geometry fallback for any untyped
@@ -201,33 +200,72 @@ const HOST_USES = new Set(['shop', 'supermarket']);
 // …and the OSM type has to agree it is retail. The use alone can be reached by
 // the geometry fallback, which knows nothing about what the building sells.
 const HOST_TYPES = new Set(['retail', 'commercial', 'supermarket', 'kiosk', 'shop']);
-export function stampFranchises(buildings) {
-  for (const f of buildings) {
-    if (f.n || !f.o || f.o.length < 3) continue;      // never rename a real name
-    const area = Math.abs(f._area ??= polygonArea(f.o));
-    const use = classify(f);
-    if (!HOST_USES.has(use) || !HOST_TYPES.has(f.t)) continue;
-    for (const fr of FRANCHISES) {
-      if (area < fr.minArea || area > fr.maxArea) continue;
-      if ((f.h ?? 0) > fr.maxH) continue;   // a drive-through is not six storeys
-      // HASHED, not `_id % every`. The modulo is uniform over all ids and the
-      // eligible hosts are a thin, unevenly spread subset of them, so the two
-      // interact: after the host pool was narrowed to real retail, Pardubice —
-      // which has two McDonald's — drew zero, while other tiles drew several.
-      // A hash of the id is uniform over ANY subset and just as deterministic.
-      // …and the id has to be a NUMBER. The legacy single-city file ships
-      // without `_id` (geo.js only stamps one on the tiled path), and every
-      // comparison against undefined is false — so an unguarded test would
-      // have quietly branded EVERY eligible shop in it. Falling back to the
-      // footprint keeps that file deterministic instead of catastrophic.
-      const id = Number.isFinite(f._id) ? f._id
-        : Math.abs(Math.round(f.o[0][0] * 7 + f.o[0][1] * 13));
-      if (rnd(id, 911 + fr.name.length) > 1 / fr.every) continue;
-      f.n = fr.name;
-      f._use = null; f._brand = undefined;             // re-decide with the name
-      classify(f);
-      break;
+// WHERE A DRIVE-THROUGH ACTUALLY STANDS. Hashing over every retail shed in
+// the region put the restaurants nowhere in particular — "McDonald's u
+// hlavního nádraží tam není, ale v realitě tam je". A Czech McDonald's is at
+// a station, at a hypermarket car park, or on a main road out of town, and
+// the data already says where those are: railway=station POIs (kept by the
+// pipeline as t:'station') and the big car parks. Requiring an anchor is a
+// per-building test — it never depends on which OTHER buildings were picked —
+// so a name once given is never taken away, and no chunk is left holding
+// signage for a franchise that has moved.
+const ANCHOR_R = 260;
+// the envelope of a drive-through pavilion, shared by every chain
+const FR_MIN_AREA = 150, FR_MAX_AREA = 1400, FR_MAX_H = 9;
+function anchorsOf(city) {
+  if (!city) return null;
+  const n = (city.pois?.length ?? 0) + (city.paved?.length ?? 0);
+  if (city._frAnchors && city._frAnchorsN === n) return city._frAnchors;
+  const out = [];
+  for (const p of city.pois ?? []) if (p.t === 'station') out.push(p.p[0], p.p[1]);
+  for (const p of city.paved ?? []) {
+    if (p.t !== 'parking' || !p.o || p.o.length < 3) continue;
+    // a HYPERMARKET's car park — 8 000 m² is a couple of hundred spaces. At
+    // 2 200 every yard behind every shop qualified and the gate stopped
+    // gating: the restaurants were scattered exactly as widely as before.
+    if (Math.abs(polygonArea(p.o)) < 8000) continue;
+    let sx = 0, sz = 0;
+    for (const [x, z] of p.o) { sx += x; sz += z; }
+    out.push(sx / p.o.length, sz / p.o.length);
+  }
+  city._frAnchorsN = n;
+  return (city._frAnchors = out);
+}
+export function stampFranchises(buildings, city) {
+  const anchors = anchorsOf(city);
+  if (!anchors?.length) return;
+  // ONE RESTAURANT PER SITE, and it is the nearest suitable building to it —
+  // not a hash spread thinly over the whole region. Hashing put the count
+  // right and the PLACES wrong: the pavilion by Pardubice hlavní nádraží,
+  // which in reality is a McDonald's, drew nothing while sheds in the fields
+  // drew several. A site is served once and then remembered, so a name is
+  // never given twice and never taken back, however the tiles stream in.
+  const served = city._frServed ??= new Set();
+  for (let a = 0; a < anchors.length; a += 2) {
+    const ax = anchors[a], az = anchors[a + 1];
+    const akey = Math.round(ax) + ',' + Math.round(az);
+    if (served.has(akey)) continue;
+    let best = null, bestD = ANCHOR_R * ANCHOR_R;
+    for (const f of buildings) {
+      if (f.n || !f.o || f.o.length < 3) continue;    // never rename a real name
+      const d = (f.o[0][0] - ax) ** 2 + (f.o[0][1] - az) ** 2;
+      if (d >= bestD) continue;
+      const area = Math.abs(f._area ??= polygonArea(f.o));
+      if (area < FR_MIN_AREA || area > FR_MAX_AREA) continue;
+      if ((f.h ?? 0) > FR_MAX_H) continue;   // a drive-through is not six storeys
+      const use = classify(f);
+      if (!HOST_USES.has(use) || !HOST_TYPES.has(f.t)) continue;
+      bestD = d; best = f;
     }
+    if (!best) continue;
+    // which chain got this site is hashed from the SITE, so it is the same on
+    // every machine and does not move when a neighbouring tile arrives
+    const fr = FRANCHISES[Math.floor(rnd(Math.abs(Math.round(ax) * 7 + Math.round(az) * 13), 77)
+      * FRANCHISES.length) % FRANCHISES.length];
+    best.n = fr.name;
+    best._use = null; best._brand = undefined;         // re-decide with the name
+    classify(best);
+    served.add(akey);
   }
 }
 // A SHOP WITH NO NAME IS STILL A SHOP. Signage is gated entirely on a BRANDS

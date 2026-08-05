@@ -549,7 +549,7 @@ export class CityWorld {
     const all = this.city.buildings;
     if (this._stamped > all.length) this._stamped = 0;
     if (this._stamped >= all.length) return;
-    stampFranchises(all.slice(this._stamped));
+    stampFranchises(all.slice(this._stamped), this.city);
     this._stamped = all.length;
   }
 

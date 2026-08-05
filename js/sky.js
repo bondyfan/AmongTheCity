@@ -45,7 +45,7 @@ const nightAtHour = h =>
 // ---- palette: urban gray-blues by day; the Woods' sunset/night bands kept ----
 const DAY_FOG = new THREE.Color(0xa8b8c8); // gray-blue city haze
 const DAY_SKY = { horizon: new THREE.Color(0x9fc0dd), zenith: new THREE.Color(0x5a8fc0) };
-const NIGHT_SKY = new THREE.Color(0x070c22), NIGHT_FOG = new THREE.Color(0x0d1226);
+const NIGHT_SKY = new THREE.Color(0x02040c), NIGHT_FOG = new THREE.Color(0x03040b);
 // sunset: warm haze along the horizon, pink-violet in the sky above it — the
 // band across the AIR is what actually reads as a sunset; sun colour alone
 // barely registers when most of the frame is facades and asphalt
@@ -124,9 +124,13 @@ const SKY_FRAG = /* glsl */`
     // so the night sky needs its own light source to read as a sky at all
     if (uMoon > 0.001) {
       float mDot = max(dot(dir, -sd), 0.0);
-      float mDisc = smoothstep(0.9990, 0.9997, mDot);
-      float mHalo = pow(mDot, 200.0) * 0.45;
-      col += vec3(0.74, 0.80, 0.96) * (mDisc * 1.5 + mHalo) * uMoon * (1.0 - cov * 0.9);
+      // A MOON IS A PEBBLE LIT BY THE SUN, not a second sun. It used to paint
+      // the dome hard enough to read as daylight — "měsíc svítí opravdu krutě"
+      // — which is also what stopped the street lamps meaning anything: you
+      // cannot light a scene that is already lit.
+      float mDisc = smoothstep(0.9991, 0.9997, mDot);
+      float mHalo = pow(mDot, 260.0) * 0.10;
+      col += vec3(0.70, 0.76, 0.94) * (mDisc * 0.5 + mHalo) * uMoon * (1.0 - cov * 0.9);
     }
     gl_FragColor = vec4(col, 1.0);
   }`;
@@ -244,9 +248,17 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
   // the floor sits well above the Woods' near-black and drifts amber as the
   // sun goes. Pitch dark would also hide the pedestrians and the traffic that
   // make the place feel alive.
-  hemi.intensity = 0.74 * (1 - 0.70 * nightK);
-  hemi.color.setRGB(0.87 - 0.10 * nightK, 0.91 - 0.19 * nightK, 1.0 - 0.42 * nightK);
-  hemi.groundColor.setRGB(0.23 + 0.16 * nightK, 0.24 + 0.10 * nightK, 0.26);
+  // NIGHT IS DARK. The old floor sat at 0.22 — a third of full daylight — on
+  // the theory that a city bounces sodium light off its tarmac into a
+  // permanent warm glow. It does, but the glow belongs to the LAMPS, and
+  // baking it into the ambient meant the lamps and the headlights lit nothing
+  // that was not already lit: there was no point to them, and no night. The
+  // ambient now falls to 0.035, which is a moonlit field with no lamp on it —
+  // enough to make out a kerb and a silhouette, not enough to read by. What
+  // carries a Czech street after dark is the street's own lighting.
+  hemi.intensity = 0.74 * (1 - 0.953 * nightK);
+  hemi.color.setRGB(0.87 - 0.30 * nightK, 0.91 - 0.30 * nightK, 1.0 - 0.20 * nightK);
+  hemi.groundColor.setRGB(0.23 - 0.17 * nightK, 0.24 - 0.18 * nightK, 0.26 - 0.16 * nightK);
   // the directional sun switches off as it crosses the horizon — fading over
   // the ~4° around it, like the disc sinking in: it must still rake warm light
   // down the streets AT sunset, not switch off a degree early
@@ -264,11 +276,11 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
   const glowK = warm * Math.max(0, Math.min(1, (sunElev + 8) / 10));
 
   // SUNSET first, then night — applied in that order so the gold gets
-  // swallowed by the dark as dusk deepens. The night lerp stops at 0.94: a
+  // swallowed by the dark as dusk deepens. The night lerp goes to 0.99: a
   // hint of the day hue survives, which reads as moonlit haze, not pure black.
-  _fogC.copy(DAY_FOG).lerp(SUNSET_FOG, glowK * 0.75).lerp(NIGHT_FOG, nightK * 0.94);
-  _horC.copy(DAY_SKY.horizon).lerp(SUNSET_FOG, glowK * 0.75).lerp(NIGHT_FOG, nightK * 0.94);
-  _zenC.copy(DAY_SKY.zenith).lerp(SUNSET_SKY, glowK * 0.62).lerp(NIGHT_SKY, nightK * 0.94);
+  _fogC.copy(DAY_FOG).lerp(SUNSET_FOG, glowK * 0.75).lerp(NIGHT_FOG, nightK * 0.99);
+  _horC.copy(DAY_SKY.horizon).lerp(SUNSET_FOG, glowK * 0.75).lerp(NIGHT_FOG, nightK * 0.99);
+  _zenC.copy(DAY_SKY.zenith).lerp(SUNSET_SKY, glowK * 0.62).lerp(NIGHT_SKY, nightK * 0.99);
   if (!scene.fog) scene.fog = new THREE.Fog(_fogC.getHex(), FOG_DAY.near, FOG_DAY.far);
   scene.fog.color.copy(_fogC);
   if (scene.fog.isFog) { // linear fog: the wall pulls in as night falls

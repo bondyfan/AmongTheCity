@@ -86,8 +86,8 @@ const LAYERS = [
   // density actually shows — so it thins out more gently than the tufts do.
   { name: 'turf', blades: 5, radius: 44, spacing: 0.42, hMul: 0.45, width: 0.014, lean: 0.36,
     fade0: 20, fade1: 30 },
-  { name: 'tuft', blades: 7, radius: 94, spacing: 0.92, hMul: 1.00, width: 0.023, lean: 0.36,
-    fade0: 64, fade1: 78 },
+  { name: 'tuft', blades: 7, radius: 128, spacing: 1.06, hMul: 1.00, width: 0.026, lean: 0.36,
+    fade0: 88, fade1: 110 },
 ];
 
 /** One tuft at the origin, one unit tall: tapered strips, splayed and twisted. */
