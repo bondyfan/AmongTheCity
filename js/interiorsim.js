@@ -256,6 +256,18 @@ export class Interiors {
     return Math.abs((m.plan?.ground ?? 0) - g) > 0.05;
   }
 
+  /**
+   * Throw away every standing model so the next scans rebuild them — used
+   * when a setting changes the RECIPE (facade textures), which is baked into
+   * a model at build time. Wrecks are the player's own doing and stay.
+   */
+  rebuildModels() {
+    for (const [id, m] of this.models) if (!m.damaged) this._drop(id);
+    this._shellQ = null;
+    this._shellPending?.clear();
+    this._flushChunks();
+  }
+
   /** Build (or fetch) the SHELL model of one building — the cheap tier. */
   _model(f, force = false) {
     let m = this.models.get(f._id);
@@ -293,6 +305,7 @@ export class Interiors {
     // with the same window rhythm and the same ground-edge shading.
     plan.wallHex = buildingWallHex(f);
     plan.cells = facadeCells(f);      // the atlas cells its facade is painted from
+    plan.facades = this.world?.mats?.facades !== false;   // …and whether to use them
     m = new BuildingModel(this.scene, f, plan, this._fx, { shellOnly: true });
     m.bb = f._bb ??= bboxOf(f.o);
     m.lastTouch = this._clock;

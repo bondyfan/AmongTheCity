@@ -111,22 +111,61 @@ function badgeMatFor(brand) {
   let m = _badgeMats.get(brand);
   if (m) return m;
   const cv = document.createElement('canvas');
-  cv.width = cv.height = 128;
+  // 256 device pixels, still AUTHORED in the original 128 grid: the canvas is
+  // scaled once so every path below reads the way it was written, at twice the
+  // resolution. Škoda needed it — the winged arrow is a mark made of thin
+  // strokes, and at 128 its feathers fell on half-pixels and blurred together.
+  cv.width = cv.height = 256;
   const x = cv.getContext('2d'), c = 64;
+  x.scale(2, 2);
   const disc = (r, col) => { x.beginPath(); x.arc(c, c, r, 0, Math.PI * 2); x.fillStyle = col; x.fill(); };
   const ring = (r, w, col) => { x.beginPath(); x.arc(c, c, r, 0, Math.PI * 2); x.lineWidth = w; x.strokeStyle = col; x.stroke(); };
   if (brand === 'skoda') {
-    // the green roundel: black face, emerald center, the white winged arrow
-    // reduced to a swoosh + wing — abstract, but no other marque is a green
-    // circle with a white bird in it
-    disc(60, '#0d1310'); disc(50, '#0e5c38'); ring(56, 7, '#b9c2c4');
-    x.fillStyle = '#eef3f0';
+    // The okřídlený šíp — and it is a SILHOUETTE, not line art. One solid wing
+    // fills the upper two thirds: a lobe on the right, three feathers fanning
+    // up-LEFT, the feathers being slits CUT INTO the mass. It sits on an arrow
+    // crossing the lower third pointing RIGHT, barbed head at one end,
+    // fletched tail at the other. Two earlier passes drew the mark as strokes
+    // — a pair of swooshes, then a shaft with ribs and a hollow eye — and
+    // strokes are the one thing that cannot survive here: the badge is 27 px
+    // on screen at five metres, and an 8-unit stroke is 1.2 of those pixels.
+    // The ink has to be ~40 % of the field, the way the real badge is, or the
+    // roundel reads as an empty green dot.
+    // The field is lighter than the flat-art #0E3A2F on purpose: this is a
+    // Lambert material multiplied by scene light, and the official green goes
+    // to black at the brightness a bonnet actually sits at.
+    const green = '#12563e';
+    disc(62, '#0a100d');             // dark rim — holds an edge against white paint
+    disc(55.5, green);
+    ring(58, 5.5, '#cfd6d9');        // chrome, ~4 % of the diameter like the real one
+    x.fillStyle = '#f4f7f5';
     x.beginPath();
-    x.moveTo(30, 92); x.quadraticCurveTo(50, 56, 96, 38); x.lineTo(102, 46);
-    x.quadraticCurveTo(66, 60, 48, 92); x.closePath(); x.fill();
-    x.beginPath();
-    x.moveTo(36, 60); x.quadraticCurveTo(52, 36, 78, 30); x.lineTo(64, 48);
-    x.quadraticCurveTo(50, 50, 44, 62); x.closePath(); x.fill();
+    x.moveTo(84.6, 87.3);                                   // shaft top, under the lobe
+    x.bezierCurveTo(86.0, 83.6, 103.3, 42.3, 69.3, 14.2);   // the lobe's right flank, to the crest
+    x.quadraticCurveTo(58.9, 17.7, 48.1, 16.6);             // feather 1, outer edge
+    x.bezierCurveTo(49.2, 17.5, 61.0, 27.2, 66.6, 39.1);    // feather 1, underside
+    x.lineTo(64.9, 39.6);                                   // slit 1
+    x.bezierCurveTo(61.9, 36.2, 50.7, 24.0, 40.1, 20.0);    // feather 2, top
+    x.quadraticCurveTo(33.9, 27.6, 25.3, 32.4);             // feather 2, outer edge
+    x.bezierCurveTo(30.2, 34.9, 43.2, 42.7, 48.2, 48.7);    // feather 2, underside
+    x.lineTo(46.8, 49.5);                                   // slit 2
+    x.bezierCurveTo(37.7, 42.6, 21.6, 39.0, 20.8, 38.8);    // feather 3, top
+    x.quadraticCurveTo(19.5, 48.9, 14.4, 57.7);             // feather 3, outer edge
+    x.bezierCurveTo(39.3, 62.7, 46.1, 74.3, 47.2, 87.3);    // the underside, onto the shaft
+    x.lineTo(42.5, 87.3);
+    x.lineTo(34.4, 83.8); x.lineTo(17.9, 83.5);             // the fletched tail
+    x.quadraticCurveTo(24.3, 90.2, 28.0, 98.7);
+    x.lineTo(34.4, 98.7); x.lineTo(42.5, 95.1);
+    x.lineTo(89.7, 95.1);                                   // shaft, bottom edge
+    x.lineTo(91.1, 98.9);                                   // lower barb
+    x.quadraticCurveTo(97.6, 92.5, 106.5, 91.2);            // the point
+    x.quadraticCurveTo(97.6, 89.9, 91.1, 83.5);             // upper barb
+    x.closePath(); x.fill();
+    // the real slits are 1.7 units wide; a mip chain closes them and the wing
+    // becomes a paddle, so re-open them to something that survives
+    x.strokeStyle = green; x.lineWidth = 2.5; x.lineCap = 'round';
+    x.beginPath(); x.moveTo(65.5, 39.3); x.quadraticCurveTo(57, 29, 44.5, 18.3); x.stroke();
+    x.beginPath(); x.moveTo(47.5, 49.0); x.quadraticCurveTo(37, 42, 22.5, 35.5); x.stroke();
   } else if (brand === 'bmw') {
     disc(60, '#111417');
     const q = ['#e8edf2', '#2e6cb5'];   // alternating quadrants, boundaries at 12/3/6/9

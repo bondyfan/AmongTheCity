@@ -36,9 +36,28 @@ import * as THREE from '../libs/three.module.js';
 import { LAYER_Y } from './config.js';
 import { GrassMask } from './grassmask.js';
 
-const REBUILD_AT = 11;      // m of travel before the ring is rebuilt
+// ---- and it GROWS IN, it does not arrive ---------------------------------
+// The ring is one buffer swapped whole, so everything it gained since the last
+// build appeared in a single frame — a band of grass switching on at the far
+// edge every REBUILD_AT metres, which at 100 km/h is twice a second: "ta tráva
+// se načítá jako po částech". Three things fix that together.
+//
+//   1. The blade's SIZE is a function of how far it is from the eye, evaluated
+//      per frame in the vertex shader (`fade0` → `fade1`). Nothing is ever
+//      switched on: a blade rises out of the ground as you approach it.
+//   2. The ring is built WIDER than the fade reaches, so a blade only ever
+//      enters the buffer while it is still scaled to nothing. `radius − fade1`
+//      is that margin, and it has to cover how far the eye can drift from the
+//      ring's centre before the next swap lands.
+//   3. …which is why the centre LEADS the eye. A fill takes a few hundred ms,
+//      and at speed the old code finished building a ring the player had
+//      already driven a dozen metres past — half the margin was spent before
+//      the ring was even on screen. The centre is now placed where the eye
+//      will be, not where it was.
+const REBUILD_AT = 7;       // m of travel before the ring is rebuilt
 const BUDGET_MS = 1.2;      // per frame, shared by the mask and the fill
-const FADE = 0.78;          // fraction of a layer's radius where it thins out
+const LEAD_T = 0.55;        // s of travel the ring centre is placed ahead
+const LEAD_MAX = 16;        // …never more than this, or a jet flings it away
 
 // The gradient up a single blade: dark at the root where no light reaches,
 // lighter and warmer at the tip. Most of what makes a tuft read as round.
@@ -47,9 +66,15 @@ const TIP = new THREE.Color(0x86ab55);
 
 // `hMul` scales the height the MASK gives, which is the real height of the
 // grass there. Two layers of the same grass, not two kinds of it.
+// `radius` is how wide the ring is BUILT; `fade0`/`fade1` where the blades
+// grow and vanish. The gap between fade1 and radius is the drift margin from
+// the note above — a blade is only ever added to the buffer beyond fade1,
+// where its scale is zero and nobody can see it arrive.
 const LAYERS = [
-  { name: 'turf', blades: 5, radius: 22, spacing: 0.24, hMul: 0.45, width: 0.012, lean: 0.34 },
-  { name: 'tuft', blades: 7, radius: 52, spacing: 0.55, hMul: 1.00, width: 0.020, lean: 0.34 },
+  { name: 'turf', blades: 5, radius: 26, spacing: 0.24, hMul: 0.45, width: 0.012, lean: 0.34,
+    fade0: 10, fade1: 16 },
+  { name: 'tuft', blades: 7, radius: 52, spacing: 0.55, hMul: 1.00, width: 0.020, lean: 0.34,
+    fade0: 32, fade1: 40 },
 ];
 
 /** One tuft at the origin, one unit tall: tapered strips, splayed and twisted. */
@@ -86,17 +111,21 @@ function tuftGeometry(blades, halfWidth, lean) {
   return g;
 }
 
-function grassMaterial() {
+function grassMaterial(fade0, fade1) {
   const mat = new THREE.MeshLambertMaterial({
     vertexColors: true,
     side: THREE.DoubleSide,   // a blade is one-sided geometry seen from anywhere
   });
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
+    shader.uniforms.uEye = { value: new THREE.Vector2() };
+    shader.uniforms.uFade = { value: new THREE.Vector2(fade0, fade1) };
     mat.userData.shader = shader;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         uniform float uTime;
+        uniform vec2 uEye;
+        uniform vec2 uFade;
         attribute float up01;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         {
@@ -112,6 +141,13 @@ function grassMaterial() {
           float b = sin(uTime * 1.1 + wp.x * 0.07 - wp.z * 0.19);
           transformed.x += k * (a * 0.17 + b * 0.09);
           transformed.z += k * (b * 0.17 - a * 0.07);
+          // …and the blade GROWS OUT OF THE GROUND with distance. The scale is
+          // about the local origin, which is the root, so a far blade is not a
+          // faded ghost lying on the grass — it is a shorter blade, exactly
+          // what a blade looks like before it has grown. At zero the triangle
+          // is degenerate and never reaches the rasteriser, which is what pays
+          // for building the ring wider than it draws.
+          transformed *= 1.0 - smoothstep(uFade.x, uFade.y, distance(wp.xz, uEye));
         }`);
   };
   return mat;
@@ -133,15 +169,20 @@ export class Grass {
     this.mask = new GrassMask(city, world?.ground ?? null);
     this.enabled = true;
     this._at = null;                // where the ring on screen was built
-    this._mat = grassMaterial();
-    this._missing = false;          // a fill hit ground the mask did not have
+    this._needRefill = false;       // a fill hit ground the mask did not have yet
+    // one material per layer: they fade over different distances, and the
+    // fade lives in the shader
     this.layers = LAYERS.map((L) => ({
       ...L,
       geo: tuftGeometry(L.blades, L.width, L.lean),
+      mat: grassMaterial(L.fade0, L.fade1),
       mesh: null,
       cap: 0,
       pending: null,
     }));
+    this._eye = new THREE.Vector2();
+    this._px = null; this._pz = null;   // last eye position, for the velocity
+    this._vx = 0; this._vz = 0;         // …eased, so a hitch cannot fling the ring
     this._m = new THREE.Matrix4();
     this._q = new THREE.Quaternion();
     this._p = new THREE.Vector3();
@@ -155,8 +196,12 @@ export class Grass {
     this._at = null;                // either way, the next update starts fresh
   }
 
-  /** A region tile landing changes what the ground under us is made of. */
-  invalidate() { this.mask.clear(); this._at = null; }
+  /**
+   * A region tile landing changes what the ground under us is made of — but
+   * only inside that tile. Passing the tile through means a wood arriving
+   * 4 km away no longer blanks the lawn you are standing on.
+   */
+  invalidate(t) { this.mask.clearTile(t?.tx, t?.tz, this.world?.terrain?.tile ?? this._tile); this._at = null; }
 
   _drop(L) {
     if (!L.mesh) return;
@@ -169,13 +214,40 @@ export class Grass {
   /** Called every frame with the eye's ground position. */
   update(x, z, dt) {
     if (!this.enabled) return;
-    const sh = this._mat.userData.shader;
-    if (sh) sh.uniforms.uTime.value += dt;
+    // Where the eye is NOW — the fade is measured from here every frame, which
+    // is the whole reason nothing pops any more.
+    this._eye.set(x, z);
+    for (const L of this.layers) {
+      const sh = L.mat.userData.shader;
+      if (!sh) continue;
+      sh.uniforms.uTime.value += dt;
+      sh.uniforms.uEye.value.copy(this._eye);
+    }
+    // Velocity, eased. A build hitch or a teleport must not throw the ring
+    // centre across the map, so the step is clamped and the ease is slow
+    // enough that only sustained travel moves it.
+    if (dt > 0 && this._px !== null) {
+      const k = Math.min(1, dt * 1.5);
+      this._vx += ((x - this._px) / dt - this._vx) * k;
+      this._vz += ((z - this._pz) / dt - this._vz) * k;
+    }
+    this._px = x; this._pz = z;
 
     // The mask shares the budget: it is the input to the fill, so a frame that
     // spends the lot on rasterising is a frame the fill had nothing to do in.
-    const built = this.mask.step(BUDGET_MS);
-    if (built && this._missing) { this._missing = false; this._at = null; }
+    this.mask.step(BUDGET_MS);
+    // A fill that ran over ground the mask had not rasterised yet published a
+    // ring with 120 m square holes in it. It used to ask for a redo by setting
+    // `_at = null` — and the fill completing in the SAME update then wrote
+    // `_at` straight back, cancelling it, so the holes survived until the
+    // player had driven another whole REBUILD_AT and then snapped in as
+    // blocks. The request is a flag of its own now, and it is honoured once
+    // the mask has nothing left queued — which is also what stops it from
+    // spinning: each retry can only be triggered by a queue that has drained.
+    if (this._needRefill && !this.mask.queue.length) {
+      this._needRefill = false;
+      this._at = null;
+    }
 
     const far = !this._at
       || (x - this._at[0]) ** 2 + (z - this._at[1]) ** 2 >= REBUILD_AT * REBUILD_AT;
@@ -183,14 +255,21 @@ export class Grass {
     this._fill(BUDGET_MS);
   }
 
-  _start(cx, cz) {
+  _start(ex, ez) {
+    // Lead the eye: the fill below runs over the next few hundred ms, and a
+    // ring centred on where the player WAS is a ring he has already driven a
+    // dozen metres into by the time it lands. Standing still this is zero.
+    const v = Math.hypot(this._vx, this._vz);
+    const lead = Math.min(LEAD_MAX, v * LEAD_T);
+    const cx = ex + (v > 0.01 ? this._vx / v : 0) * lead;
+    const cz = ez + (v > 0.01 ? this._vz / v : 0) * lead;
     for (const L of this.layers) {
       const step = L.spacing;
       // Worst case is the whole disc surviving every mask — allocate for it
       // once so a fill never reallocates halfway through.
       const cap = Math.ceil((Math.PI * L.radius * L.radius) / (step * step)) + 64;
       L.pending = {
-        cx, cz,
+        cx, cz, ex, ez,
         i0: Math.floor((cx - L.radius) / step), i1: Math.ceil((cx + L.radius) / step),
         j0: Math.floor((cz - L.radius) / step), j1: Math.ceil((cz + L.radius) / step),
         j: Math.floor((cz - L.radius) / step),
@@ -219,7 +298,12 @@ export class Grass {
       }
       this._swap(L, P);
       L.pending = null;
-      this._at = [P.cx, P.cz];
+      // The trigger below measures from where the EYE was when this ring was
+      // started, never from the ring's centre — the centre leads the eye by up
+      // to LEAD_MAX, and comparing against that would trip the rebuild on the
+      // very next frame, forever.
+      this._at = [P.ex, P.ez];
+      if (P.missed) this._needRefill = true;   // …and come back once the mask has caught up
     }
   }
 
@@ -227,19 +311,21 @@ export class Grass {
     const terrain = this.world?.terrain;
     if (!terrain) return;
     const step = L.spacing, j = P.j;
-    const R2 = L.radius * L.radius, fade0 = (L.radius * FADE) ** 2;
+    const R2 = L.radius * L.radius;
     for (let i = P.i0; i <= P.i1; i++) {
       const x = (i + rnd(i, j, 1)) * step;
       const z = (j + rnd(i, j, 2)) * step;
       const d2 = (x - P.cx) ** 2 + (z - P.cz) ** 2;
       if (d2 > R2) continue;
       const cm = this.mask.heightAt(x, z);
-      if (cm < 0) { this._missing = true; continue; }   // mask not rasterised yet
+      if (cm < 0) { P.missed = true; continue; }        // mask not rasterised yet
       if (cm === 0) continue;                           // tarmac, roof, water
-      // thin out towards the edge instead of ending in a hard circle
-      const t = d2 <= fade0 ? 1 : 1 - (d2 - fade0) / (R2 - fade0);
-      if (rnd(i, j, 3) > t * 0.9 + 0.1) continue;
       if (P.n >= P.cap) return;
+      // NO thinning towards the rim any more. It used to hide the hard edge of
+      // the disc, but it was keyed to the ring's own centre — so the same
+      // blade was kept by one build and dropped by the next, and blinked in
+      // and out at mid-radius as the rings marched past. The shader's distance
+      // fade does the job from the EYE, where it belongs, and it is continuous.
 
       // The mask's byte IS the height in centimetres — a verge, a lawn and a
       // meadow differ by how tall they are, which is the whole of the
@@ -249,7 +335,7 @@ export class Grass {
       this._q.setFromAxisAngle(UP, rnd(i, j, 5) * Math.PI * 2);
       this._p.set(x, y, z);
       const w = 0.85 + 0.45 * rnd(i, j, 6);
-      this._s.set(w, h * (0.6 + 0.4 * t), w);
+      this._s.set(w, h, w);
       this._m.compose(this._p, this._q, this._s);
       this._m.toArray(P.mats, P.n * 16);
 
@@ -277,7 +363,7 @@ export class Grass {
     if (!L.mesh || P.n > L.cap) {
       this._drop(L);
       L.cap = Math.max(P.n, 64);
-      L.mesh = new THREE.InstancedMesh(L.geo, this._mat, L.cap);
+      L.mesh = new THREE.InstancedMesh(L.geo, L.mat, L.cap);
       L.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(L.cap * 3), 3);
       L.mesh.frustumCulled = false;      // the ring is around the camera anyway
       L.mesh.castShadow = false;

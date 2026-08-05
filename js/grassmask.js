@@ -54,6 +54,25 @@ export class GrassMask {
   clear() { this.masks.clear(); this.queue.length = 0; this._queued.clear(); }
 
   /**
+   * Drop only what a newly arrived tile actually changed. `clear()` threw away
+   * every rasterised chunk in memory, and it is wired to EVERY city tile and
+   * every ground-raster tile arrival — so one tile landing blanked the grass
+   * for the whole world and it came back one 120 m block per frame. That is
+   * the "loads in blocks" the player sees, and no amount of distance fading
+   * hides it, because the holes are chunk-shaped rather than ring-shaped.
+   * A tile is 4.8 km of chunks; anything outside it is still valid.
+   */
+  clearTile(tx, tz, tile) {
+    if (tx === undefined || tz === undefined || !tile) { this.clear(); return; }
+    const c0x = Math.floor((tx * tile) / CHUNK), c1x = Math.floor(((tx + 1) * tile) / CHUNK);
+    const c0z = Math.floor((tz * tile) / CHUNK), c1z = Math.floor(((tz + 1) * tile) / CHUNK);
+    for (const key of [...this.masks.keys()]) {
+      const [cx, cz] = key.split(',').map(Number);
+      if (cx >= c0x && cx < c1x && cz >= c0z && cz < c1z) this.masks.delete(key);
+    }
+  }
+
+  /**
    * Centimetres of grass at (x, z). Returns −1 for "not built yet", which is
    * NOT the same as 0: the caller leaves the ground alone rather than deciding
    * it is bare, and the chunk goes on the queue.

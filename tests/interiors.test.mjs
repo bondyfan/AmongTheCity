@@ -355,3 +355,38 @@ test('novostavby exist, carry their own colour, and dropped the atlas', () => {
   assert.ok(withRail >= sampled * 0.5,
     `French balconies on only ${withRail}/${sampled} sampled novostavby`);
 });
+
+// ---- franchises are RARE, and they are shops ------------------------------
+// "na dost místech, kde jsou nějaké obchody nebo nějaké firmy, tak to dělá buď
+// McDonald's, anebo KFC". The host pool used to include `civic`, which is the
+// classifier's catch-all — both a common OSM tag and the geometry fallback for
+// any untyped footprint over 700 m². 23 of the 24 restaurants stamped in this
+// very file landed on one: schools, sports halls, a fire station.
+test('the franchise stamp is rare, and only ever lands on retail', () => {
+  const fresh = JSON.parse(
+    readFileSync(new URL('../public/data/pardubice.json', import.meta.url), 'utf8'));
+  const before = fresh.buildings.filter((b) => b.n).length;
+  stampFranchises(fresh.buildings);
+  const stamped = fresh.buildings.filter(
+    (b) => /mcdonald/i.test(b.n ?? '') || /\bkfc\b/i.test(b.n ?? ''));
+  assert.ok(stamped.length <= 6,
+    `${stamped.length} fast-food restaurants stamped on one town — Pardubice has about three`);
+  assert.ok(stamped.length >= 1, 'a town this size has at least one');
+  for (const b of stamped) {
+    assert.ok(['retail', 'commercial', 'supermarket', 'kiosk', 'shop'].includes(b.t),
+      `a franchise was stamped on building=${b.t}, which is not a shop`);
+  }
+  assert.equal(fresh.buildings.filter((b) => b.n).length, before + stamped.length,
+    'stamping renamed something that already had a name');
+});
+
+// …and nothing retail is left anonymous, which is the pressure that made
+// branding everything look like an improvement in the first place.
+test('an unnamed shop still gets lettering over its door', () => {
+  const shop = { t: 'retail', h: 4.5, o: [[0, 0], [18, 0], [18, 12], [0, 12]], _id: 4242 };
+  const plan = buildingPlan(shop, null);
+  assert.equal(plan.use, 'shop');
+  assert.ok(plan.sign?.sign !== undefined, 'no fascia at all on an unnamed shop');
+  assert.equal(plan.sign.label, 'OBCHOD');
+  assert.equal(plan.brand, null, 'a generic fascia must not masquerade as a chain');
+});

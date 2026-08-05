@@ -158,11 +158,18 @@ let camYaw = SPAWN.heading;
 // the TOP of the frame sat 2.7° BELOW the horizon — the sky was never on
 // screen at all, which is why the cloud field looked like it did not exist.
 let camPitch = 0.26;         // radians above horizontal
+// …and how far BELOW zero it may go, which is the look-up range: 1.1 rad is
+// 63° above the horizon, enough to put the clouds over your own roof in frame.
+const CAM_PITCH_UP = 1.1;
 // The character model is correctly scaled (1.77 m against a 4.9 m car), so
 // "the player looks huge" is FRAMING, not size: at 7.5 m with FOV 55 a person
 // filled 19 % of the screen height. Standing further back and higher halves
 // that and lets the street read as a street.
 const CAM_DIST_0 = 14;      // ⌘0 comes back here
+// The ends of the wheel's travel. CAM_DIST_MIN is also where BOARDING A CAR
+// puts the boom: a car is the thing you want close, and the walking default of
+// 14 m read as watching your own car from across the street.
+const CAM_DIST_MIN = 5, CAM_DIST_MAX = 26;
 let camDist = CAM_DIST_0;
 const camSmooth = new THREE.Vector3();
 let _camSpeedK = 0;   // eased |speed|/vmax for boom+FOV — see updateCamera
@@ -296,12 +303,19 @@ function updateCamera(dt) {
   // never points at the sky; the driver's is a look angle either side of the
   // horizon. Sharing one variable made C flip you straight into the headliner.
   if (fpCar) fpPitch = Math.max(-FP_PITCH_DN, Math.min(FP_PITCH_UP, fpPitch - drag.y * sens));
-  else camPitch = Math.max(0.06, Math.min(1.15, camPitch + drag.y * sens));
+  // NEGATIVE pitch is how you look at the sky. Above zero it is an elevation:
+  // the boom climbs and the camera looks down at the target, which is all the
+  // old floor of 0.06 ever allowed — drag up and the camera simply stopped at
+  // eye level ("kamera mě nepustí, abych se díval nahoru"). Below zero the
+  // boom stays where it is and the VIEW tilts up instead (see lookUp further
+  // down), which is the only thing that can work: dipping the camera under the
+  // car would just bury it in the ground clamp.
+  else camPitch = Math.max(-CAM_PITCH_UP, Math.min(1.15, camPitch + drag.y * sens));
   // consumed in BOTH modes even though first person has no boom: these are
   // one-shot getters, and a notch left sitting in the accumulator would fire
   // the chase cam across the street the moment C switched back.
   if (input.takeZoomHome()) camDist = CAM_DIST_0;
-  camDist = Math.max(5, Math.min(26, camDist + input.takeWheel() * 1.4));
+  camDist = Math.max(CAM_DIST_MIN, Math.min(CAM_DIST_MAX, camDist + input.takeWheel() * 1.4));
   fpHideSelf(!!fpCar);
   fpCabin(fpCar);
 
@@ -422,7 +436,14 @@ function updateCamera(dt) {
     camYaw += d * Math.min(1, dt * (game.car ? 2.2 : 1.6));
   }
 
-  const pitch = camPitch * pitchK;
+  // Two halves of one knob. The boom only ever ORBITS on the positive side;
+  // everything below zero becomes a tilt of the view, applied at lookAt().
+  const pitch = Math.max(0, camPitch) * pitchK;
+  // …and NOT scaled by pitchK: that number flattens the ORBIT so the horizon
+  // sits two thirds up the frame in flight, which is about where the camera
+  // hangs. Asking to look up is asking for a number of degrees, and it should
+  // buy the same ones in a helicopter as on foot.
+  const lookUp = Math.max(0, -camPitch);
   // Indoors the orbit has to shrink or a 14 m boom simply lives in the flat
   // next door. 3.4 m is about as far back as a Czech living room allows.
   // FLYING IS NEVER INDOORS. modelAt() is a 2-D lookup, so overflying a
@@ -493,7 +514,22 @@ function updateCamera(dt) {
   camSmooth.lerp(want, Math.min(1, Math.min(dt, 0.045) * 9));
   camera.position.copy(camSmooth);
   camShake();
-  camera.lookAt(tx, ty, tz);
+  // Aim at the target, then swing that aim UP by lookUp — rotating the view
+  // direction rather than moving the look point, so the tilt is the same
+  // number of degrees whether the boom is 5 m or 26 m long. At full tilt the
+  // car sits along the bottom edge and the rest of the frame is sky.
+  let lx = tx, ly = ty, lz = tz;
+  if (lookUp > 1e-3) {
+    const dx = tx - camera.position.x, dy = ty - camera.position.y, dz = tz - camera.position.z;
+    const len = Math.hypot(dx, dy, dz) || 1e-6;
+    const hl = Math.hypot(dx, dz) || 1e-6;
+    const el = Math.asin(Math.max(-1, Math.min(1, dy / len))) + lookUp;
+    const ch = Math.cos(el) * len;
+    lx = camera.position.x + dx / hl * ch;
+    lz = camera.position.z + dz / hl * ch;
+    ly = camera.position.y + Math.sin(el) * len;
+  }
+  camera.lookAt(lx, ly, lz);
   applyLens(dt, fov, CAM_NEAR);
 }
 
@@ -1051,6 +1087,10 @@ input.onKey('KeyE', () => {
         // onDoor: the walk-up is cancellable (a second E, the car driving off,
         // the 6 s timeout), and naming a car nobody got into is a lie
         showCarName(car);
+        // …and the boom comes IN. Both seats: a passenger watches the same
+        // chase cam a driver does, and 14 m back is a shot of the street with
+        // your car somewhere in it. The wheel still owns it from here on.
+        camDist = CAM_DIST_MIN;
         if (s !== 0) return;             // passenger seat: no engine, no speedo
         game.car = car;
         // Claimed from onSeated for the same reason the helicopter is: the
@@ -2075,14 +2115,23 @@ function applySettings(s, key) {
   if (world) {
     const wantOrtho = s.ortho ? orthoMgr : null;
     const recipeChanged = world.mats.ortho !== wantOrtho
-      || world.mats.facades !== !!s.facades
-      || world.mats.trees !== (s.trees !== false);
+      || world.mats.facades !== !!s.facades;
     world.mats.ortho = wantOrtho;
     world.mats.facades = !!s.facades;
-    world.mats.trees = s.trees !== false;
+    // Trees are NOT a setting any more. A Czech town without its trees is not
+    // a cheaper Czech town, it is a different place — the avenues, the
+    // floodplain woods and the garden hedges are half of what the streets
+    // look like. The knob is gone from the panel and the flag is pinned on;
+    // an old saved `trees: false` must not survive as an invisible switch.
+    world.mats.trees = true;
     grass?.setEnabled(s.grass !== false);
-    if (recipeChanged && (key === undefined || ['ortho', 'facades', 'trees', 'preset'].includes(key))) {
+    if (recipeChanged && (key === undefined || ['ortho', 'facades', 'preset'].includes(key))) {
       world.rebuildAll();
+      // …and the SHELLS, which are what you are actually looking at within the
+      // interior draw radius. Rebuilding only the chunk meshes left every
+      // nearby building exactly as it was, which is why the toggle read as
+      // doing nothing at all.
+      world.interiors?.rebuildModels?.();
     }
   }
 }
@@ -2105,8 +2154,8 @@ async function boot() {
   // A region tile landing changes what the ground under us is MADE of — a car
   // park arriving where the mask said field has to stop the grass growing
   // through it. The mask is cheap to rebuild and this only fires on a tile.
-  city.onTileLoaded?.(() => grass?.invalidate());
-  world.ground?.onTileLoaded?.(() => grass?.invalidate());
+  city.onTileLoaded?.((t) => grass?.invalidate(t));
+  world.ground?.onTileLoaded?.((t) => grass?.invalidate(t));
   grass.setEnabled(getSettings().grass !== false);
   sky = makeSky(scene);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
@@ -2333,7 +2382,15 @@ function tick(src) {
       // SSAO was fully built, plumbed through the composite — and hard-coded
       // OFF at this one call site, which is why "ambient occlusion nefunguje".
       postfx.render(scene, camera, { ssao: gs.ao !== false, bloom: gs.bloom !== false, rays, canopy: null,
-        aoStrength: 0.34, aoFloor: 0.25, aoRadius: 1.7,
+        // The composite does `ao = max(mix(1, ao, aoStrength), aoFloor)`, so
+        // aoStrength IS the deepest darkening the effect can ever reach: at
+        // 0.34 a fully occluded pixel came out at 0.66 — two thirds bright,
+        // which is why the setting looked like it did nothing. 0.82 against a
+        // 0.20 floor lets a real corner go dark while the floor still stops
+        // the gouging that made the first AO pass look like dirt. The wider
+        // radius is what puts shade under a car and along a kerb rather than
+        // only in the last few centimetres of a crease.
+        aoStrength: 0.82, aoFloor: 0.20, aoRadius: 2.4,
         motionBlur: gs.mblur === false ? 0 : motionBlurAmount(),
         blurAniso: game.jet ? MB_ANISO_JET : MB_ANISO_GROUND,
         flare: gs.flare === false ? 0 : flareAmount() });

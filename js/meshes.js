@@ -37,7 +37,7 @@ import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKe
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
 import { furnitureInto } from './furniture.js';
-import { entranceOf, brandOf } from './interiors.js';
+import { entranceOf, brandOf, signBrandOf, classify } from './interiors.js';
 import { INTERIOR } from './config.js';
 
 // geometry dimensions (meters) — construction sizes, not art direction
@@ -947,41 +947,97 @@ function clampUnderRoads(geo, drv, terrain, offX = 0, offZ = 0) {
 // touches is the water, and the higher samples are the banks it is cut into.
 // Cached because a river is one feature crossing dozens of chunks and every one
 // of them must agree, or the Vltava gets a staircase at each cell border.
-function waterLevel(f, terrain) {
-  if (f._wy !== undefined) return f._wy;
-  if (!terrain) return WATER_Y;
-  const ring = f.o;
-  // stride so a 4 000-vertex riverbank is not sampled to death; the minimum is
-  // stable under sparse sampling because it is the water, not the bank
-  const step = Math.max(1, Math.floor(ring.length / 96));
-  let lo = Infinity, known = 0, n = 0;
-  for (let i = 0; i < ring.length; i += step) {
-    n++;
-    // an unmeasurable sample must RAISE THE FLAG — skipping it silently let a
-    // chunk finish "clean" and never rebuild, with the river's level measured
-    // on half its outline
-    if (!terrain.ready(ring[i][0], ring[i][1])) {
-      terrain.missed = true;
-      terrain._missTiles?.add(Math.floor(ring[i][0] / terrain.tile) + ','
-        + Math.floor(ring[i][1] / terrain.tile));
-      continue;
+// ---- a river FLOWS, so its surface cannot be one number --------------------
+// The level used to be a single global minimum over the whole outline, shared
+// by every chunk the body touches, "or the Vltava gets a staircase at each cell
+// border". That is right for a pond and badly wrong for a river: a watercourse
+// mapped as ONE polygon runs downhill, and the minimum is its lowest point
+// anywhere. Swept over all 342 shipped tiles, 95 bodies ended up with their
+// surface more than 3 m under their own typical bank and the worst sat 29 m
+// down — a canyon with a blue floor, which is exactly what the player
+// photographed.
+//
+// So the level is a FIELD instead: a soft minimum of the ground along the
+// nearby outline, weighted by distance. Soft, because a hard minimum over a
+// moving window is a staircase again; it is smooth in x and z, so two chunks
+// meeting at a border compute the same number from the same samples and no
+// seam can open. It follows the water downhill, it stays flat across a lake,
+// and it turns a weir into a ramp rather than a cliff.
+const LEVEL_SIGMA = 95;      // m — how far along the bank a level looks
+const LEVEL_TAU = 0.7;       // m — how sharply the soft minimum bites
+const LEVEL_STEP = 28;       // m — spacing of the samples along the outline
+
+/** Ground samples along a body's outline, cached per feature. */
+function waterSamples(f, terrain) {
+  if (f._ws && f._wsFull) return f._ws;
+  const out = [];
+  let missing = false;
+  for (const ring of [f.o, ...(f.i ?? [])]) {
+    if (!ring || ring.length < 2) continue;
+    for (let i = 0; i < ring.length; i++) {
+      const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
+      const L = Math.hypot(bx - ax, bz - az);
+      const n = Math.max(1, Math.ceil(L / LEVEL_STEP));
+      for (let k = 0; k < n; k++) {
+        const x = ax + (bx - ax) * (k / n), z = az + (bz - az) * (k / n);
+        // an unmeasurable sample must RAISE THE FLAG — skipping it silently
+        // let a chunk finish "clean" and never rebuild, with the river's
+        // level measured on half its outline
+        if (!terrain.ready(x, z)) {
+          missing = true;
+          terrain.missed = true;
+          terrain._missTiles?.add(Math.floor(x / terrain.tile) + ',' + Math.floor(z / terrain.tile));
+          continue;
+        }
+        out.push(x, z, terrain.heightAt(x, z));
+      }
     }
-    known++;
-    const h = terrain.heightAt(ring[i][0], ring[i][1]);
-    if (h < lo) lo = h;
   }
+  f._ws = out;
   // DO NOT CACHE A GUESS. A chunk can be meshed before its height map lands —
-  // that is the normal case at boot — and heightAt answers 0 there. Caching
-  // that put the Vltava at −0.35 m and, because the cache lives on the FEATURE,
-  // it survived the rebuild that the arriving terrain triggers: the river was
-  // permanently 190 m under Prague. So a level is only remembered once the
-  // ground it was measured against actually existed.
-  const level = (Number.isFinite(lo) ? lo : 0) - 0.35;
-  if (known === n) f._wy = level;   // cache NOTHING measured on missing ground
-  return level;
+  // that is the normal case at boot — and a profile measured on half a river
+  // must be thrown away when the rest of the ground arrives.
+  f._wsFull = !missing;
+  return out;
 }
 
-function skirtRing(sink, ring, key, inward, r, g, b, terrain, wy) {
+/**
+ * The surface height of one body of water AT A POINT. Callers that only need
+ * one number for a whole body (the tree scatter's "is this wet") can pass the
+ * body's own centre.
+ */
+function waterLevelAt(f, x, z, terrain) {
+  if (!terrain) return WATER_Y;
+  const s = waterSamples(f, terrain);
+  if (!s.length) return 0 - 0.35;
+  // widen until something is in reach — a chunk in the middle of a lake can be
+  // further from the outline than one window
+  for (let r = LEVEL_SIGMA; ; r *= 2) {
+    const r2 = r * r, s2 = (r / 2) ** 2;
+    let lo = Infinity;
+    for (let i = 0; i < s.length; i += 3) {
+      const d2 = (s[i] - x) ** 2 + (s[i + 1] - z) ** 2;
+      if (d2 <= r2 && s[i + 2] < lo) lo = s[i + 2];
+    }
+    if (!Number.isFinite(lo)) {
+      if (r > 40000) return 0 - 0.35;
+      continue;
+    }
+    // log-sum-exp soft minimum, offset by `lo` so the exponentials cannot
+    // overflow; weights fall off with distance so the field is smooth
+    let wsum = 0, esum = 0;
+    for (let i = 0; i < s.length; i += 3) {
+      const d2 = (s[i] - x) ** 2 + (s[i + 1] - z) ** 2;
+      if (d2 > r2) continue;
+      const w = Math.exp(-d2 / s2);
+      wsum += w;
+      esum += w * Math.exp(-(s[i + 2] - lo) / LEVEL_TAU);
+    }
+    return lo - LEVEL_TAU * Math.log(esum / wsum) - 0.35;
+  }
+}
+
+function skirtRing(sink, ring, key, inward, r, g, b, terrain, wyAt) {
   const sgn = (polygonArea(ring) > 0 ? 1 : -1) * (inward ? 1 : -1);
   for (let i = 0; i < ring.length; i++) {
     const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
@@ -1000,7 +1056,11 @@ function skirtRing(sink, ring, key, inward, r, g, b, terrain, wy) {
       if (terrain) {
         // one height per END — a single midpoint sample across a 30 m piece
         // left the wall top a metre off the draped ground at both ends on any
-        // sloping bank, a slit at one end and a buried lip at the other
+        // sloping bank, a slit at one end and a buried lip at the other.
+        // The water level is read at the PIECE, from the same field the
+        // surface uses, so the foot of the wall meets the water all the way
+        // along a river that is running downhill.
+        const wy = wyAt((p0x + p1x) / 2, (p0z + p1z) / 2);
         const t0 = Math.max(terrain.heightAt(p0x, p0z) + BANK_TOP, wy + 0.05);
         const t1 = Math.max(terrain.heightAt(p1x, p1z) + BANK_TOP, wy + 0.05);
         wallQuad2(sink, p0x, p0z, p1x, p1z, t0, t1, wy - 0.4, fx, fz, r, g, b);
@@ -2542,8 +2602,11 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) 
   const footing = fall > 0.35 ? Math.min(fall + 0.6, 14) : 0;
   // read the brand fresh at build time: stampFranchises() renames its hosts at
   // tile load, before chunks build, so a McDonald's is branded on the very
-  // first mesh — and the chunk is re-meshed on interiors activation anyway
-  const brand = brandOf(f);
+  // first mesh — and the chunk is re-meshed on interiors activation anyway.
+  // signBrandOf falls back to a plain Czech fascia (OBCHOD / POTRAVINY, or the
+  // shop's own OSM name) so that unnamed retail is not the only thing on the
+  // street with nothing written on it.
+  const brand = signBrandOf(f, classify(f));
   _c.setHex(buildingWallHex(f));
   const wr = _c.r, wg = _c.g, wb = _c.b;
   const rr = wr * ROOF_DARKEN, rg = wg * ROOF_DARKEN, rb = wb * ROOF_DARKEN;
@@ -3306,6 +3369,114 @@ function busStopInto(sink, x, z, cell) {
   }
 }
 
+// ---- benzínka: canopy, pumps, totem ---------------------------------------
+// 1 178 of them are in the shipped tiles as amenity=fuel nodes, most with the
+// operator's name, and until now not one was drawn — the player crossed a
+// region the size of Bohemia without passing a single petrol station. A Czech
+// forecourt is a wide flat canopy on slim columns, two pump islands under it,
+// and a totem out by the road: that silhouette is the whole recognition, so
+// the shop is left to whatever building OSM already maps beside it.
+// Absolute heights (one ground sample for the lot, like every other fixture),
+// so the chunk drape must skip it.
+const FUEL_BRANDS = [
+  { re: /benzina|orlen/i, col: 0x1c9b4b, trim: 0xf4f6f5 },
+  { re: /shell/i, col: 0xe4b024, trim: 0xd8261f },
+  { re: /\bomv\b/i, col: 0x1f4b8e, trim: 0xf4f6f5 },
+  { re: /\bmol\b/i, col: 0x18693c, trim: 0xe23b2e },
+  { re: /euro ?oil|eurooil/i, col: 0x1d5aa8, trim: 0xf2c53d },
+  { re: /\bono\b|globus|tank ?ono/i, col: 0xc8352a, trim: 0xf4f6f5 },
+];
+function fuelInto(sink, x, z, name, cell, terrain) {
+  // face the forecourt along the nearest road, so the canopy sits across the
+  // approach rather than skewed to it
+  let dx = 0, dz = -1, best = 60 * 60;
+  for (const r of cell.roads) {
+    if (!r.d || !r.p) continue;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+      const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9;
+      let t = ((x - ax) * ex + (z - az) * ez) / L2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const d2 = (x - (ax + ex * t)) ** 2 + (z - (az + ez * t)) ** 2;
+      if (d2 < best) { best = d2; const L = Math.sqrt(L2); dx = ex / L; dz = ez / L; }
+    }
+  }
+  const ux = -dz, uz = dx;                       // across the road
+  const y0 = terrain ? terrain.heightAt(x, z) : 0;
+  const mark = sink.mark();
+  const brand = FUEL_BRANDS.find((b) => b.re.test(name ?? '')) ?? { col: 0x2f6ea8, trim: 0xf4f6f5 };
+  const at = (u, v) => [x + ux * u + dx * v, z + uz * u + dz * v];
+  _c.setHex(0xf0efe9); const cr = _c.r, cg = _c.g, cb = _c.b;      // canopy soffit
+  _c.setHex(brand.col); const br2 = _c.r, bg2 = _c.g, bb2 = _c.b;  // the fascia band
+  _c.setHex(0x9aa0a6); const sr = _c.r, sg = _c.g, sb = _c.b;      // columns, pumps
+  sink.at(SURF.paving);
+  // the apron the pumps stand on
+  const A = 11, B = 8;                          // half-width across, half-depth along
+  const c0 = at(-A, -B), c1 = at(A, -B), c2 = at(A, B), c3 = at(-A, B);
+  sink.quad(c0[0], y0 + 0.02, c0[1], c1[0], y0 + 0.02, c1[1],
+    c2[0], y0 + 0.02, c2[1], c3[0], y0 + 0.02, c3[1], 0.62, 0.62, 0.63);
+  sink.at(SURF.concrete);
+  // four columns
+  const CH = 5.2;
+  for (const [u, v] of [[-8.4, -4.6], [8.4, -4.6], [-8.4, 4.6], [8.4, 4.6]]) {
+    const [px, pz] = at(u, v);
+    for (const [ox, oz] of [[ux, uz], [dx, dz]]) {
+      sink.quad(px - ox * 0.16, y0, pz - oz * 0.16, px + ox * 0.16, y0, pz + oz * 0.16,
+        px + ox * 0.16, y0 + CH, pz + oz * 0.16, px - ox * 0.16, y0 + CH, pz - oz * 0.16,
+        sr, sg, sb);
+    }
+  }
+  // the canopy: a slab with a coloured fascia all the way round
+  const CA = 10, CB = 6.4, FT = 0.9;
+  const q = [at(-CA, -CB), at(CA, -CB), at(CA, CB), at(-CA, CB)];
+  sink.quad(q[0][0], y0 + CH, q[0][1], q[1][0], y0 + CH, q[1][1],
+    q[2][0], y0 + CH, q[2][1], q[3][0], y0 + CH, q[3][1], cr, cg, cb);      // soffit
+  sink.quad(q[3][0], y0 + CH + FT, q[3][1], q[2][0], y0 + CH + FT, q[2][1],
+    q[1][0], y0 + CH + FT, q[1][1], q[0][0], y0 + CH + FT, q[0][1], cr, cg, cb); // roof
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4];
+    sink.quad(a[0], y0 + CH, a[1], b[0], y0 + CH, b[1],
+      b[0], y0 + CH + FT, b[1], a[0], y0 + CH + FT, a[1], br2, bg2, bb2);
+    sink.quad(b[0], y0 + CH, b[1], a[0], y0 + CH, a[1],
+      a[0], y0 + CH + FT, a[1], b[0], y0 + CH + FT, b[1], br2, bg2, bb2);
+  }
+  // two pump islands, two pumps each
+  for (const v of [-2.6, 2.6]) {
+    const i0 = at(-5.2, v), i1 = at(5.2, v);
+    sink.quad(i0[0], y0 + 0.02, i0[1], i1[0], y0 + 0.02, i1[1],
+      i1[0], y0 + 0.18, i1[1], i0[0], y0 + 0.18, i0[1], 0.78, 0.78, 0.76);
+    for (const u of [-3.2, 3.2]) {
+      const [px, pz] = at(u, v);
+      for (const [ox, oz] of [[ux, uz], [dx, dz]]) {
+        sink.quad(px - ox * 0.45, y0 + 0.18, pz - oz * 0.45, px + ox * 0.45, y0 + 0.18, pz + oz * 0.45,
+          px + ox * 0.45, y0 + 1.9, pz + oz * 0.45, px - ox * 0.45, y0 + 1.9, pz - oz * 0.45,
+          sr, sg, sb);
+      }
+      // the brand stripe across the pump's head
+      const [hx, hz] = at(u, v);
+      for (const [ox, oz] of [[ux, uz], [dx, dz]]) {
+        sink.quad(hx - ox * 0.46, y0 + 1.5, hz - oz * 0.46, hx + ox * 0.46, y0 + 1.5, hz + oz * 0.46,
+          hx + ox * 0.46, y0 + 1.85, hz + oz * 0.46, hx - ox * 0.46, y0 + 1.85, hz - oz * 0.46,
+          br2, bg2, bb2);
+      }
+    }
+  }
+  // the totem, out toward the road
+  const [tx2, tz2] = at(-A - 1.4, -B - 1.0);
+  for (const [ox, oz] of [[ux, uz], [dx, dz]]) {
+    sink.quad(tx2 - ox * 0.14, y0, tz2 - oz * 0.14, tx2 + ox * 0.14, y0, tz2 + oz * 0.14,
+      tx2 + ox * 0.14, y0 + 5.4, tz2 + oz * 0.14, tx2 - ox * 0.14, y0 + 5.4, tz2 - oz * 0.14,
+      sr, sg, sb);
+  }
+  for (const flip of [1, -1]) {
+    sink.quad(tx2 - ux * 1.0 * flip, y0 + 4.0, tz2 - uz * 1.0 * flip,
+      tx2 + ux * 1.0 * flip, y0 + 4.0, tz2 + uz * 1.0 * flip,
+      tx2 + ux * 1.0 * flip, y0 + 6.2, tz2 + uz * 1.0 * flip,
+      tx2 - ux * 1.0 * flip, y0 + 6.2, tz2 - uz * 1.0 * flip, br2, bg2, bb2);
+  }
+  if (terrain) sink.fixFrom(mark);
+}
+
 // ---- fences, walls, noise barriers: the lines that divide one plot ---------
 // 88 200 of them across the world, and until now the world had none — every
 // garden ran into its neighbour's and an industrial yard had no edge at all.
@@ -3440,7 +3611,7 @@ function bumpInto(sink, node, cell, terrain) {
 }
 
 // one sign: post + panel, all vertex-coloured triangles in the chunk sink
-function signPost(sink, sg, cell) {
+function signPost(sink, sg, cell, terrain) {
   const [x, z] = sg.p[0];
   // face against the travel of the nearest drivable road, from its right kerb
   let dx = 0, dz = -1, hw = 3;
@@ -3467,28 +3638,52 @@ function signPost(sink, sg, cell) {
   const ux = -dz, uz = dx;
   const H = 2.2;                                  // panel centre height
   sink.at(SURF.concrete);
+  // RIGID, like every other fixture (wireSpan, pylonInto, busStopInto): one
+  // ground sample for the whole sign, and the chunk-wide drape is told to skip
+  // it. Draping per vertex was pulling the panel's layers apart by fractions
+  // of a millimetre in an uncorrelated way, which is why the z-fight below
+  // crawled and shimmered instead of sitting still.
+  const mark = sink.mark();
+  const y0 = terrain ? terrain.heightAt(px, pz) : 0;
   _c.setHex(0x8a8d92);                            // galvanised post
   const prm = _c.r, pgm = _c.g, pbm = _c.b;
   for (const [ox, oz] of [[ux, uz], [dx, dz]]) {  // two crossed fins read as a post
-    sink.quad(px - ox * 0.035, 0, pz - oz * 0.035, px + ox * 0.035, 0, pz + oz * 0.035,
-      px + ox * 0.035, H + 0.45, pz + oz * 0.035, px - ox * 0.035, H + 0.45, pz - oz * 0.035,
+    sink.quad(px - ox * 0.035, y0, pz - oz * 0.035, px + ox * 0.035, y0, pz + oz * 0.035,
+      px + ox * 0.035, y0 + H + 0.45, pz + oz * 0.035, px - ox * 0.035, y0 + H + 0.45, pz - oz * 0.035,
       prm, pgm, pbm);
-    sink.quad(px + ox * 0.035, 0, pz + oz * 0.035, px - ox * 0.035, 0, pz - oz * 0.035,
-      px - ox * 0.035, H + 0.45, pz - oz * 0.035, px + ox * 0.035, H + 0.45, pz + oz * 0.035,
+    sink.quad(px + ox * 0.035, y0, pz + oz * 0.035, px - ox * 0.035, y0, pz - oz * 0.035,
+      px - ox * 0.035, y0 + H + 0.45, pz - oz * 0.035, px + ox * 0.035, y0 + H + 0.45, pz + oz * 0.035,
       prm, pgm, pbm);
   }
-  const P = (u, v) => [px + ux * u, H + v, pz + uz * u];
-  const tri2 = (a, b, c2, r, g, b2) => {          // both windings — read from both sides
-    sink.triFacing(a[0], a[1], a[2], b[0], b[1], b[2], c2[0], c2[1], c2[2], -dx, 0, -dz, r, g, b2);
-    sink.triFacing(a[0], a[1], a[2], c2[0], c2[1], c2[2], b[0], b[1], b[2], dx, 0, dz, r, g, b2);
+  // THE PANEL NEEDS A DEPTH AXIS. Every coloured surface of a sign used to be
+  // authored in one plane at zero separation — the post's first fin included,
+  // which is a grey quad lying exactly in the panel's plane and facing the
+  // same way. The depth buffer then had to break an exact tie per pixel, the
+  // winner changed with the camera, and the face crawled between grey, red and
+  // white as you drove: the reported "blikání". The author's own "+12 mm"
+  // nudges did nothing because they moved the symbol UP the panel (+v) rather
+  // than OUT of it — the flat-decal idiom, where +y really is the normal,
+  // transplanted onto a vertical plate.
+  const PLATE = 0.05;    // clears the 35 mm post fins with 15 mm to spare
+  const LAYER = 0.012;   // one layer of relief; still resolvable at ~165 m
+  const P = (u, v) => [px + ux * u, y0 + H + v, pz + uz * u];
+  // k = 0 is the plate face, 1 a symbol painted on it, 2 anything on THAT. The
+  // front copy steps along −travel and the back copy along +travel, so the two
+  // faces stack OUTWARD and can never meet in the middle.
+  const tri2 = (a, b, c2, r, g, b2, k = 0) => { // both windings — read from both sides
+    const o = PLATE + k * LAYER;
+    const F = (p, s) => [p[0] - dx * s * o, p[1], p[2] - dz * s * o];
+    const a0 = F(a, 1), b0 = F(b, 1), c0 = F(c2, 1);
+    const a1 = F(a, -1), b1 = F(b, -1), c1 = F(c2, -1);
+    sink.triFacing(a0[0], a0[1], a0[2], b0[0], b0[1], b0[2], c0[0], c0[1], c0[2], -dx, 0, -dz, r, g, b2);
+    sink.triFacing(a1[0], a1[1], a1[2], c1[0], c1[1], c1[2], b1[0], b1[1], b1[2], dx, 0, dz, r, g, b2);
   };
   _c.setHex(0xc8332a); const rr = _c.r, rg = _c.g, rb = _c.b;
   _c.setHex(0xf2f0ea); const wr2 = _c.r, wg2 = _c.g, wb2 = _c.b;
   if (sg.k === 'give_way') {
     // inverted triangle: red border, white heart
     tri2(P(-0.45, 0.45), P(0.45, 0.45), P(0, -0.35), rr, rg, rb);
-    const e = 0.012;
-    tri2(P(-0.30, 0.36 + e), P(0.30, 0.36 + e), P(0, -0.17 + e), wr2, wg2, wb2);
+    tri2(P(-0.30, 0.36), P(0.30, 0.36), P(0, -0.17), wr2, wg2, wb2, 1);
   } else if (sg.k === 'stop') {
     // red octagon (fan) with a white ring hinted by a lighter inner fan
     const R = 0.42;
@@ -3498,16 +3693,17 @@ function signPost(sink, sg, cell) {
         rr, rg, rb);
     }
     // the white STOP bar — legible as the word from any driving distance
-    tri2(P(-0.26, 0.055), P(0.26, 0.055), P(-0.26, -0.055), wr2, wg2, wb2);
-    tri2(P(0.26, 0.055), P(0.26, -0.055), P(-0.26, -0.055), wr2, wg2, wb2);
+    tri2(P(-0.26, 0.055), P(0.26, 0.055), P(-0.26, -0.055), wr2, wg2, wb2, 1);
+    tri2(P(0.26, 0.055), P(0.26, -0.055), P(-0.26, -0.055), wr2, wg2, wb2, 1);
   } else {
     // hlavní silnice: yellow diamond in a white one
     tri2(P(-0.4, 0), P(0, 0.4), P(0.4, 0), wr2, wg2, wb2);
     tri2(P(-0.4, 0), P(0.4, 0), P(0, -0.4), wr2, wg2, wb2);
     _c.setHex(0xe7b33c); const yr = _c.r, yg = _c.g, yb = _c.b;
-    tri2(P(-0.28, 0.01), P(0, 0.29), P(0.28, 0.01), yr, yg, yb);
-    tri2(P(-0.28, 0.01), P(0.28, 0.01), P(0, -0.27), yr, yg, yb);
+    tri2(P(-0.28, 0.01), P(0, 0.29), P(0.28, 0.01), yr, yg, yb, 1);
+    tri2(P(-0.28, 0.01), P(0.28, 0.01), P(0, -0.27), yr, yg, yb, 1);
   }
+  if (terrain) sink.fixFrom(mark);   // absolute heights: the drape must skip them
 }
 
 const LAMP_STEP = 34, LAMP_MIN_W = 5.4, LAMP_H = 7.2;
@@ -3906,10 +4102,11 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     if (!f.o || f.o.length < 3) continue;
     // WHERE THE WATER SITS. On a flat world every surface was WATER_Y, a metre
     // or two below a ground that was everywhere zero. With terrain that is a
-    // hole: the Vltava would render 187 m below Prague. So each body gets its
-    // own level, computed ONCE per feature and cached — per feature and not
-    // per chunk, or one river would step at every cell boundary.
-    const wy = waterLevel(f, mats.terrain);
+    // hole: the Vltava would render 187 m below Prague. So the level is read
+    // from the ground along the body's own outline — and read PER POINT, so a
+    // river that is running downhill has a surface that runs downhill with it.
+    const wyAt = (px, pz) => waterLevelAt(f, px, pz, mats.terrain);
+    const wy = wyAt(x0 + CHUNK / 2, z0 + CHUNK / 2);   // one number, for callers that want one
     // clip-per-chunk instead of _home dedupe: the Labe is one polygon spanning
     // dozens of cells, and home-only rendering would pop it with one far cell
     const clip = clipRingToRect(f.o, x0, z0, x1, z1);
@@ -3918,8 +4115,15 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       else holes.push(clip);
       const iClip = (f.i ?? []).map((h) => clipRingToRect(h, x0, z0, x1, z1)).filter(Boolean);
       wet.push({ o: clip, i: iClip, wy });
+      // tessellated first, then every vertex lifted onto the level field — the
+      // surface is a gentle ramp down the valley instead of one flat lid
       const surf = terrainTess(shapePoly(clip, iClip, wy, COLORS.water), 8);
-      if (surf) water.push(surf);
+      if (surf) {
+        const a = surf.attributes.position.array;
+        for (let i = 0; i < a.length; i += 3) a[i + 1] = wyAt(a[i], a[i + 2]);
+        surf.attributes.position.needsUpdate = true;
+        water.push(surf);
+      }
       // islands are land: give them a lid just under the green-fill layer,
       // their outline already grows a skirt facing out into the water below
       for (const h of iClip) {
@@ -3929,9 +4133,9 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     }
     // skirts ride the ORIGINAL rings — the clipped ones grew artificial edges
     // along the cell border that would dam the river with earth walls
-    skirtRing(sink, f.o, key, true, kr, kg, kb, mats.terrain, wy);
+    skirtRing(sink, f.o, key, true, kr, kg, kb, mats.terrain, wyAt);
     for (const h of f.i ?? []) if (h.length >= 3)
-      skirtRing(sink, h, key, false, kr, kg, kb, mats.terrain, wy);
+      skirtRing(sink, h, key, false, kr, kg, kb, mats.terrain, wyAt);
     yield;
   }
   if (mats.terrain) sink.fixFrom(bankMark);   // bank skirts resolved absolutely
@@ -4125,7 +4329,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // appended them after that line: thirty zebra bars per chunk, emitted
     // into a bucket nobody ever poured out again.
     if (!roadsOnly && cell.signs) for (const sg3 of cell.signs) {
-      if (sg3._home === key) signPost(sink, sg3, cell);
+      if (sg3._home === key) signPost(sink, sg3, cell, mats.terrain);
     }
     if (!roadsOnly && cell.crossings) for (const cr of cell.crossings) {
       if (cr._home === key) zebraInto(sink, cr, cell, mats.terrain);
@@ -4152,8 +4356,9 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // zastávky: the poi list is small and unbucketized — a linear scan per
     // chunk build is cheaper than teaching the index a fourth node layer
     if (!roadsOnly && city.pois) for (const poi of city.pois) {
-      if (poi.t === 'bus_stop' && chunkKey(poi.p[0], poi.p[1]) === key)
-        busStopInto(sink, poi.p[0], poi.p[1], cell);
+      if (chunkKey(poi.p[0], poi.p[1]) !== key) continue;
+      if (poi.t === 'bus_stop') busStopInto(sink, poi.p[0], poi.p[1], cell);
+      else if (poi.t === 'fuel') fuelInto(sink, poi.p[0], poi.p[1], poi.n, cell, mats.terrain);
     }
     yield;
     // …and everything else a Czech street has standing on it (js/furniture.js)

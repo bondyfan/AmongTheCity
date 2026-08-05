@@ -280,7 +280,6 @@ export function initSettings(apply) {
     toggleRow('rays', 'Sluneční paprsky'),
     toggleRow('mblur', 'Motion blur (rozmaz při rychlosti)'),
     toggleRow('flare', 'Lens flare (odlesky od slunce)'),
-    toggleRow('trees', 'Stromy'),
     selectRow('peds', 'Chodci', [[0, 'Žádní'], [12, 'Málo'], [34, 'Běžně'], [60, 'Rušno']]),
     // Interiors stream only around a walking player, so the cost is bounded —
     // but on a weak machine the plan+geometry build is the one hitch left, and

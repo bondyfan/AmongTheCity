@@ -182,26 +182,73 @@ const BRANDS = [
 // from its own id so the same shed is the same restaurant on every machine and
 // in every session. Called once per streamed tile.
 const FRANCHISES = [
-  { name: "McDonald's", every: 34, minArea: 150, maxArea: 2200, maxH: 11 },
-  { name: 'KFC', every: 53, minArea: 130, maxArea: 1800, maxH: 11 },
+  // Tuned against the real data, not guessed: over the six tiles around
+  // Pardubice (~29 × 29 km, 35 000 buildings) this lands 4 McDonald's and
+  // 1 KFC, which is about what that area really has. The old 34/53 on the old
+  // host pool made 24 of them in the ONE Pardubice tile.
+  { name: "McDonald's", every: 30, minArea: 150, maxArea: 1400, maxH: 9 },
+  { name: 'KFC', every: 41, minArea: 150, maxArea: 1400, maxH: 9 },
 ];
-const HOST_USES = new Set(['shop', 'supermarket', 'civic', 'restaurant']);
+// SHOPS ONLY. `civic` used to be in here, and `civic` is the classifier's
+// catch-all — both a common OSM tag and the geometry fallback for any untyped
+// footprint over 700 m². Measured on the Pardubice tile, 23 of the 24 stamped
+// restaurants landed on one: schools, sports halls, fire stations, a
+// `building=transportation`. That is the whole of "everywhere I look it is a
+// McDonald's or a KFC". `restaurant` is dead weight here too — an UNNAMED
+// building can never classify as one, since only brandOf() yields it and that
+// needs the name this function is about to write.
+const HOST_USES = new Set(['shop', 'supermarket']);
+// …and the OSM type has to agree it is retail. The use alone can be reached by
+// the geometry fallback, which knows nothing about what the building sells.
+const HOST_TYPES = new Set(['retail', 'commercial', 'supermarket', 'kiosk', 'shop']);
 export function stampFranchises(buildings) {
   for (const f of buildings) {
     if (f.n || !f.o || f.o.length < 3) continue;      // never rename a real name
     const area = Math.abs(f._area ??= polygonArea(f.o));
     const use = classify(f);
-    if (!HOST_USES.has(use)) continue;
+    if (!HOST_USES.has(use) || !HOST_TYPES.has(f.t)) continue;
     for (const fr of FRANCHISES) {
       if (area < fr.minArea || area > fr.maxArea) continue;
       if ((f.h ?? 0) > fr.maxH) continue;   // a drive-through is not six storeys
-      if (f._id % fr.every !== (fr.name.length % fr.every)) continue;
+      // HASHED, not `_id % every`. The modulo is uniform over all ids and the
+      // eligible hosts are a thin, unevenly spread subset of them, so the two
+      // interact: after the host pool was narrowed to real retail, Pardubice —
+      // which has two McDonald's — drew zero, while other tiles drew several.
+      // A hash of the id is uniform over ANY subset and just as deterministic.
+      // …and the id has to be a NUMBER. The legacy single-city file ships
+      // without `_id` (geo.js only stamps one on the tiled path), and every
+      // comparison against undefined is false — so an unguarded test would
+      // have quietly branded EVERY eligible shop in it. Falling back to the
+      // footprint keeps that file deterministic instead of catastrophic.
+      const id = Number.isFinite(f._id) ? f._id
+        : Math.abs(Math.round(f.o[0][0] * 7 + f.o[0][1] * 13));
+      if (rnd(id, 911 + fr.name.length) > 1 / fr.every) continue;
       f.n = fr.name;
       f._use = null; f._brand = undefined;             // re-decide with the name
       classify(f);
       break;
     }
   }
+}
+// A SHOP WITH NO NAME IS STILL A SHOP. Signage is gated entirely on a BRANDS
+// match (js/pieces.js brandSigns, js/meshes.js's far-LOD wordmark), so an
+// unnamed retail unit got no fascia at all — from the street the only building
+// that said anything was a chain, which is most of why stamping chains
+// everywhere ever looked like an improvement. These are the plain Czech
+// fascias every high street actually wears, and a shop that HAS a name in OSM
+// simply wears its own.
+const GENERIC_SIGN = {
+  shop: { label: 'OBCHOD', sign: 0x35618c, trim: 0xf2f4f6 },
+  supermarket: { label: 'POTRAVINY', sign: 0x2e6b45, trim: 0xf2f4f6 },
+  restaurant: { label: 'RESTAURACE', sign: 0x7a4326, trim: 0xf6efe4 },
+};
+export function signBrandOf(f, use) {
+  const b = brandOf(f);
+  if (b) return b;
+  const g = GENERIC_SIGN[use];
+  if (!g) return null;
+  // an OSM name beats the generic word — "POTRAVINY U NOVÁKA" over the door
+  return f.n ? { ...g, label: f.n.toUpperCase().slice(0, 20) } : g;
 }
 export function brandOf(f) {
   if (f._brand !== undefined) return f._brand;
@@ -1008,7 +1055,11 @@ export function buildingPlan(f, roads, neighbours, ground = 0) {
   if (storeys === 1) sH = Math.min(usable, singleVolume ? usable : I.maxStorey);
 
   const plan = {
+    // `brand` drives the LOOK (wall colour, cladding, storey rules) and must
+    // stay a real chain; `sign` is only what goes over the door, so retail
+    // that no chain claims still gets lettering.
     use, label: brand?.label ?? USE_LABEL[use] ?? 'Budova', brand,
+    sign: signBrandOf(f, use),
     id: f._id, name: f.n ?? null,
     fr, ring, holes: f.i ?? null, area,
     y0, sH, storeys, top: y0 + total, usable, ground,

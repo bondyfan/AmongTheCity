@@ -473,7 +473,13 @@ function emitPerimeter(out, plan, fi, leaf) {
           const p = push(out, cx2, (y0 + y1) / 2, cz2, (u1f - u0f) * pw / 2,
             (y1 - y0) / 2, thick / 2, yaw, col, 'ext', false, k * 0.95, k * 1.02);
           p.leaf = 'ext';
-          p.uv = uv;
+          // "Textury fasád" reaches the SHELL through here. Everything within
+          // the interior draw radius — which is every building the player is
+          // close enough to look at — is a shell rather than a chunk mesh, so
+          // a flag only the chunk builder read was a switch you could not see
+          // working. Without a uv rect the piece falls into the plain solid
+          // batch, which is what facades-off means: flat painted panels.
+          p.uv = plan.facades === false ? null : uv;
           return p;
         };
         const storefront = fi === 0 && cells.storeC && !isDoor;
@@ -1278,7 +1284,9 @@ function emitFacadeExtras(out, plan) {
 // four — split only at 12 m so a rocket can still take the sign apart.
 const SIGN = 'sign';
 function brandSigns(out, plan) {
-  const brand = plan.brand;
+  // `plan.sign` is the fascia, which is not the same thing as the chain: an
+  // unnamed shop has no brand but still gets lettering over its door.
+  const brand = plan.sign ?? plan.brand;
   if (!brand?.sign) return;
   const ring = plan.ring, fr = plan.fr;
   const sgn = polygonArea(ring) > 0 ? 1 : -1;
