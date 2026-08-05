@@ -60,7 +60,7 @@ import { GrassMask } from './grassmask.js';
 // 100 km/h with the rebuild interval below that is ~30 MB/s of garbage — the
 // major collections that followed are the one-to-two-second freezes with the
 // engine note stuck on one tone.
-const REBUILD_AT = 10;      // m of travel before the ring is rebuilt
+const REBUILD_AT = 12;      // m of travel before the ring is rebuilt
 const BUDGET_MS = 1.2;      // per frame, shared by the mask and the fill
 const LEAD_T = 0.55;        // s of travel the ring centre is placed ahead
 const LEAD_MAX = 16;        // …never more than this, or a jet flings it away
@@ -76,15 +76,18 @@ const TIP = new THREE.Color(0x86ab55);
 // grow and vanish. The gap between fade1 and radius is the drift margin from
 // the note above — a blade is only ever added to the buffer beyond fade1,
 // where its scale is zero and nobody can see it arrive.
+// DOUBLE the reach — turf to 30 m, tufts to 78 — which costs radius SQUARED
+// in instances, so both layers pay for it with spacing. That is the right
+// trade at distance: a blade 60 m away is under a pixel wide, and what reads
+// as "grass out there" is coverage, not density. Net ~2× the instances for
+// 2× the range, and the fill stays well inside its budget (measured below).
 const LAYERS = [
-  // turf is the filler BETWEEN the tufts and is only ever seen close up, so it
-  // buys its drift margin with spacing rather than with instances: at 0.24 m
-  // over a 26 m disc it was 37 000 of them, most of which are scaled to
-  // nothing at any moment.
-  { name: 'turf', blades: 5, radius: 26, spacing: 0.30, hMul: 0.45, width: 0.012, lean: 0.34,
-    fade0: 9, fade1: 15 },
-  { name: 'tuft', blades: 7, radius: 52, spacing: 0.55, hMul: 1.00, width: 0.020, lean: 0.34,
-    fade0: 31, fade1: 39 },
+  // turf is the filler BETWEEN the tufts, and the near ground is where its
+  // density actually shows — so it thins out more gently than the tufts do.
+  { name: 'turf', blades: 5, radius: 44, spacing: 0.42, hMul: 0.45, width: 0.014, lean: 0.36,
+    fade0: 20, fade1: 30 },
+  { name: 'tuft', blades: 7, radius: 94, spacing: 0.92, hMul: 1.00, width: 0.023, lean: 0.36,
+    fade0: 64, fade1: 78 },
 ];
 
 /** One tuft at the origin, one unit tall: tapered strips, splayed and twisted. */

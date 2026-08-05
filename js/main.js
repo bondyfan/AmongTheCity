@@ -436,14 +436,18 @@ function updateCamera(dt) {
     camYaw += d * Math.min(1, dt * (game.car ? 2.2 : 1.6));
   }
 
-  // Two halves of one knob. The boom only ever ORBITS on the positive side;
-  // everything below zero becomes a tilt of the view, applied at lookAt().
-  const pitch = Math.max(0, camPitch) * pitchK;
-  // …and NOT scaled by pitchK: that number flattens the ORBIT so the horizon
-  // sits two thirds up the frame in flight, which is about where the camera
-  // hangs. Asking to look up is asking for a number of degrees, and it should
-  // buy the same ones in a helicopter as on foot.
-  const lookUp = Math.max(0, -camPitch);
+  // ONE knob, one orbit, all the way through zero — and the aim never leaves
+  // the target, because the target staying in the middle of the frame is the
+  // point. Below the horizontal the camera does NOT dive under the car (it
+  // would be under the tarmac within a metre); it comes IN instead. That is
+  // the same geometry from the other side: with the lens near the ground and
+  // the car's middle a metre above it, shortening the boom is what steepens
+  // the look upward, and by the time it is close the horizon sits under the
+  // car and everything over the roof is sky.
+  const upK = Math.max(0, -camPitch) / CAM_PITCH_UP;    // 0 … 1
+  const pitch = camPitch * pitchK;
+  const hk = 1 - upK;                                   // the height bias lets go
+  if (upK > 0) dist = Math.max(3.0, dist * (1 - 0.7 * upK));
   // Indoors the orbit has to shrink or a 14 m boom simply lives in the flat
   // next door. 3.4 m is about as far back as a Czech living room allows.
   // FLYING IS NEVER INDOORS. modelAt() is a 2-D lookup, so overflying a
@@ -458,7 +462,7 @@ function updateCamera(dt) {
   const flat = Math.cos(pitch) * dist;
   let px = tx + Math.sin(camYaw) * flat;
   let pz = tz + Math.cos(camYaw) * flat;
-  let py = ty + height * (indoors ? 0.25 : 1) + Math.sin(pitch) * dist;
+  let py = ty + height * (indoors ? 0.25 : 1) * hk + Math.sin(pitch) * dist;
   // …and then it still has to not be inside a wall. March the boom back in
   // from full length until the camera sits in air: the same trick every
   // third-person game uses, done against the interior's own boxes rather than
@@ -492,7 +496,11 @@ function updateCamera(dt) {
   }
   // keep the camera above ground/bridge decks — `py` as the near hint, so a
   // viaduct deck OVERHEAD no longer wins and pops the camera onto the bridge
-  const groundY = world.heightAt(px, pz, py) + 0.5;
+  // …and 0.5 m of it is the floor the boom rests on when it swings low. That
+  // is where the sky comes from: from 35 cm off the tarmac, aiming at a car
+  // whose middle is a metre up, the horizon sits just under centre frame and
+  // everything above it is sky — with the car still in the middle of it.
+  const groundY = world.heightAt(px, pz, py) + (camPitch < 0 ? 0.35 : 0.5);
   const want = new THREE.Vector3(px, indoors ? py : Math.max(py, groundY), pz);
   if (!camInit) { camSmooth.copy(want); camInit = true; }
   // The boom is RIGID to the target's own translation: carry the smoothed
@@ -514,22 +522,10 @@ function updateCamera(dt) {
   camSmooth.lerp(want, Math.min(1, Math.min(dt, 0.045) * 9));
   camera.position.copy(camSmooth);
   camShake();
-  // Aim at the target, then swing that aim UP by lookUp — rotating the view
-  // direction rather than moving the look point, so the tilt is the same
-  // number of degrees whether the boom is 5 m or 26 m long. At full tilt the
-  // car sits along the bottom edge and the rest of the frame is sky.
-  let lx = tx, ly = ty, lz = tz;
-  if (lookUp > 1e-3) {
-    const dx = tx - camera.position.x, dy = ty - camera.position.y, dz = tz - camera.position.z;
-    const len = Math.hypot(dx, dy, dz) || 1e-6;
-    const hl = Math.hypot(dx, dz) || 1e-6;
-    const el = Math.asin(Math.max(-1, Math.min(1, dy / len))) + lookUp;
-    const ch = Math.cos(el) * len;
-    lx = camera.position.x + dx / hl * ch;
-    lz = camera.position.z + dz / hl * ch;
-    ly = camera.position.y + Math.sin(el) * len;
-  }
-  camera.lookAt(lx, ly, lz);
+  // ALWAYS the target, in every pose: the car is the middle of the picture
+  // whether the boom is overhead or down by the kerb. Looking up is the boom
+  // going low, not the aim leaving the car.
+  camera.lookAt(tx, ty, tz);
   applyLens(dt, fov, CAM_NEAR);
 }
 
@@ -2114,10 +2110,13 @@ function applySettings(s, key) {
   // chunk-recipe knobs: flip the flags on the shared mats and rebuild
   if (world) {
     const wantOrtho = s.ortho ? orthoMgr : null;
-    const recipeChanged = world.mats.ortho !== wantOrtho
-      || world.mats.facades !== !!s.facades;
+    const recipeChanged = world.mats.ortho !== wantOrtho;
     world.mats.ortho = wantOrtho;
-    world.mats.facades = !!s.facades;
+    // Facade textures are not a setting any more either — window rhythm IS
+    // what tells a panelák from a warehouse, and the toggle only ever reached
+    // the chunk meshes anyway, never the shells you actually stand in front
+    // of. An old saved `facades: false` must not survive as an invisible one.
+    world.mats.facades = true;
     // Trees are NOT a setting any more. A Czech town without its trees is not
     // a cheaper Czech town, it is a different place — the avenues, the
     // floodplain woods and the garden hedges are half of what the streets
@@ -2125,7 +2124,7 @@ function applySettings(s, key) {
     // an old saved `trees: false` must not survive as an invisible switch.
     world.mats.trees = true;
     grass?.setEnabled(s.grass !== false);
-    if (recipeChanged && (key === undefined || ['ortho', 'facades', 'preset'].includes(key))) {
+    if (recipeChanged && (key === undefined || ['ortho', 'preset'].includes(key))) {
       world.rebuildAll();
       // …and the SHELLS, which are what you are actually looking at within the
       // interior draw radius. Rebuilding only the chunk meshes left every

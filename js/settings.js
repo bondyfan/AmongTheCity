@@ -273,7 +273,6 @@ export function initSettings(apply) {
     selectRow('traffic', 'Hustota provozu', [[0, 'Žádná'], [60, 'Řídká'],
       [120, 'Běžná'], [240, 'Hustá']]),
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
-    toggleRow('facades', 'Textury fasád'),
     toggleRow('grass', 'Tráva (3D stébla)'),
     toggleRow('ao', 'Ambient occlusion (stíny v koutech)'),
     toggleRow('bloom', 'Bloom (záře světel)'),
