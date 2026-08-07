@@ -1360,11 +1360,67 @@ Three details that are not decoration:
 * **`car.speed` still means exactly what it meant** — signed m/s along the nose
   — because nine consumers outside `vehicles.js` depend on it.
 
-Measured against the numbers the old model was tuned to: 0–100 km/h in 5.67 s
-(the spec in the KIND comment says ~5.7), 0.64 g corners clean and silent,
-a handbrake flick at 22 m/s reaches 79°/s of yaw and 90° of body slip,
-countersteer takes a 63° slide back to under 2°, and dt = 1/20 with full lock
-and handbrake stays finite and bounded.
+### Balancing it: "jako na ledě"
+
+The first cut was play-tested and rejected — *"je to az moc, jak kdyby na lede,
+ze kdyz jedu a zatocim, tak se to uplne smekne"*. Three separate things were
+wrong, and only one of them was the tyres:
+
+1. **The car was neutral.** Real road cars are deliberately set up to
+   understeer, so a driver who arrives too fast runs wide — which he can see and
+   lift for — rather than spinning, which he cannot. `REAR_BIAS = 1.12`.
+2. **Grip collapsed past the peak.** `PAC_C = 1.55` let force fall to 0.6 of
+   peak, so any corner taken with commitment kept going. At 1.35 it falls only
+   to ~0.85: a slide is still available, and the tyre can climb back out of one.
+3. **The wheel could be slammed to full lock in 0.15 s at any speed** — which is
+   the *only* input a keyboard can give. Measured, a stab at 108 km/h spiked the
+   front slip angle past every skid threshold, so merely turning at speed
+   sounded and looked like a drift. Winding ON now slows with speed
+   (`STEER_ON / (1 + 0.055·v)`); coming BACK does not, because countersteer has
+   to stay instant or the slide that *is* deliberate becomes uncatchable.
+
+And one measurement bug that made the whole thing feel worse than it was:
+`slipF/slipR` reported the **absolute** contact-patch velocity, so a front tyre
+working perfectly well at 30 m/s still read three metres a second of scrub and
+tripped the squeal and the marks. The signal now measures slip angle **in excess
+of `A_PEAK`**, the tyre's own peak — the line between cornering and sliding — so
+it reads a flat zero through any corner the car is actually gripping in. Loose
+ground scales that peak down (`A_PEAK_OFF`), because a meadow shears long before
+the rubber does, which is why a field can be ploughed into ruts at speeds that
+would not mark tarmac.
+
+### …and then it was too stiff
+
+The next play-test: *"to zatacení je porád takové tuhé, ze se neda moc zatacet.
+Pri vetsi rychlosti to pomalu zatáci porád jako vsude."* Fair, and mostly
+self-inflicted — the fix for "on ice" had reached for stability three times over.
+
+The number that actually decided it was never in the tyre model at all:
+`CAR.steerSpeedK`, the steering-lock falloff, allowed only **6.1° of lock at
+108 km/h**, which is an 81 m radius — a motorway sweep, not a turn. Opening it to
+0.026 asks for 64 m; `KZ2` came back down from 1.45 to 1.15 (yaw inertia is felt
+as *lag* long before it is felt as stability); and `STEER_SLOW` from 0.055 to
+0.022. Extra lock is only a licence to slide if the tyres cannot hold what it
+asks for, so `MU_REF` moved with it — 1.55 for an Octavia, past a real road tyre
+and deliberately so. **Those two are a pair; move one and re-measure the other.**
+
+| full lock at | 50 km/h | 72 | 90 | 108 |
+|---|---|---|---|---|
+| radius, before the balance pass | 28 m | 44 | 61 | 81 |
+| radius, now | **15 m** | **26** | **38** | **53** |
+| body slip | 2.2° | 2.9° | 5.0° | 6.7° |
+| `slip01` | 0.00 | 0.01 | 0.07 | 0.13 |
+
+Turn-in lag fell from 0.33 s to ~0.25 s, and `slip01` still sits at or under the
+skid gate through all of it: the car turns hard without squealing or marking,
+and only genuinely provoking it breaks traction.
+
+Measured, after everything: 0–100 km/h in 5.67 s (the spec in the KIND comment
+says ~5.7, and it never moved through any of this); a handbrake flick at 22 m/s
+reaches 137°/s of yaw and 90° of body slip; countersteer takes a 68° slide back
+to 8.8°; a panic stop and a hard corner on grass both still register; parking at
+1.5 m/s still turns inside 4.4 m with `slip01` at zero; and dt = 1/20 with full
+lock and handbrake stays finite and bounded.
 
 ### The trap the slide sprang
 

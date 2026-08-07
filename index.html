@@ -27,7 +27,27 @@
     <div id="fps-meter" class="hidden"></div>
     <!-- where you are: settlement on top, street under it (nav.js fills these) -->
     <div id="place-hud" class="hidden"><span class="pl-town"></span><span class="pl-street"></span></div>
-    <div id="tod-clock" title="Time of day"></div>
+    <!-- Top-right stack: the time, what you are worth, what you have left.
+         #tod-clock is the SAME element it always was — same id, main.js:1832
+         still writes its textContent — it has only stopped being an island of
+         its own. Money and the bars hang under it so the corner your eye
+         already goes to for the clock answers all three questions at once. -->
+    <div id="status-hud">
+      <div id="tod-clock" title="Time of day"></div>
+      <!-- .mn-val carries the balance; .mn-tick is the ± that floats out to
+           the LEFT of it (see style.css — under it is where the bars are).
+           Writing text into an empty .mn-tick is what starts its animation. -->
+      <div id="money"><span class="mn-val"></span><span class="mn-tick"></span></div>
+      <!-- Two bars, never a number: the one you read under fire you read in
+           peripheral vision. Armour starts empty on purpose and statusbar.js
+           takes it away with the global .hidden once it knows there is none —
+           an empty secondary track reads as a rule under the health bar, so
+           the one frame before that first update() costs nothing. -->
+      <div id="vitals">
+        <div class="vt-bar vt-hp"><i></i></div>
+        <div class="vt-bar vt-ar"><i></i></div>
+      </div>
+    </div>
     <div id="speedo" class="hidden"><span id="speed-num">0</span><small id="speed-unit">km/h</small></div>
     <!-- the car you just got into, named over the speedo for 3 s. Never
          display:none — main.js only adds/removes .show so the fade runs. -->
@@ -42,6 +62,16 @@
          (main.js fills both from navigation.js). -->
     <div id="nav-hud" class="hidden"><span class="nv-eta"></span><span class="nv-dist"></span></div>
     <div id="pod" class="hidden"></div>
+    <!-- Fuel gauge, one rail under the speedo: how fast you are going and how
+         much longer you can keep it up belong to the same glance. Starts
+         .hidden exactly like #speedo — statusbar.js's ctx is { car, onFoot },
+         so it is up only when you are actually sitting in something. It shares
+         its rail with #pod, which is helicopter-only, and statusbar's ctx has
+         no heli; if a flying machine ever grows a fuel gauge, one of the two
+         moves — they are 2px apart. -->
+    <div id="fuel" class="hidden">
+      <div class="fu-bar"><i></i></div><span class="fu-type"></span><span class="fu-range"></span>
+    </div>
     <div id="reticle" class="hidden"><span></span></div>
     <canvas id="minimap" width="220" height="220"></canvas>
     <!-- M was bound in main.js from the day the world map landed and has never
@@ -53,6 +83,12 @@
       <b>myš (drag)</b> kamera · <b>kolečko</b> zoom
     </div>
   </div>
+
+  <!-- Taking damage. A sibling of #hud rather than a child, because #hud is
+       switched off wholesale (.hidden) for the menu and the map, and the one
+       thing that must never be switched off with it is the reason you cannot
+       see. Full screen, click-through, driven from opacity alone. -->
+  <div id="redout"></div>
 
   <div id="banner" class="hidden"></div>
 

@@ -26,6 +26,11 @@ import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
 import { Pedestrians } from './pedestrians.js';
 import { Chatter, voiceOf } from './chatter.js';
+import * as wallet from './wallet.js';
+import * as vitals from './vitals.js';
+import * as fuel from './fuel.js';
+import * as statusbar from './statusbar.js';
+import { PRICE, pumpBrand, pumpPrice, kc2 } from './prices.js';
 import { ChatBubbles } from './chatbubbles.js';
 import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
@@ -98,6 +103,18 @@ const game = {
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let parkingLots = null;
 let peds = null;
+// Where you wake up when you die: the forecourt of the Pardubice hospital
+// campus (28 buildings, centroid 2287,293 — the nearest `hospital` POI is a
+// node the region filter drops, so this is measured off the BUILDINGS). The
+// design's first pick, (2126,104), was 0.6 m from the centreline of Kyjevská:
+// you would have come round in the carriageway with traffic on it. This spot
+// is 10.8 m from the nearest road and 12.6 m from the nearest wall — near
+// enough to walk to a car, far enough not to be run over on arrival.
+const HOSPITAL = { x: 2291, z: 295 };
+
+// Reused across every stepGame — see the note at its use site.
+const _vitCtx = { car: null, heli: null, jet: null, player: null, onFoot: true };
+
 let chatter = null;      // who says what, and when — js/chatter.js
 let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
@@ -1186,6 +1203,64 @@ input.onKey('KeyH', () => {
   chatter?.honk(game.car.x, game.car.z);
 });
 
+// ---------- F: the pump ----------
+// Every fuel POI that has streamed in, and nothing else. `city.pois` is a FLAT
+// array that geo.js never bucketizes and never evicts (its own comment says
+// so), so it grows to tens of thousands of entries as you drive the region —
+// scanning it to answer "am I at a pump" would be a linear walk of the whole
+// thing several times a second. Filtering the fuel ones out once, as each tile
+// arrives, leaves at most the 1 178 in the region and in practice a few dozen;
+// scanning THAT is free and needs no spatial index at all.
+let _pumps = [];
+function indexPumps(pois) {
+  for (const p of pois ?? []) if (p.t === 'fuel' && p.p) _pumps.push(p);
+}
+
+// The forecourt is 22 x 16 m (js/meshes.js fuelInto), so 14 m off the node
+// covers standing at any of the four pumps without catching the road outside.
+const PUMP_R2 = 14 * 14;
+function pumpAt(x, z) {
+  let best = null, bd = PUMP_R2;
+  for (const p of _pumps) {
+    const dx = p.p[0] - x, dz = p.p[1] - z;
+    const d = dx * dx + dz * dz;
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
+
+// Hold F to fill. Not E: the E chain reaches "step out of the car" long before
+// it could reach a pump verb, so a refuel bound there would never once fire —
+// you would step out of the car every time you tried to pay for petrol.
+let _fuelling = null;     // { car, pump, brand, type, spent } while the key is held
+function pumpStep(dt) {
+  const car = game.car;
+  if (!input.keys.has('KeyF') || !car || Math.abs(car.speed) > 0.6) { _fuelling = null; return; }
+  const pump = pumpAt(car.x, car.z);
+  if (!pump) { _fuelling = null; return; }
+  if (!_fuelling || _fuelling.car !== car || _fuelling.pump !== pump) {
+    const brand = pumpBrand(pump.n);
+    _fuelling = { car, pump, brand, type: fuel.fuelTypeOf(car.kind), spent: 0 };
+  }
+  const f = _fuelling;
+  // Litres per second, not per frame: a fill has to feel like a fill. 0.9 l/s
+  // is a real slow pump and puts a dry 45 l Fabia at about fifty seconds —
+  // long enough to be a stop, short enough not to be a punishment.
+  const want = 0.9 * dt;
+  const price = pumpPrice(f.brand, f.type);
+  // Never deliver fuel that is not paid for: work out what the wallet can
+  // actually cover for THIS tick and clamp the litres to it, so an empty
+  // wallet stops the pump rather than running up a debt.
+  const afford = price > 0 ? wallet.money() / price : 0;
+  const put = fuel.fill(car, Math.min(want, afford));
+  if (put <= 0) { return; }
+  f.spent += put * price;
+  // Bill in whole koruna as they accrue — the wallet is an integer, and paying
+  // a fraction every frame would round to zero forever and give away petrol.
+  const due = Math.floor(f.spent);
+  if (due >= 1 && wallet.pay(due, 'palivo')) f.spent -= due;
+}
+
 // brief nudge in the action-hint slot (e.g. "land first")
 let _hintHold = 0;
 function ui_hint(text) {
@@ -1914,7 +1989,20 @@ function updateHud(dt) {
     // him out. Every "nastoupit" hint above is guarded the same way — from a
     // seat, the pos they measure against is the vehicle's, not a pedestrian's.
     else if (game.car || player.inCar) {
-      hint.innerHTML = '<kbd>E</kbd> vystoupit';
+      // At a pump the hint earns its second line: the price is what makes the
+      // choice of station a choice, so it is on screen before you commit.
+      const c = game.car;
+      const pump = c && Math.abs(c.speed) < 0.6 ? pumpAt(c.x, c.z) : null;
+      if (pump) {
+        const type = fuel.fuelTypeOf(c.kind);
+        const price = pumpPrice(pumpBrand(pump.n), type);
+        // kc2() already carries the "Kč" — appending another produced
+        // "36,90 Kč Kč/l" on the first screenshot of this hint.
+        hint.innerHTML = '<kbd>E</kbd> vystoupit · <kbd>F</kbd> držet: '
+          + PRICE.fuel.label[type] + ' ' + kc2(price) + '/' + PRICE.fuel.unit[type];
+      } else {
+        hint.innerHTML = '<kbd>E</kbd> vystoupit';
+      }
       hint.classList.remove('hidden');
     } else {
       // on foot the hint doubles as a sign over the door: walk into a building
@@ -2286,6 +2374,10 @@ async function boot() {
   trains = new Trains(scene, city);
   worldMap = new WorldMap(city, minimap);
   initNavigation(city);   // lazy + optional; never blocks the boot
+  // the pumps that have streamed in so far, and every one that arrives later
+  indexPumps(city.pois);
+  city.onTileLoaded?.((t) => indexPumps(t.pois));
+
   peds = new Pedestrians(scene, city, world.terrain);
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact,
   // attenuated by distance like the debris audio. The gender used to be
@@ -2406,6 +2498,46 @@ async function boot() {
       } catch (err) { reject(err); }
     };
     warm();
+  });
+
+  // ---- the body, the wallet and the tank ----
+  statusbar.init();
+  // SEJMUT. Deliberately NOT a game.mode change: main.js gates the whole
+  // postprocess pass on mode === 'play' (see wantPost), so a 'wasted' mode
+  // would switch off bloom, god rays and — at night — the emissive street
+  // lamps, for the length of the death card. vitals.down() is a flag; the
+  // world keeps running underneath it and only INPUT is taken away.
+  vitals.onDown((cause) => {
+    statusbar.banner('SEJMUT', 'wasted');
+    // Let go of whatever you were in first. Writing player.pos while inCar is
+    // still set is undone on the next frame — player.js mirrors the vehicle's
+    // position onto you every step — and the car would go on being driven.
+    if (game.car) {
+      const c = game.car;
+      c.ctl = null;
+      game.car = null;
+      parked.includes(c) || parked.push(c);
+      claimParked(c, false);
+      engineStop();
+      carAudioStop();
+    }
+    player.inCar = null;
+    fpView = false;
+    $id('speedo').classList.add('hidden');
+    hideCarName();
+    setTimeout(() => {
+      if (game.mode !== 'play') return;
+      player.pos.x = HOSPITAL.x;
+      player.pos.z = HOSPITAL.z;
+      player.y = world?.terrain?.heightAt?.(HOSPITAL.x, HOSPITAL.z) ?? player.y;
+      // The fee is charged even when you cannot afford it — pay() is atomic and
+      // refuses, so a broke player wakes up owing nothing rather than in debt.
+      // Being unable to pay is not a reason to be kept dead.
+      wallet.pay(PRICE.hospital.fee, 'nemocnice');
+      vitals.revive();
+      statusbar.hideBanner();
+      camInit = false;      // the boom re-seats behind the body at the new spot
+    }, 4000);
   });
 
   game.mode = 'play';
@@ -2803,6 +2935,21 @@ function stepGame(dt) {
     world?.terrain?.heightAt?.(camera.position.x, camera.position.z) ?? (camera.position.y - 6));
   updateHud(dt);
 
+  // ---- the body, the wallet, the tank ----
+  // One reused context object: stepGame can run three times per rendered frame
+  // and a fresh literal here would be three allocations a frame on the hottest
+  // path in the file. Fields are overwritten, never re-created.
+  _vitCtx.car = game.car; _vitCtx.heli = game.heli; _vitCtx.jet = game.jet;
+  _vitCtx.player = player;
+  _vitCtx.onFoot = !game.car && !game.heli && !game.jet && !player.inCar && !trains?.riding;
+  vitals.update(dt, _vitCtx);
+  // Only a car a HUMAN is driving burns — fuel.burn refuses anything with an
+  // .ai, so the traffic schedule can never be stranded by a system it does not
+  // know about.
+  if (game.car) fuel.burn(game.car, dt);
+  pumpStep(dt);
+  statusbar.update(dt, _vitCtx);
+
   // ---- net: server co-op pump (menu → Multiplayer only; null in single) ----
   // One call does everything network: our state out at ~10 Hz, remote citizens
   // walked/interpolated, peers' rocket detonations replayed here, and the name
@@ -3138,6 +3285,13 @@ window.__atc = {
   // from a screenshot. `_live` is the real array, mutated in place.
   get peds() { return peds; },
   get chatter() { return chatter; },
+  // The body, the wallet and the tank — the same module instances the game
+  // itself holds. Reaching them any other way means importing the file again
+  // from a console, and under vite's dev server that is a DIFFERENT instance
+  // the moment the file has been hot-reloaded (it serves `vitals.js?t=…` to
+  // the page and plain `vitals.js` to you). An hour went into a bug that was
+  // only ever two copies of the same module disagreeing.
+  vitals, wallet, fuel, statusbar,
   said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
   get interiors() { return world?.interiors; },
   get postfx() { return postfx; },

@@ -137,7 +137,13 @@ export const CAR_COLORS = [0xb8433a, 0x3a63a8, 0xd8d5ce, 0x35383d, 0x8a9096,
   0x9a7b3c, 0x476b46, 0x7a4a66, 0xc4c9cf, 0x2f4f72];
 export const CAR = {
   accel: 6.5, brake: 11, vmax: 38, vrev: 8,   // m/s
-  steerMax: 0.62, steerSpeedK: 0.045,          // wheel angle & its speed falloff
+  // steerSpeedK is the lock falloff with speed, and it is the ONE number that
+  // decides how tight a corner the driver is even allowed to ask for: at 0.045
+  // full lock at 108 km/h was 6.1°, which is a 81 m radius — a motorway sweep,
+  // not a turn. 0.026 opens it to 9.7° / 64 m. It only reads as a licence to
+  // slide if the tyres cannot hold what it asks for, which is why it moved
+  // together with MU_REF in vehicles.js and not on its own.
+  steerMax: 0.62, steerSpeedK: 0.026,          // wheel angle & its speed falloff
   grip: 7.5, drag: 0.35, roll: 0.55,
   len: 4.2, wid: 1.8,
 };

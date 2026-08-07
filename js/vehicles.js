@@ -502,9 +502,12 @@ const SUB_DT = 1 / 120;   // the tyre model's own clock; see the substep loop
 const WHEELBASE = 0.6;    // × len — unchanged from the old model, so turn radii carry over
 const CG_FRONT = 0.45;    // CoG sits this fraction of the wheelbase behind the front axle…
 const CG_H = 0.55;        // …and this high, which is what makes load transfer transfer
-const KZ2 = 1.45;         // yaw radius of gyration² as a multiple of a·b — bigger
-                          // is heavier: the car takes longer to start rotating
-                          // AND longer to stop, which is most of what "planted" is
+// Yaw radius of gyration² as a multiple of a·b. Bigger is heavier: the car
+// takes longer to start rotating AND longer to stop. 1.45 was chosen to settle
+// the car down after the first play-test and turned out to be most of why the
+// next one came back "tuhé, pomalu zatáčí pořád jako všude" — inertia is felt
+// as lag long before it is felt as stability.
+const KZ2 = 1.15;
 // Cornering stiffness, measured rather than picked: at B = 7 a 0.58 g corner
 // (20 m/s round 70 m, which is a brisk but perfectly ordinary main-road bend)
 // came out at 8.6° of front slip and 3.0 m/s of contact-patch scrub — enough to
@@ -518,15 +521,21 @@ const PAC_B = 11.0;       // tyre stiffness: how fast force builds with slip ang
 // 1.35 it only falls to about 0.85, which still allows a real slide but lets
 // the tyre climb back out of one on its own.
 const PAC_C = 1.35;       // shape — peak near 11.5°, then away to 0.85 of peak
-const MU_REF = 6.4;       // KIND.grip ÷ this = the tyre's friction coefficient
-const MU_MIN = 0.55, MU_MAX = 1.75;
+// KIND.grip ÷ this = the tyre's friction coefficient. 1.55 for an Octavia is
+// well past a real road tyre, and deliberately so: steerSpeedK was opened up to
+// let the driver ask for a 57 m corner at 108 km/h instead of an 81 m one, and
+// grip has to be there to answer or the extra lock is just a licence to slide —
+// which is the complaint this whole pass exists to fix. The two numbers are a
+// pair; move one and re-measure the other.
+const MU_REF = 4.9;
+const MU_MIN = 0.55, MU_MAX = 2.0;
 const MU_OFF = 0.42;      // grip a fully offroad tyre loses — a meadow is not tarmac
 // Real road cars are deliberately set up to understeer: the rear axle is given
 // more grip than the front so that a driver who arrives too fast runs wide —
 // which he can see and lift for — instead of spinning, which he cannot. The
 // first cut of this model was neutral, and neutral in a game with a keyboard
 // for a steering wheel reads as loose.
-const REAR_BIAS = 1.12;   // × rear grip against the front's
+const REAR_BIAS = 1.06;   // × rear grip against the front's
 // Split by pedal, because a car is: the drive goes mostly to the back of the
 // friction circle and the brakes mostly to the front. One shared number gave
 // power-on oversteer so mild it read as understeer, and front brakes so weak a
@@ -540,7 +549,7 @@ const SLIP_V = 2.2;       // m/s floor under the slip-angle denominator
 const KIN_V = 7.0;        // …below which the kinematic constraint is blended back in
 const KIN_K = 14;         // and how hard it pulls
 const STEER_ON = 9;       // rad/s the wheel winds toward lock at a standstill…
-const STEER_SLOW = 0.055; // …divided by (1 + this × m/s), so 0.31 s at 108 km/h
+const STEER_SLOW = 0.022; // …divided by (1 + this × m/s): 0.19 s at 108 km/h
 const STEER_BACK = 16;    // unwinding and countersteer: as fast as you like
 const R_MAX = 3.6;        // rad/s — a car spinning faster than this is a bug
 const LAT_MAX = 45;        // m/s of sideways, likewise

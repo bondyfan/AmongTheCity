@@ -740,6 +740,142 @@ function smoothBends(p, isBridge) {
 // equal to the bit, and a 2 cm hash is generous.
 const J_KEY = (x, z) => Math.round(x * 50) + ',' + Math.round(z * 50);
 const J_MIN_ARMS = 3;       // two ways meeting is a way that was split, not a junction
+// ---- overlaps that share no node -------------------------------------------
+// Two carriageways can cover the same ground without OSM ever joining them: the
+// parallel ways of one street, a service road along a kerb, a driveway crossed
+// by a lane. Each is levelled on its own and nothing ties them, so one ends up
+// lying ON the other — "je to jako vyšší layer... s autem nadskočím".
+//
+// Measured over one Pardubice tile: 5 474 overlapping samples. The median step
+// is 5 mm and harmless, but 368 exceed 15 cm and the worst is 1.69 m between
+// two 3.6 m service roads. Real junctions were never the problem — where two
+// ways genuinely share a node the pins already agree to within a centimetre
+// (795 junctions measured, worst 1 cm).
+//
+// So an overlap becomes a junction node too. junctionY then averages the arms
+// exactly as it does at a crossroads, and levelWay's existing taper bends both
+// ways into agreement over PIN_TAPER metres instead of stepping. Where the two
+// already agree the average is a no-op, which is why this can be done blind at
+// index time, before any terrain has loaded.
+//
+// `layer` is what keeps a real flyover out of it: a road bridging another is
+// SUPPOSED to sit higher. In the tile above every one of the 368 bad overlaps
+// was on the same layer — but the tag is in the data now, and the guard costs
+// one comparison.
+const OVL_STEP = 40;   // m between reconciliation nodes along a long overlap
+const OVL_NEAR = 18;   // m — a real shared node this close already agrees
+const OVL_G = 60;      // m bucket for the segment index
+
+function pointAt(r, s) {
+  let run = 0;
+  for (let i = 0; i < r.p.length - 1; i++) {
+    const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+    const L = Math.hypot(bx - ax, bz - az) || 1e-9;
+    if (run + L >= s || i === r.p.length - 2) {
+      const t = Math.max(0, Math.min(1, (s - run) / L));
+      return [ax + (bx - ax) * t, az + (bz - az) * t];
+    }
+    run += L;
+  }
+  return [r.p[0][0], r.p[0][1]];
+}
+
+function nearestOn(r, x, z) {
+  let best = Infinity, bs = 0, run = 0;
+  for (let i = 0; i < r.p.length - 1; i++) {
+    const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+    const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9, L = Math.sqrt(L2);
+    let t = ((x - ax) * ex + (z - az) * ez) / L2;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const d = Math.hypot(x - (ax + ex * t), z - (az + ez * t));
+    if (d < best) { best = d; bs = run + L * t; }
+    run += L;
+  }
+  return { d: best, s: bs };
+}
+
+function segDist(a1x, a1z, a2x, a2z, b1x, b1z, b2x, b2z) {
+  // proper crossings first: a driveway cutting a lane meets it at ONE point a
+  // few metres long, which endpoint tests alone would walk straight past
+  const dax = a2x - a1x, daz = a2z - a1z, dbx = b2x - b1x, dbz = b2z - b1z;
+  const den = dax * dbz - daz * dbx;
+  if (Math.abs(den) > 1e-9) {
+    const t = ((b1x - a1x) * dbz - (b1z - a1z) * dbx) / den;
+    const u = ((b1x - a1x) * daz - (b1z - a1z) * dax) / den;
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1)
+      return { d: 0, x: a1x + dax * t, z: a1z + daz * t };
+  }
+  let best = Infinity, bx = a1x, bz = a1z;
+  const test = (px, pz, q1x, q1z, q2x, q2z) => {
+    const ex = q2x - q1x, ez = q2z - q1z, L2 = ex * ex + ez * ez || 1e-9;
+    let t = ((px - q1x) * ex + (pz - q1z) * ez) / L2;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const cx = q1x + ex * t, cz = q1z + ez * t;
+    const d = Math.hypot(px - cx, pz - cz);
+    if (d < best) { best = d; bx = (px + cx) / 2; bz = (pz + cz) / 2; }
+  };
+  test(a1x, a1z, b1x, b1z, b2x, b2z);
+  test(a2x, a2z, b1x, b1z, b2x, b2z);
+  test(b1x, b1z, a1x, a1z, a2x, a2z);
+  test(b2x, b2z, a1x, a1z, a2x, a2z);
+  return { d: best, x: bx, z: bz };
+}
+
+function linkOverlaps(roads, at) {
+  const usable = roads.filter((r) => r.d && !r.br && r.p?.length > 1 && r.w > 0);
+  if (usable.length < 2) return;
+  for (const r of usable) r._len ??= polylineLength(r.p);
+  // bucket SEGMENTS, not whole ways: an overlap at a crossing is only a few
+  // metres long, and sampling a way at intervals walks past almost all of them
+  // — the first version of this pass sampled every 40 m and missed 297 of the
+  // 368 bad overlaps in the tile, which are exactly the crossings.
+  const grid = new Map();
+  for (const r of usable) {
+    let run = 0;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+      const L = Math.hypot(bx - ax, bz - az) || 1e-9;
+      const seg = { r, ax, az, bx, bz, run, L };
+      const x0 = Math.floor(Math.min(ax, bx) / OVL_G), x1 = Math.floor(Math.max(ax, bx) / OVL_G);
+      const z0 = Math.floor(Math.min(az, bz) / OVL_G), z1 = Math.floor(Math.max(az, bz) / OVL_G);
+      for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) {
+        const k = gx + ',' + gz;
+        let a = grid.get(k);
+        if (!a) grid.set(k, a = []);
+        a.push(seg);
+      }
+      run += L;
+    }
+  }
+  const made = new Set();
+  for (const segs of grid.values()) {
+    for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {
+      const A = segs[i].r, B = segs[j].r;
+      if (A === B || (A.l ?? 0) !== (B.l ?? 0)) continue;
+      const reach = (A.w + B.w) / 2;
+      const hit = segDist(segs[i].ax, segs[i].az, segs[i].bx, segs[i].bz,
+        segs[j].ax, segs[j].az, segs[j].bx, segs[j].bz);
+      if (hit.d > reach) continue;
+      const lo = A._id < B._id ? A : B, hi = A._id < B._id ? B : A;
+      const sLo = nearestOn(lo, hit.x, hit.z), sHi = nearestOn(hi, hit.x, hit.z);
+      // …but not where they already meet properly
+      let shared = false;
+      for (const pin of lo._pins ?? []) {
+        if (Math.abs(pin.s - sLo.s) > OVL_NEAR) continue;
+        if ((pin.node.arms ?? []).some((arm) => arm.r === hi)) { shared = true; break; }
+      }
+      if (shared) continue;
+      const tag = lo._id + ':' + hi._id + ':' + Math.round(sLo.s / OVL_STEP);
+      if (made.has(tag)) continue;
+      made.add(tag);
+      const node = { x: hit.x, z: hit.z, _ovl: true,
+        arms: [{ r: lo, i: -1, end: false, s: sLo.s }, { r: hi, i: -1, end: false, s: sHi.s }] };
+      (lo._pins ??= []).push({ s: sLo.s, node });
+      (hi._pins ??= []).push({ s: sHi.s, node });
+    }
+  }
+}
+
 const J_MAX_TRIM = 0.35;    // never eat more than this fraction of a short road
 export function indexJunctions(roads) {
   const at = new Map();
@@ -890,6 +1026,8 @@ export function indexJunctions(roads) {
   // the union-find marks are scoped to THIS call — a later tile must not see
   // half-built roots on nodes it never touched
   for (const list2 of JUNCTIONS.values()) for (const e of list2) delete e._cRoot;
+  // …and finally the overlaps that never got a node of their own.
+  linkOverlaps(roads, at);
 }
 
 /** Junction clusters, bucketed like the pads. */

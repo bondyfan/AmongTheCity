@@ -16,18 +16,24 @@ const LS_KEY = 'atc-settings';
 
 // The graphics keys a preset owns. mouseLook and volume are personal preferences, not
 // performance knobs — presets leave them alone and changing them never forks to custom.
+// `ao` and `ortho` belong to the presets now. Both were switchable but neither
+// was ever STAMPED by one, so the aerial ground came up off on a fresh profile
+// and ambient occlusion only survived because an absent key reads as on — a
+// default nobody chose and nothing recorded. The low preset keeps them off:
+// SSAO is a full-screen pass and the photo is a texture fetch per cell, which
+// is exactly what the low preset exists to skip.
 const PRESETS = {
   low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 60,
             ortho: false, facades: false, trees: true, grass: false, peds: 12, bloom: false, rays: false,
-            interiors: false, buildingR: 80, mblur: false, flare: false,
+            ao: false, interiors: false, buildingR: 80, mblur: false, flare: false,
             cloudDist: 'medium' },
   medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 240,
-            ortho: false, facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
-            interiors: true, buildingR: 160, mblur: true, flare: true,
+            ortho: true,  facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
+            ao: true,  interiors: true, buildingR: 160, mblur: true, flare: true,
             cloudDist: 'medium' },
   high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
-            ortho: false, facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
-            interiors: true, buildingR: 280, mblur: true, flare: true,
+            ortho: true,  facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
+            ao: true,  interiors: true, buildingR: 280, mblur: true, flare: true,
             cloudDist: 'far' },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
@@ -113,7 +119,14 @@ const CSS = `
 #atc-dev-copy:active { transform: translateY(1px); }
 #atc-dev-copy.ok { background: #7fd18a; }
 #atc-gear {
-  position: fixed; top: 44px; right: 12px; z-index: 20; pointer-events: auto;
+  /* Below the top-right status stack, not beside it. The clock used to be the
+     only thing in that corner and 44px cleared it; #status-hud now runs clock →
+     money → health → armour from 12px down to about 80px, and the gear sat in
+     the middle of it. 96px clears the tallest the stack gets (armour visible)
+     with room to spare. css/style.css owns #status-hud; this button's CSS is
+     injected from here, which is why the two numbers live apart — if the stack
+     grows another row, this is the one that has to move. */
+  position: fixed; top: 96px; right: 12px; z-index: 20; pointer-events: auto;
   width: 38px; height: 38px; font-size: 19px; line-height: 1; cursor: pointer;
   background: rgba(12,16,24,0.72); color: #e8ecf4;
   border: 1px solid rgba(140,170,220,0.3); border-radius: 10px;

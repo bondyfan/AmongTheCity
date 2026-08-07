@@ -442,6 +442,16 @@ function processRoads(els, owns) {
     // trolejbusy: the wires over the street are half of what makes Pardubice
     // look like Pardubice, and OSM maps them per way
     if (/^(yes|both)$/.test(t.trolley_wire ?? '')) r.tw = 1;
+    // WHICH LEVEL THIS WAY IS ON. Two carriageways whose ribbons overlap but
+    // that share no junction node are either a mapping accident that must be
+    // levelled together, or a genuine grade separation that must NOT be — and
+    // `layer` is the only thing in the data that tells them apart. Measured
+    // over one Pardubice tile: 368 overlaps step by more than 15 cm and 297 of
+    // them are CROSSINGS, exactly the case this decides. 157 of 4 442 highway
+    // ways here carry the tag and the builder threw every one away.
+    // Defensive parse: OSM contains values like "0;-1" from botched edits.
+    const lay = parseInt(t.layer, 10);
+    if (Number.isFinite(lay) && lay !== 0) r.l = lay;
     out.push(r);
   }
   return out;

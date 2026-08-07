@@ -31,10 +31,9 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
   text-shadow: 0 1px 6px rgba(0,0,0,0.8); opacity: 0.92;
   transition: opacity 1s ease;
 }
-#tod-clock {
-  position: absolute; top: 14px; right: 16px; color: #dfe6f2; font-size: 14px;
-  font-weight: 600; text-shadow: 0 1px 4px rgba(0,0,0,0.8); opacity: 0.85;
-}
+/* #tod-clock is no longer positioned here: it is the first row of #status-hud
+   (see "STATUS HUD" at the foot of this file), which owns the whole top-right
+   rail now. Same element, same id, same textContent writer in main.js. */
 #speedo {
   position: absolute; right: 22px; bottom: 96px; color: #f2f5fb; text-align: right;
   text-shadow: 0 2px 8px rgba(0,0,0,0.85);
@@ -235,3 +234,338 @@ html, body { overscroll-behavior: none; touch-action: none; }
   font: 500 12.5px/1.2 system-ui, sans-serif; color: #ffd166;
 }
 #place-hud .pl-town:empty, #place-hud .pl-street:empty { display: none; }
+
+
+/* ==========================================================================
+   STATUS HUD — the time, the money, the blood, the fuel, and the red that
+   says you are about to lose all four.
+
+   WHY A COLUMN, AND WHY THE CLOCK MOVED. Every readout this game already has
+   is pinned to a rail of its own: the clock top right, the speedo bottom
+   right, the place name bottom left, the trip bottom centre. That holds while
+   there are five of them. Hanging a wallet and two bars off three MORE
+   free-floating absolutes was the first attempt, and three more corners is
+   how a HUD turns into a debug overlay — six things at six distances from the
+   same edge, nothing grouped, and the eye has to hunt for the one it wants.
+   So the clock stops being an island and becomes the first row of a stack.
+   Time, money, health: one rail, one glance, and the corner you already look
+   at for the hour answers the other two on the way past.
+
+   NO PANEL, EXCEPT AROUND THE BARS. #speedo, #car-name and #nav-hud each
+   argue in their own comment that a box behind them would fight the rest of
+   the screen, and they survive a blown-out sky and wet asphalt on type plus a
+   double shadow alone. The money is type, so it does the same. The bars
+   cannot: a bar is a LENGTH, and a length with no frame has no zero and no
+   full — you would be reading an unlabelled smear of red. They get the same
+   dark glass and the same 1px cold edge the action hint uses, and nothing
+   else on this rail gets a box.
+
+   HOW THE FILLS ARE DRIVEN, and this is the half of the contract that is not
+   in the interface list: a fill responds to an inline `style.width` (the
+   obvious way) OR to a `--v` of 0..1 set on the bar or on the fill itself.
+   Both work, inline width wins if somebody sets both, and the default with
+   neither is EMPTY, not full — #hud is .hidden until the game starts, so the
+   first update() lands before anyone sees a bar, and an empty bar that has
+   not been told anything yet is at least an honest lie. --v must be a finite
+   number; filtering that is statusbar.js's job, on its side of the wire.
+
+   NO WIDTH TRANSITION ANYWHERE IN HERE. statusbar.update(dt) writes these
+   every frame, and stepGame can run three times per rendered frame, so a
+   transition would not smooth anything that is not already smooth — it would
+   only add lag to the one number you take a bullet for. Same reason #redout
+   has no transition: opacity is owned by the caller, frame by frame.
+
+   ---- NOTE FOR js/settings.js, WHICH IS NOT MINE TO EDIT ----
+   #atc-gear is injected from inside that module at `top: 44px; right: 12px`
+   (js/settings.js:116). The stack below occupies the top-right rail from 12px
+   down to 80px (measured, at the desktop sizes; 12–70px on the phone
+   breakpoint), and the ± ticker animates in the band immediately to its left,
+   so the gear now lands on the balance and eats the last segment of the health
+   bar with it. IT MUST MOVE TO top: 120px — 40px of clearance, which is what
+   the bars need if they ever grow a third row.
+   That belongs in settings.js. Writing `#atc-gear { top: 120px !important }`
+   here would fix the symptom and leave two files disagreeing about where the
+   button is, which is worse than the collision.
+   ========================================================================== */
+
+:root {
+  /* Not one new colour. Every value below already appears in this file; they
+     are named here so four new readouts cannot drift away from the HUD they
+     just joined. The interface's own neutral comes first, then the three
+     semantic ones — and the split is the rule: the wallet is neutral because
+     a balance is not an opinion, and only the CHANGE in it is coloured. */
+  --hud-ink:   #f2f5fb;                  /* the speedo's white */
+  --hud-dim:   #aab6cc;                  /* the controls hint */
+  --hud-edge:  rgba(140, 170, 220, 0.28);/* the action hint's cold 1px */
+  --hud-glass: rgba(8, 11, 17, 0.62);    /* a shade under the action hint's */
+  --sem-good:  #8fe3a0;                  /* #fps-meter b */
+  --sem-warn:  #ffd166;                  /* #fps-meter b.mid, the waypoint arrow */
+  --sem-bad:   #ff8a7a;                  /* #fps-meter b.low */
+  --sem-cool:  #cfe0ff;                  /* the kbd blue: cold, and secondary */
+}
+
+#status-hud {
+  /* env() rather than a flat 16px: the viewport meta is viewport-fit=cover, so
+     on a notched phone held in landscape the right rail is under the corner
+     radius and the clock loses a character. The fallbacks are the numbers the
+     clock used before it moved, so nothing changes on a desktop. */
+  position: absolute; z-index: 12; pointer-events: none;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; align-items: flex-end; gap: 5px;
+  /* one shadow for the whole stack — the tight one carries the type over a
+     white wall, the wide one lifts it off a bright sky */
+  text-shadow: 0 1px 4px rgba(0,0,0,0.85), 0 0 12px rgba(0,0,0,0.5);
+}
+#tod-clock {
+  color: #dfe6f2; font-size: 14px; font-weight: 600; opacity: 0.85;
+  line-height: 1.15;
+}
+
+/* ---- money ----
+   Tabular figures, right-aligned, and both halves of that matter: proportional
+   digits re-measure the string every time the balance changes, so "1 660 Kč"
+   paying out to "1 060 Kč" would shuffle every digit sideways — a HUD number
+   that twitches while it counts reads as broken even when it is right. */
+#money {
+  position: relative;                        /* the ticker hangs off this box */
+  font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1;
+  line-height: 1;
+}
+#money .mn-val {
+  display: block; text-align: right;
+  color: var(--hud-ink); font-size: 23px; font-weight: 800; letter-spacing: 0.5px;
+}
+#money .mn-val:empty { display: none; }
+/* A debt is the one balance that is not neutral. Both spellings, because the
+   contract fixes the elements and not the modifier, and two dead selectors
+   cost nothing next to a minus sign nobody notices. */
+#money.neg .mn-val, #money.debt .mn-val { color: var(--sem-bad); }
+
+/* The ± ticker floats OUT TO THE LEFT of the balance, not under it: under it
+   is where the bars are, and left of it is the only empty sky this corner has.
+   Absolutely positioned so it can never shove the digits the tabular figures
+   above just finished holding still.
+   IT ARMS ITSELF FROM :empty — a ticker with no text has animation:none, so
+   writing text into it starts the run and clearing it resets it, and no class
+   has to be invented on the other side of the contract. To replay it for a
+   second change inside one second: clear the text, read offsetWidth, write the
+   new text — without that read the browser coalesces the two and nothing
+   moves. */
+#money .mn-tick {
+  position: absolute; right: calc(100% + 9px); top: 3px;
+  white-space: nowrap; opacity: 0;
+  font-size: 13.5px; font-weight: 700; letter-spacing: 0.4px;
+  color: var(--hud-dim);
+  animation: mnTick 1.15s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+#money .mn-tick:empty { display: none; animation: none; }
+#money .mn-tick.up, #money .mn-tick.gain, #money .mn-tick.plus { color: var(--sem-good); }
+#money .mn-tick.down, #money .mn-tick.loss, #money .mn-tick.minus { color: var(--sem-bad); }
+@keyframes mnTick {
+  0%   { opacity: 0; transform: translateY(5px); }
+  14%  { opacity: 1; transform: translateY(0); }
+  62%  { opacity: 1; transform: translateY(-2px); }
+  100% { opacity: 0; transform: translateY(-9px); }
+}
+
+/* ---- health and armour ----
+   WHY THE HEALTH BAR HAS A SHAPE AND NOT JUST A LENGTH. It is the one you
+   read while something is shooting at you, which means peripheral vision, a
+   quarter of a second, no counting of pixels. A plain fill fails exactly
+   there: 20 % and 35 % of a 132px track are 20px apart and, red on red, they
+   look the same, so you find out which one it was by dying. Two cheap tricks
+   fix it without a number:
+     · FIVE SEGMENTS. The notches are drawn OVER the fill, so the end of the
+       bar always lands on a countable tick. "One box left" is a shape, and a
+       shape survives peripheral vision; a length does not.
+     · THE EMPTY PART IS HATCHED. Lost health is not background — it is a
+       diagonal red hatch that GROWS as you take damage, so at 20 % four
+       fifths of the bar is visibly wound and the thing reads as damaged
+       before you have read it as short.
+   Both are driven by length alone. That is the point: they work whether or not
+   statusbar.js ever gets round to putting a .low class on anything, which was
+   the version that was rejected — a bar whose only low-health cue was a class
+   the other side of the contract might not send is a bar that is fine in
+   testing and flat red in the one moment it exists for.
+   Armour is the same object at half the height in a cold colour: secondary by
+   construction, and it never gets the hatch, because armour you do not have is
+   not a wound. */
+#vitals {
+  --vt-w: 132px;             /* the track width, wanted by both bars at once */
+  display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
+}
+.vt-bar, #fuel .fu-bar {
+  position: relative; overflow: hidden; border-radius: 2px;
+  background-color: var(--hud-glass);
+  box-shadow: inset 0 0 0 1px var(--hud-edge), 0 1px 5px rgba(0,0,0,0.5);
+}
+.vt-bar { width: var(--vt-w); }
+.vt-bar > i, #fuel .fu-bar > i {
+  display: block; height: 100%;
+  /* inline style.width wins over this; see HOW THE FILLS ARE DRIVEN above */
+  width: clamp(0%, calc(var(--v, 0) * 100%), 100%);
+  /* The bright leading edge is an INSET shadow, not a border: with the global
+     box-sizing:border-box a 2px border still paints at width:0, so a dead
+     player would keep a white sliver of health. An inset shadow on a zero-wide
+     box paints nothing. No outer glow either — this box is resized every frame
+     and an outer blur widens the repaint rectangle every time. */
+  box-shadow: inset -2px 0 0 rgba(255,255,255,0.7);
+}
+.vt-hp {
+  height: 11px;
+  background-image: repeating-linear-gradient(-45deg,
+    rgba(255,138,122,0.17) 0 3px, transparent 3px 7px);
+}
+/* #c26c61 is not a new colour: it is --sem-bad mixed 3:1 toward the page's own
+   background (#0d1016, html/body at the top of this file), which is what gives
+   the fill the shading of a tube instead of a flat swatch. Written out rather
+   than color-mix()'d because a declaration containing var() is validated at
+   COMPUTED-value time, so on an engine that lacks color-mix the whole thing
+   would fall back to transparent — an invisible health bar — instead of to the
+   flat colour the line above it. */
+.vt-hp > i { background: linear-gradient(180deg, var(--sem-bad), #c26c61); }
+/* the notches, over everything, five of them */
+.vt-hp::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(90deg,
+    transparent 0 calc(20% - 1px), rgba(6,9,14,0.8) calc(20% - 1px) 20%);
+}
+.vt-ar { height: 5px; }
+.vt-ar > i { background: var(--sem-cool); opacity: 0.82; }
+/* Optional urgency. If statusbar.js puts .low / .crit on the bar or on
+   #vitals it gets a pulse on top of the form cues; if it never does, nothing
+   above depends on it. Both anchors, for the same reason the ticker takes
+   three spellings. */
+#vitals.low .vt-hp > i, .vt-hp.low > i { animation: hpPulse 1s ease-in-out infinite; }
+#vitals.crit .vt-hp > i, .vt-hp.crit > i { animation: hpPulse 0.52s ease-in-out infinite; }
+@keyframes hpPulse { 50% { opacity: 0.5; } }
+
+/* ---- fuel ----
+   Bottom right, one rail under the speedo: how fast you are going and how much
+   longer you can keep it up are one glance, not two. Four segments, not five,
+   and that is deliberate — a fuel gauge reads in quarters because every fuel
+   gauge ever built reads in quarters, and it also means the two bars on screen
+   can never be mistaken for each other at the edge of vision.
+   Source order is bar, type, range (statusbar.js's contract); `order` puts the
+   label row on top and lets the bar span underneath, so no wrapper div that
+   the contract does not have has to exist. */
+#fuel {
+  position: absolute; right: 22px; bottom: 66px; z-index: 12; pointer-events: none;
+  width: 132px; display: flex; flex-wrap: wrap;
+  justify-content: space-between; align-items: baseline; gap: 3px 8px;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+}
+#fuel .fu-type {
+  order: 0; color: var(--hud-dim); text-transform: uppercase;
+  font: 700 10.5px/1 system-ui, sans-serif; letter-spacing: 1.4px;
+}
+#fuel .fu-range {
+  order: 1; color: var(--hud-ink); opacity: 0.9;
+  font: 600 12px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums;
+}
+#fuel .fu-type:empty, #fuel .fu-range:empty { display: none; }
+#fuel .fu-bar {
+  order: 2; flex: 0 0 100%; height: 8px;
+  background-image: repeating-linear-gradient(-45deg,
+    rgba(255,209,102,0.15) 0 3px, transparent 3px 7px);
+}
+/* --sem-warn toward the page background, exactly as the health fill above */
+#fuel .fu-bar > i { background: linear-gradient(180deg, var(--sem-warn), #bb9b50); }
+#fuel .fu-bar::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(90deg,
+    transparent 0 calc(25% - 1px), rgba(6,9,14,0.8) calc(25% - 1px) 25%);
+}
+/* An empty tank is a red problem, not an amber one — same three-spelling
+   courtesy, same graceful nothing if none of them ever arrives. */
+#fuel.low .fu-bar > i, #fuel.dry .fu-bar > i, #fuel .fu-bar.low > i {
+  background: var(--sem-bad);
+  animation: hpPulse 1s ease-in-out infinite;
+}
+#fuel.low .fu-range, #fuel.dry .fu-range { color: var(--sem-bad); }
+
+/* ---- the redout ----
+   UNDER #hud on purpose (z-index 9 against the HUD's 10). The instinct is to
+   put the damage flash on top of everything, and that is exactly backwards:
+   the moment the screen goes red is the moment you need to read 8 HP and 300
+   metres of fuel, and washing the numbers you are about to act on is a
+   punishment the player cannot answer. The world goes red; the HUD stays
+   crisp on top of it.
+   Two layers, so one opacity does two jobs: a vignette that closes in from the
+   edges, which is what a redout actually feels like, plus a flat wash so full
+   opacity is a blackout and not just dark corners. */
+#redout {
+  position: fixed; inset: 0; z-index: 9; pointer-events: none; opacity: 0;
+  background:
+    radial-gradient(ellipse at 50% 50%,
+      rgba(120,8,4,0) 34%, rgba(112,10,6,0.55) 76%, rgba(58,3,2,0.95) 100%),
+    linear-gradient(rgba(146,20,12,0.24), rgba(146,20,12,0.24));
+}
+
+/* ---- SEJMUT ----
+   The death card overrides #banner's own 3.2s bannerIn, which fades itself out
+   at the end — right for "kupujete naftu", wrong for the one card that has to
+   sit there until something revives you. wastedIn ends at opacity 1 and holds,
+   so the card lives exactly as long as the class does and the JS side decides
+   when that is.
+   padding-left equals the letter-spacing on purpose: tracking adds a phantom
+   space after the LAST letter, and #banner is centred by translateX(-50%) on
+   its own box, so at 12px of tracking the word sits 6px left of centre. The
+   padding puts the glyphs back on the axis. */
+#banner.wasted {
+  top: 32vh;
+  font-size: clamp(34px, 8.5vw, 66px); font-weight: 800;
+  letter-spacing: 12px; padding-left: 12px;
+  color: var(--sem-bad);
+  text-shadow: 0 2px 18px rgba(0,0,0,0.95), 0 0 42px rgba(150,16,10,0.75);
+  animation: wastedIn 1.5s cubic-bezier(0.16, 0.84, 0.3, 1) forwards;
+}
+/* the band: a strip of dark that fades out at both ends, so the word survives
+   a white sky without ever looking like a dialog box */
+#banner.wasted::before {
+  content: ''; position: absolute; z-index: -1;
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  /* exactly one viewport wide, and that is the point: at 260vw the two ends of
+     the gradient were off-screen and the strip read as a hard-edged letterbox
+     bar — a dialog box, which is the one thing the rest of this HUD refuses to
+     be. At 100vw both fades land where you can see them. */
+  width: 100vw; height: 2.2em;
+  background: linear-gradient(90deg,
+    rgba(8,5,7,0) 0%, rgba(8,5,7,0.74) 24%, rgba(8,5,7,0.74) 76%, rgba(8,5,7,0) 100%);
+}
+@keyframes wastedIn {
+  0%   { opacity: 0; letter-spacing: 30px; transform: translateX(-50%) scale(1.06); }
+  55%  { opacity: 1; }
+  100% { opacity: 1; letter-spacing: 12px; transform: translateX(-50%) scale(1); }
+}
+
+/* ---- reduced motion ----
+   Only this file's own new animations. Every one of them is decoration over
+   information that is already there — the ticker's number, the bar's length,
+   the word SEJMUT — so they can all be reduced to a hold or a fade without
+   anything becoming unreadable. The pulses go entirely: a low health bar is
+   already a hatched bar with one segment left. */
+@media (prefers-reduced-motion: reduce) {
+  #money .mn-tick { animation: mnTickStill 1.5s linear forwards; }
+  #vitals.low .vt-hp > i, .vt-hp.low > i,
+  #vitals.crit .vt-hp > i, .vt-hp.crit > i,
+  #fuel.low .fu-bar > i, #fuel.dry .fu-bar > i, #fuel .fu-bar.low > i {
+    animation: none;
+  }
+  #banner.wasted { animation: wastedStill 0.35s linear forwards; }
+}
+@keyframes mnTickStill { 0%, 74% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes wastedStill { from { opacity: 0; } to { opacity: 1; } }
+
+@media (max-width: 760px) {
+  /* A phone frame is half the width and the thumb is over the bottom right.
+     The stack keeps its rail; the bars and the type come down a size, and the
+     one --vt-w does both bars at once. */
+  #status-hud { gap: 4px; }
+  #money .mn-val { font-size: 19px; }
+  #money .mn-tick { font-size: 12px; right: calc(100% + 7px); }
+  #vitals { --vt-w: 106px; }
+  .vt-hp { height: 9px; }
+  #fuel { width: 106px; bottom: 62px; }
+}
