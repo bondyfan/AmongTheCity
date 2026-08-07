@@ -34,6 +34,7 @@
 
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { ORIGIN, M_PER_LAT, M_PER_LON, TILE, tileWanted, wantedTiles } from './lib/world-area.mjs';
+import { venueKind, venueName, joinVenues } from './lib/venues.mjs';
 
 const px = (lon) => +((lon - ORIGIN.lon) * M_PER_LON).toFixed(1);
 const pz = (lat) => +((ORIGIN.lat - lat) * M_PER_LAT).toFixed(1); // south positive
@@ -299,6 +300,13 @@ function processBuildings(els, owns) {
       const kind = t.building === 'yes' ? (t.amenity ?? t.shop ? 'commercial' : 'yes') : t.building;
       b.t = kind;
       if (t.name) b.n = t.name;
+      // WHAT IT SELLS, not merely that it sells something. The shop VALUE was
+      // read here only to turn `building=yes` into `commercial` and was then
+      // thrown away, so a supermarket and a hairdresser reached the game as the
+      // same building — while js/interiors.js classify() has read `u` all along
+      // and no build script had ever written it.
+      const u = venueKind(t);
+      if (u) b.u = u;
       let roofKnown = false;
       if (t['roof:shape']) { roofKnown = true; if (t['roof:shape'] !== 'flat') b.r = t['roof:shape']; }
       // …then let Prague's own survey correct the guess. An explicit OSM
@@ -665,6 +673,44 @@ function processPois(els, owns) {
   return out;
 }
 
+// ---------- venues: the named trade (scripts/lib/venues.mjs) ----------------
+// A shop is mapped three ways in this country — as tags on the building way, as
+// a node inside the footprint, or as a node in the doorway — and only the first
+// ever reached a tile. This emits the other two as their own point layer:
+// position, the OSM value that says what it sells, and the name over the door.
+// An AREA venue (a unit inside a market hall, drawn as a closed way with no
+// building tag) contributes its centroid, because what the runtime wants from
+// it is a label and a host building, not a polygon it would draw twice.
+function processVenues(els, owns) {
+  const out = [], seen = new Set();
+  for (const el of els) {
+    const t = el.tags ?? {};
+    const kind = venueKind(t), name = venueName(t);
+    if (!kind || !name) continue;
+    const k = el.type + '/' + el.id;
+    if (seen.has(k)) continue;
+    let pt = null;
+    if (el.type === 'node') pt = [px(el.lon), pz(el.lat)];
+    else if (el.type === 'way' && el.geometry?.length) {
+      const r = ring(el.geometry);
+      const n = closed(r) ? r.length - 1 : r.length;
+      let sx = 0, sz = 0;
+      for (let i = 0; i < n; i++) { sx += r[i][0]; sz += r[i][1]; }
+      pt = [+(sx / n).toFixed(1), +(sz / n).toFixed(1)];
+    }
+    if (!pt) continue;
+    seen.add(k);
+    if (!owns(pt)) continue;
+    const v = { p: pt, t: kind, n: name };
+    // the chain behind a local name ("Kiosek" operated as a Žabka): what the
+    // signage matcher recognises is the chain, so carry it when it says
+    // something the name does not
+    if (t.brand && t.brand !== name) v.b = t.brand;
+    out.push(v);
+  }
+  return out;
+}
+
 // ---------- the world overview (public/data/overview.json) ----------
 // The world map draws the LIVE city arrays, which is exactly right for a 30 km
 // region that streams in within seconds of spawning. Over 110 km it means the
@@ -934,8 +980,9 @@ const OUT_DIR = process.env.OUT_DIR || 'public/data';
 mkdirSync(`${OUT_DIR}/tiles`, { recursive: true });
 const manifestTiles = [];
 const totals = { buildings: 0, roads: 0, rails: 0, water: 0, waterways: 0,
-  green: 0, paved: 0, trees: 0, pois: 0, signals: 0, signs: 0, crossings: 0, power: 0,
+  green: 0, paved: 0, trees: 0, pois: 0, venues: 0, signals: 0, signs: 0, crossings: 0, power: 0,
   furniture: 0, calming: 0, barriers: 0 };
+const joined = { inside: 0, beside: 0, taken: 0 };
 let emitted = 0, empty = 0, bytes = 0;
 
 // Some rivers are single OSM multipolygons tens of kilometres long. They live
@@ -991,6 +1038,7 @@ const rawTiles = readdirSync(RAW_DIR)
       paved: processAreas(els, isPaved, pavedKind, owns),
       trees: processTrees(els, owns),
       pois: processPois(els, owns),
+      venues: processVenues(els, owns),
       signals: processSignals(els, owns),
       signs: processSigns(els, owns),
       crossings: processCrossings(els, owns),
@@ -999,6 +1047,21 @@ const rawTiles = readdirSync(RAW_DIR)
       calming: processCalming(els, owns),
       barriers: processBarriers(els, owns),
     };
+    // …and hang each venue on the building it stands in, so the facade signage
+    // and the HUD label come from OSM instead of from a hash. A venue whose
+    // name is now on a building is DROPPED from the point layer: these tiles
+    // are committed to git and the same string twice is the one cost this
+    // change does not have to pay. What is left is the trade no footprint
+    // absorbed — the other tenants of a block, market stalls, kiosks.
+    //
+    // Per tile, so a doorway node never claims a footprint in the next tile: a
+    // way is owned by its first vertex, so the pair can straddle a boundary,
+    // and at 4.8 km tiles that is a handful of shops in the whole world.
+    {
+      const s = joinVenues(tile.buildings, tile.venues);
+      joined.inside += s.inside; joined.beside += s.beside; joined.taken += s.taken;
+      if (s.claimed.size) tile.venues = tile.venues.filter((v) => !s.claimed.has(v));
+    }
     let n = 0;
     for (const key of Object.keys(totals)) { n += tile[key].length; totals[key] += tile[key].length; }
     if (!n) { empty++; continue; } // bare corner — nothing to stream, keep it off the manifest
@@ -1034,4 +1097,7 @@ else console.log('IPR Praha: data/ipr-buildings.json absent — Prague keeps the
 const wanted = wantedTiles().length;
 console.log(`${rawTiles.length} raw tiles read of ${wanted} the world wants`
   + ` → ${emitted} emitted, ${empty} empty`);
+console.log(`venues: ${joined.inside.toLocaleString()} landed inside a footprint, `
+  + `${joined.beside.toLocaleString()} in a doorway beside one, `
+  + `${joined.taken.toLocaleString()} buildings took a real OSM name from them`);
 console.log({ ...totals, sizeMB: +(bytes / 1e6).toFixed(2) });

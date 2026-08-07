@@ -173,8 +173,20 @@ export function initOrtho(terrain = null) {
     return entry;
   }
 
-  // Ground quad for streaming chunk (cx, cz) — chunk GRID indices, not meters.
-  function orthoGroundMesh(cx, cz) {
+  /**
+   * Everything the photo quad needs that only the MAIN THREAD can decide: which
+   * supertile serves this chunk, at what detail, which material carries it, and
+   * where the chunk's uv window sits inside it. Split out of orthoGroundMesh
+   * because a mesher worker has no DOM and therefore no TextureLoader — it can
+   * still build the identical GEOMETRY from `{lx, lz, S}` (orthoQuad below) and
+   * hang a placeholder material on it, which the decode resolves back to `mat`.
+   * Null means "no photo here": off the edge of the world, or a dead tile.
+   *
+   * Calling this is what STARTS the fetch and touches the LRU, so it must
+   * happen exactly once per chunk build, on whichever side of the wire is
+   * driving that build.
+   */
+  function plan(cx, cz) {
     // no fixed extent anymore (the world streams outward as tiles load), just
     // a sanity clamp so absurd indices never turn into WMS requests
     const wx = cx * CHUNK, wz = cz * CHUNK;
@@ -185,48 +197,15 @@ export function initOrtho(terrain = null) {
     if (entry === undefined) entry = makeEntry(sx, sz, px); // ?? would re-fetch failed (null) tiles
     if (entry === null) return null;       // known-dead tile → flat-color fallback
     tiles.delete(key); tiles.set(key, entry); // LRU touch — move to the tail
-
     // UV window: the chunk sits at column lx, row lz inside its supertile
-    // (both 0..S−1, counted from the tile's WEST and NORTH edges). u is easy:
-    // lx/S → (lx+1)/S west→east. v needs care with signs: image row 0 is the
-    // photo's TOP = latN = the SMALLEST z (our z axis points south), and
-    // TextureLoader's default flipY puts that top row at v=1. PlaneGeometry's
-    // v=1 edge is its local +y edge, which rotateX(−π/2) lands on world −z —
-    // north again. North meets north with NO extra flip; the windowed v just
-    // counts lz rows DOWN from 1: v ∈ [1−(lz+1)/S, 1−lz/S].
-    const lx = cx - sx * S, lz = cz - sz * S;
-    // Thirty segments a side — 4 m, the same pitch the flat ground draws at.
-    // Six used to be enough when the height field was faceted at its 20 m
-    // samples, but heightAt is C1-smooth now AND the photo must dive under
-    // levelled roads (meshes.js clamps it beneath every corridor): at 20 m a
-    // whole cutting fits between two vertices and the photo's grass lay ON
-    // the carriageway. 30 divides by 6, so every old sample point is still a
-    // vertex, and neighbouring photos still share their edge lattice exactly.
-    const SEG = 30;
-    const geo = new THREE.PlaneGeometry(CHUNK, CHUNK, SEG, SEG);
-    geo.rotateX(-Math.PI / 2);             // face up; local +y → world −z (north)
-    const uv = geo.attributes.uv;
-    for (let i = 0; i < uv.count; i++)
-      uv.setXY(i, (lx + uv.getX(i)) / S, (S - 1 - lz + uv.getY(i)) / S);
+    // (both 0..S−1, counted from the tile's WEST and NORTH edges).
+    return { mat: entry.mat, lx: cx - sx * S, lz: cz - sz * S, S, px };
+  }
 
-    const mesh = new THREE.Mesh(geo, entry.mat);
-    mesh.position.set(cx * CHUNK + CHUNK / 2, 0, cz * CHUNK + CHUNK / 2);
-    // …and displace it. The quad is built around its own centre, so a vertex's
-    // world position is its local one plus that centre.
-    if (terrain) {
-      const p = geo.attributes.position, a = p.array;
-      const ox = mesh.position.x, oz = mesh.position.z;
-      for (let i = 0; i < a.length; i += 3) a[i + 1] = terrain.heightAt(ox + a[i], oz + a[i + 2]);
-      p.needsUpdate = true;
-      geo.computeVertexNormals();
-    }
-    mesh.receiveShadow = true;             // buildings/trees drop real shadows onto the photo
-    // Static: the quad never moves again on its own. It IS moved once, by
-    // meshes.rebase(), which shifts a finished chunk into its own local frame —
-    // and that pass knows to call updateMatrix() because of this flag.
-    mesh.matrixAutoUpdate = false;
-    mesh.updateMatrix();
-    return mesh;
+  // Ground quad for streaming chunk (cx, cz) — chunk GRID indices, not meters.
+  function orthoGroundMesh(cx, cz) {
+    const p = plan(cx, cz);
+    return p ? orthoQuad(cx, cz, p, terrain, p.mat) : null;
   }
 
   // main.js calls this each frame with wherever the camera's attention is.
@@ -248,5 +227,55 @@ export function initOrtho(terrain = null) {
     return pxFor(Math.floor(cx / S2), Math.floor(cz / S2));
   }
 
-  return { orthoGroundMesh, setFocus, tierOf };
+  return { orthoGroundMesh, plan, setFocus, tierOf };
+}
+
+/**
+ * The photo quad's GEOMETRY, given a plan and a material. Pure maths and three:
+ * no loader, no canvas, no document — a mesher worker calls this with a
+ * placeholder material and the decoded chunk gets the real one back by key.
+ *
+ * `plan` is {lx, lz, S} from initOrtho().plan(); `material` is whatever the
+ * caller wants on the mesh.
+ */
+export function orthoQuad(cx, cz, plan, terrain, material) {
+  // v needs care with signs: image row 0 is the photo's TOP = latN = the
+  // SMALLEST z (our z axis points south), and TextureLoader's default flipY
+  // puts that top row at v=1. PlaneGeometry's v=1 edge is its local +y edge,
+  // which rotateX(−π/2) lands on world −z — north again. North meets north
+  // with NO extra flip; the windowed v just counts lz rows DOWN from 1:
+  // v ∈ [1−(lz+1)/S, 1−lz/S].
+  const { lx, lz, S } = plan;
+  // Thirty segments a side — 4 m, the same pitch the flat ground draws at.
+  // Six used to be enough when the height field was faceted at its 20 m
+  // samples, but heightAt is C1-smooth now AND the photo must dive under
+  // levelled roads (meshes.js clamps it beneath every corridor): at 20 m a
+  // whole cutting fits between two vertices and the photo's grass lay ON
+  // the carriageway. 30 divides by 6, so every old sample point is still a
+  // vertex, and neighbouring photos still share their edge lattice exactly.
+  const SEG = 30;
+  const geo = new THREE.PlaneGeometry(CHUNK, CHUNK, SEG, SEG);
+  geo.rotateX(-Math.PI / 2);             // face up; local +y → world −z (north)
+  const uv = geo.attributes.uv;
+  for (let i = 0; i < uv.count; i++)
+    uv.setXY(i, (lx + uv.getX(i)) / S, (S - 1 - lz + uv.getY(i)) / S);
+
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.position.set(cx * CHUNK + CHUNK / 2, 0, cz * CHUNK + CHUNK / 2);
+  // …and displace it. The quad is built around its own centre, so a vertex's
+  // world position is its local one plus that centre.
+  if (terrain) {
+    const p = geo.attributes.position, a = p.array;
+    const ox = mesh.position.x, oz = mesh.position.z;
+    for (let i = 0; i < a.length; i += 3) a[i + 1] = terrain.heightAt(ox + a[i], oz + a[i + 2]);
+    p.needsUpdate = true;
+    geo.computeVertexNormals();
+  }
+  mesh.receiveShadow = true;             // buildings/trees drop real shadows onto the photo
+  // Static: the quad never moves again on its own. It IS moved once, by
+  // meshes.rebase(), which shifts a finished chunk into its own local frame —
+  // and that pass knows to call updateMatrix() because of this flag.
+  mesh.matrixAutoUpdate = false;
+  mesh.updateMatrix();
+  return mesh;
 }

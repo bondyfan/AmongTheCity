@@ -35,6 +35,7 @@ import { buildingPlan, hasInterior, entranceOf, planToWorld } from './interiors.
 import { BuildingModel, Debris, Dust } from './destructible.js';
 import { buildingWallHex, facadeCells, roofGeometry } from './meshes.js';
 import { makeCitizen } from './citizen.js';
+import { archetypeAt } from './people.js';
 import { sfxAt } from './audio.js';   // safe headless — no-op without an AudioContext
 
 const I = INTERIOR;
@@ -543,12 +544,16 @@ export class Interiors {
       const fi = (Math.random() * plan.storeys) | 0;
       const room = pickRoom(plan, fi);
       if (!room) continue;
-      const c = makeCitizen();
+      // Indoors gets the five bodies too — a bank full of identical thirty-
+      // year-old men was the same clone-army problem as the pavement, and the
+      // people in here are LOCAL to this client anyway (see this file's header),
+      // so a plain Math.random draw is correct rather than a shortcut.
+      const c = makeCitizen({ archetype: archetypeAt(Math.random()).key });
       c.group.scale.setScalar(PLAYER_SCALE);
       this.scene.add(c.group);
       const spot = roomPoint(plan, room);
       const o = {
-        model: m, mesh: c.group, animate: c.walk, fi,
+        model: m, mesh: c.group, animate: c.walk, dispose: c.dispose, fi,
         x: spot.x, z: spot.z, y: plan.floors[fi].y,
         vy: 0, heading: Math.random() * TWO_PI, walkT: Math.random() * 10,
         tx: spot.x, tz: spot.z, wait: Math.random() * 3,
@@ -562,8 +567,15 @@ export class Interiors {
 
   _despawn(i) {
     const o = this.occupants[i];
-    this.scene.remove(o.mesh);
-    o.mesh.traverse((n) => n.geometry?.dispose?.());
+    // citizen.js's own dispose(), not remove-and-traverse. The old version
+    // worked by accident and stopped being safe to rely on the day the model
+    // changed: it walked the subtree calling geometry.dispose(), which was
+    // harmless only because every geometry a citizen used was shared and had
+    // its dispose() neutered. A citizen now owns ONE real buffer — the merged
+    // body cluster — so the traverse happened to free the right thing and
+    // no-op on the rest, which is exactly the kind of correctness nobody can
+    // maintain. netcity.js:493 argues the same case for the network path.
+    o.dispose ? o.dispose() : this.scene.remove(o.mesh);
     this.occupants.splice(i, 1);
   }
 

@@ -239,6 +239,117 @@ const SOUNDS = [
   ['tyre_touchdown',
     'Aircraft tyres slamming onto a runway at landing: a sharp double chirp of '
     + 'rubber on concrete with a puff of scrub, then rolling. Dry, close, no music', 1.6],
+
+  // ---- v13: the road under the wheels -----------------------------------
+  // The complaint that started this: driving the Tesla, "it only hums like a
+  // vacuum cleaner — I hear no DRIVING, no wheels turning". True, and not the
+  // EV's fault: tyre noise was one bandpassed noise source whose gain rose with
+  // speed, which is a fan with a volume knob. Rolling noise is not a level, it
+  // is a SEQUENCE — tread blocks slapping the road one at a time — and what
+  // changes with speed is whether the ear can still count them.
+  //
+  // So the bands below are written to differ in KIND, not in intensity, and
+  // that is deliberate. The engine bands (eng_*) were generated as "the same
+  // engine, louder" and came back spectrally indistinguishable — see the long
+  // note in audio.js about the measured centroids — so crossfading them would
+  // have been crossfading a sound with itself. Each prompt here names a
+  // different audible MECHANISM (countable patter → fused hiss → hard roar),
+  // which is a thing the generator can actually differentiate, and playbackRate
+  // tracking then slides continuously between the three.
+  // 450 characters is the API's hard ceiling on `text` (see the assert in gen())
+  // — these three were written long, came back 400, and are deliberately terse.
+  ['roll_asph_low',
+    'Close recording of car tyres rolling slowly over dry asphalt at jogging pace, mic at the '
+    + 'wheel arch: individual tread blocks slapping the road one after another in a slow '
+    + 'countable patter, each with a hollow woody knock, fine grit crackling between them. '
+    + 'Constant slow speed. Tyres and road only: no engine, no wind, no brakes, no squeal, no '
+    + 'music, no voice. Dry and close, seamless loop', 4.0, { loop: true }],
+  ['roll_asph_mid',
+    'Close recording of car tyres rolling on dry asphalt at steady main-road speed, mic at the '
+    + 'wheel arch: the separate tread slaps have fused into one continuous even hiss with a broad '
+    + 'low roar of rubber beneath it, dense and unbroken, no rhythm left to count. Constant '
+    + 'speed. Tyres and road only: no engine, no wind, no brakes, no squeal, no music, no voice. '
+    + 'Dry and close, seamless loop', 4.0, { loop: true }],
+  // Written twice. The first version asked for "a bright roar sizzling on top
+  // with a heavy rumble beneath" and the generator delivered only the rumble:
+  // measured centroid 521 Hz against the MID band's 810, i.e. the fast band came
+  // back duller than the one below it, and crossfading up through it would have
+  // sounded like slowing down. Naming the brightness and forbidding the bass
+  // outright is what fixed it — the mistake to avoid is offering the generator
+  // two characters and letting it pick.
+  ['roll_asph_high',
+    'Close recording of car tyres on coarse asphalt at very high motorway speed, mic at the wheel '
+    + 'arch: a bright hard sizzling roar of rubber shearing over stone chippings, hissing and '
+    + 'abrasive, thin and searing at the top of the range. Bright and treble-forward, NO deep '
+    + 'rumble, no bass, no boom. Constant speed. Tyres only: no engine, no wind, no brakes, no '
+    + 'squeal, no music, no voice. Dry and close, seamless loop', 4.0, { loop: true }],
+  // Off the tarmac. Two bands is enough: the meadow caps the car near 90 km/h
+  // through drag (see driveStep), so there is no third regime to render.
+  ['roll_dirt_low',
+    'Close recording of car tyres rolling slowly over a dry dirt and gravel track, microphone at '
+    + 'the wheel arch: loose stones crunching and popping under the tread one at a time, dry soil '
+    + 'grinding, the occasional pebble flicking up and pinging off the wheel arch. Constant slow '
+    + 'speed throughout. Tyres and loose ground only: no engine, no exhaust, no wind, no skidding, '
+    + 'no music, no voice. Dry and close, seamless loop', 4.0, { loop: true }],
+  ['roll_dirt_high',
+    'Close recording of car tyres tearing along a dry gravel track at speed, microphone at the '
+    + 'wheel arch: a continuous harsh rush of grit and loose stone, gravel spraying up and '
+    + 'rattling hard against the wheel arches and underbody, dense and gritty. Constant speed '
+    + 'throughout, never rising or falling. Tyres and loose ground only: no engine, no exhaust, '
+    + 'no wind, no skidding, no music, no voice. Dry and close, seamless loop', 4.0, { loop: true }],
+
+  // ---- the air the car is pushing through --------------------------------
+  // car_wind above is a mic in a gale and stays as the gusting layer. These
+  // three are the airflow ITSELF at three speeds, and they too are written to
+  // differ in kind: an airy rush with no bass, a buffeting roar, a howling
+  // pressure wall. Five seconds each rather than four — wind has no rhythm to
+  // hide a seam behind, so a longer loop is a less learnable one.
+  ['wind_car_low',
+    'Steady airflow rushing past an open car window at moderate town speed, heard from the '
+    + 'driver seat: a soft airy rush with a light fluttering edge, thin and high with almost no '
+    + 'bass, calm and even. Constant throughout, never rising or falling. Air only: no engine, no '
+    + 'tyres, no road noise, no whistling tone, no music, no voice. Seamless loop', 5.0, { loop: true }],
+  ['wind_car_mid',
+    'Strong airflow past an open car window at fast main-road speed, heard from the driver seat: '
+    + 'a full-bodied roaring rush of air with heavy low buffeting thudding against the door frame '
+    + 'and a rough turbulent edge on top. Constant throughout, never rising or falling. Air only: '
+    + 'no engine, no tyres, no road noise, no whistling tone, no music, no voice. Seamless loop',
+    5.0, { loop: true }],
+  ['wind_car_high',
+    'Violent airflow past an open car window at extreme speed, heard from the driver seat: a '
+    + 'deafening howling wall of air, deep pounding pressure buffeting and a harsh tearing roar '
+    + 'over the top, overwhelming and physical. Constant throughout, never rising or falling. Air '
+    + 'only: no engine, no tyres, no road noise, no whistling tone, no music, no voice. Seamless '
+    + 'loop', 5.0, { loop: true }],
+
+  // ---- the slide ---------------------------------------------------------
+  // Two loops, because the whole point is that the ground answers back: rubber
+  // that cannot let go SQUEALS, loose ground just gets thrown. jet_brake above
+  // is the wrong sound for this — that is a braked wheel grinding on concrete,
+  // this is a rolling tyre being dragged sideways.
+  ['skid_asph',
+    'Car tyres sliding sideways across dry asphalt, held in a long continuous skid: a loud '
+    + 'sustained rubber squeal, rough and screaming with an unstable wavering edge, a gritty scrub '
+    + 'of rubber tearing across stone underneath it. Held steady throughout, never starting or '
+    + 'stopping. Tyres only: no engine, no wind, no crash, no music, no voice. Dry and close, '
+    + 'seamless loop', 3.5, { loop: true }],
+  ['skid_dirt',
+    'Car tyres sliding sideways across loose dirt and gravel, held in a long continuous slide: a '
+    + 'sustained gritty rushing scrape of stone and dry soil being ploughed and thrown, gravel '
+    + 'spraying and rattling against the wheel arches, no squeal at all because the ground itself '
+    + 'is giving way. Held steady throughout, never starting or stopping. Tyres and loose ground '
+    + 'only: no engine, no wind, no crash, no music, no voice. Dry and close, seamless loop',
+    3.5, { loop: true }],
+  // The two transients the loops cannot supply: a loop faded in from zero has
+  // no attack, and the bite of a slide is entirely in its first 200 ms.
+  ['skid_chirp',
+    'A single short chirp of car tyres breaking traction on dry asphalt: a sharp quick squeal of '
+    + 'rubber that rises and cuts off almost immediately. One brief dry event, close, no engine, '
+    + 'no music, no voice', 0.7],
+  ['skid_bark',
+    'A handbrake yanked on hard in a moving car: the metallic ratchet clack of the lever, then '
+    + 'the rear tyres locking with a sudden barking screech of rubber that settles into a scrub. '
+    + 'One dry event, close exterior, no engine, no music, no voice', 1.3],
 ];
 
 const exists = async (p) => { try { await access(p); return true; } catch { return false; } };
@@ -249,9 +360,18 @@ const post = (body) => fetch('https://api.elevenlabs.io/v1/sound-generation', {
   body: JSON.stringify(body),
 });
 
+// The API caps `text` at 450 characters and answers a long one with a 400 that
+// is indistinguishable, at a glance, from the {loop:true} rejection below — so
+// three carefully written prompts were retried plain, rejected again, and lost.
+// Catch it here, before either request, and name the actual problem.
+const TEXT_MAX = 450;
+
 async function gen([name, text, duration, extra]) {
   const path = join(OUT, name + '.mp3');
   if (!FORCE && await exists(path)) { console.log('skip (exists):', name); return; }
+  if (text.length > TEXT_MAX) {
+    throw new Error(`${name}: prompt is ${text.length} chars, the API allows ${TEXT_MAX} — shorten it`);
+  }
   const base = { text, duration_seconds: duration, prompt_influence: 0.5 };
   let res = await post(extra ? { ...base, ...extra } : base);
   // A hint field the account's API revision doesn't know comes back 422 and

@@ -25,6 +25,7 @@
 import { readdirSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { readPbf } from './lib/osmpbf.mjs';
 import { TILE, xOf, zOf, tileWanted, nearestWanted, wantedTiles, nodeWanted } from './lib/world-area.mjs';
+import { isVenue } from './lib/venues.mjs';
 
 const RAW_DIR = process.env.RAW_DIR || 'data/raw-region';  // overridable for dry runs
 const OSM_DIR = 'data/raw-osm';
@@ -67,6 +68,11 @@ const wantWay = (t) => !!t && (
   // transmission lines: every vertex of the way IS a tower (that is how they
   // are mapped), so the way geometry alone places pylons and strings wires
   || /^(line|minor_line)$/.test(t.power ?? '')
+  // A NAMED SHOP DRAWN AS AN AREA. Most are already here because they carry
+  // building=*, but a unit inside a mall or a market stall is often just a
+  // closed way with shop=* and a name — 93 of them within 6 km of the origin,
+  // and every one was landing in the same bin as the nodes (see venues.mjs).
+  || isVenue(t)
 );
 
 // Relations only matter as multipolygons — a building, a lake, a forest whose
@@ -101,6 +107,11 @@ const wantNode = (t) => !!t && (
   || t.tourism === 'artwork'        // statues on squares
   || BARRIER_NODE.test(t.barrier ?? '')
   || t.traffic_calming !== undefined // retardéry
+  // THE NAMED TRADE. 31 284 shop/eatery/bank/pharmacy nodes inside the world
+  // mask, 27 763 of them with a name, and this file kept none of them — the
+  // string "shop" did not appear in it. See scripts/lib/venues.mjs for the
+  // measurement and for why the tag list is what it is.
+  || isVenue(t)
 );
 
 // ---- tile writer -----------------------------------------------------------

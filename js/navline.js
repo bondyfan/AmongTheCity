@@ -44,6 +44,35 @@ const FADE_OUT = 55;          // …and at the far end, so the window's cut is i
 // (two floats per spine point, ~450 of them), so the line's head rides the car
 // while its geometry stays still.
 const SHADE_STEP = 0.4;       // m of travel before the alphas are rewritten
+// …and the second way a line ends up behind you, which has nothing to do with
+// the window moving. A route that doubles back — out of a dead end, round a
+// block, off and back on a dual carriageway — puts its RETURNING leg beside the
+// one you are on. That leg is ahead of you in driving terms and squarely behind
+// you in space, and 400 m of window is enough to draw a lot of it: measured
+// over five real cross-town routes, the ribbon was lit a median of 96 m behind
+// the car and as much as 272 m.
+//
+// So a vertex is also cut when it is physically behind — but ONLY once it is
+// far enough ahead along the route to be a different leg. Without that second
+// condition the rule would eat the near geometry it must never touch: on a
+// roundabout the far side of the ring is a few metres "behind" you the whole
+// way round, and that is the one place the line has to be legible.
+const NEAR_KEEP = 40;         // m of route that is never cut, whatever its bearing
+const BEHIND_FADE = 6;        // …then a returning leg fades out over this
+// Matching by nearest point alone cannot answer "where am I on this route" when
+// the route drives the SAME tarmac twice — up a street and back down it, out to
+// a roundabout and home again. Both passes lie on one centreline, so the car is
+// zero metres from each, and the tie went to whichever the loop happened to
+// reach last. Measured: at 982 m along a real route the tracker reported 1512 m,
+// a 530 m jump, and the ribbon then drew "the road ahead" of a place half a
+// kilometre away — which is how 215 m of line ended up behind the car.
+//
+// Continuity breaks the tie. A candidate pays for how far it sits from where we
+// were a frame ago, so the pass we are actually on wins by default and the other
+// one has to be dramatically nearer to take over. The penalty is capped, or a
+// genuine re-match after a teleport or a re-route could never happen.
+const CONT_K = 0.05;          // metres of penalty per metre of discontinuity
+const CONT_MAX = 600;         // …counted no further than this
 const TILE_V = 6;             // m of route per texture repeat
 const SCROLL = 0.55;          // repeats per second — the flow toward the destination
 const LIFT = LAYER_Y.marking - LAYER_Y.road + 0.02;   // above the road DECK
@@ -125,8 +154,11 @@ export class NavLine {
     this._builtAt = -1e9;             // the _s the current window was cut at
     this._visible = true;             // the caller's on/off (driving or not)
     this._bd = 0; this._bi = 0; this._bs = 0;   // _scan results, kept off the stack
+    this._bscore = 0;
     // the built window, kept so _shade can re-fade it without rebuilding
     this._sp = new Float32Array(MAX_PTS);       // arclength of every spine point
+    this._spx = new Float32Array(MAX_PTS);      // …and where it is, for the bearing test
+    this._spz = new Float32Array(MAX_PTS);
     this._m = 0; this._s1 = 0; this._fadeEnd = false;
     this._shadedAt = -1e9;
   }
@@ -210,14 +242,19 @@ export class NavLine {
     t.offset.y = (t.offset.y - dt * SCROLL) % 1;
   }
 
-  // nearest point on route segments [from, to) — into fields, not an object
+  // Nearest point on route segments [from, to) — into fields, not an object.
+  // Ranked by distance PLUS a continuity penalty (see CONT_K), so a route that
+  // doubles back over itself cannot hand the car the wrong pass. _bd keeps the
+  // true distance: it is what the off-route test reads.
   _scan(x, z, from, to) {
-    const r = this._route, cum = this._cum;
+    const r = this._route, cum = this._cum, prev = this._s;
     for (let i = from; i < to; i++) {
       const a = r[i], b = r[i + 1];
       const d = segT(x, z, a[0], a[1], b[0], b[1], _cp);
-      if (d >= this._bd) continue;
-      this._bd = d; this._bi = i; this._bs = cum[i] + _cp.t * (cum[i + 1] - cum[i]);
+      const s = cum[i] + _cp.t * (cum[i + 1] - cum[i]);
+      const score = d + CONT_K * Math.min(Math.abs(s - prev), CONT_MAX);
+      if (score >= this._bscore) continue;
+      this._bscore = score; this._bd = d; this._bi = i; this._bs = s;
     }
   }
 
@@ -227,9 +264,12 @@ export class NavLine {
   // thousand segments once and then never again.
   _track(x, z) {
     const n = this._route.length;
-    this._bd = Infinity; this._bi = 0; this._bs = 0;
+    this._bd = Infinity; this._bscore = Infinity; this._bi = 0; this._bs = 0;
     this._scan(x, z, Math.max(0, this._i - 6), Math.min(n - 1, this._i + 80));
-    if (this._bd > 40) { this._bd = Infinity; this._scan(x, z, 0, n - 1); }
+    if (this._bd > 40) {
+      this._bd = Infinity; this._bscore = Infinity;
+      this._scan(x, z, 0, n - 1);
+    }
     this._i = this._bi; this._s = this._bs;
   }
 
@@ -283,7 +323,7 @@ export class NavLine {
     if (m < 2) { this._m = 0; this.group.visible = false; return; }
 
     // --- ribbon: two vertices per spine point, mitred at the corners ---
-    const pos = this._pos, uv = this._uv, sp = this._sp;
+    const pos = this._pos, uv = this._uv, sp = this._sp, spx = this._spx, spz = this._spz;
     for (let k = 0; k < m; k++) {
       const p = P[k];
       // tangents either side of the point; the ends have only one
@@ -312,7 +352,7 @@ export class NavLine {
       pos[v3 + 3] = p.x - nx * w; pos[v3 + 4] = y; pos[v3 + 5] = p.z - nz * w;
       const v = (p.s - vBase) / TILE_V;
       uv[v2] = 0; uv[v2 + 1] = v; uv[v2 + 2] = 1; uv[v2 + 3] = v;
-      sp[k] = p.s;
+      sp[k] = p.s; spx[k] = p.x; spz[k] = p.z;
     }
     this._m = m; this._s1 = s1; this._fadeEnd = fadeEnd;
     const g = this.mesh.geometry;
@@ -330,11 +370,32 @@ export class NavLine {
   // the way it always did, and both are the same smoothstep.
   _shade() {
     if (!this.mesh || this._m < 2) return;
-    const col = this._col, sp = this._sp, m = this._m;
+    const col = this._col, sp = this._sp, spx = this._spx, spz = this._spz, m = this._m;
     const sCar = this._s, s1 = this._s1, fadeEnd = this._fadeEnd;
+    // Where the car sits on the line, and which way the line goes there. The
+    // ROUTE's own tangent is the right "forward" here, not the car's heading:
+    // the question each vertex has to answer is "is this still in front of me
+    // as I follow this line", and a driver mid-lane-change is not the authority
+    // on that. It also costs nothing — the matched segment is already known.
+    const r = this._route, cum = this._cum;
+    const i = Math.min(this._i, r.length - 2);
+    const L = (cum[i + 1] - cum[i]) || 1e-6;
+    const t = Math.max(0, Math.min(1, (sCar - cum[i]) / L));
+    const cx = r[i][0] + (r[i + 1][0] - r[i][0]) * t;
+    const cz = r[i][1] + (r[i + 1][1] - r[i][1]) * t;
+    let fx = r[i + 1][0] - r[i][0], fz = r[i + 1][1] - r[i][1];
+    const F = Math.hypot(fx, fz) || 1;
+    fx /= F; fz /= F;
     for (let k = 0; k < m; k++) {
-      let a = (sp[k] - sCar) / FADE_IN;
+      const ds = sp[k] - sCar;
+      let a = ds / FADE_IN;
       if (fadeEnd) a = Math.min(a, (s1 - sp[k]) / FADE_OUT);
+      // a returning leg: far enough ahead to be a different piece of road, and
+      // pointing the wrong way out of the windscreen
+      if (ds > NEAR_KEEP) {
+        const rel = (spx[k] - cx) * fx + (spz[k] - cz) * fz;
+        a = Math.min(a, (rel + BEHIND_FADE) / BEHIND_FADE);
+      }
       a = Math.max(0, Math.min(1, a));
       a = a * a * (3 - 2 * a);
       const v4 = k * 8;

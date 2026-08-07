@@ -101,6 +101,47 @@ const PIN_K = 3;              // how dearly a candidate pays for the metres stil
 const TIME_K = 1.25;
 const GAP_V = 11;             // m/s ≈ 40 km/h for the unmapped tail
 const MIN_V = 2.8;            // m/s floor, so a broken speed cannot divide by ~0
+// Tracking by nearest point cannot tell the two passes apart when a route
+// drives the same tarmac twice, and getting it wrong is not cosmetic here: the
+// matched arclength is what "how far is left" and "how long until we arrive"
+// are both read from, so a jump to the other pass moves the ETA by the length
+// of the loop. navline.js carries the same fix and the same numbers — the two
+// walk the same polyline and must not disagree about where the car is on it.
+const CONT_K = 0.05;          // metres of penalty per metre of discontinuity
+const CONT_MAX = 600;         // …counted no further than this
+
+// ---- welding the roundabouts back together --------------------------------
+// keyOf welds at 10 cm, which is right for shared OSM nodes. The data has a
+// systematic SUB-METRE defect it cannot cope with: measured over the whole
+// region, 7 858 nodes are directionally dead — 3 879 that nothing leads into,
+// 3 979 that lead nowhere — and 6 840 of them (87 %) have another road within
+// ONE metre. They are the exit slip roads of oneway roundabouts, laid down a
+// metre or two off the ring they leave, while the entry slips land exactly on
+// it. 175 of the region's 613 oneway roundabouts therefore had entries and no
+// exit at all: you could drive in and never out.
+//
+// That is the "navigation doesn't work through roundabouts" bug, and it is
+// also the twenty-minute ETA. Routing 87 m across one such roundabout produced
+// a 14 993 m route — the router faithfully going the only way the graph left
+// open — and it collapsed to a minute the moment the car reached the ring and
+// re-snapped past it.
+//
+// 2 m is chosen from that measurement. The gaps are overwhelmingly sub-metre —
+// 6 840 of the 7 858 sit within one metre — but the roundabout in the bug
+// report had its four exits at 1.08, 1.52, 1.60 and 1.75 m, so a one-metre
+// reach would have mended it by luck rather than by rule. Widening to 2 m
+// costs almost nothing (6 854 nodes instead of 6 840) and still cannot touch a
+// genuinely separate road, since parallel carriageways are metres apart. The
+// direction test is what keeps it safe — an ordinary two-way cul-de-sac has
+// both an in and an out edge and is never a candidate, so a dead end a metre
+// from a passing road is left alone.
+//
+// This is the one place navigation's graph DIVERGES from traffic.js's, against
+// the rule at the top of this file. Deliberate, and in the safe direction: the
+// AI cars merely decline to use an exit the player can plainly drive.
+const WELD_R = 2.0;           // m — how far a dead end may reach for a road
+const WELD_MIN = 0.6;         // …and how short a split piece may be before we
+                              // link to the road's own end instead of cutting it
 
 const TURN_MIN = 0.38;        // rad (~22°) — below this a junction is "carrying on"
 const TURN_PASSED = 2;        // m past a junction before it stops being "next"
@@ -190,6 +231,9 @@ export class Navigation {
     this.nodes = [];            // { x, z, out: [] } — the ARRAY INDEX is the node id,
                                 // which is what lets the A* state live in typed arrays
     this._nodeIx = new Map();   // keyOf(x,z) → index
+    this._indeg = [];           // in-degree per node, kept live by _addSeg — the
+                                // weld pass needs "nothing leads here" in O(1)
+    this._touched = new Set();  // nodes this ingest batch created or joined
     this._usage = new Map();    // keyOf → { n, last }: PERSISTENT, so a side street
                                 // arriving three tiles later still turns an existing
                                 // way's interior point into a junction
@@ -216,6 +260,7 @@ export class Navigation {
     this._since = 1e9;          // s since the last search (gates the re-route rate)
     this._retryIn = PARTIAL_RETRY;  // …and the current partial-route backoff
     this._bd = 0; this._bi = 0; this._bs = 0;  // _scan results, kept off the stack
+    this._bscore = 0;
     this._turn = { dist: 0, dir: 'straight', street: null };
 
     // whatever already streamed in, then every tile after us
@@ -256,6 +301,10 @@ export class Navigation {
         }
       }
     }
+    // …then mend the dead ends this batch left (see WELD_R). After the split
+    // loop, never during it: a junction both of whose ways are in THIS batch is
+    // only complete once both have been laid down.
+    this._weldBatch();
     this.stats.nodes = this.nodes.length;
     this.stats.edges = this._segs.length;
     // a tile that carried drivable ways is the only reason a partial route
@@ -270,7 +319,9 @@ export class Navigation {
       i = this.nodes.length;
       this.nodes.push({ x, z, out: [] });
       this._nodeIx.set(k, i);
+      this._indeg.push(0);
     }
+    this._touched.add(i);
     return i;
   }
 
@@ -305,15 +356,94 @@ export class Navigation {
     const cost = len / speed;
     seg.f = { seg, rev: 0, a, b, cost };
     this.nodes[a].out.push(seg.f);
+    this._indeg[b]++;
     // a oneway never grows a reverse twin — exactly as traffic.js decides it,
     // so the router can never send the player up a street the AI refuses
     if (!road.ow) {
       seg.r = { seg, rev: 1, a: b, b: a, cost };
       this.nodes[b].out.push(seg.r);
+      this._indeg[a]++;
     }
     this._segs.push(seg);
     this._gridAdd(seg);
     if (speed > this._vmax) this._vmax = speed;
+    return seg;
+  }
+
+  // ---- topology repair: see WELD_R ----------------------------------------
+
+  // Every node this batch touched that can only be left, or only be entered.
+  // Run after the batch is built, so a junction completed by two ways in the
+  // SAME batch is never mistaken for a dead end.
+  _weldBatch() {
+    const todo = [];
+    for (const i of this._touched) {
+      const out = this.nodes[i].out.length, inn = this._indeg[i];
+      if ((inn === 0 && out > 0) || (out === 0 && inn > 0)) todo.push(i);
+    }
+    this._touched.clear();
+    for (const i of todo) this._weldNode(i);
+  }
+
+  // Attach one dead end to the road it is a hair away from. The road is CUT at
+  // the dead end's own position and the two halves rejoin there, so the dead
+  // end becomes a real junction of that road and inherits its direction rules —
+  // which is what lets an exit slip be reached from the ring it leaves.
+  _weldNode(i) {
+    const n = this.nodes[i], x = n.x, z = n.z;
+    let best = null, bd = WELD_R, bm = 0, bt = 0;
+    const cx = Math.floor(x / GRID), cz = Math.floor(z / GRID);
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gz = cz - 1; gz <= cz + 1; gz++) {
+        for (const seg of this._grid.get(gx + ',' + gz) ?? []) {
+          if (seg.dead) continue;
+          // a segment already ending here needs no welding, and a segment of
+          // the dead end's OWN road is the road itself doubling back
+          if (seg.f.a === i || seg.f.b === i) continue;
+          const pts = seg.pts;
+          for (let m = 0; m < pts.length - 1; m++) {
+            const d = distPointToSegment(x, z, pts[m][0], pts[m][1], pts[m + 1][0], pts[m + 1][1], _cp);
+            if (d >= bd) continue;
+            bd = d; best = seg; bm = m; bt = _cp.t;
+          }
+        }
+      }
+    }
+    if (!best) return false;
+    const sAt = best.cum[bm] + bt * (best.cum[bm + 1] - best.cum[bm]);
+    // Cutting a hair off the end of a road makes a piece _addSeg would discard
+    // as degenerate, and discarding it would break the very ring we are here to
+    // mend. Link to that end instead.
+    if (sAt < WELD_MIN || best.len - sAt < WELD_MIN) {
+      const end = sAt < WELD_MIN ? best.pts[0] : best.pts[best.pts.length - 1];
+      const gap = Math.hypot(end[0] - x, end[1] - z);
+      if (gap < 0.5) return false;                 // same place already
+      // a metre of tarmac, drivable both ways: it is the join itself, not a road
+      this._addSeg({ t: best.road.t, v: best.road.v, n: best.road.n }, [[x, z], [end[0], end[1]]]);
+      return true;
+    }
+    this._splitSeg(best, bm, x, z);
+    return true;
+  }
+
+  // Replace `seg` with two pieces meeting at (x,z). The old directed edges are
+  // unhooked from their nodes and the geometry is marked dead so the snap grid
+  // — which holds it by reference in every cell it crosses — walks past it.
+  _splitSeg(seg, m, x, z) {
+    const a = seg.f.a, b = seg.f.b;
+    const drop = (nodeIx, edge) => {
+      if (!edge) return;
+      const out = this.nodes[nodeIx].out;
+      const k = out.indexOf(edge);
+      if (k >= 0) out.splice(k, 1);
+    };
+    drop(a, seg.f); this._indeg[b]--;
+    if (seg.r) { drop(b, seg.r); this._indeg[a]--; }
+    seg.dead = 1;
+    const head = seg.pts.slice(0, m + 1); head.push([x, z]);
+    const tail = [[x, z]]; for (let i = m + 1; i < seg.pts.length; i++) tail.push(seg.pts[i]);
+    this._addSeg(seg.road, head);
+    this._addSeg(seg.road, tail);
   }
 
   // A segment occupies every grid cell its polyline passes through, not just
@@ -383,7 +513,7 @@ export class Navigation {
           const cell = g.get((cx + i) + ',' + (cz + j));
           if (!cell) continue;
           for (const seg of cell) {
-            if (seg._v === stamp) continue;      // a seg spans several cells
+            if (seg._v === stamp || seg.dead) continue;  // a seg spans several cells
             seg._v = stamp;
             const pts = seg.pts;
             let bd = Infinity, bx = 0, bz = 0, bs = 0;
@@ -702,12 +832,14 @@ export class Navigation {
   // nearest point on route segments [from, to) — results land in fields, not in
   // a returned object, because this runs every frame
   _scan(x, z, from, to) {
-    const r = this.route, cum = this._cum;
+    const r = this.route, cum = this._cum, prev = this._s;
     for (let i = from; i < to; i++) {
       const a = r[i], b = r[i + 1];
       const d = distPointToSegment(x, z, a[0], a[1], b[0], b[1], _cp);
-      if (d >= this._bd) continue;
-      this._bd = d; this._bi = i; this._bs = cum[i] + _cp.t * (cum[i + 1] - cum[i]);
+      const s = cum[i] + _cp.t * (cum[i + 1] - cum[i]);
+      const score = d + CONT_K * Math.min(Math.abs(s - prev), CONT_MAX);
+      if (score >= this._bscore) continue;
+      this._bscore = score; this._bd = d; this._bi = i; this._bs = s;
     }
   }
 
@@ -718,11 +850,14 @@ export class Navigation {
   // the condition that earns a full sweep).
   _track(x, z, full) {
     const n = this.route.length;
-    this._bd = Infinity; this._bi = 0; this._bs = 0;
+    this._bd = Infinity; this._bscore = Infinity; this._bi = 0; this._bs = 0;
     if (full) this._scan(x, z, 0, n - 1);
     else {
       this._scan(x, z, Math.max(0, this._i - 6), Math.min(n - 1, this._i + 80));
-      if (this._bd > OFF_ROUTE) { this._bd = Infinity; this._scan(x, z, 0, n - 1); }
+      if (this._bd > OFF_ROUTE) {
+        this._bd = Infinity; this._bscore = Infinity;
+        this._scan(x, z, 0, n - 1);
+      }
     }
     this._i = this._bi; this._s = this._bs; this.offRoute = this._bd;
     this.remainingM = (this._cum[n - 1] - this._bs) + this._gap;

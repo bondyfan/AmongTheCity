@@ -156,9 +156,11 @@ const BRANDS = [
     use: 'supermarket', label: 'Hobbymarket',
     tills: 5, aisles: 6, racking: true, backHouse: 0.15, wall: 0xdcd8cc, sign: 0xf07f13 },
   // ---- fast food ----
-  // OSM carries no building called "McDonald's" anywhere in the region (the
-  // restaurants are amenity NODES, which the data pipeline does not keep), so
-  // these are placed onto suitable host buildings by stampFranchises() below.
+  // These now come from the DATA. The restaurants are amenity NODES, which the
+  // pipeline used to drop on the floor — scripts/lib/venues.mjs keeps them and
+  // scripts/build-region.mjs hangs each one on the footprint it stands in, so
+  // the building by Pardubice hlavní nádraží is called McDonald's because OSM
+  // node/13970695060 says it is, at 50.033526 15.754266, 241 m from the origin.
   // A modern McDonald's is not a beige-plaster box: since the 2010s "Ray Kroc"
   // refit the chain builds grey-brown clad pavilions with a full-glass frontage
   // and an anthracite band over the glazing. `wall` is what the far LOD paints
@@ -173,117 +175,37 @@ const BRANDS = [
     wall: 0xd9d5cc, clad: 0xa31c26, sign: 0xe4002b, trim: 0xf5f5f0 },
 ];
 
-// ---- franchises ----------------------------------------------------------
-// Fast food lives in OSM as amenity nodes on top of unnamed retail sheds, and
-// build-city.mjs keeps only a handful of POI kinds, so nothing in the data says
-// "McDonald's". Rather than invent coordinates, the restaurants are ATTACHED to
-// hosts the data does describe: a small retail/commercial building, preferably
-// one standing near a station or a shopping centre, chosen deterministically
-// from its own id so the same shed is the same restaurant on every machine and
-// in every session. Called once per streamed tile.
-const FRANCHISES = [
-  // Tuned against the real data, not guessed: over the six tiles around
-  // Pardubice (~29 × 29 km, 35 000 buildings) this lands 4 McDonald's and
-  // 1 KFC, which is about what that area really has. The old 34/53 on the old
-  // host pool made 24 of them in the ONE Pardubice tile.
-  { name: "McDonald's" }, { name: "McDonald's" }, { name: 'KFC' },   // 2 : 1, as in life
-];
-// SHOPS ONLY. `civic` used to be in here, and `civic` is the classifier's
-// catch-all — both a common OSM tag and the geometry fallback for any untyped
-// footprint over 700 m². Measured on the Pardubice tile, 23 of the 24 stamped
-// restaurants landed on one: schools, sports halls, fire stations, a
-// `building=transportation`. That is the whole of "everywhere I look it is a
-// McDonald's or a KFC". `restaurant` is dead weight here too — an UNNAMED
-// building can never classify as one, since only brandOf() yields it and that
-// needs the name this function is about to write.
-const HOST_USES = new Set(['shop', 'supermarket']);
-// …and the OSM type has to agree it is retail. The use alone can be reached by
-// the geometry fallback, which knows nothing about what the building sells.
-const HOST_TYPES = new Set(['retail', 'commercial', 'supermarket', 'kiosk', 'shop']);
-// WHERE A DRIVE-THROUGH ACTUALLY STANDS. Hashing over every retail shed in
-// the region put the restaurants nowhere in particular — "McDonald's u
-// hlavního nádraží tam není, ale v realitě tam je". A Czech McDonald's is at
-// a station, at a hypermarket car park, or on a main road out of town, and
-// the data already says where those are: railway=station POIs (kept by the
-// pipeline as t:'station') and the big car parks. Requiring an anchor is a
-// per-building test — it never depends on which OTHER buildings were picked —
-// so a name once given is never taken away, and no chunk is left holding
-// signage for a franchise that has moved.
-const ANCHOR_R = 260;
-// the envelope of a drive-through pavilion, shared by every chain
-const FR_MIN_AREA = 150, FR_MAX_AREA = 1400, FR_MAX_H = 9;
-function anchorsOf(city) {
-  if (!city) return null;
-  const n = (city.pois?.length ?? 0) + (city.paved?.length ?? 0);
-  if (city._frAnchors && city._frAnchorsN === n) return city._frAnchors;
-  const out = [];
-  for (const p of city.pois ?? []) if (p.t === 'station') out.push(p.p[0], p.p[1]);
-  for (const p of city.paved ?? []) {
-    if (p.t !== 'parking' || !p.o || p.o.length < 3) continue;
-    // a HYPERMARKET's car park — 8 000 m² is a couple of hundred spaces. At
-    // 2 200 every yard behind every shop qualified and the gate stopped
-    // gating: the restaurants were scattered exactly as widely as before.
-    if (Math.abs(polygonArea(p.o)) < 8000) continue;
-    let sx = 0, sz = 0;
-    for (const [x, z] of p.o) { sx += x; sz += z; }
-    out.push(sx / p.o.length, sz / p.o.length);
-  }
-  city._frAnchorsN = n;
-  return (city._frAnchors = out);
-}
-export function stampFranchises(buildings, city) {
-  const anchors = anchorsOf(city);
-  if (!anchors?.length) return;
-  // ONE RESTAURANT PER SITE, and it is the nearest suitable building to it —
-  // not a hash spread thinly over the whole region. Hashing put the count
-  // right and the PLACES wrong: the pavilion by Pardubice hlavní nádraží,
-  // which in reality is a McDonald's, drew nothing while sheds in the fields
-  // drew several. A site is served once and then remembered, so a name is
-  // never given twice and never taken back, however the tiles stream in.
-  const served = city._frServed ??= new Set();
-  for (let a = 0; a < anchors.length; a += 2) {
-    const ax = anchors[a], az = anchors[a + 1];
-    const akey = Math.round(ax) + ',' + Math.round(az);
-    if (served.has(akey)) continue;
-    let best = null, bestD = ANCHOR_R * ANCHOR_R;
-    for (const f of buildings) {
-      if (f.n || !f.o || f.o.length < 3) continue;    // never rename a real name
-      const d = (f.o[0][0] - ax) ** 2 + (f.o[0][1] - az) ** 2;
-      if (d >= bestD) continue;
-      const area = Math.abs(f._area ??= polygonArea(f.o));
-      if (area < FR_MIN_AREA || area > FR_MAX_AREA) continue;
-      if ((f.h ?? 0) > FR_MAX_H) continue;   // a drive-through is not six storeys
-      const use = classify(f);
-      if (!HOST_USES.has(use) || !HOST_TYPES.has(f.t)) continue;
-      bestD = d; best = f;
-    }
-    if (!best) continue;
-    // which chain got this site is hashed from the SITE, so it is the same on
-    // every machine and does not move when a neighbouring tile arrives
-    const fr = FRANCHISES[Math.floor(rnd(Math.abs(Math.round(ax) * 7 + Math.round(az) * 13), 77)
-      * FRANCHISES.length) % FRANCHISES.length];
-    best.n = fr.name;
-    best._use = null; best._brand = undefined;         // re-decide with the name
-    classify(best);
-    served.add(akey);
-  }
-}
 // A SHOP WITH NO NAME IS STILL A SHOP. Signage is gated entirely on a BRANDS
 // match (js/pieces.js brandSigns, js/meshes.js's far-LOD wordmark), so an
 // unnamed retail unit got no fascia at all — from the street the only building
-// that said anything was a chain, which is most of why stamping chains
-// everywhere ever looked like an improvement. These are the plain Czech
-// fascias every high street actually wears, and a shop that HAS a name in OSM
-// simply wears its own.
+// that said anything was a chain, which is most of why inventing chains ever
+// looked like an improvement. These are the plain Czech fascias every high
+// street actually wears, and now that the pipeline keeps OSM's 27 763 named
+// venues, a shop that HAS a name wears its own — which is the overwhelming
+// majority of the retail anyone drives past.
 const GENERIC_SIGN = {
   shop: { label: 'OBCHOD', sign: 0x35618c, trim: 0xf2f4f6 },
   supermarket: { label: 'POTRAVINY', sign: 0x2e6b45, trim: 0xf2f4f6 },
   restaurant: { label: 'RESTAURACE', sign: 0x7a4326, trim: 0xf6efe4 },
 };
+// `u` is an OSM shop=*/amenity=* value (270 shop values alone) and this is the
+// only question the street asks of it: which of the three fascias does this
+// trade wear. A bank, a school and an office wear none — they have signs, but
+// not a shop fascia, and painting POTRAVINY on a gymnasium was never the point.
+const tradeSign = (u) =>
+  /^(fast_food|restaurant|cafe|bar|pub|food_court|ice_cream)$/.test(u ?? '') ? 'restaurant'
+  : /^(supermarket|hypermarket|wholesale|greengrocer|butcher|bakery|convenience|deli)$/.test(u ?? '') ? 'supermarket'
+  : /^(office|bank|post_office|school|kindergarten|library|townhall|museum|hotel)$/.test(u ?? '') ? null
+  : u ? 'shop' : null;
 export function signBrandOf(f, use) {
   const b = brandOf(f);
   if (b) return b;
-  const g = GENERIC_SIGN[use];
+  // A SHOP UNDER A BLOCK OF FLATS IS STILL A SHOP. classify() deliberately
+  // refuses to let the ground floor's trade retype a residential building (see
+  // there), which would otherwise leave the večerka on the corner of a panelák
+  // with nothing over its door — so the fascia is decided from `u` directly
+  // when the use class has none of its own.
+  const g = GENERIC_SIGN[use] ?? GENERIC_SIGN[tradeSign(f.u)];
   if (!g) return null;
   // an OSM name beats the generic word — "POTRAVINY U NOVÁKA" over the door
   return f.n ? { ...g, label: f.n.toUpperCase().slice(0, 20) } : g;
@@ -327,9 +249,20 @@ export function classify(f) {
   const lv = f.lv ?? Math.max(1, Math.round((f.h ?? 6) / 3.1));
   let use = null;
 
-  // the build scripts may emit `u` = shop=*/amenity=* for a building; when a
-  // rebuilt dataset carries it, it beats every guess below
-  if (f.u) {
+  // `u` is the shop=*/amenity=* value the pipeline now carries — either off the
+  // building way itself or off the OSM node standing in its footprint
+  // (scripts/lib/venues.mjs). It is the strongest signal there is about what a
+  // building is FOR, and until this dataset existed nothing ever wrote it.
+  //
+  // …with one exception, and it is the whole of Czech mixed use: `u` describes
+  // the GROUND FLOOR. A potraviny in the corner of a panelák does not make the
+  // panelák a supermarket — and it would, because `shop` is promoted to
+  // `supermarket` past 900 m² and `restaurant` is laid out as one open volume,
+  // so a five-storey block with a bistro in it would come out one storey tall.
+  // Housing that OSM explicitly typed as housing keeps its use; the trade still
+  // reaches the street through signBrandOf, which reads `u` on its own.
+  const housing = TYPE_USE[f.t] === 'flats' || TYPE_USE[f.t] === 'house';
+  if (f.u && !housing) {
     if (/^(mall|department_store)$/.test(f.u)) use = 'mall';
     else if (/^(supermarket|hypermarket|wholesale|doityourself|hardware|furniture|car)$/.test(f.u)) use = 'supermarket';
     else if (/^(school|college|university|kindergarten)$/.test(f.u)) use = 'school';
@@ -337,7 +270,12 @@ export function classify(f) {
     else if (/^(hotel|hostel|guest_house)$/.test(f.u)) use = 'hotel';
     else if (/^(place_of_worship)$/.test(f.u)) use = 'church';
     else if (/^(parking|parking_space)$/.test(f.u)) use = 'parking';
-    else if (f.u) use = 'shop';
+    // the eateries, which are a use class of their own: one open volume, tills
+    // along one wall, seating in front of them
+    else if (/^(fast_food|restaurant|cafe|bar|pub|food_court|ice_cream)$/.test(f.u)) use = 'restaurant';
+    else if (/^(office|bank|post_office)$/.test(f.u)) use = 'office';
+    else if (/^(townhall|library|theatre|cinema|museum|marketplace)$/.test(f.u)) use = 'civic';
+    else use = 'shop';
   }
   // a chain we actually know beats every other signal — OSM types Kaufland as
   // `commercial`, Albert as `civic` and Palác Pardubice as `retail`

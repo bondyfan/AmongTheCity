@@ -36,8 +36,15 @@ const GFX_KEYS = Object.keys(PRESETS.medium);
 // never fork the graphics preset. showNames existed as a hardcoded `true` on
 // NetGame that nothing could ever flip — this is where the player gets the
 // switch. nameDist is metres of visible range (nametags.NAME_RANGES).
+// chatter / chatBubbles / chatVoice are three switches and not one because the
+// two halves of a spoken line fail for different people. Somebody streaming
+// wants the bubbles and not the voices; somebody who reads Czech slowly wants
+// the voices and not the bubbles; somebody in an office wants neither and
+// still wants the city. `chatter` is the master (off = the crowd goes back to
+// being scenery), the other two only say how a line is delivered.
 const DEFAULTS = { preset: 'medium', ...PRESETS.medium, mouseLook: true, volume: 0.8,
-  showFps: false, showNames: true, nameDist: NAME_RANGES[1] };
+  showFps: false, showNames: true, nameDist: NAME_RANGES[1],
+  chatter: true, chatBubbles: true, chatVoice: true };
 
 // The live settings object — handed out by reference so main can keep one pointer to it.
 let S = { ...DEFAULTS };
@@ -294,6 +301,9 @@ export function initSettings(apply) {
     // labels are distances in the world's own terms — 120 m is the far side of
     // a square, 2 km is the next village.
     toggleRow('showNames', 'Jména hráčů nad hlavou'),
+    toggleRow('chatter', 'Lidé ve městě mluví'),
+    toggleRow('chatBubbles', 'Bubliny s textem'),
+    toggleRow('chatVoice', 'Namluvené hlasy'),
     selectRow('nameDist', 'Dosah jmen', [[NAME_RANGES[0], 'Blízko (120 m)'],
       [NAME_RANGES[1], 'Střední (400 m)'], [NAME_RANGES[2], 'Daleko (900 m)'],
       [NAME_RANGES[3], 'Přes celé město (2 km)']]),

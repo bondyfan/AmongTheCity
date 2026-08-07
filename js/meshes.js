@@ -1141,6 +1141,10 @@ function wwBuckets(city) {
   return m;
 }
 
+/** The waterways one chunk draws — the same bucket the builder reads, so a
+ *  worker handed only these gets the identical trench. */
+export function waterwaysIn(city, key) { return wwBuckets(city).get(key) ?? null; }
+
 // One continuous in-chunk piece of a waterway trench: hole ring for the
 // ground carve, sunken surface, and bank walls facing the centreline. End
 // caps only where the stream truly begins/ends — chunk-border cuts stay open
@@ -2451,8 +2455,14 @@ export function facadeCells(f) {
 // One 1024×256 CanvasTexture + full-bright material per chain, module-cached
 // (chunk unload disposes geometries only, so these live for the session and
 // every chunk shares them — a cell with three brands costs three draw calls).
+// The key both sides of a worker build agree to call this material. The chunk
+// mesher may run where there is no <canvas>, so the wordmark material cannot be
+// built there — the geometry goes out naming its chain and the main thread
+// resolves the name against this cache (geomcodec's `mats.codecMats`).
+export const brandMatKey = (brand) => 'brand:' + (brand.label ?? 'Obchod');
+
 const _brandMats = new Map();
-function brandMarkMat(brand) {
+export function brandMarkMat(brand) {
   const label = brand.label ?? 'Obchod';
   let m = _brandMats.get(label);
   if (m) return m;
@@ -2643,12 +2653,13 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) 
   // building cut into a hillside meets the ground instead of hovering over it.
   // Only where there is a real drop — on flat ground it is not built at all.
   const footing = fall > 0.35 ? Math.min(fall + 0.6, 14) : 0;
-  // read the brand fresh at build time: stampFranchises() renames its hosts at
-  // tile load, before chunks build, so a McDonald's is branded on the very
-  // first mesh — and the chunk is re-meshed on interiors activation anyway.
-  // signBrandOf falls back to a plain Czech fascia (OBCHOD / POTRAVINY, or the
-  // shop's own OSM name) so that unnamed retail is not the only thing on the
-  // street with nothing written on it.
+  // The name and the trade both ride on the feature straight out of the tile
+  // (scripts/lib/venues.mjs hangs OSM's named shop/eatery nodes onto the
+  // footprint they stand in), so a McDonald's is branded on its very first
+  // mesh with nothing to re-decide later. signBrandOf falls back to a plain
+  // Czech fascia (OBCHOD / POTRAVINY, or the shop's own OSM name) so that
+  // retail OSM genuinely left unnamed is not the only thing on the street with
+  // nothing written on it.
   const brand = signBrandOf(f, classify(f));
   _c.setHex(buildingWallHex(f));
   const wr = _c.r, wg = _c.g, wb = _c.b;
@@ -3029,6 +3040,19 @@ function bboxArea(ring) {
   return (x1 - x0) * (z1 - z0);
 }
 
+/**
+ * The textured wall material, built (with its 2048×1024 window atlas) the first
+ * time anything asks. Exported because the atlas is the one <canvas> a chunk
+ * build needs: a mesher running in a worker parks a sentinel on mats._facadeMat
+ * so this never runs there, and the main thread calls it before decoding the
+ * first chunk whose walls name the 'facade' material. Facades are never off —
+ * the geometry carries its atlas uvs either way.
+ */
+export function facadeMaterial(mats) {
+  return (mats._facadeMat ??= new THREE.MeshLambertMaterial({
+    vertexColors: true, map: facadeAtlas() }));
+}
+
 export function buildBuildingsMesh(city, cx, cz, mats) {
   const key = cx + ',' + cz;
   const cell = city.chunkIndex.get(key);
@@ -3061,9 +3085,7 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   const pg = bSink.geo();
   if (pg) bGeos.push(pg);
   if (!bGeos.length) return null;
-  const mat = facades
-    ? (mats._facadeMat ??= new THREE.MeshLambertMaterial({ vertexColors: true, map: facadeAtlas() }))
-    : mats.building;
+  const mat = facades ? facadeMaterial(mats) : mats.building;
   const group = new THREE.Group();
   group.name = 'buildings';
   // A merge is a union of attributes, so one geometry arriving with a ground
@@ -3085,12 +3107,17 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   // brandMarkMat is a MeshBasicMaterial and never shades. Geometry is owned by
   // the group (disposed on rebuild/unload); the material and its texture are
   // module-cached and shared city-wide.
+  // …and `mats.brandMat` is the seam a DOM-less mesher hooks: the canvas that
+  // paints a wordmark cannot exist in a worker, so the worker hands back a
+  // placeholder the codec can name and the main thread resolves it to the real
+  // texture. Everything else about the quad is the same geometry either way.
+  const brandMat = mats.brandMat ?? brandMarkMat;
   for (const mk of marks.values()) {
     if (!mk.pos.length) continue;
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(mk.pos), 3));
     g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(mk.uv), 2));
-    group.add(new THREE.Mesh(g, brandMarkMat(mk.brand)));
+    group.add(new THREE.Mesh(g, brandMat(mk.brand)));
   }
   return group;
 }
@@ -3369,19 +3396,99 @@ function islandInto(sink, x, z, ux, uz, terrain, deckY) {
 }
 
 // the označník: a pole with the blue zastávka flag, facing the nearest road
-function busStopInto(sink, x, z, cell) {
+// ---- zastávkový záliv ------------------------------------------------------
+// OSM DOES NOT MAP THESE. Measured at Kpt. Bartoše in Polabiny, where the
+// orthophoto plainly shows a lay-by: inside 45 m the data holds the street,
+// some footways, a cycleway and TWO bus_stop nodes — and no area whatsoever.
+// So a bay cannot be extracted, only generated, and it is generated from here
+// because busStopInto has already found the carriageway and which way it runs.
+//
+// The shape is ČSN 73 6425-1 for one bus: ~3 m of extra width over ~13 m of
+// standing length, with a 10 m taper at each end to swing in and out of.
+//
+// Heights come from roadGradeY — the ribbon's OWN deck — so the bay meets the
+// carriageway with no step. Draping it on raw terrain instead would leave a
+// lip along the kerb line on any road in cut or on fill, which is the whole
+// reason the ribbon is levelled in the first place.
+//
+// The ground below needs no extra clamping: the corridor the terrain is
+// already cut to reaches r.w / 2 + 4.5 m, which contains the entire 3 m bay.
+const BAY_W = 3.0, BAY_FLAT = 6.5, BAY_TAPER = 10;
+function bayInto(sink, r, along, offX, offZ, terrain) {
+  // only on a real through street: a bay in a living street or on a track is
+  // not a thing anybody builds, and a 5 m lane has no room to give one up
+  if (!r || !terrain || !r.d || r.br || !(r.w >= 5.4)) return;
+  const half = r.w / 2;
+  // which kerb the shelter stands on — the sign of the stop's offset along
+  // the road's left normal
+  const [ax, az] = r.p[0], [bx, bz] = r.p[1] ?? r.p[0];
+  const L0 = Math.hypot(bx - ax, bz - az) || 1;
+  const side = (offX * -((bz - az) / L0) + offZ * ((bx - ax) / L0)) >= 0 ? 1 : -1;
+  const s0 = along - BAY_FLAT - BAY_TAPER, s1 = along + BAY_FLAT + BAY_TAPER;
+  if (s0 < 0 || s1 > (r._len ?? 1e9)) return;      // no room before the junction
+  const widthAt = (s) => {
+    const d = Math.abs(s - along);
+    if (d <= BAY_FLAT) return BAY_W;
+    return BAY_W * Math.max(0, 1 - (d - BAY_FLAT) / BAY_TAPER);
+  };
+  // walk the way itself rather than a straight line, so a bay on a bend
+  // follows the kerb instead of cutting the corner
+  const at = (s) => {
+    let run = 0;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [px, pz] = r.p[i], [nx2, nz2] = r.p[i + 1];
+      const ex = nx2 - px, ez = nz2 - pz, L = Math.hypot(ex, ez) || 1e-9;
+      if (run + L >= s || i === r.p.length - 2) {
+        const t = Math.max(0, Math.min(1, (s - run) / L));
+        return [px + ex * t, pz + ez * t, -ez / L * side, ex / L * side];
+      }
+      run += L;
+    }
+    return [r.p[0][0], r.p[0][1], 0, 0];
+  };
+  const mark = sink.mark();
+  sink.at(SURF.asphalt);
+  _c.setHex(COLORS.road[r.t] ?? 0x55585e);   // the carriageway's own grey
+  const rr = _c.r, rg = _c.g, rb = _c.b;
+  const STEP = 2.5;
+  let prev = null;
+  for (let s = s0; s <= s1 + 1e-6; s += STEP) {
+    const [px, pz, nx2, nz2] = at(s);
+    const y = roadGradeY(r, s, terrain) + LAYER_Y.road;
+    const w = widthAt(s);
+    const cur = { ix: px + nx2 * half, iz: pz + nz2 * half, y,
+      ox: px + nx2 * (half + w), oz: pz + nz2 * (half + w) };
+    if (prev) {
+      sink.quad(prev.ix, prev.y, prev.iz, prev.ox, prev.y, prev.oz,
+        cur.ox, cur.y, cur.oz, cur.ix, cur.y, cur.iz, rr, rg, rb);
+    }
+    prev = cur;
+  }
+  sink.fixFrom(mark);          // absolute deck heights: the drape must skip it
+}
+
+function busStopInto(sink, x, z, cell, terrain) {
   let dx = 0, dz = -1, best = 30 * 30;
+  let bestR = null, bestAlong = 0, qx = x, qz = z;
   for (const r of cell.roads) {
     if (!r.d || !r.p) continue;
+    let run = 0;
     for (let i = 0; i < r.p.length - 1; i++) {
       const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
       const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9;
+      const L = Math.sqrt(L2);
       let t = ((x - ax) * ex + (z - az) * ez) / L2;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
       const d2 = (x - (ax + ex * t)) ** 2 + (z - (az + ez * t)) ** 2;
-      if (d2 < best) { best = d2; const L = Math.sqrt(L2); dx = ex / L; dz = ez / L; }
+      if (d2 < best) {
+        best = d2; dx = ex / L; dz = ez / L;
+        bestR = r; bestAlong = run + L * t;
+        qx = ax + ex * t; qz = az + ez * t;
+      }
+      run += L;
     }
   }
+  bayInto(sink, bestR, bestAlong, x - qx, z - qz, terrain);
   sink.at(SURF.concrete);
   _c.setHex(0x8a8d92);
   const pr = _c.r, pg = _c.g, pb = _c.b;
@@ -4400,7 +4507,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // chunk build is cheaper than teaching the index a fourth node layer
     if (!roadsOnly && city.pois) for (const poi of city.pois) {
       if (chunkKey(poi.p[0], poi.p[1]) !== key) continue;
-      if (poi.t === 'bus_stop') busStopInto(sink, poi.p[0], poi.p[1], cell);
+      if (poi.t === 'bus_stop') busStopInto(sink, poi.p[0], poi.p[1], cell, mats.terrain);
       else if (poi.t === 'fuel') fuelInto(sink, poi.p[0], poi.p[1], poi.n, cell, mats.terrain);
     }
     yield;

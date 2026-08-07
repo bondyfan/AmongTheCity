@@ -1176,7 +1176,11 @@ export function junctionDeckY(node, x, z, terrain) {
 
 /** Junction pads, bucketed by chunk key. meshes.js asks for its own. */
 export const JUNCTIONS = new Map();
-const CLUSTERS = new Map();
+// Exported because js/chunkspec.js has to hand a chunk's crossing clusters to the
+// mesh worker: the worker has no live city object, so everything a build reads
+// has to be nameable and copyable. clustersIn() stays the reader for callers
+// that are on this side of the boundary.
+export const CLUSTERS = new Map();
 
 export function junctionsIn(chunkK) { return JUNCTIONS.get(chunkK) ?? null; }
 
@@ -1191,6 +1195,31 @@ export function forEachChunkInRadius(x, z, r, fn) {
   const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
   for (let dx = -r; dx <= r; dx++)
     for (let dz = -r; dz <= r; dz++) fn((cx + dx) + ',' + (cz + dz), cx + dx, cz + dz);
+}
+
+/**
+ * The nearest named shop/eatery/office within `maxD` metres, or null — the
+ * venues indexPayload bucketized, i.e. the trade that did NOT get folded into a
+ * building of its own. This is how a unit inside a gallery or the third of four
+ * shops along a block says its real OSM name instead of nothing.
+ *
+ * Reads the 3×3 cells around the point rather than a flat list: at 120 m chunks
+ * that is every venue within reach and a couple of dozen distance tests, which
+ * is what makes it safe to call from the HUD every frame.
+ */
+export function venueAt(city, x, z, maxD = 8) {
+  let best = null, bestD = maxD * maxD;
+  forEachChunkInRadius(x, z, 1, (key) => {
+    const cell = city?.chunkIndex?.get(key);
+    if (!cell?.venues) return;
+    for (const v of cell.venues) {
+      const p = v.p?.[0];
+      if (!p) continue;
+      const d = (p[0] - x) ** 2 + (p[1] - z) ** 2;
+      if (d < bestD) { bestD = d; best = v; }
+    }
+  });
+  return best;
 }
 
 // feature bbox → every chunk cell it touches. `touched` (optional Set)
@@ -1218,7 +1247,7 @@ function bucketize(index, list, kind, touched) {
   for (const f of list) {
     const ring = forEachCellOf(f, (key) => {
       let cell = index.get(key);
-      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [], crossings: [], power: [], furniture: [], calming: [], barriers: [] });
+      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [], crossings: [], power: [], furniture: [], calming: [], barriers: [], venues: [] });
       cell[kind].push(f);
       touched?.add(key);
     });
@@ -1239,6 +1268,42 @@ function appendAll(dst, src) { for (const f of src) dst.push(f); }
 // `slot` is the tile's index in the manifest — it makes _id deterministic, so
 // a building that is evicted and re-fetched keeps the identity everything
 // downstream hashes from. `heavyOnly` is the re-fetch of a SLIM tile: its
+// ---- the road you see from the air is wider than its carriageway ----------
+// The widths in the tiles are the CARRIAGEWAY — the running lanes and nothing
+// else. What the ČÚZK orthophoto shows, and therefore what the player compares
+// us against, is the whole sealed surface: the lanes plus the hard shoulder,
+// the gutter, and on a town street the parking lane that is almost always
+// there. Measured against the photo the ribbons read visibly too narrow, and
+// the error is not a constant fraction — a motorway is a metre out, a
+// residential street nearly doubles. So this is an ADDITION per class, not a
+// percentage: residential 5.5 -> 8.0, tertiary 7 -> 8.5, secondary 8 -> 9.5,
+// primary 9 -> 10.5, motorway 11 -> 12.5, all of which land inside what ČSN
+// 73 6110 / 73 6101 actually build.
+//
+// Footways, cycleways and paths get NOTHING. They are not carriageways and
+// they have no shoulder; widening a pavement would only make it wrong.
+//
+// Applied HERE, once per feature at index time, because r.w is read by a
+// dozen consumers — the ribbon, the junction pads, the kerb, the corridors
+// the ground is clamped under, the lamp spacing. Widening only the ribbon
+// would leave the terrain clamped to the old width and put grass back on the
+// asphalt, which is a bug class this project has already paid for once.
+// (This is the interim runtime form; the widths belong in build-region.mjs
+// and should move there at the next data rebuild.)
+const PAVED_EXTRA = {
+  motorway: 1.5, trunk: 1.5, primary: 1.5, secondary: 1.5, tertiary: 1.5,
+  motorway_link: 1.0, trunk_link: 1.0, primary_link: 1.0,
+  secondary_link: 1.0, tertiary_link: 1.0,
+  unclassified: 2.5, residential: 2.5,   // the parking lane is the difference
+  living_street: 1.5, service: 1.2, track: 0.5,
+};
+function pave(r) {
+  if (r._paved || !(r.w > 0)) return;   // idempotent: a tile may be re-indexed
+  r._paved = true;
+  const extra = PAVED_EXTRA[r.t];
+  if (extra) r.w = +(r.w + extra).toFixed(2);
+}
+
 // roads and polygons never left, so re-indexing them would double them.
 function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   let next = slot * IDS_PER_TILE;
@@ -1256,7 +1321,7 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   // ids for the resident layers continue past the heavy ones in the same slot
   const roads = stamp(data.roads), rails = stamp(data.rails),
     water = stamp(data.water), green = stamp(data.green), paved = stamp(data.paved);
-  for (const r of roads) { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); }
+  for (const r of roads) { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); pave(r); }
   for (const r of rails) r.p = smoothBends(r.p, r.br);
   indexJunctions(roads);
   indexBridgeCrossings(roads, rails);
@@ -1293,6 +1358,18 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   // retardéry ride the road they sit on, so they are points too
   const calming = (data.calming ?? []).map((c) => ({ p: [c.p], k: c.k, _id: ++next }));
   bucketize(city.chunkIndex, calming, 'calming', touched);
+  // THE NAMED TRADE OSM SURVEYED — {p:[[x,z]], t:'supermarket'|'cafe'|…, n:name}.
+  // A venue standing in a footprint of its own was folded INTO that building at
+  // build time, so its name is already on `f.n` and its trade on `f.u`
+  // (scripts/lib/venues.mjs); what arrives here is everything no footprint
+  // absorbed — the other four tenants of a block, the units inside a gallery,
+  // a stall on a market square. Bucketized like the signs rather than kept in a
+  // flat list: the only question anyone asks of it is "what stands HERE", and
+  // this list never shrinks (evictFar gives back buildings and trees, nothing
+  // else), so a linear scan would grow for as long as the session runs.
+  const venues = (data.venues ?? []).map((v) => ({ p: [v.p], t: v.t, n: v.n, b: v.b, _id: ++next }));
+  bucketize(city.chunkIndex, venues, 'venues', touched);
+  appendAll(city.venues, venues);
   // fences and walls are POLYLINES: one owner chunk per line, like a road
   const barriers = stamp(data.barriers);
   bucketize(city.chunkIndex, barriers, 'barriers', touched);
@@ -1333,7 +1410,7 @@ export async function loadCity(url) {
     origin: data.origin, mPerLat: data.mPerLat, mPerLon: data.mPerLon,
     tile: data.tile, // manifest tile size in meters (undefined in legacy mode)
     buildings: [], roads: [], rails: [], water: [], waterways: [], power: [],
-    green: [], paved: [], trees: [], pois: [], signals: [], barriers: [],
+    green: [], paved: [], trees: [], pois: [], venues: [], signals: [], barriers: [],
     chunkIndex: new Map(), _nextId: 1,
   };
   // tile-arrival listeners: cb({roads, signals, tx, tz, cells}) fires AFTER a

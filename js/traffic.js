@@ -732,6 +732,12 @@ export class Traffic {
     this.actors = null;
     this.blockers = null;   // parked hulls from main.js — see _obst below
     this.urbanAt = null;    // (x,z) -> 0.15..1 settlement factor, wired by main.js
+    // (x, z) — a car in this city just leaned on its horn. Single-slot sink,
+    // the same shape peds.onPedHit uses, and fired from BOTH honk sites below.
+    // js/chatter.js subscribes so a honk gets shouted back at; anything else
+    // that wants to know a horn went off can chain it the usual way. It is not
+    // an audio hook — audio.js already got its horn() call one line earlier.
+    this.onHonk = null;
     this.clock = null;              // test seam: () => shared seconds. null = worldT()
     this._nodes = new Map();        // keyOf(x,z) → { x, z, out: [] }
     this._usage = new Map();        // keyOf → {n, last}: PERSISTENT so later tiles
@@ -2072,6 +2078,7 @@ export class Traffic {
         this._hornPool -= 1;
         car._hornCd = HONK_CD_MIN + rnd01(hash32(p.seed, 9)) * HONK_CD_VAR;
         horn(car.x, car.z);
+        this.onHonk?.(car.x, car.z);
       }
     }
     car._rammedT -= dt;
@@ -2304,6 +2311,7 @@ export class Traffic {
       car._hornCd = HONK_CD_MIN + Math.random() * HONK_CD_VAR;
       p.heldT = 0;                                // re-arm: the next honk waits its 2.5 s again
       horn(p.sx, p.sz);
+      this.onHonk?.(p.sx, p.sz);
     }
 
     // ---- integrate speed, advance along the rail, then CLAMP against the

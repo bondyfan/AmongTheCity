@@ -107,6 +107,7 @@
 
 import * as THREE from 'three';
 import { makeCitizen } from './citizen.js';
+import { archetypeAt, ARCH_SALT } from './people.js';
 import { PLAYER_SCALE, LAYER_Y } from './config.js';
 import { worldT } from './worldclock.js';
 
@@ -1000,7 +1001,13 @@ export class Pedestrians {
     let n = 0, c;
     try {
       Math.random = () => rnd01(hash32(s.seed, 0xc17, n++));
-      c = makeCitizen();
+      // WHICH BODY is not part of the wardrobe draw and must not ride on it:
+      // it comes off its own salt so that js/chatter.js can compute the same
+      // answer without replaying the jacket, the trousers, the skin and the
+      // hair in the same order. A grandmother has to sound like a grandmother,
+      // and that only works if the module choosing her shape and the module
+      // choosing her voice reach the same conclusion from the seed alone.
+      c = makeCitizen({ archetype: archetypeAt(rnd01(hash32(s.seed, ARCH_SALT))).key });
     } finally { Math.random = real; }
 
     // people share ONE scale with the player — a half-size hero among
@@ -1014,6 +1021,17 @@ export class Pedestrians {
       mesh: c.group, animate: c.walk,
       ragdollPose: c.ragdollPose, standPose: c.standPose, dispose: c.dispose,
       sch: s, free: 0, look: c.look,
+      // The PERSON, as opposed to the slot. s.seed is already the shared
+      // integer that decided this citizen's jacket, route and pace, so it is
+      // the only identity two clients can agree on — but _cutLoose() nulls
+      // `sch`, and being run over or ghosted is exactly when a body most needs
+      // to still be somebody (js/chatter.js keys a voice and a cooldown on it).
+      // Copying it here costs one int per body and survives every path.
+      pid: s.seed,
+      // feet-to-hair, this person's own — js/chatter.js floats their speech
+      // bubble off it. The five archetypes span 15 cm, which is exactly the
+      // amount that makes a fixed 1.75 m assumption look like a bug.
+      headTop: c.headTop,
       steps: s.steps, side: s.side,
       // Face the right way and stand at the right point of the stride from the
       // first frame: _face() eases over ~0.2 s, which would otherwise be a body
@@ -1116,7 +1134,12 @@ export class Pedestrians {
   // standing peds are one 0.35 m circle at the feet, lying bodies a capsule
   // sampled as three circles along the body axis
   _carHit(car, p) {
-    const s = Math.abs(car.speed);
+    // GROUND speed where the player's car has one. car.speed is the component
+    // along the nose, so a car arriving sideways out of a drift at 25 m/s used
+    // to report almost nothing and pass harmlessly through the walker. AI cars
+    // are rail-followed and carry no lateral component, so they fall back to
+    // the scalar and behave exactly as before.
+    const s = car.vGround ?? Math.abs(car.speed);
     if (s <= HIT_MIN_SPEED) return false;
     const dx = p.x - car.x, dz = p.z - car.z;
     if (Math.abs(dx) > car.len || Math.abs(dz) > car.len) return false;

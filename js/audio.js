@@ -81,12 +81,25 @@ function playSample(name, buf, vol, rate) {
 // looping ambience. NEVER rejects: a missing file resolves to null and is
 // remembered as null, so a bare checkout costs one 404 per sound, not one per
 // call. Only reached on a cache miss, so the promise it allocates is rare.
+//
+// A name beginning "v/" is a SPOKEN LINE and comes from assets/voices/ instead.
+// One prefix rather than a second cache: the corpus is ~300 clips of under two
+// seconds, they are loaded lazily and hit exactly the same "fetch once, decode
+// once, remember null on 404" path every other sound uses, and giving them
+// their own Map would have meant a second copy of all four call sites below.
+// The prefix stays in the key, so a voice line and a sound effect can share a
+// name without colliding.
+function assetUrl(name) {
+  return name.charCodeAt(0) === 118 /* v */ && name.charCodeAt(1) === 47 /* / */
+    ? 'assets/voices/' + name.slice(2) + '.mp3'
+    : 'assets/sounds/' + name + '.mp3';
+}
 function loadBuffer(name) {
   const have = buffers.get(name);
   if (have !== undefined) return Promise.resolve(have);
   let p = loading.get(name);
   if (!p) {
-    p = fetch('assets/sounds/' + name + '.mp3')
+    p = fetch(assetUrl(name))
       .then(r => { if (!r.ok) throw 0; return r.arrayBuffer(); })
       .then(ab => ctx.decodeAudioData(ab))
       .then(b => { buffers.set(name, b); return b; })
@@ -268,6 +281,200 @@ function noiseBuffer() {
   }
   return _noise;
 }
+
+// ---- the voices of the city: spoken lines, placed in the street ----------
+//
+// WHY THIS IS NOT sfxAt(). A scream and a sentence are not the same problem.
+// sfxAt() is a volume: it takes a one-shot and makes it quieter with distance,
+// which is right for a bang, because a bang forty metres away really is mostly
+// just a quieter bang. Speech is not. What actually happens to a voice across a
+// street is that it loses its TOP first — consonants go, sibilance goes, the
+// crispness that makes words words goes — while the vowel body carries; then
+// the buildings start returning it to you a beat late, so the further away
+// somebody is the more of what reaches you is reflection rather than voice. A
+// voice that is merely turned down sounds like a voice in headphones with the
+// fader pulled, and the user's brief was the opposite of that: "když je to víc
+// z dálky, tak ať to zní víc z dálky".
+//
+// So a spoken line gets four things, all of them cheap and all of them driven
+// by the one number we have:
+//
+//   gain     the same 1/r law as gainAt(), so it agrees with every other cue
+//   lowpass  16 kHz at your elbow down to ~1.1 kHz at the far edge — the
+//            single most important one; this is what "far" sounds like
+//   highpass 20 Hz close, ~300 Hz far — distance takes the chest weight out
+//            of a voice too, and without this a far line is a dull thud
+//   wet      a shared convolver, sent to harder the further away you are, so
+//            a shout across the square arrives with the square attached
+//
+// RANGE. 42 m, and that is a content decision rather than a mixing one: past
+// about forty metres you cannot make out words on a real street either, and a
+// bubble you can read attached to a voice you cannot is worse than silence.
+// What fills in beyond it is already in the mix — city_ambience.mp3 is, by its
+// own generation prompt, "faint indistinct murmuring voices far off". The
+// crowd you can't quite hear is the bed; the ones you can are these.
+//
+// POLYPHONY. Three at once. Not for CPU — three convolver sends is nothing —
+// but because four simultaneous strangers is not a busy street, it is a mess,
+// and the ear gives up on all four. js/chatter.js rate-limits far below this;
+// SPEAK_MAX is the backstop for a crash where everyone panics at once. A
+// refused line is refused SILENTLY and the caller is told, so the bubble can
+// still appear: seeing what somebody said while three other people are
+// shouting is exactly what happens in a crowd.
+const SPEAK_MAX = 3;             // simultaneous spoken lines
+const SPEAK_DIST = 42;           // m — past this a line is not played at all
+const SPEAK_REF = 4;             // m — inside this a voice is simply "here"
+const SPEAK_LP = [1100, 16000];  // Hz of lowpass at max range and at zero
+const SPEAK_HP = [300, 20];      // Hz of highpass at max range and at zero
+const SPEAK_WET = 0.55;          // send at max range (0 at the listener's ear)
+let speaking = 0;                // live count, decremented in onended
+let verb = null, verbIn = null;  // the shared convolver and its input bus
+
+// One impulse for the whole city: 1.1 s of noise decaying exponentially, rolled
+// off at both ends. It is not a measurement of anywhere — it is the smallest
+// thing that turns "quiet" into "over there", and a real IR would cost 200 kB
+// to say the same sentence. Built lazily on the first spoken line so a session
+// that never hears one never pays for it.
+function verbBus() {
+  if (verb || !ctx || ctx.state !== 'running') return verbIn;
+  const sr = ctx.sampleRate, n = (sr * 1.1) | 0;
+  const ir = ctx.createBuffer(2, n, sr);
+  for (let c = 0; c < 2; c++) {
+    const d = ir.getChannelData(c);
+    for (let i = 0; i < n; i++) {
+      const t = i / n;
+      // t**2 in the exponent gives a tail that starts dense and thins out,
+      // which is what a street between buildings does; a plain exponential
+      // sounds like a plate.
+      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 2.2) * Math.exp(-3.1 * t * t);
+    }
+  }
+  verb = ctx.createConvolver();
+  verb.buffer = ir;
+  verb.normalize = true;
+  // The tail is darker than the source — a reflection has bounced off brick,
+  // not off a mirror. Without this the reverb adds sparkle at distance, which
+  // is precisely backwards.
+  const tone = ctx.createBiquadFilter();
+  tone.type = 'lowpass'; tone.frequency.value = 2600; tone.Q.value = 0.4;
+  verbIn = ctx.createGain(); verbIn.gain.value = 1;
+  verbIn.connect(verb); verb.connect(tone); tone.connect(master);
+  return verbIn;
+}
+
+/**
+ * Say one line, out there in the world.
+ *
+ *   name  a voice clip id — call it as "v/<id>" so loadBuffer reaches into
+ *         assets/voices/ (see assetUrl). A missing file is a silent no-op,
+ *         remembered, and costs one 404 for the session: the whole feature
+ *         degrades to text bubbles on a checkout with no generated voices,
+ *         which is the same bargain every other sound in this file strikes.
+ *   x, z  where the speaker is standing.
+ *   opts  { vol, rate, maxDist }  — rate is a per-utterance pitch nudge so the
+ *         same clip twice in a minute is not audibly the same tape.
+ *
+ * Returns true if the line was accepted (it will play, possibly after a
+ * first-time fetch), false if it was refused — too far, too many voices
+ * already, or the context is not unlocked yet. Callers use the answer to
+ * decide whether to show a bubble anyway; they must NOT use it to decide
+ * whether the line "happened", because a refusal for polyphony is not a
+ * refusal of the event.
+ */
+export function speakAt(name, x, z, opts = {}) {
+  if (!ctx || ctx.state !== 'running') return false;
+  if (speaking >= SPEAK_MAX) return false;
+  const maxD = opts.maxDist ?? SPEAK_DIST;
+  const d = lisSet ? Math.hypot(x - lisX, z - lisZ) : 0;
+  if (d >= maxD) return false;
+
+  const buf = buffers.get(name);
+  if (buf === null) return false;                 // known missing — bubble only
+  if (buf) { speakPlay(buf, d, x, z, opts); return true; }
+  // First time this line is heard: reserve the slot NOW so a burst of the same
+  // new line cannot start six fetches and then play six copies at once, and
+  // re-check distance on arrival — 150 ms of network is 6 m at city speed.
+  speaking++;
+  loadBuffer(name).then((b) => {
+    speaking--;
+    if (!b || !ctx || ctx.state !== 'running') return;
+    const d2 = lisSet ? Math.hypot(x - lisX, z - lisZ) : 0;
+    if (d2 < maxD && speaking < SPEAK_MAX) speakPlay(b, d2, x, z, opts);
+  });
+  return true;
+}
+
+function speakPlay(buf, d, x, z, opts) {
+  const t = ctx.currentTime;
+  const k = Math.min(1, d / (opts.maxDist ?? SPEAK_DIST));   // 0 = here, 1 = far edge
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.value = opts.rate ?? 1;
+
+  const hp = ctx.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = SPEAK_HP[1] + (SPEAK_HP[0] - SPEAK_HP[1]) * k * k;
+  hp.Q.value = 0.5;
+
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  // squared, so the top survives the first few metres and then falls away
+  // fast — a linear sweep spends its whole audible travel in the last 10 %
+  lp.frequency.value = SPEAK_LP[0] + (SPEAK_LP[1] - SPEAK_LP[0]) * (1 - k) ** 2;
+  lp.Q.value = 0.5;
+
+  const g = ctx.createGain();
+  g.gain.value = (opts.vol ?? 1) * (SPEAK_REF / Math.max(SPEAK_REF, d)) * (1 - k);
+
+  const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  if (pan && lisSet) {
+    const dx = x - lisX, dz = z - lisZ;
+    const L = Math.hypot(dx, dz) || 1;
+    const rx = -lisDz, rz = lisDx;              // the listener's right vector
+    // damped toward the centre up close: a voice one metre away is not hard
+    // left just because the speaker's shoulder is
+    pan.pan.value = Math.max(-1, Math.min(1, ((dx * rx + dz * rz) / L) * Math.min(1, d / 3)));
+  }
+
+  src.connect(hp); hp.connect(lp); lp.connect(g);
+  const out = pan ? (g.connect(pan), pan) : g;
+  out.connect(master);
+
+  // the wet send taps AFTER the distance filtering — a reflection of a dull
+  // far voice is a dull far reverb, which is the point
+  let send = null;
+  const bus = verbBus();
+  if (bus && k > 0.05) {
+    send = ctx.createGain();
+    send.gain.value = SPEAK_WET * k * k;
+    g.connect(send); send.connect(bus);
+  }
+
+  speaking++;
+  src.onended = () => {
+    speaking--;
+    src.disconnect(); hp.disconnect(); lp.disconnect(); g.disconnect();
+    pan?.disconnect(); send?.disconnect();
+  };
+  src.start(t);
+}
+
+/**
+ * Warm the clips the player is most likely to hear first. Purely an latency
+ * move: the first play of a cold line arrives ~100 ms late, which nobody
+ * notices on an idle mutter and everybody notices when it is the shout of the
+ * man you just clipped with the wing mirror. Idempotent, throws nothing, and
+ * does nothing at all before the context is unlocked.
+ */
+export function preloadVoices(names) {
+  if (!ctx || ctx.state !== 'running') return;
+  for (const n of names ?? []) if (!buffers.has(n) && !loading.has(n)) loadBuffer(n);
+}
+
+/** How many lines are being spoken right now — chatter.js reads this to stay
+ *  under the cap rather than firing and being refused. */
+export function speakingNow() { return speaking; }
 
 // ---- looping city ambience ---------------------------------------------
 // The bed the whole mix sits on: one buffer, looped forever, at a level low
@@ -1539,51 +1746,239 @@ function rubble(t, v) {
   src.onended = () => { src.disconnect(); bp.disconnect(); g.disconnect(); };
 }
 
-// ---- tyre / road noise ----------------------------------------------------
-// The one loop a driving game cannot go without: broadband tyre hiss that
-// rises and brightens with speed, plus a low gravel rumble that fades in as
-// the wheels leave the tarmac. One noise source, two filter paths, all moves
-// on setTargetAtTime — silent at rest, self-starting on the first call.
-// Pulled down and darkened once roadWindSet() existed: this layer used to be
-// the ONLY thing that got louder with speed, so it had to carry the wind too,
-// and a 2600 Hz noise sweep carrying that job is what the wind ended up sounding
-// like. With real air on top of it, this can go back to being rubber.
-const TIRE = {
-  vol: 0.13,            // ceiling at full speed on asphalt
-  hissLo: 380, hissHi: 1800,   // bandpass sweep across speed01
-  gravel: 0.22,         // extra rumble ceiling when fully offroad
-  gravelF: 140,
-  tau: 0.12,
-};
-let tire = null, tireAt = -1, tireOff = -1;
+// ---- a speed-banded sample crossfader --------------------------------------
+// Three layers below need the same machine: several recordings of ONE thing
+// made at several speeds, crossfaded by speed, and pitch-tracked inside each
+// band so the result is continuous instead of stepped. Writing it once means
+// the tyres, the gravel and the wind cannot drift apart in behaviour.
+//
+// The engine deliberately does NOT use this — see the long note under TEX_RATE.
+// Its four bands measured out spectrally identical, so crossfading them would
+// have been crossfading a sound with itself, and one pitch-followed clip was
+// the honest answer. The bands here were written to differ in KIND rather than
+// in loudness (a countable tread patter, a fused hiss, a hard sizzling roar)
+// and then MEASURED: centroids came back 321 / 810 / 1432 Hz for asphalt, which
+// is a real ladder. The first attempt at the top band came back at 521 Hz —
+// duller than the band below it, so accelerating would have sounded like
+// slowing down — and was rewritten until it measured right. If a future band
+// is added, measure it; do not assume the generator differentiated it.
+//
+// Layout: [name, vRef] ascending, where vRef is the speed the clip depicts.
+// Weight is a tent over the band ladder (so only ever two bands are audible)
+// taken to sqrt for equal power — a linear crossfade between two UNCORRELATED
+// noise sources dips 3 dB in the middle, and that dip is audible as a hole at
+// exactly the speed you spend most of your time at.
+const BAND_TAU = 0.10;
 
-export function tireSet(speed01, offroad01 = 0) {
-  if (!ctx || ctx.state !== 'running') return;
-  const s = speed01 < 0 ? 0 : speed01 > 1 ? 1 : speed01;
-  const o = offroad01 < 0 ? 0 : offroad01 > 1 ? 1 : offroad01;
-  if (!tire) {
-    if (s < 0.02) return;                        // parked: build nothing
-    const src = ctx.createBufferSource();
-    src.buffer = noiseBuffer(); src.loop = true;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.frequency.value = TIRE.hissLo; bp.Q.value = 0.5;
-    const hg = ctx.createGain(); hg.gain.value = 0;
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = TIRE.gravelF; lp.Q.value = 0.8;
-    const gg = ctx.createGain(); gg.gain.value = 0;
-    src.connect(bp); bp.connect(hg); hg.connect(master);
-    src.connect(lp); lp.connect(gg); gg.connect(master);
-    src.start(ctx.currentTime, Math.random());
-    tire = { src, bp, hg, lp, gg };
+function bandLayer(defs, rate, dest) {
+  const L = { defs, rate, dest, b: new Array(defs.length).fill(null), asked: false };
+  return L;
+}
+
+// Build every band's source the first time the layer is actually wanted. Each
+// arrives independently (loadBuffer caches, so a second layer wanting the same
+// clip costs one fetch) and a MISSING clip falls back to shaped noise rather
+// than to silence — the same bargain rwindBuild() strikes, for the same reason:
+// a checkout with an empty assets folder must still make a noise when it moves.
+function bandBuild(L) {
+  if (L.asked) return;
+  L.asked = true;
+  L.defs.forEach(([name], i) => {
+    loadBuffer(name).then((buf) => {
+      if (!ctx || ctx.state !== 'running' || L.b[i]) return;
+      const src = ctx.createBufferSource();
+      src.buffer = buf || noiseBuffer();
+      src.loop = true;
+      const g = ctx.createGain(); g.gain.value = 0;
+      src.connect(g); g.connect(L.dest);
+      // A random offset per band: three clips started together at t=0 would
+      // wrap together too, and three simultaneous seams read as one click.
+      src.start(ctx.currentTime, Math.random() * src.buffer.duration);
+      L.b[i] = { src, g, real: !!buf };
+    });
+  });
+}
+
+/** Fractional position of v on the band ladder — 1.4 means "40 % of the way
+ *  from band 1 to band 2". Allocation-free: this runs every frame. */
+function bandPos(defs, v) {
+  const n = defs.length;
+  if (v <= defs[0][1]) return 0;
+  for (let i = 1; i < n; i++) {
+    if (v <= defs[i][1]) {
+      const a = defs[i - 1][1];
+      return (i - 1) + (v - a) / (defs[i][1] - a);
+    }
   }
-  if (Math.abs(s - tireAt) < 0.01 && Math.abs(o - tireOff) < 0.02) return;
-  tireAt = s; tireOff = o;
+  return n - 1;
+}
+
+/** env is the whole layer's level; v drives both the crossfade and the pitch. */
+function bandSet(L, v, env, t, tau = BAND_TAU) {
+  if (env > 0.0002) bandBuild(L);
+  const p = bandPos(L.defs, v);
+  for (let i = 0; i < L.defs.length; i++) {
+    const b = L.b[i];
+    if (!b) continue;
+    const w = 1 - Math.abs(p - i);
+    b.g.gain.setTargetAtTime(w > 0 ? env * Math.sqrt(w) : 0, t, tau);
+    if (w <= 0) continue;                     // silent band: leave its rate alone
+    // Inside its own band the clip is stretched to the actual speed, which is
+    // what turns three recordings into one continuous surface. Clamped, because
+    // a loop stretched past ~1.6 is a cartoon and honest banding beats that.
+    const r = v / L.defs[i][1];
+    b.src.playbackRate.setTargetAtTime(
+      r < L.rate[0] ? L.rate[0] : r > L.rate[1] ? L.rate[1] : r, t, tau);
+  }
+}
+
+// ---- tyre / road noise ----------------------------------------------------
+// "Když jedu v Tesle, tak to jenom hučí jako vysavač, ale neslyším žádnou jízdu,
+// zvuk kol, že se točí." Exactly right, and the EV was never the problem: this
+// layer used to be ONE bandpassed noise source whose gain rose with speed, and
+// that is a fan with a volume knob. Rolling noise is not a level, it is a
+// SEQUENCE — tread blocks striking the road one at a time — and what changes
+// with speed is whether the ear can still count them. No filter sweep produces
+// that; only a recording of it does, played at a rate that tracks the wheel.
+//
+// So: three asphalt bands and two gravel ones, crossfaded by speed through
+// bandLayer above, and crossfaded against each other by how far off the tarmac
+// the car is. Two bands offroad rather than three because driveStep's meadow
+// drag caps the car near 90 km/h — there is no third regime out there to render.
+const ROLL = {
+  vol: 0.30,            // asphalt ceiling, against the engine's own level
+  dirt: 1.25,           // gravel is simply a louder surface than tarmac
+  gate: 0.45,           // m/s — under this the wheels are not turning
+  rise: 3.0,            // m/s over which the layer arrives from the gate
+  full: 34,             // m/s (122 km/h) where the level has all arrived
+  floor: 0.30,          // …of which this much is already there at walking pace
+  rate: [0.60, 1.55],
+  tau: 0.10,
+};
+const ROLL_ASPH = [['roll_asph_low', 8], ['roll_asph_mid', 24], ['roll_asph_high', 46]];
+const ROLL_DIRT = [['roll_dirt_low', 7], ['roll_dirt_high', 20]];
+let rollA = null, rollD = null, rollV = -1, rollO = -1;
+
+/**
+ * speed in METRES PER SECOND (engineSet and roadWindSet were converted for the
+ * same reason: only audio.js knows where its own thresholds are, and a caller
+ * dividing by a top speed it had to guess is how the engine ended up frozen at
+ * redline). offroad01 is driveStep's own eased 0..1.
+ */
+export function tireSet(speedMS, offroad01 = 0) {
+  if (!ctx || ctx.state !== 'running') return;
+  const v = Math.abs(speedMS) || 0;
+  const o = offroad01 < 0 ? 0 : offroad01 > 1 ? 1 : offroad01;
+  // Change gate: this is called every frame and every setTargetAtTime is a
+  // scheduled event the audio thread has to walk.
+  if (Math.abs(v - rollV) < 0.05 && Math.abs(o - rollO) < 0.02) return;
+  rollV = v; rollO = o;
+  if (!rollA) {
+    if (v < ROLL.gate) return;                   // parked: build nothing
+    rollA = bandLayer(ROLL_ASPH, ROLL.rate, master);
+    rollD = bandLayer(ROLL_DIRT, ROLL.rate, master);
+  }
   const t = ctx.currentTime;
-  // hiss grows ~s^1.6 (quiet in town, loud at speed) and brightens with it
-  tire.hg.gain.setTargetAtTime(TIRE.vol * Math.pow(s, 1.6), t, TIRE.tau);
-  tire.bp.frequency.setTargetAtTime(TIRE.hissLo + (TIRE.hissHi - TIRE.hissLo) * s, t, TIRE.tau);
-  // gravel rumble scales with BOTH how offroad and how fast
-  tire.gg.gain.setTargetAtTime(TIRE.gravel * o * Math.min(1, s * 2.2), t, TIRE.tau);
+  const on = Math.min(1, Math.max(0, (v - ROLL.gate) / ROLL.rise));
+  const env = ROLL.vol * on
+    * (ROLL.floor + (1 - ROLL.floor) * Math.min(1, v / ROLL.full));
+  // equal power across the surface too — a kerb hop crosses this in 0.3 s and
+  // a linear pair would dip on the way over
+  bandSet(rollA, v, env * Math.sqrt(1 - o), t, ROLL.tau);
+  bandSet(rollD, v, env * ROLL.dirt * Math.sqrt(o), t, ROLL.tau);
+}
+
+// ---- the slide -------------------------------------------------------------
+// Rubber that cannot let go SQUEALS; loose ground just gets thrown. That is the
+// whole design: two loops, picked by what is under the wheels, driven by how
+// fast the contact patch is actually sliding rather than by a drift flag.
+//
+// Deliberately not jet_brake, which the fleet already owns — that is a braked
+// wheel grinding along concrete in a straight line. This is a ROLLING tyre
+// being dragged sideways, and the difference is audible.
+//
+// tau is a quarter of every other layer's. A skid starts and stops abruptly:
+// smoothed over 0.1 s the bite is gone and it reads as a background texture.
+const SKID = {
+  vol: 0.40, dirt: 0.46,
+  // Paired with vehicles.js SLIP_MARK (1.2 m/s of excess scrub = slip01 0.133),
+  // and set just under it so the tyres are heard letting go a moment before
+  // they show it. Both are low now only because the signal underneath them got
+  // honest: slip01 measures slip angle IN EXCESS of the tyre's peak, so it
+  // reads a flat zero through any corner the car is actually gripping in, and
+  // a threshold no longer has to double as a speed filter.
+  on: 0.08,             // slip01 under which the tyres have nothing to say
+  bpA: [780, 2300],     // asphalt squeal climbs as the tyre works harder
+  bpD: [500, 1250],     // gravel just gets busier, not higher
+  rate: [0.92, 1.20],
+  tau: 0.035,
+};
+let skidA = null, skidD = null, skidS = -1, skidO = -1;
+
+function skidBuild(name, bp0) {
+  const L = { g: null, bp: null, src: null };
+  loadBuffer(name).then((buf) => {
+    if (!ctx || ctx.state !== 'running' || L.src) return;
+    const src = ctx.createBufferSource();
+    src.buffer = buf || noiseBuffer(); src.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = bp0; bp.Q.value = 0.8;
+    const g = ctx.createGain(); g.gain.value = 0;
+    src.connect(bp); bp.connect(g); g.connect(master);
+    src.start(ctx.currentTime, Math.random() * src.buffer.duration);
+    L.src = src; L.bp = bp; L.g = g;
+  });
+  return L;
+}
+
+/**
+ * slip01 — how hard the tyres are sliding, 0..1, from driveStep's own contact
+ * patch velocities (car.slip01). offroad01 picks the surface.
+ */
+export function skidSet(slip01, offroad01 = 0) {
+  if (!ctx || ctx.state !== 'running') return;
+  const s = slip01 < 0 ? 0 : slip01 > 1 ? 1 : slip01;
+  const o = offroad01 < 0 ? 0 : offroad01 > 1 ? 1 : offroad01;
+  if (Math.abs(s - skidS) < 0.01 && Math.abs(o - skidO) < 0.02) return;
+  skidS = s; skidO = o;
+  if (!skidA) {
+    if (s <= SKID.on) return;                    // gripping: build nothing
+    skidA = skidBuild('skid_asph', SKID.bpA[0]);
+    skidD = skidBuild('skid_dirt', SKID.bpD[0]);
+  }
+  const t = ctx.currentTime;
+  // above the gate, squared: a hint of slip is a hint of a noise, a full slide
+  // is the loudest thing in the mix
+  const k = Math.max(0, (s - SKID.on) / (1 - SKID.on));
+  const env = k * k;
+  if (skidA.g) {
+    skidA.g.gain.setTargetAtTime(SKID.vol * env * Math.sqrt(1 - o), t, SKID.tau);
+    skidA.bp.frequency.setTargetAtTime(
+      SKID.bpA[0] + (SKID.bpA[1] - SKID.bpA[0]) * s, t, SKID.tau);
+    skidA.src.playbackRate.setTargetAtTime(
+      SKID.rate[0] + (SKID.rate[1] - SKID.rate[0]) * s, t, 0.08);
+  }
+  if (skidD.g) {
+    skidD.g.gain.setTargetAtTime(SKID.dirt * env * Math.sqrt(o), t, SKID.tau);
+    skidD.bp.frequency.setTargetAtTime(
+      SKID.bpD[0] + (SKID.bpD[1] - SKID.bpD[0]) * s, t, SKID.tau);
+    skidD.src.playbackRate.setTargetAtTime(
+      SKID.rate[0] + (SKID.rate[1] - SKID.rate[0]) * s, t, 0.08);
+  }
+}
+
+/** The two transients the loops cannot supply. A loop faded up from zero has
+ *  no attack, and the entire bite of a slide is in its first 200 ms: the chirp
+ *  when the tyres let go, the bark when the handbrake locks the rear. */
+export function skidChirp(vol = 1) { sfx('skid_chirp', 0.55 * vol, 0.94 + Math.random() * 0.12); }
+export function skidBark(vol = 1) { sfx('skid_bark', 0.7 * vol, 0.96 + Math.random() * 0.08); }
+
+/** Getting out, or a crash ending the slide: kill it now, not over the ramp. */
+export function skidStop() {
+  skidS = -1;
+  if (!ctx || !skidA) return;
+  const t = ctx.currentTime;
+  for (const L of [skidA, skidD]) if (L.g) L.g.gain.setTargetAtTime(0, t, 0.05);
 }
 
 // ---- the grain a synthesiser cannot fake -----------------------------------
@@ -1761,15 +2156,37 @@ export function engineVoicesStop() {
 // Deliberately NOT the jet's slipstream: that one is gated from 90 m/s and is
 // the roar of a canopy at Mach 1. A car is a different range and a different
 // sound, so it gets its own instance rather than a rescaled one.
+//
+// v13 keeps this clip and demotes it. Measured, car_wind is almost pure low
+// buffeting — spectral centroid 123 Hz, 96 % of its energy under 250 — which
+// makes it a superb BED and a poor portrait of speed: pressure on a diaphragm
+// sounds the same at 60 as at 200. So it stays as the gusting foundation at
+// roughly two thirds of its old level, and the three WBAND clips below sit on
+// top of it carrying what actually changes with speed. Those three measured
+// out at centroids 792 / 681 / 367 Hz — the ladder runs DOWNWARD in brightness
+// on purpose, because that is what the air really does: a thin airy rush at
+// town speed becomes a deep pounding wall at two hundred, and their levels
+// (0.18 / 0.20 / 0.35 rms) climb while their pitch falls.
 const RWIND = {
   from: 13,          // m/s (47 km/h) — under this the engine owns the mix
   full: 62,          // m/s (223 km/h) — everything the car has
-  vol: 0.52,
+  vol: 0.34,         // was 0.52, before the bands took over the foreground
   cutLo: 460, cutHi: 5000,
   gust: 0.3,         // ± this fraction of level, wandering
   tau: 0.18,
 };
+// The airflow itself, three speeds. from is lower than RWIND's: you hear air
+// before you hear it thump, so the bands fade in first and the bed joins them.
+const WBAND = {
+  defs: [['wind_car_low', 17], ['wind_car_mid', 33], ['wind_car_high', 55]],
+  from: 10,          // m/s (36 km/h)
+  full: 62,
+  vol: 0.46,
+  rate: [0.70, 1.45],
+  tau: 0.16,
+};
 let rwind = null, rwindPending = false, rwindLvl = 0;
+let wband = null, wbandV = 0;
 
 function rwindBuild() {
   if (!ctx || ctx.state !== 'running' || rwind || rwindPending) return;
@@ -1817,11 +2234,23 @@ export function roadWindSet(speed) {
   if (!ctx || ctx.state !== 'running') return;
   if (speed >= 0) {
     const v = Math.abs(speed);
+    wbandV = v;
     rwindLvl = v <= RWIND.from ? 0
       : Math.min(1, (v - RWIND.from) / (RWIND.full - RWIND.from));
   }
-  if (!rwind) { if (rwindLvl > 0) rwindBuild(); return; }
   const t = ctx.currentTime;
+  // ---- the airflow, three bands ----
+  // Its own gate and its own curve: the bands are the SOUND of moving through
+  // air and start at 36 km/h, the bed below is the thump of it against the
+  // shell and waits until 47. Both self-start on the first call above their
+  // gate and neither needs tearing down — the level simply falls to zero.
+  const wl = Math.min(1, Math.max(0, (wbandV - WBAND.from) / (WBAND.full - WBAND.from)));
+  if (wl > 0 || wband) {
+    if (!wband) wband = bandLayer(WBAND.defs, WBAND.rate, master);
+    // ^1.5 rather than the bed's ^2: air arrives sooner than pressure does
+    bandSet(wband, wbandV, WBAND.vol * wl * Math.sqrt(wl), t, WBAND.tau);
+  }
+  if (!rwind) { if (rwindLvl > 0) rwindBuild(); return; }
   // squared, same reasoning as the jet: the bottom of the range stays a
   // whisper so the wind ARRIVING is an event rather than a constant
   const lvl = RWIND.vol * rwindLvl * rwindLvl;
@@ -1833,12 +2262,24 @@ export function roadWindSet(speed) {
 
 /** Getting out of the car: silence it now rather than waiting for the ramp. */
 export function roadWindStop() {
-  rwindLvl = 0;
-  if (!rwind) return;
+  rwindLvl = 0; wbandV = 0;
+  if (!ctx) return;
   const t = ctx.currentTime;
+  if (wband) for (const b of wband.b) if (b) b.g.gain.setTargetAtTime(0, t, 0.12);
+  if (!rwind) return;
   rwind.gain.gain.cancelScheduledValues(t);
   rwind.gain.gain.setTargetAtTime(0, t, 0.12);
   rwind.depth.gain.setTargetAtTime(0, t, 0.12);
+}
+
+/** One call for everything the car contributes to the mix. Leaving the car,
+ *  opening the menu and the crash-to-menu path all want the same three layers
+ *  gone, and three separate calls at three separate call sites is how one of
+ *  them ends up still howling in the pause screen. */
+export function carAudioStop() {
+  tireSet(0, 0);
+  roadWindStop();
+  skidStop();
 }
 
 // ---- crash -----------------------------------------------------------------

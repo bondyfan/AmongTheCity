@@ -30,7 +30,7 @@
 
 import * as THREE from 'three';
 import { CAR, CAR_COLORS } from './config.js';
-import { crash, sfxAt } from './audio.js';   // no-ops headless — safe for node --check/tests
+import { crash, sfxAt, skidChirp, skidBark } from './audio.js';   // no-ops headless — safe for node --check/tests
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 
@@ -465,14 +465,219 @@ export function pickCarColor(kind) {
 }
 export { CAR_COLORS };   // re-export so callers can grab the fallback pool here too
 
-// ---- drift + collision tunables (module-local: config.js owns the shared CAR
-// numbers, these are v3 vehicle-only feel constants) ----
-const DRIFT_FREE = 2.5;   // steer(rad)×speed(m/s) the tyres absorb before slipping
-const DRIFT_K = 0.35;     // how fast grip collapses past that (progressive slide)
-const HB_GRIP = 0.18;     // handbrake grip multiplier — rear axle basically gone
-const HB_YAW = 1.7;       // handbrake yaw gain: the flick that swings the tail
+// ---- collision tunables ----
 const HIT_SCRUB = 0.55;   // fraction of closing speed a car-car impact eats (40–70% band)
 const HIT_RANGE2 = 144;   // 12 m center-distance gate — covers even bus vs bus nose-to-nose
+const HIT_SPIN = 0.09;    // yaw a car takes from an off-centre shove, rad/s per m/s
+
+// ---- v13: the tyres get a say --------------------------------------------
+// "Ať se to fakt víc smýká, ať je to fakt jako v nějakém GTAčku."
+//
+// What was here was a kinematic bicycle: heading changed instantly with the
+// wheel, and a scalar `_lat` was spawned from the heading change and then
+// exponentially damped. That model has no memory. The car cannot be pointed one
+// way and travelling another for any length of time, so a slide was a brief
+// smear rather than a state you hold, and countersteer did nothing recognisable
+// because there was no rotation to catch — unwinding the wheel simply stopped
+// creating new `_lat`.
+//
+// The replacement is the standard two-track-collapsed-to-one bicycle with REAL
+// lateral tyre forces and yaw rate as an actual state:
+//
+//   · slip angle per axle, α = atan(lateral contact velocity / |forward|)
+//   · force from a simplified Pacejka curve, sin(C·atan(B·α)) — it PEAKS at
+//     about 13° and then falls away to ~0.6 of peak, and that falling tail is
+//     the whole reason a drift can be held. A saturating curve that merely
+//     flattens (tanh) grips forever and slides like porridge.
+//   · yaw acceleration from the two forces' moments about the CoG, so the car
+//     has rotational inertia: it takes time to swing out and time to come back,
+//     which is exactly what countersteering catches.
+//   · load transfer, so braking loads the nose (turn-in) and throttle unloads
+//     it (push), and a friction circle on the rear, so power breaks it loose.
+//
+// Everything is done in SPECIFIC force (m/s², i.e. force/mass) so the KIND
+// table's `mass` keeps meaning what its comment says — a ratio for collisions
+// only — and cannot silently change how anything crashes.
+const SUB_DT = 1 / 120;   // the tyre model's own clock; see the substep loop
+const WHEELBASE = 0.6;    // × len — unchanged from the old model, so turn radii carry over
+const CG_FRONT = 0.45;    // CoG sits this fraction of the wheelbase behind the front axle…
+const CG_H = 0.55;        // …and this high, which is what makes load transfer transfer
+const KZ2 = 1.45;         // yaw radius of gyration² as a multiple of a·b — bigger
+                          // is heavier: the car takes longer to start rotating
+                          // AND longer to stop, which is most of what "planted" is
+// Cornering stiffness, measured rather than picked: at B = 7 a 0.58 g corner
+// (20 m/s round 70 m, which is a brisk but perfectly ordinary main-road bend)
+// came out at 8.6° of front slip and 3.0 m/s of contact-patch scrub — enough to
+// squeal and lay rubber through a corner nobody would call a drift. Real
+// passenger tyres reach peak grip nearer 8° than 13°, so B goes up and the peak
+// comes in: α_peak = tan(π/2C)/B.
+const PAC_B = 11.0;       // tyre stiffness: how fast force builds with slip angle
+// C is the post-peak tail, and it is the single knob that decides whether a
+// slide is a moment or a career. At 1.55 grip fell to 0.6 of peak once the tyre
+// let go, so any corner taken with commitment kept going — "jako na ledě". At
+// 1.35 it only falls to about 0.85, which still allows a real slide but lets
+// the tyre climb back out of one on its own.
+const PAC_C = 1.35;       // shape — peak near 11.5°, then away to 0.85 of peak
+const MU_REF = 6.4;       // KIND.grip ÷ this = the tyre's friction coefficient
+const MU_MIN = 0.55, MU_MAX = 1.75;
+const MU_OFF = 0.42;      // grip a fully offroad tyre loses — a meadow is not tarmac
+// Real road cars are deliberately set up to understeer: the rear axle is given
+// more grip than the front so that a driver who arrives too fast runs wide —
+// which he can see and lift for — instead of spinning, which he cannot. The
+// first cut of this model was neutral, and neutral in a game with a keyboard
+// for a steering wheel reads as loose.
+const REAR_BIAS = 1.12;   // × rear grip against the front's
+// Split by pedal, because a car is: the drive goes mostly to the back of the
+// friction circle and the brakes mostly to the front. One shared number gave
+// power-on oversteer so mild it read as understeer, and front brakes so weak a
+// panic stop never bit.
+const DRIVE_REAR = 0.60;  // share of THROTTLE the rear circle carries
+const BRAKE_FRONT = 0.65; // …and of the BRAKES the front does
+const HB_MU = 0.30;       // handbrake: what is left of the rear tyre's grip…
+const HB_LAT = 0.35;      // …and of the circle it has to spend on cornering
+const HB_SCRUB = 1.3;     // × CAR.brake, the drag of two locked wheels
+const SLIP_V = 2.2;       // m/s floor under the slip-angle denominator
+const KIN_V = 7.0;        // …below which the kinematic constraint is blended back in
+const KIN_K = 14;         // and how hard it pulls
+const STEER_ON = 9;       // rad/s the wheel winds toward lock at a standstill…
+const STEER_SLOW = 0.055; // …divided by (1 + this × m/s), so 0.31 s at 108 km/h
+const STEER_BACK = 16;    // unwinding and countersteer: as fast as you like
+const R_MAX = 3.6;        // rad/s — a car spinning faster than this is a bug
+const LAT_MAX = 45;        // m/s of sideways, likewise
+const G = 9.81;
+// What the slide signals mean to everyone else. SLIP_REF is the contact-patch
+// sliding speed that counts as a full-blooded drift: 9 m/s sideways is a tail
+// right out. Audio and the skid marks both normalise against it, so they cannot
+// disagree about when a skid started.
+const SLIP_REF = 9;
+// Where the tyre's grip peaks, in radians of slip angle — the derivative of the
+// Pacejka curve puts it at tan(π/2C)/B. It is the line between CORNERING and
+// SLIDING, and measuring against it is the whole difference between a skid
+// detector and a speed detector: raw contact-patch velocity called a brisk bend
+// a drift, because a front tyre working perfectly well at 30 m/s is still
+// scrubbing three metres a second sideways. Only the excess over the peak is a
+// slide, and that is what the audio and the marks are given.
+const A_PEAK = Math.tan(Math.PI / (2 * PAC_C)) / PAC_B;
+// …and loose ground saturates far earlier: on gravel or a wet meadow the
+// surface itself shears long before the rubber does, which is exactly why a
+// field can be ploughed into ruts at speeds that would not mark tarmac.
+const A_PEAK_OFF = 0.55;  // × how much of the peak angle a full-offroad tyre keeps
+// 3.0 m/s of scrub, not 1.9: measured, a 0.58 g main-road bend runs 2.4 m/s of
+// front scrub, and rubber on the road through every fast corner is not a skid
+// mark, it is wallpaper. Exported because skidmarks.js gates on exactly this
+// number and the two must not be able to disagree about when a skid started.
+export const SLIP_MARK = 1.2;   // m/s of EXCESS scrub that starts leaving rubber
+const CHIRP_ON = 0.10;    // slip01 rising through this chirps once — SKID.on's twin
+const CHIRP_CD = 0.55;    // s before it may chirp again
+
+/** Simplified Pacejka: normalised lateral force for a slip angle in radians. */
+function pacejka(alpha) {
+  return Math.sin(PAC_C * Math.atan(PAC_B * alpha));
+}
+
+/**
+ * One tyre-model substep. Body axes: F = forward (−sin h, −cos h), R = right
+ * (cos h, −sin h); positive steer points the front wheel toward R and turns the
+ * nose toward R, which is heading DECREASING — the sign convention the old
+ * model used and every consumer of car.heading still assumes.
+ *
+ * Kinematics of a rotating frame give a_long = v̇x + vy·r and a_lat = v̇y − vx·r,
+ * so the applied specific forces come back out of the integration as the two
+ * terms below. Getting that pair backwards is the classic way to build a car
+ * that accelerates out of corners for free.
+ */
+function tyreStep(car, K, gas, hb, dt) {
+  const L = car.len * WHEELBASE;
+  const a = L * CG_FRONT, b = L - a;
+  const kz2 = KZ2 * a * b;
+  let vx = car.speed, vy = car._lat ?? 0, r = car.yaw ?? 0;
+  const d = car.steer, sd = Math.sin(d), cd = Math.cos(d);
+
+  // ---- longitudinal: unchanged law, now expressed as an acceleration ----
+  // a = accel·(1 − v/vmax)^1.3 off the throttle curve, CAR.brake on the pedal,
+  // and drag + rolling resistance ONLY while coasting — that last rule is what
+  // makes vmax really be vmax at full throttle, so it survives verbatim.
+  let ax = 0, coast = 0;
+  if (gas > 0.01) {
+    if (vx < -0.05) ax = CAR.brake * gas;              // still rolling back: this is the brake
+    else ax = K.accel * Math.pow(Math.max(0, 1 - vx / K.vmax), 1.3) * gas;
+  } else if (gas < -0.01) {
+    ax = vx > 0.05 ? CAR.brake * gas : K.accel * 0.7 * gas;
+  } else {
+    coast = (CAR.drag * Math.abs(vx) + CAR.roll) * (vx >= 0 ? -1 : 1);
+  }
+
+  // ---- what each axle is standing on ----
+  let mu = K.grip / MU_REF;
+  mu = (mu < MU_MIN ? MU_MIN : mu > MU_MAX ? MU_MAX : mu)
+    * (1 - MU_OFF * (car.offroad ?? 0));
+  // Load transfer: accelerating tips weight onto the rear, braking onto the
+  // nose. nf + nr = 1 by construction, so this only ever MOVES grip.
+  let nf = (b / L) - (CG_H / L) * (ax / G);
+  nf = nf < 0.12 ? 0.12 : nf > 0.88 ? 0.88 : nf;
+  let capF = mu * G * nf, capR = mu * G * (1 - nf) * REAR_BIAS;
+
+  // Friction circle: rubber spent going forwards is rubber not available for
+  // going sideways. This single term is where power-on oversteer comes from —
+  // flooring it mid-corner eats the rear's circle and the tail leaves.
+  const rearShare = ax >= 0 ? DRIVE_REAR : 1 - BRAKE_FRONT;
+  const uR = Math.min(0.98, Math.abs(ax) * rearShare / Math.max(0.5, capR));
+  let latR = Math.sqrt(1 - uR * uR);
+  const uF = Math.min(0.98, Math.abs(ax) * (1 - rearShare) / Math.max(0.5, capF));
+  const latF = Math.sqrt(1 - uF * uF);
+  if (hb) {
+    // The rear axle stops being a tyre and becomes a skid. Both terms, not one:
+    // less grip AND none of it spare for cornering is what swings the tail.
+    capR *= HB_MU; latR *= HB_LAT;
+    const scrub = CAR.brake * HB_SCRUB * dt;
+    vx = Math.abs(vx) <= scrub ? 0 : vx - Math.sign(vx) * scrub;
+  }
+
+  // ---- slip angles and the forces they make ----
+  // The denominator is floored: at a standstill α is 0/0, and the whole model
+  // hands over to the kinematic pull below long before the floor distorts it.
+  const vxs = Math.max(Math.abs(vx), SLIP_V);
+  const vlf = vy - a * r;                 // lateral velocity of each axle, body frame
+  const vlr = vy + b * r;
+  const wlf = -vx * sd + vlf * cd;        // …and of the front tyre in ITS own frame
+  const fw = -capF * latF * pacejka(Math.atan(wlf / vxs));   // front, wheel-lateral axis
+  const fr = -capR * latR * pacejka(Math.atan(vlr / vxs));   // rear, along R
+  const ff = fw * cd;                     // the front's component along R
+  // −fw·sd is cornering drag: a steered tyre pushing sideways also pushes back.
+  const aLong = ax + coast - fw * sd;
+  const aLat = ff + fr;
+  const rdot = (-a * ff + b * fr) / kz2;
+
+  vx += (aLong - vy * r) * dt;
+  vy += (aLat + vx * r) * dt;
+  r += rdot * dt;
+
+  // ---- the low-speed kinematic constraint ----
+  // Below walking-into-jogging pace real tyres do not slip at all: they roll,
+  // and the geometry alone decides the yaw rate. The force model cannot know
+  // that (its forces vanish with speed, so a car would park like a boat), so
+  // the kinematic answer is blended back in as a soft pull that dies at KIN_V.
+  const kin = 1 - Math.abs(vx) / KIN_V;
+  if (kin > 0) {
+    const g2 = Math.min(1, KIN_K * kin * dt);
+    r += (-Math.tan(d) * vx / L - r) * g2;
+    vy -= vy * g2;
+  }
+
+  if (ax > 0 && vx > K.vmax) vx = K.vmax;
+  if (ax < 0 && vx < -CAR.vrev) vx = -CAR.vrev;
+  if (coast !== 0 && Math.abs(vx) < 0.02) vx = 0;   // coast to a real stop, not an asymptote
+  car.speed = vx;
+  car._lat = vy < -LAT_MAX ? -LAT_MAX : vy > LAT_MAX ? LAT_MAX : vy;
+  car.yaw = r < -R_MAX ? -R_MAX : r > R_MAX ? R_MAX : r;
+
+  car.heading += car.yaw * dt;
+  const h = car.heading;
+  const fx = -Math.sin(h), fz = -Math.cos(h);
+  const rx = Math.cos(h), rz = -Math.sin(h);
+  car.x += (fx * car.speed + rx * car._lat) * dt;
+  car.z += (fz * car.speed + rz * car._lat) * dt;
+}
 
 // ---- geometry builders ----
 
@@ -1160,11 +1365,39 @@ export class Vehicles {
       }
       m.position.y = car.y + bumpY;
       // ---- smoke ----
-      // Two plumes off the shared dust pool (main wires vehicles.dust):
+      // Three plumes off the shared dust pool (main wires vehicles.dust):
       //   · a totaled-ish car (damage > 0.75) pours dark engine smoke,
       //   · every combustion car near the focus breathes faint exhaust
-      //     (teslas have no pipe and stay clean).
+      //     (teslas have no pipe and stay clean),
+      //   · and a car that is SLIDING boils rubber off its rear tyres.
       if (this.dust) {
+        // ---- tyre smoke ----
+        // Only the player's car ever has a slip signal (driveStep is called
+        // from exactly one site; the traffic is rail-followed), so this cannot
+        // fire for the fleet — which is just as well, because the pool is
+        // capped at DESTRUCTION.dustMax = 170 and shared with rocket smoke,
+        // blast plumes and collapsing floors. On its own clock at ~11 puffs a
+        // second with a 1.1 s life, a drift holds about a dozen sprites: it
+        // reads as smoke and it cannot starve a demolition.
+        if ((car.slip01 ?? 0) > 0.22) {
+          car._tsT = (car._tsT ?? 0) - dt;
+          if (car._tsT <= 0) {
+            car._tsT = 0.09;
+            const k = car.slip01;
+            const fx4 = -Math.sin(car.heading), fz4 = -Math.cos(car.heading);
+            const rx4 = -fz4, rz4 = fx4;
+            const soft = (car.offroad ?? 0) > 0.45;
+            for (const sgn of [1, -1]) {
+              this.dust.puff(
+                car.x - fx4 * car.len * 0.32 + rx4 * sgn * car.wid * 0.48, car.y + 0.16,
+                car.z - fz4 * car.len * 0.32 + rz4 * sgn * car.wid * 0.48,
+                0.18, 0.9 + k * 1.1, 1.1, 0.28 + 0.3 * k,
+                // burnt rubber is grey-blue; a slide on dirt throws dust
+                soft ? 0xa2907a : 0xb9bcc2,
+                -fx4 * 1.6 + rx4 * sgn * 0.7, 0.7 + k, -fz4 * 1.6 + rz4 * sgn * 0.7);
+            }
+          }
+        } else car._tsT = 0;
         // ---- landing ----
         // suspension() sets _thump on the frame the wheels come back down. All
         // four corners shove dust, the tyres bark, and a really hard arrival
@@ -1284,66 +1517,90 @@ export function driveStep(car, ctl, dt, world, others) {
   // tight at walking pace, highway-stable flat out. car.steer chases the
   // target so the wheel visibly winds over instead of snapping.
   const lock = CAR.steerMax / (1 + CAR.steerSpeedK * Math.abs(car.speed) * 3.6);
-  car.steer += (clamp(ctl.steer ?? 0, -1, 1) * lock - car.steer) * Math.min(1, 9 * dt);
+  // ---- how fast the wheel may be WOUND ON ----
+  // The only steering input this game can receive is a key going down, so the
+  // target jumps to full lock in one frame; at a flat 9/s the wheel followed it
+  // in about 0.15 s at any speed. Measured, a keyboard stab at 108 km/h then
+  // spiked the front slip angle hard enough to reach slip01 0.67 — past the
+  // squeal and skid-mark gates — so merely turning at speed sounded and looked
+  // like a drift. That is the "jako na ledě" complaint, and it was the input
+  // model rather than the tyres.
+  //
+  // Winding ON therefore slows with speed, the way a real pair of hands does.
+  // Coming BACK does not: a driver catching a slide gets the wheel straight as
+  // fast as he likes, and countersteer has to stay instant or the slide that IS
+  // deliberate becomes uncatchable.
+  const tgt = clamp(ctl.steer ?? 0, -1, 1) * lock;
+  const winding = Math.abs(tgt) > Math.abs(car.steer) && tgt * car.steer >= 0;
+  const rate = winding ? STEER_ON / (1 + Math.abs(car.speed) * STEER_SLOW) : STEER_BACK;
+  car.steer += (tgt - car.steer) * Math.min(1, rate * dt);
 
-  // longitudinal: gas>0 accelerates (or brakes out of reverse), gas<0 brakes
-  // then backs up. Engine force follows a = accel·(1 − v/vmax)^1.3 — strong
-  // off the line, wheezing near the top, vmax approached asymptotically (an
-  // octavia does 0–100 in ~5.7 s, then crawls toward 64 m/s). With the pedals
-  // released, drag + rolling resistance bleed the speed off on their own —
-  // that's the only place they apply, so vmax really is vmax at full throttle.
+  // ---- the tyre model, on its own clock ----
+  // dt arrives as anything up to 1/20 (the clamp above, and stepGame will hand
+  // us twenty of those in one tick after a hidden tab). A tyre model integrated
+  // at 20 Hz is a tyre model that oscillates and then spins the car, so it runs
+  // at SUB_DT regardless of what the frame is doing. Six substeps at the worst
+  // case, one or two normally; everything in tyreStep is arithmetic on scalars.
   const gas = clamp(ctl.gas ?? 0, -1, 1);
-  let s = car.speed;
-  if (gas > 0.01) {
-    if (s < -0.05) s = Math.min(0, s + CAR.brake * gas * dt);
-    else {
-      // max(0,…): a collision impulse can leave s a hair over vmax, and a
-      // negative base under ^1.3 is NaN — clamp the headroom, not the speed
-      // damage does NOT sap the engine below totaled — a dented car drives
-      // exactly like a clean one until damage hits 1.0 and it dies outright
-      const a = K.accel * Math.pow(Math.max(0, 1 - s / K.vmax), 1.3);
-      s = Math.min(K.vmax, s + a * gas * dt);
-    }
-  } else if (gas < -0.01) {
-    s = s > 0.05 ? Math.max(0, s + CAR.brake * gas * dt)      // gas is negative
-      : Math.max(-CAR.vrev, s + K.accel * 0.7 * gas * dt);
-  } else {
-    const res = (CAR.drag * Math.abs(s) + CAR.roll) * dt;
-    s = Math.abs(s) <= res ? 0 : s - Math.sign(s) * res;
-  }
-  // PROGRESSIVE DRIFT: tyres hold up to DRIFT_FREE of steer×speed for free,
-  // then grip collapses the harder you push — a gentle bend tracks clean, the
-  // same wheel angle at twice the speed breaks the rear loose and the slide
-  // grows until you unwind the wheel (countersteer works because grip
-  // recovers the instant steer×speed drops).
-  const slip = Math.abs(car.steer * s);
-  let grip = K.grip / (1 + DRIFT_K * Math.max(0, slip - DRIFT_FREE));
-  let yawGain = 1;
-  if (ctl.brake) {                       // handbrake: hard scrub + rear grip gone
-    const b = CAR.brake * 1.3 * dt;
-    s = Math.abs(s) <= b ? 0 : s - Math.sign(s) * b;
-    grip *= HB_GRIP;
-    // with the rear locked the car rotates around the FRONT axle — boost yaw
-    // so a flick of steer swings the tail out (proper smyk), but only at
-    // speed: stationary handbrake donuts are not a thing
-    if (Math.abs(s) > 4) yawGain = HB_YAW;
-  }
-  car.speed = s;
+  const hb = !!ctl.brake;
+  const nSub = Math.max(1, Math.ceil(dt / SUB_DT));
+  const sdt = dt / nSub;
+  for (let i = 0; i < nSub; i++) tyreStep(car, K, gas, hb, sdt);
 
-  // yaw from a kinematic bicycle; the heading change sheds a slice of the
-  // velocity into a lateral component (the nose turns, momentum lags), which
-  // grip then damps away — mild drift in a fast bend, a proper slide on the
-  // handbrake. Reversing flips s and with it the turn direction, for free.
-  // Long wheelbases (truck/bus) yaw slower through the same len·0.6 term.
-  const dTh = -Math.tan(car.steer) * (s / (car.len * 0.6)) * yawGain * dt;
-  car.heading += dTh;
-  car._lat = ((car._lat ?? 0) + s * dTh) * Math.exp(-grip * dt);
-
+  // The body axes AFTER the substeps — the collision and wall passes below both
+  // work in them, and `s` is what those passes call the longitudinal speed.
+  const s = car.speed;
   const h = car.heading;
   const fx = -Math.sin(h), fz = -Math.cos(h);   // forward
   const rx = Math.cos(h), rz = -Math.sin(h);    // right
-  car.x += (fx * s + rx * car._lat) * dt;
-  car.z += (fz * s + rz * car._lat) * dt;
+
+  // ---- what the rest of the game is told about the slide ----
+  // GROUND speed, not car.speed. car.speed is longitudinal by contract and a
+  // dozen consumers depend on that, but a car crossing a junction sideways at
+  // 25 m/s reports almost none of it — which would mean a frozen speedometer, a
+  // harmless wall, a pedestrian who survives being run over and silent tyres.
+  // The old model made real slides rare enough to hide all four; this one does
+  // not, so the honest number is published alongside.
+  const vy = car._lat ?? 0;
+  car.vGround = Math.sqrt(car.speed * car.speed + vy * vy);
+  // Contact-patch scrub per axle, in m/s. Zero through a clean corner — in the
+  // kinematic limit BOTH of these cancel exactly — so it is a true slide
+  // detector rather than a cornering detector.
+  const L2 = car.len * WHEELBASE;
+  const yr = car.yaw ?? 0;
+  const sdd = Math.sin(car.steer), cdd = Math.cos(car.steer);
+  // Locked wheels scrub along the road as well as across it: the handbrake
+  // drags the rear, and a panic stop drags everything. Without this a straight
+  // handbrake stop would leave no mark and make no noise, which is most of what
+  // the manoeuvre is for.
+  const lockR = hb ? Math.abs(car.speed) : 0;
+  // 0.22, not more: at 0.32 a straight-line panic stop from 108 km/h saturated
+  // slip01 outright, so an emergency brake was indistinguishable from a full
+  // sideways drift in both the mix and the marks it left.
+  const lockAll = (gas < -0.6 && Math.abs(car.speed) > 5) ? Math.abs(car.speed) * 0.22 : 0;
+  const vxs = Math.max(Math.abs(car.speed), SLIP_V);
+  const aPk = A_PEAK * (1 - (1 - A_PEAK_OFF) * (car.offroad ?? 0));
+  const aF = Math.atan((-car.speed * sdd + (vy - L2 * CG_FRONT * yr) * cdd) / vxs);
+  const aR = Math.atan((vy + L2 * (1 - CG_FRONT) * yr) / vxs);
+  // Only the slip angle IN EXCESS of the tyre's peak counts, converted back
+  // into m/s of scrub so the number still means something physical downstream.
+  const vAbs = Math.sqrt(car.speed * car.speed + vy * vy);
+  const sF = Math.tan(Math.max(0, Math.abs(aF) - aPk)) * vAbs;
+  const sR = Math.tan(Math.max(0, Math.abs(aR) - aPk)) * vAbs;
+  car.slipF = Math.sqrt(sF * sF + lockAll * lockAll);
+  car.slipR = Math.sqrt(sR * sR + lockR * lockR + lockAll * lockAll);
+  const slipMax = Math.max(car.slipF, car.slipR);
+  car.slip01 = Math.min(1, slipMax / SLIP_REF);
+  // The chirp of letting go, and the bark of the lever. A loop faded up from
+  // zero has no attack and the bite of a slide is entirely in its first moment.
+  car._skidCd = Math.max(0, (car._skidCd ?? 0) - dt);
+  if (car.slip01 > CHIRP_ON && (car._slipPrev ?? 0) <= CHIRP_ON && !car._skidCd) {
+    car._skidCd = CHIRP_CD;
+    skidChirp(0.5 + 0.5 * car.slip01);
+  }
+  if (hb && !car._hbPrev && Math.abs(car.speed) > 4) skidBark(Math.min(1, car.speed / 22));
+  car._slipPrev = car.slip01;
+  car._hbPrev = hb;
 
   // ---- CAR-CAR: two-circle bodies, mass-weighted shove ----
   // Each car ≈ two discs riding its long axis (front/rear, r ≈ wid·0.62) —
@@ -1401,8 +1658,12 @@ export function driveStep(car, ctl, dt, world, others) {
           // the other car only carries a scalar speed — project its shove onto
           // its own forward, clamp against absurd launches
           o.speed = clamp(o.speed - (nx * ofx + nz * ofz) * imp * wB, -55, 55);
-          // off-center hits twist both cars (same torque form as the wall hit)
+          // off-center hits twist both cars (same torque form as the wall hit).
+          // Ours also takes real yaw RATE now rather than a one-frame nudge —
+          // with rotational inertia in the model, a T-bone should set the car
+          // spinning and leave the player to catch it.
           car.heading += clamp((aoz * nx - aox * nz) * imp * 0.02, -0.05, 0.05);
+          car.yaw = clamp((car.yaw ?? 0) + (aoz * nx - aox * nz) * imp * HIT_SPIN, -R_MAX, R_MAX);
           o.heading += clamp((boz * -nx - box * -nz) * imp * 0.02, -0.04, 0.04);
         }
         o._rammedT = 2.5;                // tell the traffic AI it just got hit
@@ -1433,8 +1694,13 @@ export function driveStep(car, ctl, dt, world, others) {
     }
   }
   if (hit) {
-    const impact = Math.abs(car.speed);
+    // GROUND speed, not longitudinal. A car that arrives at a wall sideways out
+    // of a drift used to hit it for free: car.speed reads near zero in a
+    // broadside, so there was no crunch, no damage and no debris. Now that
+    // slides are a state you can hold, that stopped being a rare case.
+    const impact = Math.sqrt(car.speed * car.speed + (car._lat ?? 0) * (car._lat ?? 0));
     car.speed *= 0.4; car._lat *= 0.3;
+    car.yaw = (car.yaw ?? 0) * 0.5;      // the wall takes the spin out too
     if (impact > 2) {
       // the wall wins, the car pays: severity by impact speed. CRASH sound,
       // permanent damage, a spray of body-colour trim — and above ~50 km/h
@@ -1477,7 +1743,14 @@ export function driveStep(car, ctl, dt, world, others) {
   // snap the suspension.
   if (world.surfaceY) {
     const s = world.surfaceY(car.x, car.z, car.y);
-    car.offroad += ((s.road ? 0 : 1) - (car.offroad ?? 0)) * Math.min(1, dt * 3.5);
+    // (car.offroad ?? 0) on BOTH sides. add() seeds the field, but a car built
+    // by hand — the tests do exactly this — arrives without it, and `undefined
+    // += …` is NaN. That NaN used to be harmless: every reader compared it
+    // (`> 0.05`, always false) and comparisons swallow NaN silently. The tyre
+    // model MULTIPLIES by it, so the same latent bug now poisons grip, then
+    // yaw, then position, and the car vanishes to NaN on its first frame.
+    car.offroad = (car.offroad ?? 0)
+      + ((s.road ? 0 : 1) - (car.offroad ?? 0)) * Math.min(1, dt * 3.5);
     suspension(car, s.y, dt, world);
     if (car.offroad > 0.05 && Math.abs(car.speed) > 0.5) {
       // Rolling resistance of a field, not of glue — solved, not guessed: an
@@ -1542,7 +1815,11 @@ function suspension(car, surf, dt, world) {
   // fall per metre travelled. Anything past that budget is a data change, so
   // re-seat rather than fall. A standing car gets a small allowance for a kerb
   // or a bridge deck appearing under it and nothing more.
-  const budget = STEP_FLOOR + STEP_SLOPE * Math.abs(car.speed) * dt;
+  // …and the distance travelled is the GROUND distance: a car sliding sideways
+  // over a kerb covers metres that car.speed does not report, and under-
+  // budgeting here trips the re-seat branch mid-drift, which hard-resets y,
+  // _vy, air and the whole attitude in the middle of a slide.
+  const budget = STEP_FLOOR + STEP_SLOPE * (car.vGround ?? Math.abs(car.speed)) * dt;
   const jumped = Math.abs(surf - (car._surf ?? surf)) > budget;
   car._surf = surf;
   if (jumped) {

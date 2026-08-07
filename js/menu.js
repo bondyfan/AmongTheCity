@@ -226,7 +226,7 @@ export function showMenu() {
 
     inner.appendChild(el('p', 'atc-menu-hint',
       '<b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>C</b> pohled řidiče · '
-      + '<b>M</b> mapa · <b>V</b> raketa (z vrtulníku)'
+      + '<b>H</b> klakson · <b>M</b> mapa · <b>V</b> raketa (z vrtulníku)'
       + '<br>Nastavení najdete pod ⚙️ vpravo nahoře.'));
     overlay.appendChild(inner);
     document.body.appendChild(overlay);

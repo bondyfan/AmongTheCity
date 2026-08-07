@@ -12,14 +12,27 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
-import { buildingPlan, classify, hasInterior, entranceOf, stampFranchises } from '../js/interiors.js';
+import { buildingPlan, classify, hasInterior, entranceOf } from '../js/interiors.js';
 import { interiorPieces, shellPieces } from '../js/pieces.js';
 import { distPointToSegment } from '../js/geo.js';
+import { stationArea } from './fixture-venues.mjs';
 
 const city = JSON.parse(readFileSync(new URL('../public/data/pardubice.json', import.meta.url), 'utf8'));
 let _id = 1;
 for (const b of city.buildings) b._id = _id++;
 const named = (re) => city.buildings.filter(b => b.n && re.test(b.n));
+
+// The restaurant by Pardubice hlavní nádraží, as the pipeline now delivers it:
+// OSM node/13970695060 (amenity=fast_food, name=McDonald's) joined onto the
+// footprint it stands in by scripts/lib/venues.mjs. It used to be a building
+// picked by hash and renamed at runtime, which is exactly the invention this
+// data replaced — see tests/venues.test.mjs.
+function mcdonalds() {
+  const { buildings } = stationArea();
+  const b = buildings.find((f) => /mcdonald/i.test(f.n ?? ''));
+  assert.ok(b, "the data no longer carries the McDonald's by the station");
+  return b;
+}
 
 test('use classification reads the city the way a local would', () => {
   const use = (re) => {
@@ -258,20 +271,13 @@ test('brand signage carries the wordmark contract', () => {
   }
   // McDonald's has no explicit fg — BOTH LOD tiers must fall back the same way
   // (trim red on the yellow fascia), or the sign changes ink at the tier swap.
-  // The franchises are stamped at runtime, so stamp them here the same way
-  // city.js does before looking one up.
-  stampFranchises(city.buildings, city);
-  const mcd = city.buildings.find(b => /mcdonald/i.test(b.n ?? ''));
-  // Earlier tests built plans for every building BEFORE the stamp — in the
-  // game the stamp runs at tile load, before any plan exists, so drop the
-  // stale cache rather than weaken the assertion.
-  if (mcd) { delete mcd._plan; delete mcd._use; mcd._brand = undefined; }
-  if (mcd) {
-    const signs = shellPieces(buildingPlan(mcd, null))
-      .filter(p => p.kind === 'sign' && p.signText !== undefined);
-    assert.ok(signs.length >= 1, "McDonald's grew no wordmark");
-    for (const p of signs) assert.equal(p.signFg, 0xda291c, "McDonald's ink is its trim red");
-  }
+  // It comes off the real footprint by the station now (see mcdonalds() above),
+  // not off a hash, so the wordmark is no longer conditional on a guess landing.
+  const mcd = mcdonalds();
+  const signs = shellPieces(buildingPlan(mcd, null))
+    .filter(p => p.kind === 'sign' && p.signText !== undefined);
+  assert.ok(signs.length >= 1, "McDonald's grew no wordmark");
+  for (const p of signs) assert.equal(p.signFg, 0xda291c, "McDonald's ink is its trim red");
 });
 
 // ---- v7 architectural identity ---------------------------------------------
@@ -281,10 +287,7 @@ test('a fast-food pavilion is glass where it faces the car park', () => {
   // krabice". The fix is a real pavilion shell — the entrance run must be
   // mostly GLASS (by facade area, panes vs solid pieces), under a cladding
   // band, with the mullions thin enough not to eat the frontage.
-  stampFranchises(city.buildings, city);
-  const mcd = city.buildings.find(b => /mcdonald/i.test(b.n ?? ''));
-  assert.ok(mcd, "the franchise stamp produced no McDonald's");
-  delete mcd._plan; delete mcd._use; mcd._brand = undefined;   // stale caches
+  const mcd = mcdonalds();
   const plan = buildingPlan(mcd, null);
   assert.equal(plan.use, 'restaurant');
   const e = plan.entrance;
@@ -356,44 +359,32 @@ test('novostavby exist, carry their own colour, and dropped the atlas', () => {
     `French balconies on only ${withRail}/${sampled} sampled novostavby`);
 });
 
-// ---- franchises are RARE, and they are shops ------------------------------
-// "na dost místech, kde jsou nějaké obchody nebo nějaké firmy, tak to dělá buď
-// McDonald's, anebo KFC". The host pool used to include `civic`, which is the
-// classifier's catch-all — both a common OSM tag and the geometry fallback for
-// any untyped footprint over 700 m². 23 of the 24 restaurants stamped in this
-// very file landed on one: schools, sports halls, a fire station.
-test('the franchise stamp is rare, and only ever lands on retail', () => {
-  const fresh = JSON.parse(
-    readFileSync(new URL('../public/data/pardubice.json', import.meta.url), 'utf8'));
-  const before = fresh.buildings.filter((b) => b.n).length;
-  stampFranchises(fresh.buildings, fresh);
-  const stamped = fresh.buildings.filter(
-    (b) => /mcdonald/i.test(b.n ?? '') || /\bkfc\b/i.test(b.n ?? ''));
-  assert.ok(stamped.length <= 6,
-    `${stamped.length} fast-food restaurants stamped on one town — Pardubice has about three`);
-  assert.ok(stamped.length >= 1, 'a town this size has at least one');
-  // …and each one stands at a SITE — a station or a hypermarket car park —
-  // rather than wherever a hash happened to land it
-  const anchors = [
-    ...fresh.pois.filter((p) => p.t === 'station').map((p) => p.p),
-    ...fresh.paved.filter((p) => p.t === 'parking' && p.o?.length >= 3)
-      .map((p) => [p.o.reduce((a, q) => a + q[0], 0) / p.o.length,
-        p.o.reduce((a, q) => a + q[1], 0) / p.o.length]),
-  ];
-  for (const b of stamped) {
-    const d = Math.min(...anchors.map((a) => Math.hypot(a[0] - b.o[0][0], a[1] - b.o[0][1])));
-    assert.ok(d < 300, `a ${b.n} stands ${Math.round(d)} m from any station or car park`);
-  }
-  for (const b of stamped) {
-    assert.ok(['retail', 'commercial', 'supermarket', 'kiosk', 'shop'].includes(b.t),
-      `a franchise was stamped on building=${b.t}, which is not a shop`);
-  }
-  assert.equal(fresh.buildings.filter((b) => b.n).length, before + stamped.length,
-    'stamping renamed something that already had a name');
+// ---- the trade a footprint carries -----------------------------------------
+// `u` is the shop/amenity value the pipeline now writes onto a building, and it
+// is the strongest thing the data ever says about what a building is FOR. The
+// one place it must NOT win is Czech mixed use: a potraviny in the corner of a
+// panelák is a potraviny, not a five-storey supermarket, and `shop` is promoted
+// past 900 m² while `restaurant` is laid out as a single open volume — so the
+// block would come out one storey tall with a POTRAVINY band round it.
+test('the ground floor sells; it does not retype the building over it', () => {
+  const block = { t: 'apartments', lv: 5, h: 16.7, u: 'convenience', n: 'Potraviny U Nováka',
+    o: [[0, 0], [34, 0], [34, 26], [0, 26]], _id: 8801 };
+  assert.equal(classify(block), 'flats', 'a večerka turned a panelák into a shop');
+  const plan = buildingPlan(block, null);
+  assert.ok(plan.storeys >= 4, `the block lost its storeys: ${plan.storeys}`);
+  // …and the shop still reaches the street, which is the whole point of keeping
+  // the trade on the record
+  assert.equal(plan.sign?.label, 'POTRAVINY U NOVÁKA');
+
+  // On a shed, `u` is exactly what it says. Same footprint, no building type.
+  const shed = { t: 'yes', h: 5, u: 'car_parts', n: 'coraHB',
+    o: [[0, 0], [24, 0], [24, 18], [0, 18]], _id: 8802 };
+  assert.equal(classify(shed), 'shop');
+  assert.equal(buildingPlan(shed, null).sign.label, 'CORAHB');
 });
 
 // …and nothing retail is left anonymous, which is the pressure that made
-// branding everything look like an improvement in the first place.
+// inventing brands look like an improvement in the first place.
 test('an unnamed shop still gets lettering over its door', () => {
   const shop = { t: 'retail', h: 4.5, o: [[0, 0], [18, 0], [18, 12], [0, 12]], _id: 4242 };
   const plan = buildingPlan(shop, null);

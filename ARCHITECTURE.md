@@ -836,3 +836,574 @@ export class PlaceFinder {
 ## main.js (MINE)
 A HUD readout bottom-left showing town + street, and the destination handed to
 Navigation whenever the world map's waypoint changes.
+
+## Chunks are meshed off the main thread — js/meshworker.js + js/meshpool.js
+A dense Pardubice chunk is 30–330 ms of geometry. Slicing the builder against a
+frame budget spread that cost out; it never removed any of it. Now the work
+happens in a pool of `hardwareConcurrency − 1` module workers (capped at 4) and
+the frame's share is a spec and a decode.
+
+    js/chunkspec.js   the INPUT codec: one chunk's cells, junction pads,
+                      waterways, pois, hidden set, terrain + canopy rasters and
+                      the ortho plan, as plain data postMessage can clone.
+    js/meshworker.js  buildChunkPayload(state, spec) → geomcodec bytes. The
+                      message handling is a pure (state, msg) function so node,
+                      which has no DOM Worker, can test the real code.
+    js/geomcodec.js   the OUTPUT codec (already there): one transferable
+                      ArrayBuffer per chunk.
+    js/meshpool.js    the main-thread half: submit / poll / finish, plus every
+                      road back to the synchronous builder.
+
+Measured over the ten densest chunks of central Pardubice with facades on:
+**79.5 ms → 3.85 ms of main thread a chunk (20.6×)**, worst chunk 179 ms → 4.1 ms.
+With the aerial photo on (a cheaper ground) 41.8 ms → 3.8 ms.
+
+Three things a worker cannot build, because each is painted on a `<canvas>`:
+the facade window atlas, the brand wordmarks and the aerial photo material. All
+three are handled by NAMING rather than by switching off — the geometry comes
+back with its atlas uvs and a material key, and the main thread resolves the key
+to its own singleton (`facadeMaterial`, `brandMarkMat`, the ortho plan's `mat`).
+
+Two invariants worth knowing before touching js/city.js:
+- **A key in `_inflight` is being built and is in neither `built` nor the
+  queue.** The Map holds every flight; the ring scan, `_requeueCells`,
+  `_dropTileChunks` and `_rebuildBuildings` all consult it.
+- **At most one flight is synchronous.** It is a generator pumped against the
+  frame budget, and two of those would divide the budget rather than spend it.
+
+The fallback is not decorative. Under vite the bare `three` specifier resolves
+for workers as it does for the page; opening index.html straight off disk, the
+`<script type="importmap">` does NOT cover workers, so the worker fails to load
+— and every chunk is built the old way. Same road out for a browser with no
+Worker, a postMessage that throws, or three failed builds in a row.
+
+No SharedArrayBuffer: it needs COOP/COEP, and `require-corp` would break the
+ČÚZK ortophoto WMS (no CORP header) — the photos would silently stop loading.
+The rasters are copied and transferred instead, once per worker per tile, with
+a version bumped whenever the earthworks reshape a height grid in place.
+
+# v10 contract: the city speaks
+
+The crowd has been walking past the player since v5 and had never once noticed
+they existed. You could clip a man with a wing mirror at fifty and he would get
+up and keep walking. This contract gives Pardubice a mouth: **314 authored
+Czech lines**, spoken aloud and shown in a bubble over the speaker's head.
+
+## The four files, and why it is four and not one
+
+    js/chatterlines.js   PURE DATA. 240 lines + 24 two-handers (74 turns), the
+                         four-voice cast, and the id→filename rules. No imports.
+    js/chatter.js        THE BRAIN. Who speaks, when, about what, and the rate
+                         limits that stop it becoming a market. Imports only
+                         the corpus, worldclock and audio — never three.js, so
+                         it is testable headless.
+    js/chatbubbles.js    THE RENDERER. A sprite with a canvas texture. No
+                         timers, no policy; it is handed a list of live
+                         utterances once a frame and draws them.
+    scripts/gen-voices.mjs  Renders every line to mp3 through ElevenLabs.
+
+The split between the brain and the renderer is what makes `tests/chatter.test.mjs`
+possible: 31 assertions about casting, gender, cooldowns and conversation
+lifecycle, with no canvas, no WebGL and no AudioContext in the process.
+
+## The corpus
+
+Twelve categories, each a situation: `nearmiss` `horn` `bump` `hit` `victim`
+`bang` `driver` `player` `idle` `local` `tod` `phone`. Plus the two-handers.
+
+**Point of view is part of the category.** `horn` and `hit` are pools chatter
+only ever hands to a *pedestrian*, so lines written from inside a car ("Zhaslo
+mi to, no!", "Já ho neviděl, vběhl mi pod kola!") were coming out of a
+passer-by's mouth — seven of them, caught by review. They live under `driver`
+now, and a test guards the property rather than the individual lines. `victim`
+is the four lines the person **you** knocked down says once they are back on
+their feet: `pedestrians.js` puts a survivor through rag → down (2–4 s on the
+tarmac) → walk, and chatter watches for that state to come back round, because
+"Bolí mě hlavně hrdost" from a man still in the air is a joke told too early.
+
+**A line's `id` IS its filename.** `assets/voices/<id>__<cast key>.mp3`. Ids are
+ASCII-only (a diacritic in a filename is a 404 waiting for a case-folding
+difference between macOS and Linux — one was caught by the test) and may be
+added freely but never renamed: a rename orphans a rendered file and bills a
+new one.
+
+`when` gates a line on `worldclock.tod()` — `morning` `noon` `evening` `night`.
+The weather values (`rain` `cold` `hot` `fog`, 16 lines) are deliberately
+present and deliberately dead: this build has no weather, so nothing can
+satisfy them and those lines never play. They are written, rendered, and
+waiting for the day sky.js grows a rain cloud.
+
+## The cast is four, and a citizen keeps their voice
+
+Two men, two women. **Every line is rendered by every cast member who could say
+it** — 898 clips — and that is what buys the property worth having: a citizen's
+voice is `hash32(seed)` off the same integer that already picked their jacket,
+so it never changes between sentences, holds across both halves of a
+conversation, and is the same voice on a co-op partner's machine. A per-person
+pitch offset of ±7 % on top of four recordings is what stops forty walkers
+sounding like four people. Nothing about the box people is gendered, so `g` is
+a voice attribute and not a claim about the character.
+
+## Distance has to FILTER, not just attenuate — js/audio.js `speakAt()`
+
+`sfxAt()` was the wrong tool and the reason is physical. A bang forty metres
+away really is mostly a quieter bang; a *voice* forty metres away has lost its
+consonants. So a spoken line gets four things off the one distance number:
+
+| | at your elbow | at 42 m |
+|---|---|---|
+| gain | full | the same 1/r law every other cue uses |
+| lowpass | 16 kHz | **1.1 kHz** — this is what "far" actually sounds like |
+| highpass | 20 Hz | 300 Hz — distance takes the chest weight out too |
+| reverb send | 0 | 0.55 into a shared 1.1 s convolver, tapped *after* the filtering |
+
+Range is **42 m** and that is content, not mixing: past that you cannot make out
+words on a real street, and a readable bubble over an unintelligible voice is
+worse than silence. What fills in beyond it is already in the mix —
+`city_ambience.mp3` is, by its own generation prompt, "faint indistinct
+murmuring voices far off". **Polyphony is 3.** A buffer name prefixed `v/`
+routes `loadBuffer` to `assets/voices/` instead of `assets/sounds/`; that one
+prefix is the whole integration.
+
+## Determinism, and its limits
+
+**Ambient is deterministic. Reactions are local.**
+
+Which line a citizen says in a given 8-second slot is `hash32(their seed, slot)`
+— no `Math.random` on that path, so two players on the same corner hear the same
+sentence. What stays local is whether you were near enough to hear it, because
+the budgets are about your ears and not about the world. Reactions are local
+outright, exactly as the traffic horn is (traffic.js:2291) and for the same
+reason: the event that caused them happened on one machine. Speech never moves
+anybody, so local divergence is survivable here in a way it would not be for
+the walk itself.
+
+`pedestrians.js` gained one field for this: **`pid: s.seed`** on the body at
+`_attach`. `_cutLoose()` nulls `sch`, and being run over or ghosted is exactly
+when a body most needs to still be somebody.
+
+## The rate limits ARE the design
+
+The failure mode of this feature is not silence, it is a market square: eight
+bubbles, three overlapping voices, and a player who switches it off in a minute.
+
+- one ambient line near you every ~5 s, never the same sentence within 45 s
+- at most 2 conversations running
+- a 16–28 s cooldown per person, a 0.85 s global floor between reactions
+  (armed by reactions only — a mutter is not an event and must not spend an
+  event's budget, which was costing about one reaction in six)
+- at most 2 witnesses answer any one event
+- 10 bubbles drawn at once, hard cap (legibility, not performance)
+- and under all of it, audio.js's three voices
+
+Every cooldown here is an **absolute deadline**, not a countdown. The first
+version copied `pedestrians.js`'s `hitCd` idiom — stamp a duration, test `> 0` —
+but pedestrians.js decrements `hitCd` in its walk loop and nothing ever
+decremented ours. A citizen who said one word was mute for the rest of their
+420-second life, the busiest street went quiet after a minute, and every test
+still passed, because "he does not speak twice" is what a working cooldown
+looks like from the outside too. A timestamp cannot rot: no per-frame pass to
+forget, no question about who ticks whose field. `tests/chatter.test.mjs` now
+asserts the cooldown **ends**, which is the assertion whose absence hid it.
+
+## Wiring (main.js, MINE)
+
+    peds.onPedHit    → chatter.pedHit()      (and the scream now uses the
+                       SAME seed as the speaking voice, so the person who
+                       yells is the person who talks)
+    peds.panic       → chained, so every present and future panic source
+                       (weapons, corpses) feeds chatter.bang() for free
+    city.crashDebris → chained: a car folding round a lamp post is the best
+                       thing that can happen to a bystander's day
+    traffic.onHonk   → new single-slot sink, fired from BOTH honk sites
+
+**H is the horn**, and it is new: the AI has been honking at the player since v7
+and the player could never honk back. It goes through the same sink as an AI
+honk, so a pedestrian cannot tell who leaned on it.
+
+`chatter.update()` runs **after `updateCamera()`**, not next to `peds.update()`.
+Bubbles are screen-referred sprites scaled off view distance, so pumping them
+before the camera moves sizes every one of them against last frame — visible as
+a bubble that lags a hard corner.
+
+## Generating the voices
+
+    ELEVENLABS_API_KEY=sk_... node scripts/gen-voices.mjs
+
+904 clips, ~26 000 characters, `eleven_v3` with `language_code: 'cs'`. Each
+line's `tts` field (an English delivery direction) is prepended as a bracketed
+tag — **verified by transcribing the output that v3 shapes the delivery without
+speaking the tag**. `stability: 0.35` is what lets a shout be a shout; the
+default sits the model in its audiobook register, which is the most common way
+street dialogue comes back sounding like a museum guide.
+
+Only missing files are billed. Concurrency is **3**: at six, a Creator-tier key
+answers ~180 clips and 429s the other 720 — measured. 429 and 5xx retry with
+jittered exponential backoff; a non-429 4xx fails immediately, because waiting
+does not fix being wrong. `--stale` deletes orphaned mp3s.
+
+**Editing a line's text does not orphan its mp3** — same id, same filename — so
+the bubble would read one sentence while the voice said another. Delete those
+by hand or `FORCE=1`.
+
+## Verification
+
+    npm test          # tests/chatter.test.mjs — 38 assertions
+
+The one that matters most is *"every line a citizen can say has a clip rendered
+in their own voice"*: it walks 270 seeds × 240 lines and asserts the file the
+game will ask for is one the generator was told to produce. Nothing else in the
+build connects those two halves, and a mismatch is inaudible rather than loud.
+
+---
+
+# v11 contract: the shops have their real names
+
+Until this contract the pipeline threw away **every named shop and eatery node
+in the country**. `scripts/split-extracts.mjs` kept four amenity values
+(`fuel|hospital|police|fire_station`) and the string `shop` did not appear in
+the file at all, so the loss happened at stage 1 and nothing downstream could
+have recovered it even in principle — measured in the product, not the extract:
+`grep -c McDonald data/raw-region/0_0.json` was **0**.
+
+What the game did instead was **invent** the missing trade. `js/interiors.js`
+`stampFranchises()` picked buildings by hash near a station or a hypermarket car
+park and renamed them McDonald's or KFC. Meanwhile the real McDonald's
+(node/13970695060, 241 m from the origin), the real Lidl (node/3394785494), the
+real Česká pošta (node/12569453187) and the real coraHB (node/13634813428) stood
+within 450 m of Pardubice hlavní nádraží and reached nothing.
+
+Measured over the six extracts inside the world mask, node ids deduplicated:
+shop 19 317 (16 559 named), restaurant 5 603 (5 302), cafe 1 809 (1 704),
+fast_food 1 778 (1 500), pharmacy 1 094 (1 044), post_office 1 075 (1 060),
+bank 608 (594) — **31 284 nodes, 27 763 of them named, and the pipeline kept
+zero.** Full survey: `docs/OSM-COVERAGE.md`.
+
+## scripts/lib/venues.mjs — ONE definition, two scripts
+
+The splitter must keep the node and the builder must emit it, and the two must
+never disagree about the tag list again, so both import the same module.
+
+    venueKind(tags)  → the OSM value that says what a place SELLS, or null.
+                       shop=* (minus no/vacant/closed), a named list of
+                       amenity=*, tourism=hotel|museum|attraction, and office=*
+                       collapsed to one 'office' (its 73 values look identical
+                       from the street and the tiles are committed to git).
+    venueName(tags)  → name ?? brand. NOT operator — on Czech data that is
+                       mostly "Česká pošta, s.p." bolted onto street furniture.
+    isVenue(tags)    → both of the above. The wantNode/wantWay clause.
+    joinVenues(buildings, venues) → hangs each venue on the footprint it stands
+                       in; MUTATES `n` and `u`; returns the claim statistics.
+
+## THE JOIN IS A BUILD-TIME JOIN
+
+OSM maps a shop three ways — tags on the building way, a node inside the
+footprint, or a node in the doorway — and only the first ever reached a tile.
+`scripts/build-region.mjs` now resolves the other two **per tile, offline**:
+
+- INSIDE wins, and the **smallest** containing footprint wins, so a bakery
+  inside a gallery names the unit it was drawn in and never the whole gallery.
+- BESIDE (≤ 10 m) is the fallback for a doorway node, and only onto an unnamed
+  building under 2 000 m² and 12 m tall. That gate is what stops a bistro
+  renaming the eight-storey block it occupies the corner of.
+- A surveyed building name ALWAYS outranks a POI node standing in it.
+- Several venues in one block resolve by trade rank (a supermarket defines a
+  building, the accountant on its third floor does not), then by name order, so
+  the answer never depends on the order the PBF stored two nodes in.
+
+Measured on the two Pardubice tiles (`-1,-1` and `0,-1`, 15 339 buildings):
+1 384 venues landed inside a footprint, 25 in a doorway, **641 buildings took a
+real OSM name**. Named buildings 721 → 1 362. Buildings wearing a fascia
+200 → 706, of which the fascia shows the building's **own OSM name** 61 → 584.
+New use classes that no guess could ever have produced: restaurant 0 → 125,
+supermarket 23 → 62, school 59 → 89, hotel 18 → 26. Tile cost **+1.4 %**.
+
+## The tile format gains one layer
+
+    venues: [{ p:[x,z], t:kind, n:name, b:brand? }]
+
+…and buildings gain `u`, the shop/amenity value. `js/interiors.js` `classify()`
+had read `f.u` since v7 and **no build script had ever written it**.
+
+A venue whose name is now ON a building is dropped from the layer — the same
+string twice is the one cost this change does not have to pay. What ships is
+the trade no footprint absorbed: a block's other tenants, the units inside a
+gallery, a stall on a market square. `js/geo.js` bucketizes them by chunk (not a
+flat list — `evictFar` gives back buildings and trees and nothing else, so a
+linear scan would grow for as long as the session runs) and `venueAt(city, x, z,
+maxD)` reads one 3×3 of cells. The on-foot HUD hint asks it when nothing
+actionable is in range: 🏪 Sportisimo.
+
+## `u` describes the GROUND FLOOR
+
+The one place the trade must not win is Czech mixed use. A potraviny in the
+corner of a panelák is a potraviny, not a five-storey supermarket — and it would
+be, because `shop` is promoted past 900 m² and `restaurant` is laid out as a
+single open volume, so the block would come out one storey tall. `classify()`
+therefore refuses to let `u` retype a building OSM explicitly typed as housing,
+and `signBrandOf()` reads `u` on its own so the shop still gets its fascia.
+
+## What was deleted
+
+`stampFranchises()`, `anchorsOf()`, `FRANCHISES`, `HOST_USES`, `HOST_TYPES`,
+`ANCHOR_R`, the `_frAnchors` / `_frServed` caches on `city`, `CityWorld._stamped`
+and its two call sites, and the three tests that pinned the guess's behaviour.
+The `BRANDS` table stays: it is the LOOK of a chain (wall colour, cladding,
+storey rules), and it is now keyed off a name that came out of OSM.
+
+## Verification
+
+    npm test          # tests/venues.test.mjs — 8 assertions
+
+`tests/fixtures/pardubice-hlavni-nadrazi.json` is 45 kB of **verbatim stage-1
+output** — every building way and every shop/amenity/office/tourism node in a
+600 × 260 m box on the world origin, at OSM's own coordinate precision — because
+`data/raw-region` is 2.1 GB and gitignored. The test that matters asserts the
+McDonald's by Pardubice hlavní nádraží comes from **node/13970695060** and lands
+within 40 m of where the surveyor put it (measured: 5 m). If the extraction
+filter ever loses the shops again, that is the test that says so.
+
+## Regenerating the world
+
+    node scripts/split-extracts.mjs      # ~6 min, rewrites data/raw-region/
+    node scripts/build-region.mjs        # HOURS, rewrites all 342 tiles
+
+Both are required — the names are lost at stage 1, so rebuilding tiles alone
+changes nothing. `--tiles=-1,-1 0,-1` rebuilds a subset, but note it also
+rewrites `overview.json` from only those tiles, so it is for scratch `OUT_DIR`
+runs and never for `public/data`.
+
+
+# v11 contract: the crowd stops being one person
+
+The city had ONE body — eleven boxes, 1.75 m tall, and only the palette changed
+between them. The user's word for it was "Minecraft". Five bodies now walk
+around Pardubice, and the whole design rests on one observation: **at twenty
+metres the eye reads structure, not colour.** Fifteen centimetres of height, a
+narrower shoulder, a stoop and a walking stick are legible down a street; a
+different jacket is not.
+
+## js/people.js — the third module that exists so two others can agree
+
+    m30  1.78  28 %   the default bloke
+    f30  1.69  26 %   narrow shoulders, waist, long hair
+    f60  1.63  18 %   shorter, fuller waist, bun, hip-length coat
+    m60  1.76  20 %   heavier, greying, shorter stride
+    m90  1.67   8 %   stooped, thin, slow, walking stick
+
+It imports **nothing** — not three.js, not the clock — and that is its purpose.
+`js/citizen.js` builds the mesh and therefore needs three; `js/chatter.js` picks
+the voice and must never touch three, or the headless tests die. A grandmother
+has to *sound* like a grandmother, so both have to draw the same archetype from
+the same seed, and the only way to guarantee that without one importing the
+other is a third module that imports neither. `ARCH_SALT` lives there for the
+same reason: a constant two modules must agree on belongs to neither of them.
+
+The weights are not uniform on purpose — a ninety-year-old on a stick is
+something you notice *because* it is rare. Uniform weights put one in five.
+
+## The model got better and got CHEAPER
+
+|                | old | new |
+|---|---|---|
+| meshes per body | 15 | **13** (14 with a stick) |
+| materials | up to 5 | 1 shared + limbs |
+| geometry | all shared | shared limbs + one ~9 kB cluster per body |
+
+Everything that does not articulate — head, hair, eyes, pupils, nose, mouth,
+neck, chest, waist, shoulder yoke, hips, coat — is **merged into one mesh with
+vertex colours**, drawn with a single material every citizen in the world
+shares. (The old header claimed eleven meshes; it was counting the eleven
+*children* of the body group, four of which were pivot Groups holding two
+meshes each. Measured with a traverse, the old figure drew fifteen.)
+
+That merge is what pays for the detail: **static boxes are free**. The torso is
+four boxes (hips → waist → chest → shoulder yoke) instead of one slab, because
+a waist narrower than the chest and shoulders wider than both is the entire
+difference between a person and a wardrobe. The head gets a nose, a mouth, and
+hair that *wraps the skull* rather than sitting on it as a lid — a flat slab on
+top of a cube leaves a cube, and that was the last thing still reading as
+Minecraft after the shoulders landed.
+
+The price is one per-instance BufferGeometry, so `dispose()` is no longer
+optional bookkeeping — it is what stops a 24/7 room leaking VRAM as walkers
+come and go.
+
+## Joints, and where a stoop actually bends
+
+The old figure had a one-piece arm and a one-piece leg, so the walk was two
+pendulums. There is now an **elbow and a knee**, and the knee is most of the
+improvement: a leg that folds under the body on the back-swing is the strongest
+single cue that something is walking rather than being slid along the pavement.
+Flexion peaks a quarter-cycle after the thigh reaches its rearmost point and is
+clamped positive, because a knee bends one way only.
+
+A `torso` group at hip height carries the upper body and the arms. `stoop` used
+to be applied to `body`, whose origin is the **feet** — so an old man's bend
+rotated the whole figure about his ankles and he leaned forward like a plank
+with his legs in line with his spine. Bending at the hip with the legs left
+vertical is what a stoop is. His stoop is 0.17 rad and not the 0.22 it was first
+drawn at: the head rides in the same merged mesh as the chest, so it tips with
+the back, and past about a fifth of a radian he is looking at the pavement and
+the face stops being visible from street level.
+
+## The voice follows the body
+
+`voiceOf()` used to flip its own gender coin. That was fine while every citizen
+was the same box and became wrong the moment there were five: a stooped
+ninety-year-old would open his mouth and a young woman came out. Archetype
+first, voice second, both off the same seed through the same salt:
+
+    m30 → m1   m60 → m2   m90 → m2 (pitched a further −6 %)
+    f30 → f2   f60 → f1
+
+The mapping uses the cast that already existed, so **all 904 clips stayed valid
+and nothing was re-rendered**. `pedestrians.js` also stamps `headTop` on each
+body, and `chatter.js` hangs the speech bubble off *that* rather than a constant
+— the five archetypes span 15 cm, which is exactly the amount that makes a fixed
+1.75 m assumption look like a bug.
+
+The hero and every peer stay on the default adult, deliberately: they come
+through the uid path, their name tags and seat anchors were measured against a
+1.75 m figure, and turning somebody else's avatar into a pensioner is not
+`makeCitizen`'s decision to make.
+
+## Also tuned
+
+Drivers got their own 4.5 s floor (`DRIVER_CD`) on top of the general reaction
+gap. Stand in the road, traffic.js piles up a queue, every car in it passes the
+`heldT` test — and at the shared 0.85 s floor four of them shouted inside four
+seconds. Screenshotted, that is a mob with two bubbles overlapping illegibly.
+The queue is the joke; the volume is not.
+
+# v13 contract: the road under the wheels
+
+The complaint, verbatim: *"Když jedu v Tesle, která je elektro, tak to jenom
+hučí jako vysavač, ale neslyším žádnou jízdu, jako zvuk jako kol, že se točí."*
+And: *"Trošku víc realističtější ten smyk, ať se to fakt víc smýká, ať je to
+fakt jako v nějakém GTAčku."* Four things came out of it — new recordings, a
+banded playback layer, a real tyre model, and rubber left on the road.
+
+## The bands, and why they were measured before they were trusted
+
+`scripts/gen-sounds.mjs` grew twelve entries: three tyre-roll loops on asphalt,
+two on gravel, three of airflow, two skid loops, and the two transients
+(`skid_chirp`, `skid_bark`) that a loop faded up from zero cannot supply.
+
+`js/audio.js` already carried a hard-won warning about exactly this shape of
+asset — the four `eng_*` rpm bands came back with spectral centroids of
+169–208 Hz and *no monotonic trend*, so crossfading them would have been
+crossfading a sound with itself. The lesson taken from it was not "never band"
+but **"write the bands to differ in KIND, then measure"**:
+
+| clip | rms | centroid | <250 Hz | >2 kHz |
+|---|---|---|---|---|
+| `roll_asph_low`  | 0.077 | 321 Hz  | 79.6 % | 1.9 % |
+| `roll_asph_mid`  | 0.193 | 810 Hz  | 47.9 % | 5.7 % |
+| `roll_asph_high` | 0.192 | 1432 Hz | 35.1 % | 15.3 % |
+| `wind_car_low`   | 0.183 | 792 Hz  | 60.0 % | 8.2 % |
+| `wind_car_mid`   | 0.195 | 681 Hz  | 62.7 % | 5.6 % |
+| `wind_car_high`  | 0.353 | 367 Hz  | 81.8 % | 3.4 % |
+
+The roll ladder climbs (countable tread patter → fused hiss → hard sizzling
+roar) and the wind ladder deliberately *descends* in brightness while climbing
+in level, because that is what air does: a thin rush at town speed becomes a
+deep pounding wall at two hundred. `roll_asph_high` had to be written twice —
+the first version asked for "a bright roar sizzling on top with a heavy rumble
+beneath", got only the rumble, and measured 521 Hz, i.e. duller than the band
+below it. **Accelerating would have sounded like slowing down.** Offering the
+generator two characters and letting it choose is the mistake; naming the one
+you want and forbidding the other is the fix.
+
+`car_wind` survives and is demoted. Measured, it is almost pure low buffeting
+(centroid 123 Hz, 96 % under 250) — a superb bed and a poor portrait of speed —
+so it keeps gusting underneath at two thirds of its old level while the three
+bands carry what changes.
+
+## bandLayer — one crossfader, three users
+
+`audio.js` gained a small shared machine rather than three copies: `[name,
+vRef]` ascending, weight is a tent over the ladder (only ever two bands audible)
+taken to **sqrt for equal power**, and each audible band's `playbackRate` tracks
+`v / vRef` inside a clamp. A linear crossfade between two uncorrelated noise
+sources dips 3 dB in the middle, and that hole lands at exactly the speed you
+spend most of your time at. A missing clip falls back to `noiseBuffer()`, the
+bargain `rwindBuild` already struck: a bare checkout must still make a noise
+when it moves. Cost: ~16 MB of resident decoded PCM once the player first
+drives, on top of what `chatter.js` already holds.
+
+## The tyre model (js/vehicles.js `tyreStep`)
+
+The old model was a kinematic bicycle: heading changed instantly with the wheel
+and a scalar `_lat` was spawned from the heading change and exponentially
+damped. It has no memory, so the car could not be pointed one way and travelling
+another for any length of time, and countersteer did nothing recognisable
+because there was no rotation to catch.
+
+The replacement is the standard bicycle with real lateral forces and **yaw rate
+as an actual state**: slip angle per axle, a simplified Pacejka curve
+(`sin(C·atan(B·α))`, peak near 8°, falling to ~0.6 of peak — the falling tail is
+the whole reason a drift can be *held*), yaw acceleration from the two moments,
+longitudinal load transfer, and a friction circle split by pedal (drive 75 % to
+the rear, brakes 65 % to the front). Everything is in **specific** force so
+`KIND.mass` keeps meaning what its comment says: a ratio for collisions only.
+
+Three details that are not decoration:
+
+* **It runs at `SUB_DT = 1/120` regardless of the frame.** `stepGame` hands
+  `driveStep` up to twenty steps of 1/20 s after a hidden tab, and a stiff tyre
+  model integrated at 20 Hz oscillates and then spins the car.
+* **Below `KIN_V` the kinematic constraint is blended back.** Real tyres do not
+  slip at parking pace; they roll, and geometry alone sets the yaw rate. The
+  force model's forces vanish with speed, so without this a car parks like a
+  boat.
+* **`car.speed` still means exactly what it meant** — signed m/s along the nose
+  — because nine consumers outside `vehicles.js` depend on it.
+
+Measured against the numbers the old model was tuned to: 0–100 km/h in 5.67 s
+(the spec in the KIND comment says ~5.7), 0.64 g corners clean and silent,
+a handbrake flick at 22 m/s reaches 79°/s of yaw and 90° of body slip,
+countersteer takes a 63° slide back to under 2°, and dt = 1/20 with full lock
+and handbrake stays finite and bounded.
+
+### The trap the slide sprang
+
+A sliding car reports `|car.speed| ≈ 0` while travelling 25 m/s sideways. The
+old model made real slides rare enough to hide what that breaks; this one does
+not. `car.vGround` is published alongside and now feeds the **speedometer**, the
+**wall-impact damage**, the **pedestrian run-over test**, the **tyre and wind
+audio** and the **speed streaks** — a car arriving at a wall out of a drift used
+to hit it for free. The engine is the one correct exception: revs follow the
+wheels, which roll forwards.
+
+`car.offroad` was also being NaN'd by `undefined += …` on any hand-built car.
+Every reader compared it (`> 0.05`, always false) and comparisons swallow NaN
+silently; the tyre model *multiplies* by it, so the same latent bug went from
+invisible to fatal on the first frame.
+
+## js/skidmarks.js
+
+One mesh, one preallocated indexed geometry, a ring of 2400 quads = four
+independent wheel tracks of 600 segments each. It follows the **navline.js**
+ribbon idiom (cut once at maximum size, drawn through `setDrawRange`, faded
+through a per-vertex RGBA attribute) and not the pedestrians.js blood idiom,
+because a pool sharing one material fades every decal at once — blood hit that
+wall and had to sink corpses instead of fading them.
+
+Four tracks rather than two: in a slide the front wheels point somewhere quite
+different from the rears, and four crossing arcs is most of what makes a mark
+read as a mark. Colour and lift come off the surface — near-black rubber at
++3.5 cm on tarmac, turned-over earth at +7.5 cm on soft ground, where grass.js
+plants blades at +5 cm and would otherwise swallow the gouge. Height comes from
+`world.surfaceY(x, z, car.y).y`, never `terrain.heightAt`: the `near` argument is
+what keeps a mark under a flyover from snapping up onto the deck.
+
+Emission is gated on **distance travelled**, never on frames, for the same
+twenty-substeps reason as above, and the threshold is `SLIP_MARK`, exported from
+`vehicles.js` so the marks and `SKID.on` in `audio.js` cannot disagree about
+when a skid started. 3 m/s of scrub, not less: a brisk main-road bend runs 2.4,
+and rubber through every fast corner is wallpaper rather than a skid mark.
+
+The pool cap **is** the memory bound. `city.js` unloads only the chunks in its
+own `built` map, so these outlive the street they were painted on — which is
+what we want, and also why an unbounded emitter would leak forever.

@@ -7,8 +7,9 @@
 
 import * as THREE from 'three';
 import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR } from './config.js';
-import { loadCity, chunkKey } from './geo.js';
+import { loadCity, chunkKey, venueAt } from './geo.js';
 import { CityWorld } from './city.js';
+import { planRings } from './streamplan.js';
 import { input } from './input.js';
 import { Player, worldSeatAnchor } from './player.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
@@ -17,13 +18,15 @@ import { Traffic } from './traffic.js';
 import { makeSky, updateSky, todClock } from './sky.js';
 import { Minimap } from './minimap.js';
 import { initAudio, sfx, sfxAt, setListener, engineVoices, engineVoicesStop,
-  engineStart, engineStop, engineSet, tireSet, setVolume,
+  engineStart, engineStop, engineSet, tireSet, setVolume, skidSet, carAudioStop,
   heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
   windStart, windStop, windSet, windLoad, roadWindSet, roadWindStop,
-  ambientStart, nearbyTrafficHum } from './audio.js';
+  ambientStart, nearbyTrafficHum, horn } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
 import { Pedestrians } from './pedestrians.js';
+import { Chatter, voiceOf } from './chatter.js';
+import { ChatBubbles } from './chatbubbles.js';
 import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
 import { Grass } from './grass.js';
@@ -34,6 +37,7 @@ import { WorldMap } from './worldmap.js';
 import { Trains } from './trains.js';
 import { Weapons } from './weapons.js';
 import { SpeedStreaks } from './speedfx.js';
+import { SkidMarks } from './skidmarks.js';
 import { MISSILE } from './config.js';
 import { showMenu } from './menu.js';
 import { connectCity, queueEvent, getPlayerName, CityNetWS } from './netcity.js';
@@ -94,6 +98,8 @@ const game = {
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let parkingLots = null;
 let peds = null;
+let chatter = null;      // who says what, and when — js/chatter.js
+let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
 let clouds = null;                // the sky to fly the machines through
 const _earDir = new THREE.Vector3();
@@ -114,6 +120,7 @@ let worldMap = null;   // the full-region map on M, and the waypoint it owns
 let trains = null;     // České dráhy on the real 532 km network
 let weapons = null;  // the rocket pod under that machine, and what it does to walls
 let streaks = null;  // the air, showing itself past 100 km/h
+let skids = null;    // …and the road, remembering what was done to it
 let aimMark = null;  // the ring on the ground where the next rocket would land
 let _aimT = 0;
 const parked = [];      // cars placed by us, enterable RIGHT NOW
@@ -594,8 +601,9 @@ function viewerState() {
 // How far ahead of the player the streamer should be looking. Only the fast
 // machines get a lead worth having: on foot or in a car the loader is never the
 // bottleneck, and a lead there would only blur which chunks count as "near".
-const LEAD_S = 2.0;          // seconds of travel to look ahead
+const LEAD_S = 2.5;          // seconds of travel to look ahead
 const LEAD_MAX = 1600;       // …capped, or Mach 2 would stream a different town
+const LEAD_KEEP = 3 * 120;   // metres of built world kept behind the lead point
 const _lead = { x: 0, z: 0 };
 function leadFocus(focus) {
   _lead.x = focus.x; _lead.z = focus.z;
@@ -603,15 +611,25 @@ function leadFocus(focus) {
   if (!f) return _lead;
   const v = game.jet ? game.jet.speed : Math.hypot(f.vx ?? 0, f.vz ?? 0);
   if (v < 30) return _lead;                    // hovering or taxiing: look here
-  // The lead may never push the player OUT of the built area — that would
-  // trade a hole in front for a hole underneath, which is far worse. The
-  // streamer builds `viewChunks` cells around the focus, so keep the offset
-  // to a fraction of that radius whatever the speed asks for.
-  const built = (world?.viewChunks ?? 6) * 120;
-  const d = Math.min(v * LEAD_S, LEAD_MAX, built * 0.6);
   // heading convention: dir(h) = (−sin h, −cos h)
-  _lead.x = focus.x - Math.sin(f.heading) * d;
-  _lead.z = focus.z - Math.cos(f.heading) * d;
+  const dx = -Math.sin(f.heading), dz = -Math.cos(f.heading);
+  // NEVER LOOK FURTHER THAN YOU BUILD. The lead moves the whole streaming
+  // window forward, so a lead past the built edge trades a hole in front for a
+  // hole UNDERNEATH — the aircraft's own cell falls out of the near rings and
+  // collision starts answering against ground nobody meshed. The old bound was
+  // `viewChunks · 120 · 0.6`, which is a guess about the built world dressed as
+  // a measurement: it read 720 m whether the world ahead was finished or empty,
+  // and it shrank exactly when the full-detail ring contracted at speed — the
+  // moment the lead matters most.
+  //
+  // So ask. `builtReach` walks the flight line and stops at the first cell with
+  // no geometry, which answers for THIS machine over THIS ground after THIS
+  // long in a straight line, and needs no constant to be right.
+  const want = Math.min(v * LEAD_S, LEAD_MAX);
+  const reach = world?.builtReach?.(focus.x, focus.z, dx, dz, want + LEAD_KEEP) ?? 0;
+  const d = Math.max(0, Math.min(want, reach - LEAD_KEEP));
+  _lead.x = focus.x + dx * d;
+  _lead.z = focus.z + dz * d;
   return _lead;
 }
 
@@ -961,8 +979,7 @@ input.onKey('KeyE', () => {
     $id('speedo').classList.add('hidden');
     hideCarName();
     engineStop();
-    tireSet(0, 0);
-    roadWindStop();
+    carAudioStop();          // roll, wind and any skid still running, in one call
     sfx('door_open', 0.7);
     player.beginExit({ onOut: () => sfx('door_close', 0.8) });
   } else if (game.jet) {
@@ -1151,6 +1168,22 @@ input.onKey('KeyV', () => {
     heading: h.heading, pitch: h.pitch ?? 0,
     vx: h.vx ?? 0, vy: h.vy ?? 0, vz: h.vz ?? 0,
   });
+});
+
+// ---------- H: the horn ----------
+// The AI has been honking at the player since v7 and the player has never once
+// been able to honk back — the one half of the conversation that was missing.
+// It matters more now than it did: a horn is the cheapest way to make a street
+// notice you exist, and chatter.js hangs a whole category of replies off it.
+// Only from a car you are driving (a helicopter has no horn), and it goes
+// through traffic's own sink so the reaction path is byte-identical to an AI
+// honk — one door, one behaviour, no second copy to drift.
+let _hornCd = 0;
+input.onKey('KeyH', () => {
+  if (game.mode !== 'play' || !game.car || _hornCd > 0) return;
+  _hornCd = 0.45;                  // hold the key down, get one beep, not forty
+  horn();                          // no coordinates: this one is your own wheel
+  chatter?.honk(game.car.x, game.car.z);
 });
 
 // brief nudge in the action-hint slot (e.g. "land first")
@@ -1380,14 +1413,18 @@ const _hulls = [];
 //   2. The fog wall must always end INSIDE that radius. It sat at 900 m while
 //      the city was only built to 720 m, so the world visibly stopped against
 //      bare sky — exactly the "blue plane where nothing is loaded" report.
-// Three rings in the air. AIR_CHUNKS_MAX is FULL detail; AIR_SHELL_MAX adds a
-// ring of ground-and-buildings beyond it; AIR_FAR_MAX is the photo alone. At
-// 121 m over a village the old two-ring world put buildings out to 720 m and
-// then a kilometre of bare photograph — houses plainly there in the aerial
-// image with nothing standing on them, which is the "dost budov není ve světě"
-// report. The shell ring is cheap enough to be wide: no facade atlas, no
-// roads (the photo has better ones), no lamps, no trees.
-const GROUND_CHUNKS = 6, AIR_CHUNKS_MAX = 10, AIR_SHELL_MAX = 10, AIR_FAR_MAX = 14;
+// Three rings in the air. The full-detail one is the player's draw-distance
+// setting, widened by altitude; the shell ring adds ground-and-buildings beyond
+// it; the far ring is the photo alone. At 121 m over a village the old two-ring
+// world put buildings out to 720 m and then a kilometre of bare photograph —
+// houses plainly there in the aerial image with nothing standing on them, which
+// is the "dost budov není ve světě" report. The shell ring carries no facade
+// atlas, no roads (the photo has better ones), no lamps and no trees.
+//
+// How wide each of them may actually be now lives in streamplan.js, because the
+// answer depends on SPEED as well as height and has a hard cost ceiling behind
+// it — the arithmetic is long enough to deserve its own file and its own test.
+const GROUND_CHUNKS = 6;
 function updateHorizon(dt) {
   if (!world || !sky) return;
   const gs = getSettings();
@@ -1397,32 +1434,31 @@ function updateHorizon(dt) {
   const alt = aglOf(flier);
   // Altitude is one reason to see further; SPEED is the other, and the jet has
   // it at any height. A Gripen on the deck at Mach 1 crosses the whole 720 m
-  // ground-setting radius in two seconds, so it needs the wide horizon just as
-  // much as a helicopter at 300 m — and without it the look-ahead focus has no
-  // room to move and the ground ahead stays unbuilt.
-  const rush = game.jet ? Math.min(1, game.jet.speed / 260) : 0;
-  const climb = Math.max(Math.min(1, alt / 300), rush);
-  // climb 0 → 300 m widens the view from the ground setting to the air cap
-  const want = Math.round(base + (AIR_CHUNKS_MAX - base) * climb);
-  world.viewChunks = Math.max(base, want);
-  // …and unrolls a ground-only ORTHO ring far beyond it. That ring is one
-  // textured quad per cell, so it costs almost nothing, and since the aerial
-  // photo already contains the roads and roofs it reads as real city out to
-  // kilometres — which is what stops the world ending in mid-air.
-  // The shell ring opens FASTER than the others (√climb, not climb). Altitude
-  // is not what makes you see far — angle is. At 120 m over a village you are
-  // already looking a kilometre and a half down the valley, and that is exactly
-  // the height at which the missing houses were reported.
-  world.shellChunks = Math.round(AIR_SHELL_MAX * Math.sqrt(climb));
-  world.farChunks = Math.round(AIR_FAR_MAX * climb);
+  // ground-setting radius in two seconds. The old rule folded speed into the
+  // SAME saturating term as altitude — `min(1, speed / 260)` — so above
+  // 936 km/h nothing grew at all and every ring stayed pinned at its air cap:
+  // that is precisely the cliff in the report. Speed is its own argument now,
+  // and it pulls the rings in two directions at once (wider coverage, less
+  // detail) which one shared term could never express.
+  const speed = game.jet ? game.jet.speed
+    : game.heli ? Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) : 0;
+  const rings = planRings(speed, alt, base);
+  world.viewChunks = rings.view;
+  world.shellChunks = rings.shell;
+  world.farChunks = rings.far;
   // Keep the edge ahead of the nose. These are CAPS, not targets: city.js
   // spends a millisecond budget and stops, so a high number costs nothing over
   // open country and cannot blow a frame over Prague. The jet gets the widest
   // cap because its nose moves twenty times faster than a helicopter's — but
   // it also gets a slightly bigger time slice, because a stalled edge in front
   // of a 700 m/s aircraft is a hole in the world.
-  world.chunksPerFrame = game.jet ? 16 : alt > 20 ? 8 : 2;
-  world.buildBudgetMs = game.jet ? 9 : 7;
+  //
+  // Both are raised again past DETAIL_FADE_LO, where the streamer switches to
+  // filling empty cells at the cheapest tier: those cost 0.69 ms each, so the
+  // count is what binds rather than the milliseconds, and 16 of them was
+  // leaving the frontier short at 555 m/s.
+  world.chunksPerFrame = game.jet ? (speed > 140 ? 48 : 16) : alt > 20 ? 8 : 2;
+  world.buildBudgetMs = game.jet ? (speed > 140 ? 11 : 9) : 7;
   // in the air throughput wins over smoothness — the world must exist under a
   // 200 m/s jet; on the ground a short cooldown between chunk STARTS keeps
   // build work from monopolising every frame (each build is now sliced over
@@ -1795,7 +1831,11 @@ let hintT = 0;
 function updateHud(dt) {
   $id('tod-clock').textContent = todClock(tod());
   if (game.car) {
-    $id('speed-num').textContent = Math.round(Math.abs(game.car.speed) * 3.6);
+    // vGround, not car.speed: mid-drift the nose points somewhere other than
+    // where the car is going, and a speedometer that falls to 20 while you are
+    // still travelling at 90 reads as a bug rather than as physics.
+    $id('speed-num').textContent = Math.round(
+      (game.car.vGround ?? Math.abs(game.car.speed)) * 3.6);
     $id('speed-unit').textContent = 'km/h';
   } else if (trains?.riding) {
     $id('speedo').classList.remove('hidden');
@@ -1894,7 +1934,16 @@ function updateHud(dt) {
         hint.innerHTML = `🏠 ${inside}${fl}`;
         hint.classList.remove('hidden');
       } else if (car) { hint.innerHTML = '<kbd>E</kbd> nastoupit'; hint.classList.remove('hidden'); }
-      else hint.classList.add('hidden');
+      else {
+        // …and the shops that are NOT a building of their own. A unit in a
+        // gallery and the third of four fronts along one block are real,
+        // surveyed and named in OSM, and until the pipeline kept them the
+        // street said nothing at all. Only asked when nothing actionable is in
+        // range, and it reads one 3×3 of chunks (js/geo.js venueAt).
+        const v = world?.city ? venueAt(world.city, player.pos.x, player.pos.z, 7) : null;
+        if (v) { hint.textContent = `🏪 ${v.n}`; hint.classList.remove('hidden'); }
+        else hint.classList.add('hidden');
+      }
     }
   }
   // rocket readout: rounds left, or the reload bar
@@ -2059,6 +2108,12 @@ setTimeout(() => { const el = $id('location-name'); if (el) el.style.opacity = '
 renderer.domElement.addEventListener('click', () => {
   initAudio();
   ambientStart?.();
+  // Warm the lines the player is most likely to trigger in their first minute
+  // — the reactions. A cold clip arrives ~100 ms after the bubble, which is
+  // invisible on an idle mutter and glaring when it is the man you just
+  // clipped with a wing mirror. Only reachable once the context is unlocked,
+  // which is exactly here, and it is idempotent.
+  chatter?.preload();
   if (game.mode !== 'play') return;
   if (document.body.dataset.panelOpen) return;
   if (getSettings().mouseLook && !input.locked) renderer.domElement.requestPointerLock();
@@ -2074,6 +2129,18 @@ function applySettings(s, key) {
   if (world) world.viewChunks = s.viewChunks;
   if (traffic) traffic.maxCars = s.traffic;
   if (peds) peds.max = s.peds ?? 34;
+  // Turning the crowd's voice off must silence what is ALREADY in the air, not
+  // just stop the next line — a bubble left hanging over a man's head after
+  // you switched him off is the bug the player reports.
+  if (chatter) {
+    chatter.enabled = s.chatter !== false;
+    chatter.voiceOn = s.chatVoice !== false;
+    // NOT s.volume — setVolume() above already scales the master bus, and
+    // multiplying it in again would square the slider. chatter.volume is the
+    // voice layer's level RELATIVE to the rest of the mix, and it is 1.
+    if (!chatter.enabled) chatter.silence();
+  }
+  if (chatBubbles) chatBubbles.enabled = s.chatBubbles !== false;
   // interiors are a live toggle: switching them off sheds every un-shot
   // building's rooms on the next scan, and keeps the wrecks. buildingR is the
   // "Dohlednost budov" knob — how far out the box shells (real windows, brand
@@ -2220,13 +2287,62 @@ async function boot() {
   worldMap = new WorldMap(city, minimap);
   initNavigation(city);   // lazy + optional; never blocks the boot
   peds = new Pedestrians(scene, city, world.terrain);
-  // hit sounds ride the ragdoll callbacks: a scream at the point of impact
-  // (gender rolled per victim), attenuated by distance like the debris audio
+  // hit sounds ride the ragdoll callbacks: a scream at the point of impact,
+  // attenuated by distance like the debris audio. The gender used to be
+  // `Math.random() < 0.5` PER SCREAM, so one victim could scream as a man and
+  // then as a woman; now it comes off the same seed that picks their speaking
+  // voice in chatter.js, and the person who yells is the person who talks.
   peds.onPedHit = (p, v) => {
-    if (v > 3) sfxAt(Math.random() < 0.5 ? 'scream_female' : 'scream_male',
+    if (v > 3) sfxAt(voiceOf(p.pid ?? 0).male ? 'scream_male' : 'scream_female',
       Math.min(1, 0.5 + v * 0.05), p.x, p.z, 180, 0.25);
+    chatter?.pedHit(p, v);
   };
-  peds.onPedKilled = (p) => sfxAt('crowd_panic', 0.7, p.x, p.z, 200, 4);
+  peds.onPedKilled = (p) => {
+    sfxAt('crowd_panic', 0.7, p.x, p.z, 200, 4);
+    chatter?.bang(p.x, p.z, 26);
+  };
+
+  // ---- the city gets a voice (js/chatter.js + js/chatbubbles.js) ----
+  // Constructed here rather than in the module because the renderer and the
+  // brain are deliberately separate: chatter.js imports no three.js and can be
+  // tested headless, so somebody has to introduce the two, and that somebody
+  // is main.js — the same job it already does for traffic and the peds.
+  chatBubbles = new ChatBubbles(scene);
+  chatter = new Chatter(chatBubbles, { peds });
+  const cs = getSettings();
+  chatter.enabled = cs.chatter !== false;
+  chatter.voiceOn = cs.chatVoice !== false;
+  chatBubbles.enabled = cs.chatBubbles !== false;
+
+  // Every existing and future source of panic — a rocket, a body on the road,
+  // whatever weapons.js grows next — already funnels through peds.panic(), so
+  // chaining it is one wire for all of them and none of those callers has to
+  // learn that a speech module exists. Chaining, not replacing: the panic is
+  // what makes people run, and losing it to a bubble would be a poor trade.
+  const _pedPanic = peds.panic.bind(peds);
+  peds.panic = (x, z, r) => { _pedPanic(x, z, r); chatter?.bang(x, z, r); };
+
+  // Somebody leaned on the horn — traffic.js fires this from both of its honk
+  // sites, and the player's own H key below goes through the same door, so a
+  // pedestrian cannot tell whether it was you or an Octavia and reacts the
+  // same either way. Which is the correct amount of intelligence for a man
+  // who has just been startled on a pavement.
+  traffic.onHonk = (x, z) => chatter?.honk(x, z);
+
+  // A car folding itself around a lamp post is the single best thing that can
+  // happen to a bystander's day. crashDebris is vehicles.js's established
+  // "tell the world something happened" sink (it is how the wreckage gets
+  // spawned), so it is also where the gawping goes.
+  //
+  // It hangs off WORLD, the CityWorld streamer — not off `city`, which in this
+  // function is the loaded map DATA and has no methods at all. Getting that
+  // wrong is not subtle: it took the whole boot down with "Cannot read
+  // properties of undefined (reading 'bind')" before the first frame.
+  const _crashDebris = world.crashDebris.bind(world);
+  world.crashDebris = (x, y, z, color, n, energy) => {
+    _crashDebris(x, y, z, color, n, energy);
+    if ((energy ?? 0) > 0.35) chatter?.bang(x, z, 24);
+  };
   clouds = new Clouds(scene, getSettings().cloudDist);
   // The world beyond the streamed chunks used to be bare sky, so from the air
   // the built area showed as a hard-edged square floating in blue. This apron
@@ -2250,6 +2366,7 @@ async function boot() {
   // rocket smoke, blast plume and the dust off a collapsing floor alike
   weapons = new Weapons(scene, world, { dust: world.interiors.dust });
   streaks = new SpeedStreaks(scene);
+  skids = new SkidMarks(scene);
   // vehicles borrow the shared dust pool for exhaust + wreck smoke, and the
   // focus so only machines near the player breathe visible puffs
   vehicles.dust = world.interiors.dust;
@@ -2526,17 +2643,23 @@ function stepGame(dt) {
     // hands over metres per second and audio.js normalizes per kind. Shift
     // points and the ducking thresholds live there in m/s and are unchanged.
     engineSet(Math.abs(game.car.speed), engineLoad(game.car, gas));
-    // Tyre hiss under the engine — and gravel once the wheels leave the road.
-    // Deliberately NOT rescaled per kind: this one is not a rev counter, it is
-    // road roar, which is a function of the road and the rubber and not of
-    // which car is on top of them. 40 m/s (144 km/h) is where it is already
-    // as loud as it should get in the mix; a Tesla at 250 km/h does not need
-    // to be 1.8× louder than a van at 130, it needs the same wall of noise.
-    tireSet(Math.min(1, Math.abs(game.car.speed) / 40), game.car.offroad ?? 0);
-    // …and over the top of both, the air. Fed raw m/s: audio.js owns where the
-    // wind starts (47 km/h) and where it is everything (223), because those are
-    // properties of moving through air rather than of this car.
-    roadWindSet(Math.abs(game.car.speed));
+    // Everything below is fed GROUND speed, not car.speed. car.speed is the
+    // component along the nose, and a car crossing a junction sideways out of a
+    // drift has almost none of it — the tyres would go quiet and the wind would
+    // drop at the exact moment both should be loudest. The engine above is the
+    // exception and correctly so: revs follow the wheels, which roll forwards.
+    const vg = game.car.vGround ?? Math.abs(game.car.speed);
+    // Tyre roll under the engine — asphalt or gravel, banded by speed inside
+    // audio.js. Fed raw m/s for the same reason engineSet is: only audio.js
+    // knows where its own band boundaries are.
+    tireSet(vg, game.car.offroad ?? 0);
+    // …and over the top of both, the air. audio.js owns where the wind starts
+    // (36 km/h) and where it is everything (223), because those are properties
+    // of moving through air rather than of this car.
+    roadWindSet(vg);
+    // …and the tyres letting go. driveStep measured the actual contact-patch
+    // scrub; audio.js turns it into a squeal on tarmac or a spray on dirt.
+    skidSet(game.car.slip01 ?? 0, game.car.offroad ?? 0);
   } else {
     player.update(dt, { input, camYaw, world });
   }
@@ -2628,9 +2751,15 @@ function stepGame(dt) {
   vehicles.focus = focus;
   // speed lines for whichever machine the player is actually in
   if (game.car) {
+    // The streaks are anchored to the AIR, so they have to be given the car's
+    // real velocity — nose vector times speed plus the sideways component.
+    // Without the second term a drifting car's speed lines still point down the
+    // bonnet while the car travels at 40° to it.
     const c = game.car, fx2 = -Math.sin(c.heading), fz2 = -Math.cos(c.heading);
+    const rx2 = Math.cos(c.heading), rz2 = -Math.sin(c.heading);
+    const lat = c._lat ?? 0;
     streaks?.update(dt, c.x, (c.mesh?.position.y ?? 0) + 0.9, c.z,
-      fx2 * c.speed, 0, fz2 * c.speed);
+      fx2 * c.speed + rx2 * lat, 0, fz2 * c.speed + rz2 * lat);
   } else if (game.jet) {
     // the jet's velocity is along its nose (it does not fly sideways), and the
     // vertical component matters here — a vertical climb should streak too
@@ -2645,8 +2774,27 @@ function stepGame(dt) {
   } else {
     streaks?.update(dt, 0, 0, 0, 0, 0, 0);
   }
+  // Rubber on the road. Fed the car or nothing at all — on foot it still has to
+  // be stepped, because the marks already down keep ageing whether or not
+  // anybody is driving, and it is what breaks every wheel's track so that
+  // getting out and back in cannot bridge a strip across the gap.
+  skids?.update(dt, game.car ?? null, world);
 
   updateCamera(dt);
+  // The city talks AFTER the camera, and that is not a preference. Bubbles are
+  // screen-referred sprites scaled off view distance, so a chatter pumped from
+  // its natural home next to peds.update() would size and fade every bubble
+  // against last frame's camera — the same one-frame lag viewerState() has to
+  // live with for the streaming cones, except here it is visible as a bubble
+  // that lags a hard corner. Speakers have already moved this frame (peds ran
+  // at :2650), so nothing else is stale.
+  if (_hornCd > 0) _hornCd -= dt;
+  chatter?.update(dt, {
+    camera, ears, player,
+    playerCar: game.car,
+    onFoot: !game.car && !game.heli && !game.jet && !trains?.riding,
+    cars: traffic?.cars,
+  });
   placeReticle();          // after the camera: a lagging sight reads as drift
   // the shadow rig parks on the camera, but its HEIGHTS must be anchored to
   // the real ground — this world lives at absolute elevation (~220 m ASL),
@@ -2985,6 +3133,12 @@ window.__atc = {
   // of inferring it from pops. A copy: the real record is mutated in place.
   viewer: () => { const v = viewerState(); return v && { ...v }; },
   get weapons() { return weapons; },
+  // The crowd and its mouth, for the same reason `weapons` is here: a harness
+  // has to be able to assert that a bubble EXISTS after a honk, not infer it
+  // from a screenshot. `_live` is the real array, mutated in place.
+  get peds() { return peds; },
+  get chatter() { return chatter; },
+  said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
   get interiors() { return world?.interiors; },
   get postfx() { return postfx; },
   get heli() { return heli; }, get clouds() { return clouds; },
