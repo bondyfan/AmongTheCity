@@ -270,12 +270,57 @@
 //      touched 0, the patrol still on the road at the end of it.
 //
 // WHAT A PATROL IS, since 'policie' is not in VEH.CAR_KINDS and adding one is
-// not this file's call: the stock octavia, painted fleet white, with a light
-// bar built here out of two shared boxes on the roof (see copAssets). That is
-// what a Czech police car is, and it means the roster, the crash meshes, the
+// not this file's call: the stock octavia, painted fleet white, wearing the
+// Policie ČR flank livery and a light bar, all built here (see copAssets). That
+// is what a Czech police car is, and it means the roster, the crash meshes, the
 // physics and the labels all keep working without knowing anything happened.
 // The bar hangs off the CAR and not off the schedule, so a patrol keeps its
 // lights after js/police.js or a player steals it out of the traffic.
+//
+// ==========================================================================
+// v11: "MUSÍ TO FAKT VYPADAT JAKO POLICEJNÍ AUTO."
+//
+// It did not. A patrol was PATROL_PAINT — 0xe9eae5, fleet white — plus a
+// 34 cm blue nub at each end of a roof bar. Photographed at 7 m that reads.
+// At 25 m in traffic it is a pale car among pale cars: THREE of the ten paints
+// an octavia draws from (config.js CAR_COLORS 0xd8d5ce, 0xc4c9cf, 0x8a9096)
+// are already off-white or grey, the bar was 16 cm of a 1.60 m silhouette, and
+// from the chase camera's usual 17° depression the pair of lamps presented
+// 0.10 m² of lit face. The player did not say "the bar is small". He said the
+// car does not look like a police car, which is a different complaint: at 25 m
+// you do not read details, you read a LIVERY — a big block of the wrong colour
+// in the right place on the flank. Every real cue we were missing was on the
+// side of the car, and the side of the car is what traffic shows you.
+//
+// So the flank gets what a real Policie ČR Octavia has and we did not: a
+// broad blue band across the doors, a thin yellow reflective stripe under it,
+// and POLICIE in white on the blue. Three cues, one strip of geometry, one
+// texture. See LIVERY_STS for how the strip is lofted onto the octavia's own
+// hull stations so it cannot leave the panel, and liveryMat for why the
+// lettering is ONE canvas for the whole force and not one per car.
+//
+// WHAT IT COSTS, since the brief asked for the number. Per patrol, over a
+// stock car: 4 Meshes and 1 Group — the bar plinth, its two lamps, and the
+// livery strip (both flanks in a single indexed BufferGeometry, so the band
+// is one draw call and not two). ZERO geometries, ZERO materials and ZERO
+// textures per car: 3 geometries (bar, lamp, livery), 4 materials (bar body,
+// lamp off, lamp on, livery) and 1 CanvasTexture exist for the whole force.
+// Counted, not asserted: a stock octavia traverses to 18 meshes / 11
+// geometries / 10 materials / 2 textures, a patrol to 22 / 14 / 13 / 3, and a
+// SECOND patrol built after it introduces exactly 0 new geometries and 0 new
+// materials. (13 mounted materials, not 14: both lamps hold the one `off`
+// until _tickSirens swaps one of them onto the one `on`.)
+//
+// The shared-asset claim is not a hope, it is copAssets' shape: `_C` is a
+// module-scope cache built on the FIRST patrol that takes a mesh and returned
+// by identity forever after, so _fitLightBar cannot allocate a second set
+// however many times it runs. The livery went into that same cache rather
+// than beside it precisely so there is one lifetime to reason about — a
+// client that never meets a police car still builds no canvas, and the six
+// parked units, the three ambient patrols and every pursuit js/police.js
+// spawns all point at the same three geometries. What DOES scale with the
+// fleet is 5 Object3D wrappers each, and that is irreducible: a Mesh is a
+// transform, and two patrols are in two places.
 //
 // DENSITY. A patrol needs a cell with real road on it (PATROL_MAJOR) that is
 // carrying ordinary traffic at all, so the traffic slider turns the police
@@ -612,11 +657,11 @@ const PATROL_VK_MIN = 0.86, PATROL_VK_VAR = 0.20;
 // WHAT A PATROL CAR IS, and why it is not a new vehicles.js kind. 'policie' is
 // not in VEH.CAR_KINDS and adding one is somebody else's file; _attach's
 // roster-drift guard would have silently turned every patrol into the roster's
-// first entry anyway. A Czech police car IS a white Octavia with a blue bar on
-// the roof, so that is exactly what we build: the stock octavia mesh, the
-// fleet white already in the paint vocabulary, and a light bar added here as
-// two shared boxes on the roof — three meshes, one geometry set for the whole
-// force, and no change to the roster.
+// first entry anyway. A Czech police car IS a white Octavia in blue-and-yellow
+// flank livery with a blue bar on the roof, so that is exactly what we build:
+// the stock octavia mesh, the fleet white already in the paint vocabulary, and
+// the livery and the bar added here — four meshes, one geometry set for the
+// whole force, and no change to the roster.
 const PATROL_KIND = 'octavia';
 const PATROL_PAINT = 0xe9eae5;
 // Octavia roof, from vehicles.js KIND.octavia.green (`sts = [z, yBase, yRoof]`,
@@ -625,9 +670,84 @@ const PATROL_PAINT = 0xe9eae5;
 // two numbers float the bar; they are here rather than in vehicles.js because
 // a light bar is traffic's idea, not the roster's.
 const BAR_Y = 1.44, BAR_Z = 0.14, BAR_W = 1.04;
+const BAR_H = 0.055;                   // the dark plinth the lamps ride on
+// THE LAMPS ARE THE BAR NOW. They used to be two 0.34 × 0.105 nubs at ±0.30,
+// which left 36 cm of the 1.04 m bar unlit in the middle and another 10 cm at
+// each end — i.e. a blue thing on a white roof, but not a bar. The chase
+// camera is what decides this: main.js parks it 6.6 m back and 2.4 m above a
+// point 1.1 m over the car, so you look DOWN on your own roof at 17.3°, and at
+// that angle a lamp presents (w·h·cos + w·d·sin) of lit face. The old pair
+// gave 0.101 m²; 0.47 × 0.135 × 0.185 at ±0.265 gives 0.173 m², +70 %, and it
+// leaves a 6 cm dark gap at the centre so the alternating flash still reads as
+// two lamps and not as one strobing slab. Still inside the roof: the octavia
+// greenhouse tops out at topW 0.68 → ±0.615, and the lamps stop at ±0.50. The
+// bar now stands 18.6 cm off the roof where it stood 15.8.
+const LAMP_W = 0.47, LAMP_H = 0.135, LAMP_D = 0.185, LAMP_X = 0.265;
 const SIREN_T = 0.22;                  // s per lamp — ~4.5 flashes/s across the bar,
                                        // which is what a real majáček does. Driven off
                                        // SHARED time, so two clients blink together.
+
+// ---- the flank livery: the cue that was missing --------------------------
+// A wrapped stripe is not a decal quad floating beside the car — it has to sit
+// ON a lofted, tapering flank or it peels off at the wings. So it is lofted
+// along the octavia's OWN hull stations, transcribed here from vehicles.js
+// KIND.octavia.hull.sts as [z, yLo, yHi, wFrac] (nose at −z, wFrac a fraction
+// of wid/2). Transcribed and not imported because KIND is private to
+// vehicles.js and exporting it is somebody else's file — the same trade BAR_Y
+// already makes. If the octavia hull is re-authored, these six rows float the
+// stripe exactly as those two numbers float the bar, and it only ever has to
+// fit PATROL_KIND.
+//
+// The run stops at the bumper corners (−1.95 / 2.10) rather than the hull ends
+// (−2.35 / 2.35): past those the loft is folding into the nose and tail caps,
+// where a band would wrap round the corner and read as a painted bumper.
+const LIVERY_STS = [
+  [-1.95, 0.18, 0.74, 0.93],
+  [-1.10, 0.16, 0.84, 0.99],
+  [-0.65, 0.16, 0.88, 1.00],
+  [0.60, 0.16, 0.90, 1.00],
+  [1.55, 0.16, 0.93, 0.97],
+  [2.10, 0.20, 0.90, 0.89],
+];
+const LIVERY_HALF = 1.81 / 2;          // KIND.octavia.wid / 2
+// WHERE THE BAND SITS, in the hull ring's own parameter space rather than in
+// metres. bodyHull() builds each station ring with the doorline at
+// yLo + (yHi−yLo)·yB (0.80) and the arch line at ·yA (0.34), and BETWEEN those
+// two the flank is exactly vertical — x is w·half at every height. Anything
+// inside [0.34, 0.80] is therefore on a planar strip of panel by construction,
+// at any station, whatever the belt does. Absolute metres would have been the
+// obvious choice and it is the wrong one: the octavia's belt climbs 19 cm from
+// the front wing to the rear, so a band at a fixed y is on the door at the
+// B-pillar and off the panel over the arch. Riding the ring is also what a
+// real wrap does — it follows the shoulder line.
+const LIVERY_F0 = 0.36, LIVERY_F1 = 0.80;
+// …and 1.6 cm proud of it, measured, not guessed. The flank already carries
+// two body-colour beams that stand off it: the doorline crease (vehicles.js
+// DETAIL.octavia, out to x = 0.917) and the door-handle stubs (out to 0.915),
+// against a widest-station flank at 0.905. At +0.006 the stripe would z-fight
+// nothing but the crease would draw a WHITE line straight through the middle
+// of POLICIE; +0.016 puts the band at 0.921 and swallows both wherever the
+// body is at full width, which is z −0.85..0.74 — the doors, which is where
+// the lettering goes. Aft of that the body tucks in under a crease that does
+// not, and the crease's last 0.9 m emerges through the blue, by 3 mm at the
+// rear door and 36 mm where it ends at z 1.65 — a white swage line, which is
+// what a swage line under a wrap looks like anyway. The
+// alternative — a constant-x band wide enough to swallow the crease
+// everywhere — stands 8 cm off the front wing and is a running board, not a
+// stripe. The handles emerging is not a defect at all: a real patrol has white
+// door handles sitting on the blue.
+const LIVERY_OUT = 0.016;
+// Policejní modrá, and the reflective yellow under it. Held as hex like every
+// other colour in this file (PATROL_PAINT, the lamp pair) and turned into CSS
+// where the canvas needs it — two spellings of one colour is how the fallback
+// material and the painted band end up disagreeing.
+const LIVERY_BLUE = 0x1750b5;
+const LIVERY_YEL = 0xf2cf12;
+const LIVERY_YEL_V = 0.17;             // bottom fraction of the band that is yellow
+const LIVERY_TEXT_U = 0.47;            // POLICIE's centre along the run — the middle
+                                       // of the crease-free window, not of the car
+const LIVERY_TEXT_MAX = 0.34;          // …and the widest slice of the run it may take
+const LIVERY_PX = 1024;                // canvas width; the height is DERIVED (liveryMat)
 
 // Czech speed defaults where the data carries no maxspeed, by road class: 130
 // is motorway law but 110 reads right at this fidelity, the rural 90 kicks in
@@ -848,28 +968,167 @@ function sigAssets() {
   return _S;
 }
 
-// ---- the light bar, on the same lazy terms as the poles -------------------
+// How long the stripe is, following the flank rather than the axis. This is
+// the denominator of every u below and of the canvas aspect, and measuring it
+// along z alone is only 0.17 % short overall — but 0.9 % short on the rear
+// wing segment alone, which is where the taper is 7.5° and where any error
+// shows as a stripe whose lettering creeps off-centre. It costs six square
+// roots at boot to be right. Pure arithmetic on LIVERY_STS, no allocation, and
+// called exactly twice (once by the loft, once by the canvas).
+function liveryRun() {
+  let run = 0;
+  for (let i = 1; i < LIVERY_STS.length; i++) {
+    const a = LIVERY_STS[i - 1], b = LIVERY_STS[i];
+    const dz = b[0] - a[0], dx = (b[3] - a[3]) * LIVERY_HALF;
+    run += Math.sqrt(dx * dx + dz * dz);
+  }
+  return run;
+}
+
+// The flank strip: BOTH sides in one indexed BufferGeometry, so a patrol pays
+// one draw call for its whole livery and not two.
+//
+// The loft is exact where it matters. bodyHull() splits each flank quad into
+// two triangles, so a point at ring fraction f between two stations is NOT in
+// general on the triangulated surface — but only its Y is affected: x depends
+// on the station index alone, so it interpolates identically either way. The
+// band therefore hugs the panel in the one axis a stripe can peel off in, and
+// the few millimetres of Y wobble just move the stripe a hair up or down.
+//
+// Normals are the flat flank normal (±1, 0, 0) rather than the true tapered
+// one. The taper never exceeds 7.5° (the rear wing, the worst station pair),
+// and matching the panel's own near-vertical normal is the POINT: a decal that
+// shades differently from the paint under it reads as a separate object stuck
+// to the car, which is exactly the thing a livery must not do.
+function liveryGeo() {
+  const n = LIVERY_STS.length, run = liveryRun();
+  const pos = [], uvs = [], nor = [], idx = [];
+  for (let s = -1; s <= 1; s += 2) {
+    const base = pos.length / 3;
+    let along = 0;
+    for (let i = 0; i < n; i++) {
+      const st = LIVERY_STS[i];
+      if (i) {
+        const p = LIVERY_STS[i - 1];
+        const dz = st[0] - p[0], dx = (st[3] - p[3]) * LIVERY_HALF;
+        along += Math.sqrt(dx * dx + dz * dz);
+      }
+      const x = s * (st[3] * LIVERY_HALF + LIVERY_OUT);
+      const yLo = st[1], span = st[2] - st[1];
+      pos.push(x, yLo + span * LIVERY_F0, st[0], x, yLo + span * LIVERY_F1, st[0]);
+      nor.push(s, 0, 0, s, 0, 0);
+      // MIND THE u DIRECTION. Seen from outside, the left flank's screen-right
+      // is +z and the right flank's is −z, so a u that ran with z on both sides
+      // would hand one of them a mirrored POLICIE. js/meshes.js:markWall walks
+      // into the identical trap on shop fascias and says so at length; the
+      // window atlas gets away with it because windows are symmetric and text
+      // is not.
+      const u = s < 0 ? along / run : 1 - along / run;
+      uvs.push(u, 0, u, 1);
+    }
+    for (let i = 0; i < n - 1; i++) {
+      // lo/hi at station i, then at i+1. Winding is per side: the two flanks
+      // face opposite ways, so one order would leave half the livery
+      // backface-culled — invisible from the street it is meant to be read from.
+      const a = base + i * 2, b = a + 1, c = a + 2, d = a + 3;
+      if (s < 0) idx.push(a, c, d, a, d, b);
+      else idx.push(a, b, d, a, d, c);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.setIndex(idx);
+  return g;
+}
+
+// ONE texture for the whole force, and the reason it is a texture at all.
+// js/nametags.js rasterises text too, and it is the wrong tool here: a tag is
+// a Sprite with its OWN material because every player's name differs, so a
+// nametag-shaped livery is a canvas, a texture and a material per patrol —
+// nine of them parked and driving before a pursuit even starts, and disposed
+// and rebuilt every time a schedule rolls over. js/meshes.js:brandMarkMat is
+// the right prior art instead: every Kaufland in the region shares one
+// 1024-wide canvas out of a module-scope Map, because every Kaufland says the
+// same word. So does every police car.
+//
+// The canvas HEIGHT is derived from the band's own proportions rather than
+// picked, so a glyph drawn round on the canvas arrives round on the car. Hard
+// aspect ratios are how a wordmark ends up stretched the day somebody retunes
+// LIVERY_F0/F1 and nothing else looks wrong enough to notice.
+//
+// No <canvas> — a headless import, or a null 2d context under memory pressure
+// — falls back to flat blue rather than uploading the void (brandMarkMat's own
+// rule). The band is the cue that carries at 25 m; the lettering is the one
+// that carries at 10, and losing it is survivable in an environment that by
+// definition has no screen.
+function liveryMat() {
+  const flat = () => new THREE.MeshLambertMaterial({ color: LIVERY_BLUE });
+  if (typeof document === 'undefined') return flat();
+  const cv = document.createElement('canvas');
+  const w = LIVERY_PX;
+  // the door station — the widest, and where POLICIE lands
+  const band = (LIVERY_STS[3][2] - LIVERY_STS[3][1]) * (LIVERY_F1 - LIVERY_F0);
+  const h = Math.max(16, Math.round(w * band / liveryRun()));
+  cv.width = w; cv.height = h;
+  const g = cv.getContext('2d');
+  if (!g) return flat();
+  const css = (hex) => '#' + hex.toString(16).padStart(6, '0');
+  // v = 0 is the BOTTOM of the band and CanvasTexture flips Y by default, so
+  // canvas row 0 is the top of the stripe: blue first, yellow last.
+  const yel = Math.round(h * (1 - LIVERY_YEL_V));
+  g.fillStyle = css(LIVERY_BLUE);
+  g.fillRect(0, 0, w, yel);
+  // Reflexní žlutá along the bottom edge. Thin on purpose — it is the accent
+  // that tells you the blue is a livery and not a paint job, and a fat one
+  // turns the car into a breakdown truck.
+  g.fillStyle = css(LIVERY_YEL);
+  g.fillRect(0, yel, w, h - yel);
+  g.fillStyle = '#ffffff';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  let size = Math.round(h * 0.80);
+  g.font = `bold ${size}px Arial, Helvetica, sans-serif`;
+  // A font fallback that measures wider than Arial would push the word out of
+  // the crease-free window; shrink to fit rather than let it wander, exactly
+  // as brandMarkMat does for "Penny Market".
+  const max = LIVERY_TEXT_MAX * w;
+  const tw = g.measureText('POLICIE').width;
+  if (tw > max) {
+    size = Math.max(8, Math.floor(size * max / tw));
+    g.font = `bold ${size}px Arial, Helvetica, sans-serif`;
+  }
+  g.fillText('POLICIE', LIVERY_TEXT_U * w, yel / 2);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;                    // a flank is read at grazing angles
+  return new THREE.MeshLambertMaterial({ map: tex });
+}
+
+// ---- the light bar and the livery, on the same lazy terms as the poles ----
 // One geometry + material set for every patrol car in the country, built the
 // first time one actually takes a mesh — headless tests never touch THREE, and
-// a client that never meets a police car never pays for one. A bar "flashes"
-// by swapping the material reference on two boxes, exactly as a traffic light
-// changes: no per-frame allocation, and the swap only happens on the ~0.22 s
-// state flip rather than every frame.
+// a client that never meets a police car never pays for one, canvas included.
+// A bar "flashes" by swapping the material reference on two boxes, exactly as
+// a traffic light changes: no per-frame allocation, and the swap only happens
+// on the ~0.22 s state flip rather than every frame.
 let _C = null;
 function copAssets() {
   if (_C) return _C;
-  const bar = new THREE.BoxGeometry(BAR_W, 0.055, 0.19);
-  bar.translate(0, BAR_Y + 0.026, BAR_Z);        // sitting ON the roof, slightly sunk
-  const lamp = new THREE.BoxGeometry(0.34, 0.105, 0.165);
+  const bar = new THREE.BoxGeometry(BAR_W, BAR_H, 0.19);
+  bar.translate(0, BAR_Y + BAR_H / 2 - 0.004, BAR_Z);   // sitting ON the roof, slightly sunk
+  const lamp = new THREE.BoxGeometry(LAMP_W, LAMP_H, LAMP_D);
   _C = {
-    bar, lamp,
+    bar, lamp, livery: liveryGeo(),
     barMat: new THREE.MeshLambertMaterial({ color: 0x24272c }),
     // dark navy when idle so the bar reads as a bar and not as a roof rack…
     off: new THREE.MeshLambertMaterial({ color: 0x18294d }),
     // …and overbright like the car lights and the green lamp (×2.2) so the
     // bloom pass bites at night. Blue only: Czech law, and it is also what
-    // makes a patrol legible at 200 m without a livery texture.
+    // makes a patrol legible at 200 m, where the livery has stopped resolving.
     on: new THREE.MeshLambertMaterial({ color: 0x4c78ff, emissive: 0x2a4cff, emissiveIntensity: 2.2 }),
+    liveryMat: liveryMat(),
   };
   return _C;
 }
@@ -920,6 +1179,15 @@ export class Traffic {
     // read-only to us and never touched by the follow bookkeeping.
     this.actors = null;
     this.blockers = null;   // parked hulls from main.js — see _obst below
+    // How thick the police are on the ground, 0..1, from the settings panel —
+    // the same shape as maxCars above it. It is a SETTING and not a constant
+    // because the honest answer to "how many patrols should a regional Czech
+    // town have" turned out to be a preference and not a fact: the swept
+    // default reads as a police force to nobody, and the value that reads as
+    // one to a player reads as a checkpoint to the sweep. Two rounds of "I
+    // cannot see any police" is enough evidence that this belongs to the
+    // person playing it. null = use PATROL_P.
+    this.patrolP = null;
     this.urbanAt = null;    // (x,z) -> 0.15..1 settlement factor, wired by main.js
     // (x, z) — a car in this city just leaned on its horn. Single-slot sink,
     // the same shape peds.onPedHit uses, and fired from BOTH honk sites below.
@@ -1949,7 +2217,7 @@ export class Traffic {
             const ph = rnd01(hash32(ss, 7)) * TRIP_T;
             const gen = Math.floor((wt + ph) / TRIP_T);
             const t0 = gen * TRIP_T - ph;
-            if (wt >= t0 && rnd01(hash32(ss, gen, PATROL_SALT)) < PATROL_P) {
+            if (wt >= t0 && rnd01(hash32(ss, gen, PATROL_SALT)) < (this.patrolP ?? PATROL_P)) {
               const reach = Math.min(ROUTE_MAX, (wt - t0) * V_REACH);
               if (cd - reach <= R) {
                 if (budget-- <= 0) return;
@@ -2213,10 +2481,11 @@ export class Traffic {
     return car;
   }
 
-  // Bolt the bar on. Silently does nothing when the car's mesh is not a real
-  // THREE.Object3D — the headless fixtures hand back a plain object with a
-  // stub .position, and a patrol without a bar is exactly as testable as one
-  // with it.
+  // Bolt the bar and the livery on. Silently does nothing when the car's mesh
+  // is not a real THREE.Object3D — the headless fixtures hand back a plain
+  // object with a stub .position, and a patrol without a bar is exactly as
+  // testable as one with it. Nothing below this line runs headless, which is
+  // also what keeps copAssets' canvas out of `node --test`.
   _fitLightBar(car) {
     const m = car.mesh;
     if (!m || typeof m.add !== 'function') return;
@@ -2224,14 +2493,38 @@ export class Traffic {
     const g = new THREE.Group();
     const base = new THREE.Mesh(A.bar, A.barMat);
     const l = new THREE.Mesh(A.lamp, A.off), r = new THREE.Mesh(A.lamp, A.off);
-    l.position.set(-0.30, BAR_Y + 0.105, BAR_Z);
-    r.position.set(0.30, BAR_Y + 0.105, BAR_Z);
+    const lampY = BAR_Y + BAR_H + LAMP_H / 2 - 0.004;   // standing on the plinth
+    l.position.set(-LAMP_X, lampY, BAR_Z);
+    r.position.set(LAMP_X, lampY, BAR_Z);
+    // The stripe is PAINT, so it must not cast: a band 1.6 cm proud of the
+    // panel casting onto the panel it covers is shadow acne with extra steps,
+    // and the shadow would be hidden by the thing that cast it anyway. It does
+    // receive, so a bridge's shade crosses the blue exactly as it crosses the
+    // white either side of it.
+    const livery = new THREE.Mesh(A.livery, A.liveryMat);
+    livery.receiveShadow = true;
     // vehicles.add() has already run its castShadow traverse by the time we get
     // here, so the bar has to arrange its own shadow or it floats.
-    for (const o of [base, l, r]) { o.castShadow = true; o.updateMatrix(); o.matrixAutoUpdate = false; }
-    g.add(base, l, r);
+    base.castShadow = l.castShadow = r.castShadow = true;
+    base.updateMatrix(); base.matrixAutoUpdate = false;
+    l.updateMatrix(); l.matrixAutoUpdate = false;
+    r.updateMatrix(); r.matrixAutoUpdate = false;
+    livery.updateMatrix(); livery.matrixAutoUpdate = false;
+    g.add(base, l, r, livery);
     g.updateMatrix(); g.matrixAutoUpdate = false;   // the CAR moves; the bar never moves on it
-    m.add(g);
+    // …but the SHELL moves on the car, and that is a different parent. The
+    // group used to hang off car.mesh, whose origin is on the road; vehicles.js
+    // puts every panel inside userData.body and then rolls it up to 0.05 rad in
+    // a corner, pitches it under braking, and drops it 20 cm on a wreck. On
+    // car.mesh a livery 1.6 cm proud of the flank sinks into the door on one
+    // side of every corner and floats 3 cm off it on the other, and a written-
+    // off patrol wears its stripe at window height. Parented to the shell, the
+    // static local matrix above is still exactly right — three multiplies it by
+    // whatever the body is doing this frame — so matrixAutoUpdate stays off and
+    // the bar stops sliding off a rolling roof into the bargain. Falls back to
+    // the mesh itself for any car that has no shell to hang on.
+    const shell = m.userData?.body;
+    (shell && typeof shell.add === 'function' ? shell : m).add(g);
     car._cop = { l, r, st: 0 };
   }
 

@@ -2398,6 +2398,7 @@ function applySettings(s, key) {
   renderer.setPixelRatio(s.resScale === 2 ? Math.min(window.devicePixelRatio, 2) : s.resScale);
   if (world) world.viewChunks = s.viewChunks;
   if (traffic) traffic.maxCars = s.traffic;
+  if (traffic) traffic.patrolP = s.police ?? 0.70;
   if (peds) peds.max = s.peds ?? 34;
   // Turning the crowd's voice off must silence what is ALREADY in the air, not
   // just stop the next line — a bubble left hanging over a man's head after

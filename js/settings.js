@@ -56,7 +56,7 @@ const NEW_ON = ['ao', 'ortho', 'grass'];
 // being scenery), the other two only say how a line is delivered.
 const DEFAULTS = { preset: 'medium', ...PRESETS.medium, mouseLook: true, volume: 0.8,
   showFps: false, showNames: true, nameDist: NAME_RANGES[1],
-  chatter: true, chatBubbles: true, chatVoice: true };
+  chatter: true, chatBubbles: true, chatVoice: true, police: 0.70 };
 
 // The live settings object — handed out by reference so main can keep one pointer to it.
 let S = { ...DEFAULTS };
@@ -319,6 +319,10 @@ export function initSettings(apply) {
     toggleRow('mblur', 'Motion blur (rozmaz při rychlosti)'),
     toggleRow('flare', 'Lens flare (odlesky od slunce)'),
     selectRow('peds', 'Chodci', [[0, 'Žádní'], [12, 'Málo'], [34, 'Běžně'], [60, 'Rušno']]),
+    // How many police cars are on the streets. A knob and not a constant: see
+    // Traffic.patrolP for why this ended up being the player's call.
+    selectRow('police', 'Policejní hlídky', [[0, 'Žádné'], [0.30, 'Málo'],
+      [0.70, 'Běžně'], [1.30, 'Hodně']]),
     // Interiors stream only around a walking player, so the cost is bounded —
     // but on a weak machine the plan+geometry build is the one hitch left, and
     // this is the switch that removes it. Wrecked buildings stay wrecked.
