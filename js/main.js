@@ -2736,7 +2736,26 @@ async function boot() {
       engineStop();
       carAudioStop();
     }
-    player.inCar = null;
+    // LET GO OF THE CAR PROPERLY. `player.inCar = null` was not enough and the
+    // symptom was the worst kind: "objeví se u nemocnice, ale nemá tělo, může
+    // chodit, ale je jenom kamera". player.js parents the avatar INTO the
+    // vehicle when you sit down (`carrier.add(this.mesh)`, player.js:458) and
+    // only `_scene.add(this.mesh)` puts it back — so nulling the field by hand
+    // left the body sitting in the car it died in while the camera flew to the
+    // hospital alone. setInCar(null) is that file's own documented interruption
+    // fallback: it releases the seat, re-parents the mesh into the scene,
+    // stands the body up, relaxes the limbs and shows it again. It is a no-op
+    // when you died on foot.
+    //
+    // The two half-finished animations have to go with it: dying mid-walk-up
+    // to a door, or mid-slide out of one, leaves a state machine that will
+    // keep driving `pos` after the respawn has moved it.
+    player.boarding = null;
+    player.exiting = null;
+    if (player.inCar) player.setInCar(null);
+    // …and a train hides the avatar outright (trains.js:1004) rather than
+    // parenting it, so that one is a visibility flag and not a seat.
+    if (trains?.riding) { trains.riding = null; player.mesh.visible = true; }
     fpView = false;
     $id('speedo').classList.add('hidden');
     hideCarName();
