@@ -4508,10 +4508,18 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     }
   }
 
-  // -- green/paved fills: only on the flat ground — the photo already shows
-  // every lawn and parking lot, painting solid color on top would undo it --
+  // -- green/paved fills. Under the aerial photo these normally stand down:
+  // the photograph already shows every lawn and forecourt, at a fidelity flat
+  // colour cannot touch, and painting over it throws that away.
+  //
+  // A CAR PARK is the exception, and it is not a close call. The orthophoto was
+  // flown on one particular morning with one particular set of cars standing in
+  // it, so the lot arrives with cars baked into the ground — and then
+  // parkinglots.js parks its own cars on top of them. Two cars to a bay, one of
+  // them a smear, and no asphalt anywhere between. A surface the player drives
+  // and parks on has to be a real surface, so this one is worth the photograph.
   const scatter = mats.trees !== false && !shell && !roadsOnly;
-  if (!orthoGround && !shell && !roadsOnly) {
+  if (!shell && !roadsOnly) {
     // A wood keeps its fill (the trees don't close ranks, and a bare base plane
     // between the trunks would be worse) but it goes to forest-floor tone —
     // meadow green glowing through a canopy is exactly what made these read as
@@ -4519,9 +4527,11 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     const greenOf = (f) => (scatter && WOOD_TYPES.has(f.t) ? FOREST_FLOOR
       : COLORS.green[f.t] ?? (WOOD_TYPES.has(f.t) ? COLORS.green.wood : COLORS.green.grass));
     const polyKinds = [
-      [cell.green, LAYER_Y.green, greenOf, surfOfGreen],
+      [cell.green, LAYER_Y.green, greenOf, surfOfGreen,
+        () => !orthoGround],
       [cell.paved, LAYER_Y.paved,
-        (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved],
+        (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved,
+        (f) => !orthoGround || f.t === 'parking'],
     ];
     // The drivable decks a fill must stay under — from EVERY chunk the fill
     // reaches, not just this one. A fill is drawn whole from its home chunk,
@@ -4554,8 +4564,8 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       }
       return out;
     };
-    for (const [list, y, pick, kind] of polyKinds) for (const f of list) {
-      if (f._home !== key || f.o.length < 3) continue;
+    for (const [list, y, pick, kind, want] of polyKinds) for (const f of list) {
+      if (!want(f) || f._home !== key || f.o.length < 3) continue;
       yield;
       // A fill that touches a drivable corridor is tessellated FINER than the
       // corridor is wide. The clamp below works on vertices, and the default
@@ -4577,7 +4587,10 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // merged rectangles per chunk, through the very same tess-and-drape path
     // as every other fill — at LAYER_Y.inferred, under everything OSM said and
     // under every levelled road, which is the entire point of the layer.
-    if (mats.ground) {
+    // …but the classifier's guess at sealed ground stays down under the photo.
+    // Unlike a car park it has nothing the photograph gets wrong — it exists
+    // precisely to stand in for a photograph that is not there.
+    if (!orthoGround && mats.ground) {
       const drvR = cell.roads
         .filter((r) => !r.br && r.p?.length > 1)
         .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25,
