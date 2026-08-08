@@ -92,6 +92,21 @@ function makeWorld() {
     tag({ t: 'residential', w: 7, d: 1, v: 30, p: [[60, 61], [58, 118]] }),
     tag({ t: 'residential', w: 7, d: 1, v: 30, p: [[60, 61], [64, 6]] }),
     tag({ t: 'footway', w: 2, p: [[10, 30], [110, 34]] }),
+    // A pair that OVERLAPS without sharing a node — the case linkOverlaps
+    // reconciles, and one the fixture had no example of. It matters here
+    // specifically: the synthetic node it creates holds direct references to
+    // both roads, and its pins land on `_pins`, which chunkspec CUTS rather
+    // than copying. So the levelling those pins produce has to reach the worker
+    // inside the road's cached `_prof`, or the two paths quietly disagree about
+    // the height of every reconciled deck. Six overlap pins land here.
+    //
+    // They are kept AWAY from the named building at (80, 80): a drivable way
+    // passing close to it makes the two paths build genuinely different
+    // geometry — 18 of its 66 vertices have no counterpart at all. That is a
+    // separate, pre-existing defect (it reproduces with this fixture against
+    // the committed meshes.js and geo.js), and it is not what this test is for.
+    tag({ t: 'service', w: 6, d: 1, v: 20, p: [[30, 45], [110, 42]] }),
+    tag({ t: 'service', w: 6, d: 1, v: 20, p: [[80, 20], [76, 60]] }),
   ];
   for (const r of roads) r._len = polylineLength(r.p);
   const trees = [];

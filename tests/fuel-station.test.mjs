@@ -72,3 +72,71 @@ test('the forecourt sits ON the ground, not at sea level', () => {
   assert.ok(Math.abs(low - GROUND) < 1.5,
     `the lowest vertex is at ${low.toFixed(1)} m, the ground is ${GROUND} m`);
 });
+
+// ---- a forecourt stands BESIDE the road, never across it -------------------
+// A station is one OSM node, and that node lands wherever the surveyor put it —
+// the shop, the entrance, or a few metres off the kerb. The forecourt built
+// around it is 22 m across, so a node 2.5 m from the kerb laid its apron, a
+// pump island and a canopy column out in the live carriageway. The road did not
+// lose to it — the road ribbon is levelled and drawn on its own deck — but the
+// player drove through a petrol station standing in the middle of the street.
+//
+// The price totem is the same problem inverted: it is SUPPOSED to be out by the
+// road, so once the forecourt slid back it walked into the carriageway on its
+// own, and on a node mapped on the far side it faced away from the road it
+// advertises to.
+const ROAD_Z = 60, ROAD_W = 9;
+const withRoad = (nodeZ) => build(
+  [{ t: 'fuel', p: [60, nodeZ], n: 'Benzina' }],
+  [{ d: 1, t: 'primary', w: ROAD_W, v: 50, p: [[0, ROAD_Z], [120, ROAD_Z]] }]);
+
+const allVerts = (group) => {
+  const out = [];
+  for (const ch of group?.children ?? []) {
+    const p = ch.geometry?.attributes?.position;
+    if (!p) continue;
+    for (let i = 0; i < p.count; i++)
+      out.push([p.getX(i) + group.position.x, p.getY(i) + group.position.y,
+        p.getZ(i) + group.position.z]);
+  }
+  return out;
+};
+// vertices in the carriageway that belong to the station rather than the road
+const intruding = (nodeZ) => {
+  const bare = build([], [{ d: 1, t: 'primary', w: ROAD_W, v: 50,
+    p: [[0, ROAD_Z], [120, ROAD_Z]] }]);
+  const kerb = ([x, y, z]) => x > 15 && x < 105 && y > GROUND - 1 && y < GROUND + 8
+    && Math.abs(z - ROAD_Z) < ROAD_W / 2 - 0.2;
+  return allVerts(withRoad(nodeZ).group).filter(kerb).length
+    - allVerts(bare.group).filter(kerb).length;
+};
+
+test('no part of the station is left standing in the carriageway', () => {
+  for (const [nodeZ, where] of [
+    [ROAD_Z + 7, '2.5 m from the kerb'],
+    [ROAD_Z + 2, 'almost on the road itself'],
+    [ROAD_Z - 6, 'on the far side'],
+    [ROAD_Z + 40, 'well clear'],
+  ]) {
+    const n = intruding(nodeZ);
+    assert.equal(n, 0, `a node ${where} put ${n} vertices of the forecourt `
+      + 'inside the carriageway');
+  }
+});
+
+test('…and the totem still stands at the kerb, on the road side', () => {
+  // the panel is at 4.0–6.2 m; nothing else on the forecourt reaches that height
+  const totemDist = (nodeZ) => {
+    const t = allVerts(withRoad(nodeZ).group)
+      .filter(([, y]) => y > GROUND + 5.5 && y < GROUND + 6.5);
+    assert.ok(t.length, 'the totem is not there at all');
+    return Math.min(...t.map(([, , z]) => Math.abs(z - ROAD_Z)));
+  };
+  for (const nodeZ of [ROAD_Z + 7, ROAD_Z + 2, ROAD_Z - 6]) {
+    const d = totemDist(nodeZ);
+    assert.ok(d > ROAD_W / 2, `the totem is ${d.toFixed(1)} m from the centreline — `
+      + `inside the ${ROAD_W / 2} m carriageway`);
+    assert.ok(d < ROAD_W / 2 + 4, `the totem is ${d.toFixed(1)} m out — `
+      + 'too far back to read from the road');
+  }
+});

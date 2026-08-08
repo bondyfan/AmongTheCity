@@ -31,6 +31,9 @@ import * as vitals from './vitals.js';
 import * as fuel from './fuel.js';
 import * as statusbar from './statusbar.js';
 import { PRICE, pumpBrand, pumpPrice, kc2 } from './prices.js';
+import { Combat } from './combat.js';
+import * as wanted from './wanted.js';
+import { Police } from './police.js';
 import { ChatBubbles } from './chatbubbles.js';
 import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
@@ -114,7 +117,12 @@ const HOSPITAL = { x: 2291, z: 295 };
 
 // Reused across every stepGame — see the note at its use site.
 const _vitCtx = { car: null, heli: null, jet: null, player: null, onFoot: true };
+const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null };
+const _wntCtx = { x: 0, z: 0, onFoot: true, car: null, police: null };
+const _polCtx = { x: 0, z: 0, car: null };
 
+let combat = null;       // fists, and what falls out of people — js/combat.js
+let police = null;       // the patrol that wants you — js/police.js
 let chatter = null;      // who says what, and when — js/chatter.js
 let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
@@ -1203,6 +1211,57 @@ input.onKey('KeyH', () => {
   chatter?.honk(game.car.x, game.car.z);
 });
 
+// ---------- the fist ----------
+// Melee is a PRESS, not a hold: input.js exposes attackHeld (left mouse OR
+// Space OR the touch button) and takeLeftPressed() for the edge. combat.js
+// rate-limits a held button itself, so this can pass both through and let it
+// decide — which is what makes tapping and holding feel the same.
+//
+// It is guarded on being on foot rather than on !game.car alone, because a
+// PASSENGER has no game.car and punching from the seat would be a man
+// windmilling through the roof.
+function combatInput(dt) {
+  if (game.mode !== 'play' || !combat) return;
+  const onFoot = !game.car && !game.heli && !game.jet && !player.inCar && !trains?.riding;
+  const pressed = input.takeLeftPressed();
+  if (!onFoot) return;
+  if (pressed || input.keys.has('Space')) combat.strike();
+}
+
+// ---------- the stars ----------
+// Driven from here rather than from statusbar.js because the wanted level
+// arrived a slice later than that module did, and reaching into it from
+// outside would have been worse than the six lines below. DOM writes only on
+// CHANGE — this runs inside stepGame, which can go three times a frame.
+let _starsShown = -1, _huntedShown = null;
+function updateStars() {
+  const el = $id('wanted');
+  if (!el) return;
+  const n = wanted.stars();
+  if (n !== _starsShown) {
+    const was = _starsShown;
+    _starsShown = n;
+    el.classList.toggle('hidden', n <= 0);
+    const kids = el.children;
+    for (let i = 0; i < kids.length; i++) {
+      kids[i].classList.toggle('on', i < n);
+      kids[i].classList.toggle('off', i >= n);
+    }
+    // Only a RISE announces itself. Losing a star is a relief, not an event,
+    // and flashing on the way down would read as being caught again.
+    if (n > was && was >= 0) {
+      el.classList.remove('rise');
+      void el.offsetWidth;            // restart the animation, not queue it
+      el.classList.add('rise');
+    }
+  }
+  const hunted = wanted.seen();
+  if (hunted !== _huntedShown) {
+    _huntedShown = hunted;
+    el.classList.toggle('hunted', hunted);
+  }
+}
+
 // ---------- F: the pump ----------
 // Every fuel POI that has streamed in, and nothing else. `city.pois` is a FLAT
 // array that geo.js never bucketizes and never evicts (its own comment says
@@ -2204,7 +2263,14 @@ renderer.domElement.addEventListener('click', () => {
   chatter?.preload();
   if (game.mode !== 'play') return;
   if (document.body.dataset.panelOpen) return;
-  if (getSettings().mouseLook && !input.locked) renderer.domElement.requestPointerLock();
+  if (getSettings().mouseLook && !input.locked) {
+    renderer.domElement.requestPointerLock();
+    // Swallow THIS press. input.js sets leftPressed on a window-level mousedown
+    // (input.js:112), so the very click that acquires pointer lock also arrives
+    // at whatever reads the attack button — you would throw a punch every time
+    // you clicked back into the game after opening the settings panel.
+    input.takeLeftPressed();
+  }
 });
 window.addEventListener('keydown', () => initAudio(), { once: true });
 
@@ -2388,10 +2454,30 @@ async function boot() {
     if (v > 3) sfxAt(voiceOf(p.pid ?? 0).male ? 'scream_male' : 'scream_female',
       Math.min(1, 0.5 + v * 0.05), p.x, p.z, 180, 0.25);
     chatter?.pedHit(p, v);
+    // ONE DEAD PEDESTRIAN IS ONE CRIME. pedestrians.js fires BOTH hooks on a
+    // lethal hit — onPedHit and then onPedKilled — and charging heat in each
+    // would bill 34 + 52 for one body. wanted.js merges them itself: a second
+    // charge inside its COINCIDE window pays only the ESCALATION, so
+    // hit-then-kill costs 52 and not 86.
+    //
+    // ONLY A VEHICLE, THOUGH. hurt() is now the door for FISTS as well, so this
+    // hook fires on every punch too — and combat.js has already charged that
+    // punch as `rvačka`. Charging `sražení chodce` on top billed one jab twice
+    // and put four stars over a bare-handed street fight that should have been
+    // two. `p.cause` is what the blow said it was.
+    // …and only when it was YOUR car. p.by is the vehicle the blow came from,
+    // so an AI Octavia mowing somebody down two streets away no longer hands
+    // the player a star for an accident they were not part of.
+    if (p.by && p.by === game.car) wanted.add('srazeni');
   };
   peds.onPedKilled = (p) => {
     sfxAt('crowd_panic', 0.7, p.x, p.z, 200, 4);
     chatter?.bang(p.x, p.z, 26);
+    // Same rule as the hit above: a killing is only YOURS if your car did it,
+    // or if you did it with your hands — and in that second case combat.js has
+    // already raised 'zabiti' through onCrime, so charging again here would be
+    // the double bill this hook was just fixed for.
+    if (p.by && p.by === game.car) wanted.add('zabiti');
   };
 
   // ---- the city gets a voice (js/chatter.js + js/chatbubbles.js) ----
@@ -2499,6 +2585,18 @@ async function boot() {
     };
     warm();
   });
+
+  // ---- fists, and the people who mind ----
+  combat = new Combat({ peds, chatter, wallet, audio: { sfxAt } });
+  // A landed punch and a killing one are two different crimes, and combat.js
+  // is the only thing that can tell them apart.
+  combat.onCrime((kind, x, z) => {
+    wanted.add(kind);
+    // Everyone nearby saw it. peds.panic is chained into chatter.bang in this
+    // file already, so the shouting comes for free.
+    peds.panic(x, z, 18);
+  });
+  police = new Police({ traffic, vehicles, wanted, city, scene });
 
   // ---- the body, the wallet and the tank ----
   statusbar.init();
@@ -2943,6 +3041,19 @@ function stepGame(dt) {
   _vitCtx.player = player;
   _vitCtx.onFoot = !game.car && !game.heli && !game.jet && !player.inCar && !trains?.riding;
   vitals.update(dt, _vitCtx);
+  // Fists first: a swing that lands this step is a crime the wanted level
+  // should already know about when it runs two lines below.
+  _cbtCtx.player = player; _cbtCtx.onFoot = _vitCtx.onFoot;
+  _cbtCtx.camYaw = camYaw; _cbtCtx.input = input;
+  combat?.update(dt, _cbtCtx);
+  const _eyes = game.car ?? player.pos;
+  _wntCtx.x = _eyes.x; _wntCtx.z = _eyes.z;
+  _wntCtx.onFoot = _vitCtx.onFoot; _wntCtx.car = game.car; _wntCtx.police = police;
+  wanted.update(dt, _wntCtx);
+  _polCtx.x = _eyes.x; _polCtx.z = _eyes.z; _polCtx.car = game.car;
+  police?.update(dt, _polCtx);
+  combatInput(dt);
+  updateStars();
   // Only a car a HUMAN is driving burns — fuel.burn refuses anything with an
   // .ai, so the traffic schedule can never be stranded by a system it does not
   // know about.
@@ -3291,7 +3402,10 @@ window.__atc = {
   // the moment the file has been hot-reloaded (it serves `vitals.js?t=…` to
   // the page and plain `vitals.js` to you). An hour went into a bug that was
   // only ever two copies of the same module disagreeing.
-  vitals, wallet, fuel, statusbar,
+  vitals, wallet, fuel, statusbar, wanted,
+  get combat() { return combat; },
+  get police() { return police; },
+  get traffic() { return traffic; },
   said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
   get interiors() { return world?.interiors; },
   get postfx() { return postfx; },

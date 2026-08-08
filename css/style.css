@@ -237,8 +237,8 @@ html, body { overscroll-behavior: none; touch-action: none; }
 
 
 /* ==========================================================================
-   STATUS HUD — the time, the money, the blood, the fuel, and the red that
-   says you are about to lose all four.
+   STATUS HUD — the time, the money, the blood, the stars, the fuel, and the
+   red that says you are about to lose all five.
 
    WHY A COLUMN, AND WHY THE CLOCK MOVED. Every readout this game already has
    is pinned to a rail of its own: the clock top right, the speedo bottom
@@ -278,11 +278,12 @@ html, body { overscroll-behavior: none; touch-action: none; }
    ---- NOTE FOR js/settings.js, WHICH IS NOT MINE TO EDIT ----
    #atc-gear is injected from inside that module at `top: 44px; right: 12px`
    (js/settings.js:116). The stack below occupies the top-right rail from 12px
-   down to 80px (measured, at the desktop sizes; 12–70px on the phone
+   down to 100px (measured, at the desktop sizes; 12–89px on the phone
    breakpoint), and the ± ticker animates in the band immediately to its left,
    so the gear now lands on the balance and eats the last segment of the health
-   bar with it. IT MUST MOVE TO top: 120px — 40px of clearance, which is what
-   the bars need if they ever grow a third row.
+   bar with it. IT MUST MOVE TO top: 120px — which is still the right number:
+   the third row this note anticipated has since arrived (#wanted, five stars,
+   +20px), and 120px clears it with 20px to spare.
    That belongs in settings.js. Writing `#atc-gear { top: 120px !important }`
    here would fix the symptom and leave two files disagreeing about where the
    button is, which is worse than the collision.
@@ -441,6 +442,176 @@ html, body { overscroll-behavior: none; touch-action: none; }
 #vitals.crit .vt-hp > i, .vt-hp.crit > i { animation: hpPulse 0.52s ease-in-out infinite; }
 @keyframes hpPulse { 50% { opacity: 0.5; } }
 
+/* ---- hledanost: five stars ----
+
+   WHY FIVE SLOTS AND NOT A GROWING ROW. A row that grows one star at a time
+   tells you what you have and never what is coming; five slots tell you both,
+   and they tell you the second thing for free, in the same glance. It also
+   makes the row a FIXED 91px whatever the heat is, so the first star you earn
+   cannot shove the money and the bars above it sideways — the same argument
+   #money's tabular figures make thirty lines up, applied to a shape instead of
+   to a digit.
+
+   WHY NOT A NUMBER, AND WHY NOT A WORD. "HLEDANOST 3" is one more string to
+   read in the one moment there is no time to read, and it is the argument
+   #vitals already settled for the health bar: peripheral vision counts shapes
+   and it does not read type. Stars because that is the vocabulary of the
+   genre and the player arrives already fluent in it.
+
+   FORM FIRST, COLOUR SECOND — the requirement, and the reason for the whole
+   mask machinery below. Amber-at-100% against amber-at-40% is ONE brightness
+   step, and against a blown-out midday sky the dim one washes out while
+   against wet asphalt the bright one blooms; peripheral vision resolves
+   neither reliably. So a lit star and an unlit star are two different
+   SILHOUETTES: filled and 15px against hollow and 12px inside the same 15px
+   box. That difference survives being out of focus, being small, and being
+   the wrong colour, which is what "at a glance" actually asks for.
+
+   WHY A MASK AND NOT THE ★ / ☆ GLYPHS. The obvious version is one span, two
+   characters, `content:`. It was rejected on measurement, not taste: U+2605 and
+   U+2606 have DIFFERENT advance widths in several of the system fonts this
+   game falls through to, so the row would visibly re-flow as stars lit — the
+   exact jitter #money spends a paragraph avoiding — and their vertical metrics
+   disagree badly enough between macOS and Windows that the row would not sit
+   on the same line on the two platforms. A mask over a background colour is
+   the same 15px box in both states, on every platform, and the colour stays a
+   CSS variable instead of being baked into a glyph.
+
+   HOW A NEW STAR ANNOUNCES ITSELF, WITH NOTHING EXTRA FROM main.js. The pop
+   and the flare are declared on `.on` itself. A CSS animation starts when the
+   rule that declares it starts matching, so adding `.on` to star three plays
+   it once — and stars one and two, whose classes did not change, do NOT
+   replay. That is the whole trick: "the level rose" needs no signal on the
+   wire, because the only element whose class changed is precisely the new
+   star. Same self-arming idiom as `.mn-tick:empty`, same reason: a modifier
+   the other side of the contract might forget to send is a cue that works in
+   testing and is missing in the one moment it exists for.
+   Losing a star is deliberately silent. An escalation is an event; a
+   de-escalation is relief, and relief does not need a fanfare.
+
+   WHY THE HUNT THROBS THE HALO AND NOT THE STAR. hpPulse above blanks its
+   subject to opacity 0.5, which is right for a bar whose LENGTH you read and
+   wrong for five things you COUNT: half the row winking out four times a
+   second is the moment you misread three as two. So `.hunted` keeps every star
+   fully opaque, swings its outer glow instead, and widens the gap to the unlit
+   ones (0.42 → 0.30) so the count gets easier to read at the exact moment it
+   matters most. 0.30 and not lower, measured against a blown-out sky: --hud-dim
+   is a light slate, so at 0.24 the empty slots stopped resolving over white
+   altogether and the row lost its ceiling — you could see three stars and no
+   longer see that there were five. 0.86 s is a walking pulse — fast enough to
+   read as alarm, slow enough that it is not a strobe next to the 1 s health
+   pulse two rules up.
+
+   NOT ONE NEW COLOUR. Lit is --sem-warn, which is already the waypoint arrow,
+   the street name and the fuel bar; unlit is --hud-dim, the controls hint;
+   hunted is --sem-bad, which is already low health, a dry tank and SEJMUT.
+   The rgba() literals in the glows are those same two variables written out —
+   a shadow cannot take a var()'s channels with an alpha of its own without
+   relative-colour syntax, and that is exactly the kind of dependency the
+   #c26c61 note above refuses to take.
+
+   COST. Five 15px boxes. The stars are painted once per class change; only
+   the hunt animates, and it animates a filter on five sub-16px elements, which
+   is a repaint rectangle smaller than one character of the clock. Nothing here
+   is written per frame — see the contract note in index.html. */
+#wanted {
+  display: flex; align-items: center; gap: 4px;
+  /* 15px + 4px × 5 = 91px, right-aligned under the 132px bars: narrower than
+     the thing above it, which is what makes the stack read as a stack and not
+     as a fourth free-floating readout. */
+  line-height: 0;
+}
+#wanted.hidden { display: none; }
+#wanted .wt-star {
+  position: relative; display: block; flex: 0 0 auto;
+  width: 15px; height: 15px;
+  /* The silhouette lives on ::before and the flare on ::after so that the span
+     itself is free to carry the pop. Three animations, three elements, one
+     property each: put the pop's transform and the hunt's filter on the same
+     box and the two have to agree about which of them is last in the
+     animation-name list, which is a rule you break by editing an unrelated
+     line six months later. */
+}
+/* the unlit star: hollow, smaller inside the same box, and dim */
+#wanted .wt-star::before {
+  content: ''; position: absolute; inset: 0;
+  --wt-m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='%23fff' stroke-width='2.4' stroke-linejoin='round' d='M12 2.4 14.35 8.76 21.13 9.03 15.8 13.24 17.64 19.77 12 16 6.36 19.77 8.2 13.24 2.87 9.03 9.65 8.76Z'/%3E%3C/svg%3E");
+  -webkit-mask-image: var(--wt-m); mask-image: var(--wt-m);
+  -webkit-mask-repeat: no-repeat;  mask-repeat: no-repeat;
+  -webkit-mask-position: center;   mask-position: center;
+  -webkit-mask-size: 100% 100%;    mask-size: 100% 100%;
+  background-color: var(--hud-dim);
+  /* 0.42 is the floor at which the empty slots still read as slots over a
+     white wall without ever competing with a lit one for attention. */
+  opacity: 0.42;
+  /* #status-hud's text-shadow does nothing for a background, so the same two
+     shadows are re-cut as drop-shadows, which follow the mask's silhouette
+     rather than the box: the tight one carries the star over a bright sky, the
+     wide one lifts it off one. Without these the row disappears entirely at
+     midday, which is the failure the bars avoid with their glass panel and
+     this row has to avoid without one. */
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.9)) drop-shadow(0 0 6px rgba(0,0,0,0.55));
+}
+/* the lit star: filled, full size, amber */
+#wanted .wt-star.on::before {
+  --wt-m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' d='M12 1 14.7 8.28 22.46 8.6 16.37 13.42 18.47 20.9 12 16.6 5.53 20.9 7.63 13.42 1.54 8.6 9.3 8.28Z'/%3E%3C/svg%3E");
+  background-color: var(--sem-warn); opacity: 1;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.9)) drop-shadow(0 0 7px rgba(255,209,102,0.5));
+}
+/* The arrival. 0.62 s: long enough to catch the eye that was not on this
+   corner, short enough to be over before you have finished turning the wheel.
+   It starts at 2.3× because a star that grows INTO its slot reads as landing,
+   where one that grows out of nothing reads as a fade; the overshoot at 46 %
+   is the stamp. transform only — nothing here can move the layout. */
+#wanted .wt-star.on { animation: wtPop 0.62s cubic-bezier(0.16, 0.84, 0.3, 1) both; }
+#wanted .wt-star.on::after {
+  content: ''; position: absolute; inset: -2px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,209,102,0.6) 0%, rgba(255,209,102,0) 70%);
+  opacity: 0; animation: wtFlare 0.62s ease-out forwards;
+}
+@keyframes wtPop {
+  0%   { opacity: 0; transform: scale(2.3) rotate(-18deg); }
+  22%  { opacity: 1; transform: scale(1.24) rotate(3deg); }
+  46%  { transform: scale(0.94) rotate(0deg); }
+  100% { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+@keyframes wtFlare {
+  0%   { opacity: 0.9; transform: scale(0.5); }
+  100% { opacity: 0;   transform: scale(3); }
+}
+/* ---- hunted: a unit has eyes on you, not merely a number in a register ----
+   Three cues at once, and only one of them is colour: the fill goes to the
+   game's own trouble red, the halo breathes, and the empty slots drop away so
+   the lit ones stand alone. Any two of the three survive the loss of the
+   third — a colourblind player still has the motion, a reduced-motion player
+   still has the colour and the halo (see the media query at the foot of this
+   file), and a washed-out sky still leaves the throb. */
+#wanted.hunted .wt-star.on::before {
+  background-color: var(--sem-bad);
+  animation: wtHunt 0.86s ease-in-out infinite;
+}
+#wanted.hunted .wt-star:not(.on)::before { opacity: 0.30; }
+#wanted.hunted .wt-star.on::after {
+  background: radial-gradient(circle, rgba(255,138,122,0.6) 0%, rgba(255,138,122,0) 70%);
+}
+@keyframes wtHunt {
+  0%, 100% { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.9)) drop-shadow(0 0 4px rgba(255,138,122,0.45)); }
+  50%      { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.9)) drop-shadow(0 0 11px rgba(255,138,122,1)); }
+}
+/* .off is the state the bare span is already in, so it needs no paint of its
+   own — it is declared here, AFTER .on and at a specificity that beats it,
+   purely so that a driver which adds .off without remembering to remove .on
+   goes dark rather than staying lit. Same defensive courtesy the ± ticker
+   pays with its three spellings, and the failure it prevents is the worse
+   direction: a star that will not go out is a wanted level you cannot lose. */
+#wanted .wt-star.off::before {
+  --wt-m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='%23fff' stroke-width='2.4' stroke-linejoin='round' d='M12 2.4 14.35 8.76 21.13 9.03 15.8 13.24 17.64 19.77 12 16 6.36 19.77 8.2 13.24 2.87 9.03 9.65 8.76Z'/%3E%3C/svg%3E");
+  background-color: var(--hud-dim); opacity: 0.42; animation: none;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.9)) drop-shadow(0 0 6px rgba(0,0,0,0.55));
+}
+#wanted .wt-star.off { animation: none; }
+#wanted .wt-star.off::after { animation: none; opacity: 0; }
+
 /* ---- fuel ----
    Bottom right, one rail under the speedo: how fast you are going and how much
    longer you can keep it up are one glance, not two. Four segments, not five,
@@ -554,9 +725,24 @@ html, body { overscroll-behavior: none; touch-action: none; }
     animation: none;
   }
   #banner.wasted { animation: wastedStill 0.35s linear forwards; }
+  /* The star still has to ARRIVE — "a new star must be felt" is information,
+     not decoration, and dropping it entirely would leave a player who asked
+     for less motion unable to tell a rise from a state they had already. So
+     the pop becomes a fade with no travel and no overshoot, and the flare,
+     which is pure spectacle, goes. */
+  #wanted .wt-star.on { animation: wtPopStill 0.5s linear both; }
+  #wanted .wt-star.on::after { animation: none; opacity: 0; }
+  /* And the hunt keeps its meaning without the throb: the breathing halo is
+     frozen at its widest, so "being watched" is still the red star wearing a
+     visible corona rather than a colour swap nobody would notice. */
+  #wanted.hunted .wt-star.on::before {
+    animation: none;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.9)) drop-shadow(0 0 10px rgba(255,138,122,0.95));
+  }
 }
 @keyframes mnTickStill { 0%, 74% { opacity: 1; } 100% { opacity: 0; } }
 @keyframes wastedStill { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wtPopStill { from { opacity: 0; } to { opacity: 1; } }
 
 @media (max-width: 760px) {
   /* A phone frame is half the width and the thumb is over the bottom right.
@@ -567,5 +753,12 @@ html, body { overscroll-behavior: none; touch-action: none; }
   #money .mn-tick { font-size: 12px; right: calc(100% + 7px); }
   #vitals { --vt-w: 106px; }
   .vt-hp { height: 9px; }
+  /* 13px + 3px × 5 = 77px, which keeps the same "narrower than the bars above
+     it" proportion the desktop row has (91 of 132 → 77 of 106). Below 13px the
+     hollow star's 2.4-unit stroke stops resolving as an outline on a 2x phone
+     screen and both states collapse into the same grey smudge, which is the
+     one thing this readout is not allowed to do. */
+  #wanted { gap: 3px; }
+  #wanted .wt-star { width: 13px; height: 13px; }
   #fuel { width: 106px; bottom: 62px; }
 }

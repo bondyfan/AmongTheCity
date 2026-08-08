@@ -41,6 +41,13 @@
 // still use the shared geometry/material caches, unchanged, because there are
 // only a handful of distinct limb sizes in the whole city.
 //
+// SINCE THEN, one thing has been added that is not about the mesh at all: a
+// layer of ADDITIVE poses — punch, kick, aim, hands up — that run AFTER walk()
+// has written the whole skeleton and overwrite only the joints they own, so a
+// man can walk and punch at the same time. They are the block above standPose()
+// at the bottom of makeCitizen, and the argument for their shape is there
+// rather than here because it is entirely about the joints, not the geometry.
+//
 // Convention (ARCHITECTURE.md), unchanged: the figure is authored FACING −z.
 // Owners set group.rotation.y = heading and the face points along
 // (−sin h, −cos h). Limbs hang from pivot Groups placed AT the joint, so
@@ -175,6 +182,69 @@ export function disposeCitizenAssets() {
 }
 
 const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+// ---- combat-pose maths, shared by every citizen ---------------------------
+// Module level, not per-figure: these are pure and there are up to a hundred
+// bodies in the world. The long argument for the SHAPE of them is in the combat
+// block inside makeCitizen; this is only the arithmetic.
+
+// Clamp to 0..1, and note the ORDER of the comparisons: NaN fails all of them,
+// so this returns 0 — the reset — instead of passing NaN through. That is worth
+// a comment because of how a NaN dies here. It does not throw. It turns the
+// object's world matrix to NaN, the figure fails its own frustum test and
+// disappears along with everything parented to it, and there is no stack trace
+// to find it from. Combat timers divide by a swing length; one of those being
+// zero for a frame should cost a punch, not the player's body.
+const cl01 = (v) => (v > 0 ? (v < 1 ? v : 1) : 0);
+// …and the same guarantee for a signed angle, where the safe answer is 0 (level)
+// rather than either limit, so it needs the explicit test.
+const clampAbs = (v, m) => (Number.isFinite(v) ? (v < -m ? -m : v > m ? m : v) : 0);
+
+// Interpolate a joint the walk also owns, from the angle walk() left there
+// toward the pose's target. ABSOLUTE, never `+=`: stepGame() can run three
+// times for one rendered frame and this has to land in the same place each
+// time it is called with the same arguments.
+function mixX(joint, from, to, k) {
+  joint.rotation.x = from + (to - from) * k;
+}
+
+// The swing envelope, shared by punchPose and kickPose because they are the
+// same gesture on different joints — load, drive, recover — and two copies of
+// three ramps is two chances to fix a timing bug in only one of them. It gives
+// back two numbers, and the split between them is the whole trick:
+//
+//   e   HOW FAR THROUGH THE GESTURE the limb is: 0 = chambered (fist by the
+//       ribs, knee up), 1 = fully extended. Everything is interpolated between
+//       two chambered/extended angles by this, so no joint ever passes back
+//       through its hanging position on the way — an earlier version ran a
+//       single −1…+1 scalar through zero and the fist visibly fell to the hip
+//       in the middle of the strike.
+//   b   HOW MUCH OF THE POSE sits on top of the walk at all, and it is 0 at
+//       BOTH ends of t01. That is the property the additive scheme rests on:
+//       the first and last frame of a swing write walk()'s own numbers back, so
+//       a caller that stops at t01 = 1 leaves nothing behind.
+//
+// Load: the chamber blends in (e = 0, b rising). Drive: the limb extends at
+// full blend (e rising, b = 1). Recover: both fall together, so the limb folds
+// back AND hands its joints to the walk over the same span.
+//
+// Written into a module scratch instead of returned as a fresh object, because
+// nothing on a per-frame path in this codebase may allocate. Both readers copy
+// the two fields out on the line after the call, so the single scratch cannot
+// be observed stale even if a punch and a kick were somehow in flight at once.
+const _swing = { e: 0, b: 0 };
+function swingRamp(t01, load, hit) {
+  const t = cl01(t01);
+  if (t < load) {
+    _swing.e = 0; _swing.b = t / load;
+  } else if (t < hit) {
+    _swing.e = (t - load) / (hit - load); _swing.b = 1;
+  } else {
+    const v = 1 - (t - hit) / (1 - hit);
+    _swing.e = v; _swing.b = v;
+  }
+  return _swing;
+}
 
 // ---- the body plan --------------------------------------------------------
 // Every number below is the thirty-year-old man, in metres, and every other
@@ -398,11 +468,16 @@ export function makeCitizen(look = {}) {
     hand.position.y = -foreArmL - handH / 2;
     elbow.add(fore, hand);
     shoulder.add(elbow);
-    return { shoulder, elbow };
+    return { shoulder, elbow, hand };
   };
   const aL = arm(-1), aR = arm(1);
   const armL = aL.shoulder, armR = aR.shoulder;
   const elbowL = aL.elbow, elbowR = aR.elbow;
+  // The hands are exported on `parts` (below) because a pistol, a muzzle flash
+  // and a bag of stolen money all have to hang off one, and the alternative —
+  // every such module re-deriving "shoulder, minus upper arm, minus forearm"
+  // from the archetype — is four copies of an offset that moves whenever B does.
+  const handL = aL.hand, handR = aR.hand;
 
   // ---- legs: hip → knee → foot ----
   const leg = (sx) => {
@@ -464,6 +539,20 @@ export function makeCitizen(look = {}) {
   const stride = s.stride, swingK = s.swing, stoop = s.stoop;
   const caneArm = s.cane ? 0.12 : 1;         // the stick arm barely swings
 
+  // Where the BASE animation left the six joints the combat poses share with
+  // it. See the combat block near the bottom of this function for why the poses
+  // interpolate from a stamped copy rather than from joint.rotation.x itself —
+  // one sentence of it: stepGame() runs several times per rendered frame and a
+  // read-modify-write blend is not idempotent. One object per citizen, made
+  // here at spawn and overwritten in place for the rest of its life, so the
+  // per-frame path allocates nothing.
+  const base = { armL: 0, armR: 0, elbL: 0, elbR: 0, legR: 0, kneeR: 0 };
+  const stamp = () => {
+    base.armL = armL.rotation.x; base.armR = armR.rotation.x;
+    base.elbL = elbowL.rotation.x; base.elbR = elbowR.rotation.x;
+    base.legR = legR.rotation.x; base.kneeR = kneeR.rotation.x;
+  };
+
   const walk = (walkT, speedK, runK = 0) => {
     const r = runK < 0 ? 0 : runK > 1 ? 1 : runK;
     const sn = Math.sin(walkT) * speedK;
@@ -490,6 +579,7 @@ export function makeCitizen(look = {}) {
     // the bob doubles and stops touching down — a run has a flight phase
     body.position.y = Math.abs(Math.cos(walkT)) * (0.045 + 0.075 * r)
       * Math.min(1, speedK) + 0.05 * r;
+    stamp();
   };
 
   // Thrown by a car: splay the limbs ONCE at launch — arms flung out sideways,
@@ -498,6 +588,10 @@ export function makeCitizen(look = {}) {
   // drives rotation.x, so the z-splay set here survives until standPose.
   const ragdollPose = () => {
     torso.rotation.x = 0;
+    // …and its Y, which punchPose() below is the only thing that ever writes.
+    // A man punched in the middle of throwing one of his own would otherwise
+    // tumble down the road with his shoulders still wound up.
+    torso.rotation.y = 0;
     const rn = Math.random;
     armL.rotation.set(-0.4 - rn() * 0.9, 0, -(0.9 + rn() * 1.0));
     armR.rotation.set(-0.4 - rn() * 0.9, 0, 0.9 + rn() * 1.0);
@@ -508,6 +602,7 @@ export function makeCitizen(look = {}) {
     kneeL.rotation.x = -0.2 - rn() * 1.2;
     kneeR.rotation.x = -0.2 - rn() * 1.2;
     body.position.y = 0;
+    stamp();
   };
 
   // Seated in a vehicle. With a real knee this is finally the pose it always
@@ -527,6 +622,276 @@ export function makeCitizen(look = {}) {
     elbowL.rotation.x = -0.55 * kk;
     elbowR.rotation.x = -0.55 * kk;
     body.position.y = 0;
+    stamp();
+  };
+
+  // ==== combat poses: ADDITIVE, and that word is the entire design ==========
+  //
+  // Four gestures — a punch, a kick, a raised pistol, a pair of hands in the
+  // air — applied AFTER walk() has written the whole skeleton. js/player.js
+  // calls _animate() unconditionally every frame and then calls combatPose, and
+  // each of these overwrites ONLY the joints it owns, so a man can walk and
+  // punch at the same time. That is the requirement; everything below is what
+  // it took to actually get it.
+  //
+  //   REJECTED — gate them: walk OR pose, whichever is active. It is the
+  //   obvious shape and it is what the first design did. The result was a
+  //   figure that froze mid-stride to throw a jab and then slid along the
+  //   pavement in the pose until the swing finished.
+  //
+  //   REJECTED — absolute angles scaled by the blend, `arm.rotation.x = TARGET
+  //   * k`. It looks additive and is not: at k = 0 it writes ZERO, so for every
+  //   frame the pose is less than fully out, the arm is being dragged toward
+  //   hanging straight down — the walk swing dies as the pistol comes up, and
+  //   dies hardest exactly during the blend the player is watching.
+  //
+  //   KEPT — every joint walk() also owns is interpolated FROM THE VALUE WALK
+  //   JUST WROTE toward the pose target:
+  //
+  //        x = base + (target − base) · k
+  //
+  //   At k = 0 that is walk()'s own number to the bit, i.e. a genuine no-op; at
+  //   k = 1 it is the pose; in between the arm still carries some of the
+  //   stride, which is what a punch thrown while moving actually looks like.
+  //
+  // AND `base` IS A STAMPED COPY, not a read of joint.rotation.x. This is not
+  // fussiness. stepGame() runs several times per rendered frame (main.js clamps
+  // dt to 50 ms and loops), and a read-modify-write blend called twice between
+  // two walk()s converges twice as far toward its target: the same t01 would
+  // land the fist in a different place depending on how many physics steps that
+  // frame happened to take, which is a jitter nobody could reproduce and every
+  // test would pass. An absolute write from a stamped base is idempotent — call
+  // it three times with the same argument and the second and third change
+  // nothing. walk(), sitPose(), standPose() and ragdollPose() each stamp on
+  // their way out, so whatever wrote the skeleton last is always the base.
+  //
+  // WHAT A CALLER MUST DO. rotation.y on the torso and rotation.z on the
+  // shoulders are axes walk() NEVER rewrites, so — exactly like ragdollPose's
+  // splay, which survives the walk on purpose — what a pose puts there stays
+  // until something takes it away. Every one of these writes those axes as
+  // `magnitude * blend`, which makes the zero-argument call the reset: finish a
+  // swing by calling punchPose(1, arm), let an aim ramp down to aimPose(0), or
+  // call standPose(). Stop calling one at half blend and the figure keeps half
+  // a pose for ever.
+  //
+  // SIDES, once, since four functions depend on it: the figure faces −z, so +x
+  // is its RIGHT. Swinging an arm INWARD across the chest is therefore −z on
+  // the right shoulder and +z on the left (ragdollPose flings them the other
+  // way, which is the same convention read backwards), and a positive
+  // torso.rotation.y brings the RIGHT shoulder forward.
+
+  // ---- a jab -------------------------------------------------------------
+  // Every angle below was measured on the figure, not guessed: the elbow in
+  // this rig folds the forearm BACKWARD (that is what makes walk()'s negative
+  // elbow a bend and not a hyperextension), so a fist cannot be brought up to
+  // the cheek the way a boxer chambers one — a folded arm always carries the
+  // hand DOWNWARD. Trying it anyway is what the first set of numbers did, and
+  // the "chambered" fist ended up 39 cm behind the man's own back. So the
+  // chamber here is what this skeleton can actually hold and what still reads
+  // from a chase camera: the fist by the ribs at chest height, elbow flared,
+  // driving forward as the elbow opens.
+  const PUNCH_LOAD = 0.24;    // t01 — the chamber is fully drawn by here
+  const PUNCH_HIT = 0.48;     // t01 — arm straight: contact. Half the swing is
+                              //   the recovery, because a fist that snaps back
+                              //   as fast as it went out reads as a machine
+  const PUNCH_CHAM_X = 0.70;  // rad — shoulder 40° forward, elbow ahead of the
+                              //   hip: fist ends up at (0.27, 1.20, +0.14) m
+  const PUNCH_REACH = 1.55;   // rad — shoulder at 89°, the upper arm dead
+                              //   level, so the fist lands at the height of its
+                              //   own shoulder — on another citizen, the jaw
+  const PUNCH_CHAM_E = -2.20; // rad — elbow closed to 126°, fist by the ribs
+  const PUNCH_OPEN = -0.06;   // rad — elbow all but locked. Never quite 0: an
+                              //   arm at exactly straight reads as a mannequin
+  const PUNCH_CHAM_Z = 0.25;  // rad — elbow flared OUT in the chamber…
+  const PUNCH_HIT_Z = -0.11;  // rad — …and the fist crossing IN at contact
+  const GUARD_X = 1.95;       // rad — the other shoulder comes up over 90°…
+  const GUARD_E = -2.00;      // rad — …and folds hard, which lays that forearm
+                              //   diagonally across the chest — hand at 1.13 m
+                              //   once the 0.85 slack below is applied
+  const GUARD_IN = 0.55;      // rad — and tucked in toward the centreline
+  const PUNCH_TWIST = 0.24;   // rad — 14° of shoulder turn over the hips. This
+                              //   is the whole of "the punch comes from the
+                              //   body": the arms hang off `torso`, so they
+                              //   ride the twist, and it swings the extended
+                              //   fist 14 cm inward — which is what puts the
+                              //   jab on the centreline of the man in front
+                              //   instead of past his shoulder
+  const PUNCH_WIND = 0.35;    // how much of that twist goes the OTHER way while
+                              //   the arm is still chambered — the wind-up
+
+  /**
+   * One jab. t01 runs 0..1 through the swing; `arm` is 0 for the left fist and
+   * 1 for the right. ARMS AND TORSO ONLY — both legs stay entirely walk()'s, so
+   * it can be thrown at a dead stop or at a jog and reads right either way.
+   */
+  const punchPose = (t01, arm = 1) => {
+    const w = swingRamp(t01, PUNCH_LOAD, PUNCH_HIT);
+    const e = w.e, b = w.b;
+    // THE SHOULDER LEADS AND THE ELBOW WHIPS, and the two curves are the reason
+    // the punch has a shape at all. `lead` is 1 − (1−e)², so the heavy joint
+    // does most of its travel early and settles; `late` is cubed, so the
+    // forearm is still folded at the three-quarter mark and then snaps. An
+    // elbow that straightens while the shoulder is still turning is a shove.
+    //
+    // Measured on the figure, over the drive: with both joints linear the fist
+    // dropped 20 cm on its way out — the hand sweeps down past the hip as a
+    // folded elbow opens, which is real kinematics and looks like a man
+    // dropping his guard. These two curves cut that arc to 11 cm and put nearly
+    // all the forward travel in the last quarter, which is where a punch is.
+    const lead = e * (2 - e);
+    const late = e * e * e;
+    const sh = PUNCH_CHAM_X + (PUNCH_REACH - PUNCH_CHAM_X) * lead;
+    const el = PUNCH_CHAM_E + (PUNCH_OPEN - PUNCH_CHAM_E) * late;
+    const zz = PUNCH_CHAM_Z + (PUNCH_HIT_Z - PUNCH_CHAM_Z) * lead;
+    const right = !!arm;
+    const sx = right ? 1 : -1;                 // which side the fist is on
+    const fS = right ? armR : armL, fE = right ? elbowR : elbowL;
+    const oS = right ? armL : armR, oE = right ? elbowL : elbowR;
+    const fSb = right ? base.armR : base.armL, fEb = right ? base.elbR : base.elbL;
+    const oSb = right ? base.armL : base.armR, oEb = right ? base.elbL : base.elbR;
+    mixX(fS, fSb, sh, b);
+    mixX(fE, fEb, el, b);
+    // the guard is deliberately looser than the fist — a hand held as hard as
+    // the one doing the work reads as a boxing stance, not as a street fight
+    mixX(oS, oSb, GUARD_X, b * 0.85);
+    mixX(oE, oEb, GUARD_E, b * 0.85);
+    // .z is ours outright, so it is written as angle × blend and the ends of
+    // the swing put it back to zero by themselves. `sx` carries the mirror:
+    // +z is outward on the right arm and inward on the left, and the off arm
+    // is by definition on the other side from the fist.
+    fS.rotation.z = sx * zz * b;
+    oS.rotation.z = sx * GUARD_IN * b;
+    torso.rotation.y = sx * PUNCH_TWIST * (e - PUNCH_WIND * (b - e));
+  };
+
+  // ---- a front kick ------------------------------------------------------
+  // A front SNAP kick, which is the one this skeleton can do properly: the hip
+  // barely moves between the chamber and the hit and the whole gesture is the
+  // shin whipping out of a raised knee. That is also the real mechanic — a kick
+  // driven from the hip with the knee already straight is a punt, and it looks
+  // like one.
+  const KICK_LOAD = 0.32;     // t01 — knee up, heel tucked under the thigh. A
+                              //   little slower than the jab's chamber: a leg
+                              //   weighs four times what an arm does
+  const KICK_HIT = 0.55;      // t01 — leg out
+  const KICK_UP = 1.45;       // rad — hip flexed 83°: thigh horizontal, knee at
+                              //   0.83 m, i.e. exactly its own hip height
+  const KICK_OUT = 1.50;      // rad — and 3° higher at contact, so the kick
+                              //   finishes rising rather than falling
+  const KICK_FOLD = -2.10;    // rad — knee closed to 120°, heel at 0.47 m
+                              //   directly under the raised thigh
+  const KICK_OPEN = -0.12;    // rad — shin out, knee just short of locked: the
+                              //   foot arrives 0.83 m ahead at 0.80 m up, which
+                              //   is the gut of the man standing in front
+  const KICK_ARM = 0.55;      // rad — opposite arm swings forward…
+  const KICK_ARM_BACK = -0.45;// rad — …and the near one back, for balance
+  const KICK_ARM_E = -0.50;   // rad — both elbows half closed
+  const KICK_TWIST = -0.20;   // rad — shoulders turn AWAY from the kicking leg
+                              //   (negative Y = left shoulder forward)
+
+  /**
+   * A front kick with the RIGHT leg. THIS ONE OWNS A LEG — hip and knee, and
+   * therefore the shin and the shoe hanging off them — for the whole of t01.
+   * That is deliberate and it is the one exception to arms-only in this block:
+   * walk() rewrites both legs every frame and the kick overwrites its own back
+   * afterwards, so the LEFT leg keeps striding underneath and the right one
+   * belongs to the kick until the blend returns to zero at t01 = 1. standPose()
+   * clears it too, for the swing that is abandoned because the kicker was shot
+   * halfway through it.
+   */
+  const kickPose = (t01) => {
+    const w = swingRamp(t01, KICK_LOAD, KICK_HIT);
+    const e = w.e, b = w.b;
+    const hip = KICK_UP + (KICK_OUT - KICK_UP) * e * (2 - e);    // the hip leads
+    // SQUARED, where the punch's elbow is cubed, and that difference is not an
+    // oversight. The drive window here is about five frames; a cubed knee puts
+    // the whole extension inside the last one and the foot teleports. A forearm
+    // can whip that hard on screen and a shin cannot.
+    const knee = KICK_FOLD + (KICK_OPEN - KICK_FOLD) * e * e;
+    mixX(legR, base.legR, hip, b);
+    mixX(kneeR, base.kneeR, knee, b);
+    // A man who kicks with his arms hanging at his sides has tripped over
+    // something. The counter-swing costs four numbers and is most of what makes
+    // the kick read as intended rather than as a stumble.
+    mixX(armL, base.armL, KICK_ARM, b * 0.7);
+    mixX(armR, base.armR, KICK_ARM_BACK, b * 0.7);
+    mixX(elbowL, base.elbL, KICK_ARM_E, b * 0.7);
+    mixX(elbowR, base.elbR, KICK_ARM_E, b * 0.7);
+    torso.rotation.y = KICK_TWIST * e;
+  };
+
+  // ---- a raised pistol ---------------------------------------------------
+  // An isoceles stance: both arms out, both nearly straight, the support hand
+  // brought across to meet the gun hand. It is the two-handed hold that this
+  // rig can actually make — the hands land 11 cm apart in x and 4 cm in y,
+  // which at the size of these fists is one grip. The Weaver stance (support
+  // elbow low and bent) needs a hand tucked under the gun, and the elbow here
+  // can only carry a hand DOWNWARD, so it put the left fist by the hip.
+  const AIM_X = 1.60;         // rad — 92°: the gun arm just past level out of
+                              //   the shoulder. Hand at (0.18, 1.42, −0.60) m,
+                              //   i.e. its own chin height — and therefore the
+                              //   chin of whoever is standing in front of it
+  const AIM_X_SUP = 1.45;     // rad — the support arm 9° lower…
+  const AIM_E_GUN = -0.10;    // rad — gun elbow all but straight
+  const AIM_E_SUP = 0.04;     // rad — support elbow straight. POSITIVE, but
+                              //   only just: with 31° of inward roll on that
+                              //   shoulder the elbow's own axis has turned far
+                              //   enough that the sign no longer means
+                              //   hyperextension. See HANDS_E for the full case
+  const AIM_IN_GUN = 0.10;    // rad — gun arm just inside the shoulder line
+  const AIM_IN_SUP = 0.55;    // rad — support arm crosses the chest to meet it
+  const AIM_PITCH = 0.90;     // rad — ±52°. Past that the shoulder goes over
+                              //   the top and the arm folds back over the head
+
+  /**
+   * Both arms up and forward, the RIGHT (gun) hand leading. k is the blend,
+   * 0..1 — the caller ramps it over ~0.15 s, and a call at k = 0 is the reset.
+   * `pitch` is in radians and POSITIVE IS UP: it is added to both shoulders
+   * together so the grip stays married, and it is what makes the player
+   * visibly aim up a hill or down at somebody already on the ground.
+   */
+  const aimPose = (k = 1, pitch = 0) => {
+    const kk = cl01(k);
+    const p = clampAbs(pitch, AIM_PITCH);
+    // Past 90° of shoulder flexion the hand climbs above the shoulder, which is
+    // why up is the positive direction here and why the clamp above exists.
+    mixX(armR, base.armR, AIM_X + p, kk);
+    mixX(elbowR, base.elbR, AIM_E_GUN, kk);
+    mixX(armL, base.armL, AIM_X_SUP + p, kk);
+    mixX(elbowL, base.elbL, AIM_E_SUP, kk);
+    armR.rotation.z = -AIM_IN_GUN * kk;
+    armL.rotation.z = AIM_IN_SUP * kk;
+  };
+
+  // ---- hands up ----------------------------------------------------------
+  const HANDS_OUT = 1.55;     // rad — 89° of abduction: the upper arms straight
+                              //   out sideways, elbows level with the shoulders
+                              //   at 0.52 m from the centreline. That U is the
+                              //   surrender silhouette; anything less reads as
+                              //   somebody reaching for a shelf
+  const HANDS_X = 1.10;       // rad — and tipped forward of the shoulder line,
+                              //   so the hands are visible from in front and
+                              //   not hidden behind the body's own outline
+  const HANDS_E = 1.95;       // rad — POSITIVE, and the reason it can be. The
+                              //   abduction above has rolled the elbow's own
+                              //   x-axis almost upright, so the fold that would
+                              //   bend a HANGING arm backwards is the ordinary
+                              //   one on an arm held out to the side; a
+                              //   negative angle here would drive the forearms
+                              //   at the ground. It stands them vertical, and
+                              //   the hands land at (±0.40, 1.69, −0.14) —
+                              //   beside the head, just under the top of it
+
+  /** Hands up beside the head: what a mugged pedestrian holds while a gun is
+   *  pointed at them. k is the blend, 0..1, and k = 0 is the reset. */
+  const handsPose = (k = 1) => {
+    const kk = cl01(k);
+    mixX(armL, base.armL, HANDS_X, kk);
+    mixX(armR, base.armR, HANDS_X, kk);
+    mixX(elbowL, base.elbL, HANDS_E, kk);
+    mixX(elbowR, base.elbR, HANDS_E, kk);
+    armL.rotation.z = -HANDS_OUT * kk;      // out to the citizen's left…
+    armR.rotation.z = HANDS_OUT * kk;       // …and to its right
   };
 
   // Back on their feet: undo the splay so walk() fully owns the limbs again.
@@ -538,7 +903,13 @@ export function makeCitizen(look = {}) {
     elbowL.rotation.x = 0; elbowR.rotation.x = 0;
     kneeL.rotation.x = 0; kneeR.rotation.x = 0;
     torso.rotation.x = stoop;
+    // The combat poses' twist. walk() rewrites torso.rotation.x every frame and
+    // never touches Y, so this line is the only thing that undoes an abandoned
+    // punch or kick — a swing interrupted at half blend leaves the shoulders
+    // wound up otherwise, and it does not come out in the wash.
+    torso.rotation.y = 0;
     body.position.y = 0;
+    stamp();
   };
   standPose();
 
@@ -557,6 +928,10 @@ export function makeCitizen(look = {}) {
 
   return {
     group, walk, sitPose, ragdollPose, standPose, dispose,
+    // The combat set. All four are applied AFTER walk() and overwrite only
+    // their own joints — see the block above them for the contract, including
+    // the one thing a caller owes them (end a pose at its zero argument).
+    punchPose, kickPose, aimPose, handsPose,
     look: { jacket, pants, skin, hair },
     arch: a,
     // How tall this particular person is, feet to the top of their hair, before
@@ -564,7 +939,11 @@ export function makeCitizen(look = {}) {
     // tags, speech bubbles — should read this rather than assume 1.75, now that
     // a grandmother is fifteen centimetres shorter than a young man.
     headTop,
-    parts: { body, torso, cluster, armL, armR, legL, legR, elbowL, elbowR, kneeL, kneeR },
+    // handL/handR are new with the combat poses: a weapon, a muzzle flash or a
+    // snatched handbag has to hang off a hand, and that is the only joint in
+    // the figure a caller cannot reach from the ones already listed here.
+    parts: { body, torso, cluster, armL, armR, legL, legR, elbowL, elbowR,
+      kneeL, kneeR, handL, handR },
   };
 }
 

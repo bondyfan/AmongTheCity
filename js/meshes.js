@@ -3419,12 +3419,21 @@ function bayInto(sink, r, along, offX, offZ, terrain) {
   // not a thing anybody builds, and a 5 m lane has no room to give one up
   if (!r || !terrain || !r.d || r.br || !(r.w >= 5.4)) return;
   const half = r.w / 2;
-  // which kerb the shelter stands on — the sign of the stop's offset along
-  // the road's left normal
-  const [ax, az] = r.p[0], [bx, bz] = r.p[1] ?? r.p[0];
-  const L0 = Math.hypot(bx - ax, bz - az) || 1;
-  const side = (offX * -((bz - az) / L0) + offZ * ((bx - ax) / L0)) >= 0 ? 1 : -1;
+  // which kerb the shelter stands on — the sign of the stop's offset along the
+  // road's left normal AT THE STOP. Taking it from the way's first segment
+  // instead is only the same answer while the way runs straight: on a street
+  // that turns, the bay lands on whichever kerb the far end of the way happens
+  // to agree with. Measured on a way doubling back on itself: 70 triangles on
+  // the kerb opposite the shelter against 48 on its own.
   const s0 = along - BAY_FLAT - BAY_TAPER, s1 = along + BAY_FLAT + BAY_TAPER;
+  let tx = 1, tz = 0;
+  for (let i = 0, run = 0; i < r.p.length - 1; i++) {
+    const [px, pz] = r.p[i], [nx2, nz2] = r.p[i + 1];
+    const ex = nx2 - px, ez = nz2 - pz, L = Math.hypot(ex, ez) || 1e-9;
+    if (run + L >= along || i === r.p.length - 2) { tx = ex / L; tz = ez / L; break; }
+    run += L;
+  }
+  const side = (offX * -tz + offZ * tx) >= 0 ? 1 : -1;
   if (s0 < 0 || s1 > (r._len ?? 1e9)) return;      // no room before the junction
   const widthAt = (s) => {
     const d = Math.abs(s - along);
@@ -3459,8 +3468,18 @@ function bayInto(sink, r, along, offX, offZ, terrain) {
     const cur = { ix: px + nx2 * half, iz: pz + nz2 * half, y,
       ox: px + nx2 * (half + w), oz: pz + nz2 * (half + w) };
     if (prev) {
-      sink.quad(prev.ix, prev.y, prev.iz, prev.ox, prev.y, prev.oz,
-        cur.ox, cur.y, cur.oz, cur.ix, cur.y, cur.iz, rr, rg, rb);
+      // The kerb normal flips with `side`, so a fixed corner order winds the
+      // quad backwards on one kerb and the whole bay is culled away — measured
+      // as 25 triangles facing UP on the south kerb and 25 facing DOWN on the
+      // north one, which is a lay-by that simply is not there on half the
+      // stops in the city. Walk the corners the other way round instead.
+      if (side > 0) {
+        sink.quad(prev.ix, prev.y, prev.iz, prev.ox, prev.y, prev.oz,
+          cur.ox, cur.y, cur.oz, cur.ix, cur.y, cur.iz, rr, rg, rb);
+      } else {
+        sink.quad(prev.ix, prev.y, prev.iz, cur.ix, cur.y, cur.iz,
+          cur.ox, cur.y, cur.oz, prev.ox, prev.y, prev.oz, rr, rg, rb);
+      }
     }
     prev = cur;
   }
@@ -3539,7 +3558,7 @@ const FUEL_BRANDS = [
 function fuelInto(sink, x, z, name, cell, terrain) {
   // face the forecourt along the nearest road, so the canopy sits across the
   // approach rather than skewed to it
-  let dx = 0, dz = -1, best = 60 * 60;
+  let dx = 0, dz = -1, best = 60 * 60, qx = x, qz = z, qw = 0;
   for (const r of cell.roads) {
     if (!r.d || !r.p) continue;
     for (let i = 0; i < r.p.length - 1; i++) {
@@ -3548,10 +3567,28 @@ function fuelInto(sink, x, z, name, cell, terrain) {
       let t = ((x - ax) * ex + (z - az) * ez) / L2;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
       const d2 = (x - (ax + ex * t)) ** 2 + (z - (az + ez * t)) ** 2;
-      if (d2 < best) { best = d2; const L = Math.sqrt(L2); dx = ex / L; dz = ez / L; }
+      if (d2 < best) {
+        best = d2; const L = Math.sqrt(L2); dx = ex / L; dz = ez / L;
+        qx = ax + ex * t; qz = az + ez * t; qw = r.w ?? 0;
+      }
     }
   }
   const ux = -dz, uz = dx;                       // across the road
+  // A station is mapped as ONE node, and that node lands wherever the surveyor
+  // put it — usually the shop, sometimes the entrance, often within a few
+  // metres of the kerb. Built from there, a forecourt 11 m deep puts its apron,
+  // a pump island and a canopy column out in the live carriageway. Nothing in
+  // the data says where the plot ends, but a forecourt is beside a road and
+  // never across it, so slide the whole thing back until it clears the kerb.
+  const NEED = qw / 2 + 12;
+  const gap = Math.sqrt(best);
+  const near = best < 60 * 60;
+  // which way the road lies from the node, measured BEFORE the node moves
+  const away = near && (x - qx) * ux + (z - qz) * uz < 0 ? -1 : 1;
+  if (near && gap < NEED) {
+    x += ux * (NEED - gap) * away;
+    z += uz * (NEED - gap) * away;
+  }
   const y0 = terrain ? terrain.heightAt(x, z) : 0;
   const mark = sink.mark();
   const brand = FUEL_BRANDS.find((b) => b.re.test(name ?? '')) ?? { col: 0x2f6ea8, trim: 0xf4f6f5 };
@@ -3560,11 +3597,41 @@ function fuelInto(sink, x, z, name, cell, terrain) {
   _c.setHex(brand.col); const br2 = _c.r, bg2 = _c.g, bb2 = _c.b;  // the fascia band
   _c.setHex(0x9aa0a6); const sr = _c.r, sg = _c.g, sb = _c.b;      // columns, pumps
   sink.at(SURF.paving);
-  // the apron the pumps stand on
+  // The apron the pumps stand on. As ONE quad it is a 22 × 16 m plate centred
+  // on the OSM node — and that node marks the forecourt, which by definition
+  // sits right against the road it serves, so the plate laid asphalt straight
+  // over the carriageway and the road disappeared under it. Cut into cells and
+  // drop the ones a road already covers: the forecourt now meets the kerb
+  // instead of swallowing it, and the road keeps its own levelled deck.
   const A = 11, B = 8;                          // half-width across, half-depth along
-  const c0 = at(-A, -B), c1 = at(A, -B), c2 = at(A, B), c3 = at(-A, B);
-  sink.quad(c0[0], y0 + 0.02, c0[1], c1[0], y0 + 0.02, c1[1],
-    c2[0], y0 + 0.02, c2[1], c3[0], y0 + 0.02, c3[1], 0.62, 0.62, 0.63);
+  const CELL = 2;
+  const onRoad = (px, pz) => {
+    for (const r of cell.roads) {
+      if (!r.d || !r.p) continue;
+      const lim = (r.w / 2 + 0.4) ** 2;
+      for (let i = 0; i < r.p.length - 1; i++) {
+        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+        const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9;
+        let t = ((px - ax) * ex + (pz - az) * ez) / L2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        if ((px - (ax + ex * t)) ** 2 + (pz - (az + ez * t)) ** 2 < lim) return true;
+      }
+    }
+    return false;
+  };
+  for (let u = -A; u < A - 1e-6; u += CELL) {
+    for (let v = -B; v < B - 1e-6; v += CELL) {
+      const u1 = Math.min(A, u + CELL), v1 = Math.min(B, v + CELL);
+      const q0 = at(u, v), q1 = at(u1, v), q2 = at(u1, v1), q3 = at(u, v1);
+      // every corner, not the centre: a cell whose middle clears the kerb can
+      // still hang a corner over it, and the apron and the deck are close
+      // enough in height to z-fight along that strip
+      if (onRoad(q0[0], q0[1]) || onRoad(q1[0], q1[1])
+        || onRoad(q2[0], q2[1]) || onRoad(q3[0], q3[1])) continue;
+      sink.quad(q0[0], y0 + 0.02, q0[1], q1[0], y0 + 0.02, q1[1],
+        q2[0], y0 + 0.02, q2[1], q3[0], y0 + 0.02, q3[1], 0.62, 0.62, 0.63);
+    }
+  }
   sink.at(SURF.concrete);
   // four columns
   const CH = 5.2;
@@ -3611,8 +3678,15 @@ function fuelInto(sink, x, z, name, cell, terrain) {
       }
     }
   }
-  // the totem, out toward the road
-  const [tx2, tz2] = at(-A - 1.4, -B - 1.0);
+  // The totem, out at the kerb — a price pylon is read from the road, so it
+  // belongs at the entrance rather than in the middle of the plot. Two things
+  // it must not do: walk back into the carriageway the shift above just cleared,
+  // and, when the node happened to sit on the far side, march off in the
+  // opposite direction to the road it is advertising to.
+  const stand = near
+    ? Math.min(A + 1.4, Math.max(0, Math.max(gap, NEED) - qw / 2 - 1.6))
+    : A + 1.4;
+  const [tx2, tz2] = at(-stand * away, -B - 1.0);
   for (const [ox, oz] of [[ux, uz], [dx, dz]]) {
     sink.quad(tx2 - ox * 0.14, y0, tz2 - oz * 0.14, tx2 + ox * 0.14, y0, tz2 + oz * 0.14,
       tx2 + ox * 0.14, y0 + 5.4, tz2 + oz * 0.14, tx2 - ox * 0.14, y0 + 5.4, tz2 - oz * 0.14,

@@ -47,6 +47,21 @@
         <div class="vt-bar vt-hp"><i></i></div>
         <div class="vt-bar vt-ar"><i></i></div>
       </div>
+      <!-- Hledanost. FIVE slots, always five, always in the DOM: the row is the
+           same 91px wide at nula hvězd and at pět, so lighting one can never
+           shove the bars above it sideways. main.js needs three verbs and no
+           others — .hidden on this div, .on / .off on each star, .hunted on
+           this div when a unit has actual eyes on you. Everything else (the
+           new star's flare, the throb while you are being watched) arms itself
+           off those class changes, exactly the way .mn-tick above arms itself
+           off :empty. No per-frame writes, no inline styles. -->
+      <div id="wanted" class="hidden" title="Hledanost">
+        <span class="wt-star"></span>
+        <span class="wt-star"></span>
+        <span class="wt-star"></span>
+        <span class="wt-star"></span>
+        <span class="wt-star"></span>
+      </div>
     </div>
     <div id="speedo" class="hidden"><span id="speed-num">0</span><small id="speed-unit">km/h</small></div>
     <!-- the car you just got into, named over the speedo for 3 s. Never

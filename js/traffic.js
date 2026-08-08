@@ -203,6 +203,88 @@
 // past 3 km and honouring it would mean thousands of meshes; above the clamp
 // we accept the ring pop, at which distance and altitude a car is a couple of
 // pixels. Perfect invisibility is not worth a slideshow.
+//
+// ==========================================================================
+// v10: THE POLICE ARE ORDINARY TRAFFIC.
+//
+// A pursuit system needs police cars on the street before it needs anything
+// else, and the obvious way to get them — a little spawner of its own that
+// keeps N patrols near the player — is precisely the mistake v8 spent this
+// whole file undoing. A patrol minted "near me" is minted somewhere else on
+// the other client, and the very first thing co-op does with a police car is
+// put two players in the same chase; two players being chased by two
+// different cars is worse than no police at all. Two traffic systems would
+// also have meant two answers to every question this file has already
+// answered once: where a mesh may appear, what happens at a red light, who
+// yields at a junction, what a generation rollover does to a car you are
+// watching.
+//
+// So the police are not a system. They are ONE MORE SLOT in the cell —
+// minted by _scanCells, driven by _drive, ghosted by _retire, reaped by
+// _sweepPool, clamped against the same schedule — with a hash roll in front
+// of it deciding whether this cell owes a patrol this generation. Everything
+// v9 promises about pops, and everything v8 promises about two screens, the
+// patrol gets for free because it is not special.
+//
+// It cost three corrections, and all three are the kind that pass every test
+// while shipping nothing:
+//
+//   1. THE REAP MUST AGREE WITH THE MINT. _sweepPool retires any slot whose
+//      index has fallen outside the cell's allowance (`p.k >= _slots(cell)`),
+//      and the patrol has no index inside that allowance to fall outside of.
+//      The first draft handed it k = 0x9c0 — bigger than any slot count the
+//      cell can ever have, so every patrol was reaped on the first sweep
+//      after its own birth and not one of them would ever have been seen.
+//      The mirror-image sentinel is no better: a negative index is smaller
+//      than every slot count, which makes the patrol immortal — it would have
+//      survived the density slider being dragged to zero. Neither is a number
+//      problem, so the fix is not a number: `p.police` is stamped on the
+//      schedule at birth and the reap asks THAT (see _patrolOwed), which is
+//      also the only version a reader can check by eye. Measured over 1800 s
+//      on the real region graph: 202 patrol schedules minted and reaped, 0 of
+//      them on the sweep after their own birth, median life 130 s of a 150 s
+//      generation. Under the first draft all 202 would have read 0 s.
+//
+//   2. THE ROLL IS f(CELL, GENERATION), NOT f(CELL). Hashing the cell alone
+//      is not a low probability, it is a permanent assignment: the same
+//      one-in-six squares carry a police car for the life of the world and
+//      the rest never see one, so one street in the centre of Pardubice is a
+//      permanent beat and the next one over is a guaranteed safe house — and
+//      it is guaranteed identically on every client, which makes it a map
+//      feature players would learn inside an hour. Folding the generation in
+//      costs one more hash argument and re-rolls the whole city every TRIP_T.
+//      Measured over 40 minutes — 18 generations — standing in the middle of
+//      the real graph: 57 different cells carried a patrol at some point, and
+//      the busiest of them carried one in 10 of the 18. With the cell alone,
+//      every one of those 57 would have scored all 18 and no other cell would
+//      ever have scored one.
+//
+//   3. THE HARD CAP DELETED EXACTLY THE WRONG CARS. update()'s safety valve
+//      trims farthest-first, and the whole shape of a pursuit is that the
+//      unit chasing you is the one that went round the block and is coming
+//      back — i.e. by construction the police car furthest from the player is
+//      the interesting one, and the valve would take it the moment a chase
+//      got going. Police are exempt. Measured with the sweep switched off so
+//      that the valve is the only thing left that can take a mesh, and the
+//      budget slammed to 4 for 60 s: 53 cars trimmed, fleet 108 → 55, police
+//      touched 0, the patrol still on the road at the end of it.
+//
+// WHAT A PATROL IS, since 'policie' is not in VEH.CAR_KINDS and adding one is
+// not this file's call: the stock octavia, painted fleet white, with a light
+// bar built here out of two shared boxes on the roof (see copAssets). That is
+// what a Czech police car is, and it means the roster, the crash meshes, the
+// physics and the labels all keep working without knowing anything happened.
+// The bar hangs off the CAR and not off the schedule, so a patrol keeps its
+// lights after js/police.js or a player steals it out of the traffic.
+//
+// DENSITY. A patrol needs a cell with real road on it (PATROL_MAJOR) that is
+// carrying ordinary traffic at all, so the traffic slider turns the police
+// down with everybody else and off at zero. On the real region graph at the
+// product's default density, 284 of the 621 cells that carry any road at all
+// are eligible, and the roll leaves about ONE patrol wearing a mesh anywhere
+// in the 630 m ring at any moment — out of a 95-car fleet, i.e. one car in a
+// hundred. A driver passes within 150 m of a different police car about every
+// three minutes. See PATROL_P for the sweep those numbers came out of.
 // ==========================================================================
 
 import * as THREE from 'three';
@@ -474,6 +556,68 @@ const RETIRE_R = 90;                   // …or it just goes, if nobody is this 
 const WORLD_SEED = 0x50a7d21;          // change this and every car in the city is a
                                        // different car. Never change it on a live build.
 
+// ==== v10: the patrol slot ================================================
+// POLICE_K is NOT a slot index and nothing may treat it as one. It is a hash
+// lane and a key suffix: real slot indices run 0..cap-1 (cap ≤ round(SLOT_MAX
+// × 4) = 32), so a negative one can never collide with a cell's ordinary
+// traffic in `_pool`, in hash32(WORLD_SEED, ci, cj, k), or in the string key.
+// The REAP does not look at it — see `p.police` in _sweepPool, and the v10
+// header for the bug that rule exists to prevent.
+const POLICE_K = -1;
+const PATROL_SALT = 0x5e17;            // unused by any other draw in this file
+// How often an ELIGIBLE cell owes a patrol in a given generation. Not a
+// per-cell-per-second rate: like every other slot, the coin is tossed once per
+// TRIP_T and the car then lives out its trip, so this is literally "what share
+// of the arterial city blocks has a police car on it right now".
+//
+// Swept on the REAL Pardubice graph at the product's default density — four
+// region tiles, 15 minutes driving an outward spiral at 50 km/h and 10 minutes
+// standing in the centre. Columns are patrols carrying a mesh anywhere in the
+// ~630 m ring while driving, distinct patrols the drive came within 150 m of,
+// and the same census standing still:
+//     0.16    0.67 live    0.20 /min    0.28 live standing
+//     0.30    0.97 live    0.33 /min    1.08 live standing   ← chosen
+//     0.45    1.34 live    0.53 /min    1.79 live standing
+// The target is ONE patrol somewhere around you at essentially all times and
+// not two: the ambient layer's job is to make the town feel policed, and the
+// cars that are actually chasing you are js/police.js's to put on the road. If
+// this number tries to do the chasing's work as well, a regional Czech town
+// reads as a checkpoint. It is free to move — the fleet measured 94 cars at
+// every value in the sweep, because a patrol is one car in a hundred.
+const PATROL_P = 0.30;
+// …and ELIGIBLE means the cell carries a real road to patrol. lenMajor counts
+// DIRECTED major-class edge, so a two-way arterial contributes twice and 200
+// is 100 m of street: enough that a cell merely clipped by the corner of a
+// primary does not qualify, little enough that any cell an arterial actually
+// crosses does. Cells with no ordinary traffic at all (density knob at zero,
+// or open country) owe nothing — the settings slider must be able to empty
+// the world, police included.
+const PATROL_MAJOR = 200;
+// A patrol cruises. It does not race and it does not dawdle, so its personal
+// speed factor is a narrow band around the limit instead of VK_MIN..VK_MIN+VAR
+// — a police car doing 36 km/h in a 50 reads as broken, and one doing 59
+// reads as a chase that is not happening.
+const PATROL_VK_MIN = 0.86, PATROL_VK_VAR = 0.20;
+// WHAT A PATROL CAR IS, and why it is not a new vehicles.js kind. 'policie' is
+// not in VEH.CAR_KINDS and adding one is somebody else's file; _attach's
+// roster-drift guard would have silently turned every patrol into the roster's
+// first entry anyway. A Czech police car IS a white Octavia with a blue bar on
+// the roof, so that is exactly what we build: the stock octavia mesh, the
+// fleet white already in the paint vocabulary, and a light bar added here as
+// two shared boxes on the roof — three meshes, one geometry set for the whole
+// force, and no change to the roster.
+const PATROL_KIND = 'octavia';
+const PATROL_PAINT = 0xe9eae5;
+// Octavia roof, from vehicles.js KIND.octavia.green (`sts = [z, yBase, yRoof]`,
+// nose at −z): the plateau runs z −0.02..1.30 at y 1.44. The bar stands just
+// behind the windscreen header. If the octavia hull is ever re-authored these
+// two numbers float the bar; they are here rather than in vehicles.js because
+// a light bar is traffic's idea, not the roster's.
+const BAR_Y = 1.44, BAR_Z = 0.14, BAR_W = 1.04;
+const SIREN_T = 0.22;                  // s per lamp — ~4.5 flashes/s across the bar,
+                                       // which is what a real majáček does. Driven off
+                                       // SHARED time, so two clients blink together.
+
 // Czech speed defaults where the data carries no maxspeed, by road class: 130
 // is motorway law but 110 reads right at this fidelity, the rural 90 kicks in
 // on primaries/secondaries once out of the built-up area, secondary/tertiary
@@ -693,6 +837,32 @@ function sigAssets() {
   return _S;
 }
 
+// ---- the light bar, on the same lazy terms as the poles -------------------
+// One geometry + material set for every patrol car in the country, built the
+// first time one actually takes a mesh — headless tests never touch THREE, and
+// a client that never meets a police car never pays for one. A bar "flashes"
+// by swapping the material reference on two boxes, exactly as a traffic light
+// changes: no per-frame allocation, and the swap only happens on the ~0.22 s
+// state flip rather than every frame.
+let _C = null;
+function copAssets() {
+  if (_C) return _C;
+  const bar = new THREE.BoxGeometry(BAR_W, 0.055, 0.19);
+  bar.translate(0, BAR_Y + 0.026, BAR_Z);        // sitting ON the roof, slightly sunk
+  const lamp = new THREE.BoxGeometry(0.34, 0.105, 0.165);
+  _C = {
+    bar, lamp,
+    barMat: new THREE.MeshLambertMaterial({ color: 0x24272c }),
+    // dark navy when idle so the bar reads as a bar and not as a roof rack…
+    off: new THREE.MeshLambertMaterial({ color: 0x18294d }),
+    // …and overbright like the car lights and the green lamp (×2.2) so the
+    // bloom pass bites at night. Blue only: Czech law, and it is also what
+    // makes a patrol legible at 200 m without a livery texture.
+    on: new THREE.MeshLambertMaterial({ color: 0x4c78ff, emissive: 0x2a4cff, emissiveIntensity: 2.2 }),
+  };
+  return _C;
+}
+
 // How long a driver arriving at time `t` on phase bucket `b` has to sit. Pure
 // arithmetic on shared time, so both clients compute the same wait to the last
 // bit — this, not the car code, is what keeps two fleets in step across a
@@ -721,6 +891,14 @@ export class Traffic {
     this.world = world;
     this.cars = new Set();          // public — minimap reads this. Only cars with a
                                     // MESH live here; schedules without one are in _pool.
+    // v10 — public, read-only, and a strict SUBSET of this.cars: the ambient
+    // patrol cars traffic is currently driving. js/police.js reads it to find
+    // a unit worth pressing into a pursuit (see nearestPatrol) and the minimap
+    // reads it to draw them; both want the small set, not a filter over the
+    // whole fleet every frame. A car leaves it the instant it loses its mesh
+    // or somebody calls steal() on it. Cars from spawnPatrol() are NOT in here
+    // — they have no schedule and traffic does not drive them.
+    this.patrols = new Set();
     this.edges = [];                // every DIRECTED edge (reverse twins too)
     // Optional, and the single biggest lever on how well co-op traffic agrees:
     // main.js may fill this with EVERY player in the room — the local one plus
@@ -759,6 +937,11 @@ export class Traffic {
     this._px = 0; this._pz = 0;
     this._densK = 1;
     this._obst = [];                // scratch: things a car must not drive into
+    this._sirens = new Set();       // cars whose light bar is currently flashing.
+                                    // Kept apart from `patrols` on purpose: a unit
+                                    // police.js has stolen (or spawned itself) is no
+                                    // longer a patrol of ours but its bar still has
+                                    // to blink. Self-cleaning — see _tickSirens.
     this._hornPool = HONK_POOL;     // global honk budget, refilled at HONK_RATE/s
     // ingest whatever is already loaded (legacy whole-city file, or region tiles
     // that landed before we were constructed), then subscribe for the rest —
@@ -1188,6 +1371,18 @@ export class Traffic {
     return n + (rnd01(hash32(c.ci, c.cj, 0x5eed)) < f - n ? 1 : 0);
   }
 
+  // Is this square of city the sort of place that owes the world a patrol at
+  // all? Geometry and the density knob only — the COIN (which generation) lives
+  // in _scanCells, so that both callers cannot drift apart on the eligibility
+  // half of the question while the mint and the reap argue about the other.
+  // _slots() > 0 is deliberate: it makes the traffic slider turn the police
+  // down with everybody else (and off at zero), and because _slots is
+  // non-decreasing in density, a sparse client's patrols are always a SUBSET of
+  // a dense one's — the same containment the ordinary slots promise.
+  _patrolOwed(c) {
+    return !!c && c.lenMajor >= PATROL_MAJOR && this._slots(c) > 0;
+  }
+
   // ---- traffic lights: clustering, poles, per-frame phase machine ----
 
   // Fold a batch of [x,z] signal points into junction controllers. Points
@@ -1452,6 +1647,81 @@ export class Traffic {
     }
   }
 
+  // ---- the light bar, per frame -------------------------------------------
+
+  // Alternate the two lamps off SHARED time, so two clients watching the same
+  // patrol see the same flash rather than two blinkers beating against each
+  // other. `wt % (2·SIREN_T)` rather than a counter or `Math.floor(wt/T) & 1`
+  // on purpose: worldT() is ~1.8e7 and climbing, and an integer lane that
+  // large is one long session away from losing its low bit — the modulo is
+  // exact for as long as a double can hold the clock at all.
+  //
+  // Allocation-free and swap-free in the common case: the state is compared
+  // against the cached one and only ~4.5 material assignments a second per
+  // car survive. The set self-cleans on a mesh that has left the scene, which
+  // is how a unit js/police.js spawned and then disposed of stops costing us
+  // anything without police.js having to remember to switch it off.
+  _tickSirens(wt) {
+    const A = copAssets();
+    for (const car of this._sirens) {
+      const c = car._cop;
+      if (!c || !car.mesh || !car.mesh.parent) { this._sirens.delete(car); continue; }
+      const st = (wt % (SIREN_T * 2)) < SIREN_T ? 1 : 2;
+      if (st === c.st) continue;
+      c.st = st;
+      c.l.material = st === 1 ? A.on : A.off;
+      c.r.material = st === 2 ? A.on : A.off;
+    }
+  }
+
+  // ---- what js/police.js and js/main.js hold on to -------------------------
+
+  /**
+   * Turn a patrol car's majáček on or off. Works on an ambient patrol, on one
+   * that has been stolen out of the traffic, and on one spawnPatrol() made
+   * from nothing — the bar hangs off the CAR, not off the schedule, precisely
+   * so that taking a car out of the shared population does not put its lights
+   * out. No-ops harmlessly on any other car and in any headless fixture.
+   */
+  setSiren(car, on) {
+    if (!car) return;
+    car.siren = !!on;
+    const c = car._cop;
+    if (!c) return;
+    if (on) { this._sirens.add(car); return; }
+    this._sirens.delete(car);
+    if (c.st) { const A = copAssets(); c.l.material = A.off; c.r.material = A.off; c.st = 0; }
+  }
+
+  /**
+   * The nearest ambient patrol to (x, z) within `r`, or null. `want(car)` is
+   * an optional filter — police.js uses it to skip units it has already taken.
+   * The natural pursuit opening is nearestPatrol() followed by steal(): the
+   * car keeps its mesh, its paint and its bar, leaves this.cars and this.patrols
+   * and becomes the caller's to drive, and slotKey() hands the net layer the
+   * string the peer needs to stop driving its own copy of it.
+   */
+  nearestPatrol(x, z, r = 500, want = null) {
+    let best = null, bd = r * r;
+    for (const car of this.patrols) {
+      if (want && !want(car)) continue;
+      const dx = car.x - x, dz = car.z - z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < bd) { bd = d2; best = car; }
+    }
+    return best;
+  }
+
+  /**
+   * A patrol car with no schedule and no brain, for a caller that wants to
+   * drive one itself — a unit called in from off-map, or a roadblock. It is
+   * NOT in this.cars and NOT in this.patrols, traffic will never touch it, and
+   * disposing of it is `vehicles.remove(car)` (call setSiren(car, false) first
+   * or let _tickSirens notice the mesh has left the scene). It exists so that
+   * "what a police car is" is answered in one place; see _buildPatrol.
+   */
+  spawnPatrol(x, z, heading = 0) { return this._buildPatrol(x, z, heading); }
+
   // ---- routes: a deterministic walk of the graph --------------------------
 
   // choose the outgoing edge at the far node of `edge`, using a hash instead of
@@ -1645,28 +1915,75 @@ export class Traffic {
           if (budget-- <= 0) return;
           this._birth(sk, c, k, ss, gen, t0, wt);
         }
+        // ---- and the extra slot: this cell's patrol car -------------------
+        // Everything above, once more, with POLICE_K in place of k and a roll
+        // in front of it. The roll is the whole of the difference between a
+        // police force and a taxi rank: an ordinary slot always holds a car,
+        // this one holds one only when the cell wins its coin.
+        //
+        // THE COIN IS TOSSED PER (CELL, GENERATION). Hashing the cell alone —
+        // which is what the first draft did — is not a low probability, it is
+        // a PERMANENT ASSIGNMENT: the same 16 % of squares carry a police car
+        // for the entire life of the world and the other 84 % never see one,
+        // so one street in the centre is a permanent patrol beat and the next
+        // one over is a guaranteed safe house. Folding `gen` in re-rolls every
+        // cell every TRIP_T, which is what makes the police a presence rather
+        // than a map feature, and it costs exactly one more hash argument.
+        if (slots > 0 && c.lenMajor >= PATROL_MAJOR) {
+          const pk = key + '/' + POLICE_K;      // inside the gate: an ineligible
+                                                // cell must not build a string 4× a
+                                                // second for a slot it cannot have
+          if (!this._pool.has(pk)) {
+            const ss = hash32(WORLD_SEED, ci, cj, POLICE_K);
+            const ph = rnd01(hash32(ss, 7)) * TRIP_T;
+            const gen = Math.floor((wt + ph) / TRIP_T);
+            const t0 = gen * TRIP_T - ph;
+            if (wt >= t0 && rnd01(hash32(ss, gen, PATROL_SALT)) < PATROL_P) {
+              const reach = Math.min(ROUTE_MAX, (wt - t0) * V_REACH);
+              if (cd - reach <= R) {
+                if (budget-- <= 0) return;
+                this._birth(pk, c, POLICE_K, ss, gen, t0, wt, 1);
+              }
+            }
+          }
+        }
       }
     }
   }
 
   // Mint one car's entire existence from hash32(cell, slot, generation).
-  _birth(sk, c, k, ss, gen, t0, wt) {
+  // `police` is the ONE thing about a schedule that is not derived from that
+  // hash, because it is not a property of the slot but of WHICH slot: the cell
+  // has n ordinary ones and, some generations, one more. It is stamped on the
+  // record so that every later decision — the reap, the hard cap, the mesh —
+  // can ask the record instead of pattern-matching an index.
+  _birth(sk, c, k, ss, gen, t0, wt, police = 0) {
     const arr = this._cellEdges(c);
     if (!arr.length) return;
     const seed = hash32(ss, gen, 0x1d3);
     let e = null;
     const i0 = (rnd01(hash32(seed, 1)) * arr.length) | 0;
-    for (let n = 0; n < 4 && n < arr.length; n++) {
+    // A patrol gets more darts because it is fussier: it must start on a
+    // main-class road (a police car creeping out of a residential loop is not
+    // what a patrol is), and in a cell that qualified on lenMajor there is at
+    // least one such edge to find. If eight darts all miss, this cell simply
+    // has no patrol this generation — deterministic, and the next roll is 150 s
+    // away, so it is not a busy loop.
+    const tries = police ? 8 : 4;
+    for (let n = 0; n < tries && n < arr.length; n++) {
       const cand = arr[(i0 + n) % arr.length];
       // never mint a car on the last edge of a cul-de-sac: it would be born
       // driving into the wall and spend its whole life parked at the end
-      if (cand.len >= 14 && cand.a.deg > 1 && cand.b.deg > 1) { e = cand; break; }
+      if (cand.len < 14 || cand.a.deg <= 1 || cand.b.deg <= 1) continue;
+      if (police && !MAJOR_RE.test(cand.road.t)) continue;
+      e = cand; break;
     }
     if (!e) return;
     const sIn = 2 + rnd01(hash32(seed, 2)) * (e.len - 4);
-    const vK = VK_MIN + rnd01(hash32(seed, 4)) * VK_VAR;
+    const vK = police ? PATROL_VK_MIN + rnd01(hash32(seed, 4)) * PATROL_VK_VAR
+      : VK_MIN + rnd01(hash32(seed, 4)) * VK_VAR;
     const p = {
-      key: sk, ci: c.ci, cj: c.cj, k, cell: c, seed, gen, t0, vK,
+      key: sk, ci: c.ci, cj: c.cj, k, cell: c, seed, gen, t0, vK, police,
       routeM: ROUTE_MIN + rnd01(hash32(seed, 3)) * ROUTE_VAR,
       route: [{ e, base: -sIn, turnIn: 0, turnOut: 0 }],
       routeEnd: 0,
@@ -1709,7 +2026,22 @@ export class Traffic {
       if (gen !== p.gen) { this._retire(p); continue; }
       if (p.stolen) continue;                    // the player drives it now; not ours
       const cd = dist((p.ci + 0.5) * CELL - px, (p.cj + 0.5) * CELL - pz) - CELL_HALF_DIAG;
-      if (cd > phR || p.k >= this._slots(p.cell)) { this._retire(p); continue; }
+      // THE REAP HAS TO AGREE WITH THE MINT, and for the patrol slot the
+      // ordinary test cannot: `p.k >= slots` asks "is this index still inside
+      // the cell's allowance", and the patrol has no index inside that
+      // allowance to be inside. Whichever sentinel POLICE_K had been given,
+      // one side of that comparison was going to be wrong — a big one (the
+      // first draft's 0x9c0) is >= every possible slot count and reaped the
+      // patrol on the very next sweep after its birth, so not one police car
+      // would ever have appeared on screen; a negative one is < every slot
+      // count and would have made the patrol immortal, surviving even the
+      // density knob being turned to zero. So the flag decides, not the index:
+      // an ordinary slot is owed while its index fits, a patrol while its cell
+      // still qualifies. The generation check above has already re-tested the
+      // coin, so all that is left here is eligibility, which is exactly what
+      // can change under a settings change or a late tile.
+      const owed = p.police ? this._patrolOwed(p.cell) : p.k < this._slots(p.cell);
+      if (cd > phR || !owed) { this._retire(p); continue; }
       if (p.car) {
         if (p.dead) { this._retire(p); continue; }
         const dx = p.sx - px, dz = p.sz - pz;
@@ -1805,18 +2137,20 @@ export class Traffic {
     // we lend it a deterministic draw for exactly one synchronous call.
     // REQUEST to the owner of vehicles.js: `pickCarColor(kind, r)` taking an
     // optional 0..1, and this hack disappears.
-    const bigOk = e0.speed >= FAST_EDGE && rnd01(hash32(p.seed, 5)) < BIG_CHANCE;
-    const pool = bigOk ? BIG : COMMON;
-    let kind = pool[(rnd01(hash32(p.seed, 6)) * pool.length) | 0];
-    if (!VEH.CAR_KINDS.includes(kind)) kind = VEH.CAR_KINDS[0]; // roster drift guard
-    const u = rnd01(hash32(p.seed, 8));
-    let color;
-    if (typeof VEH.pickCarColor === 'function') {
-      const real = Math.random;
-      try { Math.random = () => u; color = VEH.pickCarColor(kind); }
-      finally { Math.random = real; }
-    } else {
-      color = CAR_COLORS[(u * CAR_COLORS.length) | 0];
+    let kind = null, color = 0;
+    if (!p.police) {
+      const bigOk = e0.speed >= FAST_EDGE && rnd01(hash32(p.seed, 5)) < BIG_CHANCE;
+      const pool = bigOk ? BIG : COMMON;
+      kind = pool[(rnd01(hash32(p.seed, 6)) * pool.length) | 0];
+      if (!VEH.CAR_KINDS.includes(kind)) kind = VEH.CAR_KINDS[0]; // roster drift guard
+      const u = rnd01(hash32(p.seed, 8));
+      if (typeof VEH.pickCarColor === 'function') {
+        const real = Math.random;
+        try { Math.random = () => u; color = VEH.pickCarColor(kind); }
+        finally { Math.random = real; }
+      } else {
+        color = CAR_COLORS[(u * CAR_COLORS.length) | 0];
+      }
     }
     this._setRendered(p, this._nomArc(p, wt));
     const e = p.edge;
@@ -1837,7 +2171,8 @@ export class Traffic {
       ? bridgeDeckHeight(e.road, e.off0 + e.offSign * p.s, this.world?.terrain)
       : (roadGradeY(e.road, e.off0 + e.offSign * p.s, this.world?.terrain) ?? gnd);
     p.sy = p.py = bridgeY + LAYER_Y.road;
-    const car = this.vehicles.add(kind, p.sx, p.sz, heading, color);
+    const car = p.police ? this._buildPatrol(p.sx, p.sz, heading)
+      : this.vehicles.add(kind, p.sx, p.sz, heading, color);
     car.vK = p.vK;
     car.speed = this._nomV(p);
     car.ai = p;
@@ -1846,11 +2181,54 @@ export class Traffic {
     car.mesh.rotation.y = heading;
     p.car = car;
     this.cars.add(car);
+    if (p.police) this.patrols.add(car);
+  }
+
+  // The one place in the program that knows what a police car looks like, so
+  // that an ambient patrol and a pursuit unit js/police.js spawns for itself
+  // cannot end up looking like two different forces. See PATROL_PAINT for why
+  // this is an octavia and not a roster entry of its own.
+  _buildPatrol(x, z, heading) {
+    const kind = VEH.CAR_KINDS.includes(PATROL_KIND) ? PATROL_KIND : VEH.CAR_KINDS[0];
+    const car = this.vehicles.add(kind, x, z, heading, PATROL_PAINT);
+    car.police = true;
+    // A policista does not lean out of the window and shout at the traffic.
+    // js/chatter.js picks its driver-shout candidates by `car._shoutAt` being
+    // in the past (it is a deadline, not a countdown — see chatter's _cool),
+    // so a deadline that never arrives takes this car out of that pool without
+    // chatter needing to know the police exist.
+    car._shoutAt = Infinity;
+    this._fitLightBar(car);
+    return car;
+  }
+
+  // Bolt the bar on. Silently does nothing when the car's mesh is not a real
+  // THREE.Object3D — the headless fixtures hand back a plain object with a
+  // stub .position, and a patrol without a bar is exactly as testable as one
+  // with it.
+  _fitLightBar(car) {
+    const m = car.mesh;
+    if (!m || typeof m.add !== 'function') return;
+    const A = copAssets();
+    const g = new THREE.Group();
+    const base = new THREE.Mesh(A.bar, A.barMat);
+    const l = new THREE.Mesh(A.lamp, A.off), r = new THREE.Mesh(A.lamp, A.off);
+    l.position.set(-0.30, BAR_Y + 0.105, BAR_Z);
+    r.position.set(0.30, BAR_Y + 0.105, BAR_Z);
+    // vehicles.add() has already run its castShadow traverse by the time we get
+    // here, so the bar has to arrange its own shadow or it floats.
+    for (const o of [base, l, r]) { o.castShadow = true; o.updateMatrix(); o.matrixAutoUpdate = false; }
+    g.add(base, l, r);
+    g.updateMatrix(); g.matrixAutoUpdate = false;   // the CAR moves; the bar never moves on it
+    m.add(g);
+    car._cop = { l, r, st: 0 };
   }
 
   _detach(p) {
     if (!p.car) return;
     this.cars.delete(p.car);
+    this.patrols.delete(p.car);
+    this._sirens.delete(p.car);
     this.vehicles.remove(p.car);
     p.car.ai = null;
     p.car = null;
@@ -1893,6 +2271,7 @@ export class Traffic {
     if (!this.edges.length || !playerPos) return;
     const wt = this._wt = this.now();
     if (this._junctions.length) this._tickSignals(wt);
+    if (this._sirens.size) this._tickSirens(wt);
 
     const px = this._px = playerPos.x, pz = this._pz = playerPos.z;
     // Density knob, quantised to 1/32 so two clients standing together, whose eased density
@@ -1950,7 +2329,17 @@ export class Traffic {
         // Visible cars are simply not candidates; if the whole overflow is
         // visible we leave the fleet over budget for a moment rather than
         // delete something from the middle of the screen.
-        if (this._heldVisible(p)) continue;
+        //
+        // v10: NEITHER MAY IT BE THE THING THAT ENDS A CHASE. The valve trims
+        // FARTHEST-FIRST, and the whole point of a pursuit is that the unit
+        // chasing you is the one that just went round the block and is a
+        // street away rather than on your bumper — i.e. by construction the
+        // farthest police car is the interesting one, and it is the only car
+        // in the fleet whose deletion the player would read as the game
+        // cheating rather than as scenery thinning out. There are at most a
+        // handful of patrols inside the ring (see PATROL_P), so exempting
+        // them costs the valve a rounding error of its budget.
+        if (p.police || this._heldVisible(p)) continue;
         const d = (car.x - px) ** 2 + (car.z - pz) ** 2;
         if (d > wd) { wd = d; worst = car; }
       }
@@ -2024,6 +2413,12 @@ export class Traffic {
   steal(car) {
     const p = car.ai;
     this.cars.delete(car);
+    // …including out of `patrols`, which promises to list the patrols TRAFFIC
+    // drives. `car.police` and the bar stay on the car — whoever took it is
+    // driving a police car, and js/police.js's own unit list is its business,
+    // not ours. This is also how a player steals a patrol car and keeps the
+    // lights: setSiren() never asked for a schedule.
+    this.patrols.delete(car);
     car.ai = null;
     if (p) { p.stolen = 1; p.car = null; if (p.ghost) this._ghosts.delete(p); }
     return car;
@@ -2045,13 +2440,19 @@ export class Traffic {
   claimSlot(key) {
     const p = this._pool.get(key);
     if (p) { this._detach(p); p.stolen = 1; return; }
-    const m = /^(-?\d+),(-?\d+)\/(\d+)$/.exec(String(key));
+    // the third group takes a SIGN because of the patrol slot: POLICE_K is -1
+    // and a tombstone that would not parse is a peer quietly driving a police
+    // car we also keep a copy of — the exact ghosting the tombstone exists to
+    // prevent, and the one car in the fleet where two of them is a bug the
+    // player is guaranteed to notice.
+    const m = /^(-?\d+),(-?\d+)\/(-?\d+)$/.exec(String(key));
     if (!m) return;
     const ci = +m[1], cj = +m[2], k = +m[3];
     const ss = hash32(WORLD_SEED, ci, cj, k);
     const wt = this._wt || this.now();
     const gen = Math.floor((wt + rnd01(hash32(ss, 7)) * TRIP_T) / TRIP_T);
-    this._pool.set(key, { key, ci, cj, k, gen, cell: null, stolen: 1, car: null, route: null });
+    this._pool.set(key, { key, ci, cj, k, gen, cell: null, stolen: 1, car: null, route: null,
+      police: k === POLICE_K ? 1 : 0 });
   }
 
   // A rammed car (vehicles.js stamped _rammedT on impact) is momentum, not
@@ -2422,7 +2823,7 @@ export class Traffic {
       if (!pose) continue;
       const dx = pose.x - x, dz = pose.z - z;
       if (dx * dx + dz * dz > r * r) continue;
-      out.push({ key: p.key, gen: p.gen, seed: p.seed, vK: p.vK,
+      out.push({ key: p.key, gen: p.gen, seed: p.seed, vK: p.vK, police: !!p.police,
         arc: this._nomArc(p, wt), x: pose.x, z: pose.z, done: !!p.ndone });
     }
     out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));

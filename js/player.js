@@ -34,6 +34,52 @@
 // …], created lazily) so the multiplayer layer can claim seats for remote
 // players with the very same registry — see main.js's E-handler comment.
 //
+// ---- the two combat hooks, and why they are shaped like this -------------
+//
+// js/combat.js needs exactly two things from the body and is given nothing
+// else: a place to hang an arms-only pose, and a switch that makes the walk
+// aim. Neither one is a state, neither one imports anything.
+//
+//   player.combatPose = fn|null   called with (dt) at the very END of
+//     update(), AFTER _animate() has written the skeleton. That ordering IS
+//     the hook. citizen.js's punch/kick/aim/hands poses are ADDITIVE and
+//     arms-only — they overwrite their own joints and leave the rest of the
+//     rig to walk(). Call one BEFORE _animate (which is what a hook in
+//     main.js's frame loop would amount to, since stepGame runs several times
+//     per rendered frame and player.update() is the last writer inside it) and
+//     walk() rewrites the arms a microsecond later: the punch is never drawn,
+//     nothing throws, nothing logs, the arms simply swing. The boarding
+//     machine already applies _sit(k) after writing the transform for the
+//     identical reason; this is the same rule at the other end of update().
+//
+//   player.aimLock = boolean      while true the body faces the CAMERA rather
+//     than the direction it is travelling, the stick therefore strafes, and
+//     the top speed drops to AIM_SPEED.
+//
+// aimLock is a MODIFIER on the walk branch, not a fifth state. The obvious
+// alternative — 'aiming' alongside walking/boarding/riding/exiting — was
+// rejected outright: it would need its own copy of the substepped collide, the
+// supportY climb/fall and the animate call (forty lines, duplicated and free
+// to drift apart), and every one of the four existing transitions would grow
+// an edge into and out of it. As three reads inside the walk branch it
+// composes with everything for free, and the early returns at the top of
+// update() already make it inert while boarding, seated or stepping out —
+// which is most of what "boarding a car cancels it" means. boardVehicle() and
+// setInCar() drop the flag as well, so it cannot survive the ride.
+//
+// The heading SNAPS to camYaw rather than easing toward it, and that is a fix
+// rather than laziness. main.js's chase camera eases camYaw toward
+// player.heading whenever you are moving and the mouse has been idle a moment
+// (main.js:441/458). Two controllers each chasing the other's output is a
+// feedback loop; with an eased heading it shows as the camera being dragged
+// back a tenth of the way toward wherever the body happened to be pointing,
+// every time you swing the mouse. Snapping makes (wantYaw − camYaw)
+// identically zero, so the auto-follow term multiplies out to nothing and the
+// loop cannot engage at all. What is left is one frame of lag — the camYaw we
+// are handed was computed before this frame's mouse delta, so auto-follow can
+// still claw back dt·1.6 ≈ 2.7 % of a movement at 60 Hz — which is under the
+// mouse smoothing and below the threshold of anybody noticing.
+//
 // Directions follow the ARCHITECTURE.md convention throughout:
 //   dir(h) = (−sin h, −cos h), mesh.rotation.y = heading, h = atan2(−dx, −dz).
 
@@ -74,6 +120,21 @@ const DOOR_OUT = 0.5;        // m — door point past the flank; exit lands wide
 // goes this far below it so the folded hips (pivot 0.86·scale) rest on it
 const SIT_DROP = 0.78 * PLAYER_SCALE;
 const smooth = (k) => k * k * (3 - 2 * k);
+
+// ---- the gun walk --------------------------------------------------------
+// WALK.jog is 5.6 m/s and WALK.sprint is 14.0, and neither is a speed you move
+// at with the sights up. 3.1 is a fast march — roughly twice a real walking
+// pace, a little over half the jog — and the number is picked against
+// WALK.runFrom (6.5) rather than by feel: runBlend() only starts mixing the RUN
+// gait in above that, so at 3.1 the blend is flat zero and the legs cannot slip
+// into a sprint cycle underneath a raised pistol, which is the one thing that
+// would look wrong from every camera angle at once. Cadence lands at 3.1/5.6 =
+// 0.55 of the jog, a stride that reads as deliberate rather than hurried.
+//
+// Raising the gun at a full sprint does not snap you to it: this is a target
+// fed to the same WALK.accel ramp as everything else, so 14.0 → 3.1 is 0.78 s
+// of ordinary braking, and dropping the gun accelerates back out the same way.
+const AIM_SPEED = 3.1;
 
 const isHeli = (v) => v.rotorSpeed !== undefined;   // ducks, quacks, hovers
 const isJet = (v) => v.throttle !== undefined && v.reheat !== undefined;
@@ -120,6 +181,12 @@ export class Player {
     this.heading = heading;
     this.speed = 0;          // m/s along _dir
     this.walkT = 0;          // stride phase, advanced by distance
+    // ---- the two hooks js/combat.js owns; see the header ----
+    // Both are plain public fields on purpose: combat.js writes them and this
+    // file only ever reads them, so there is no setter to keep in sync and no
+    // way for the two modules to disagree about who holds the truth.
+    this.aimLock = false;    // heading follows camYaw, the stick strafes
+    this.combatPose = null;  // fn(dt), applied AFTER the walk every frame
     this.inCar = null;       // vehicle object (car or heli) or null — SEATED
     this.seat = 0;           // which veh.seats slot we occupy while inCar
     this.boarding = null;    // { veh, seat, phase:'walk'|'slide', t, … } or null
@@ -169,15 +236,37 @@ export class Player {
     if (moving) { wx /= wl; wz /= wl; this._dirX = wx; this._dirZ = wz; }
 
     // --- speed: snap accel toward jog/sprint, same rate braking to a stop ---
-    const sprint = input.keys.has('ShiftLeft') || input.keys.has('ShiftRight');
-    const target = moving ? (sprint ? WALK.sprint : WALK.jog) : 0;
+    // With the sights up there is no sprint at all and the jog is replaced by
+    // AIM_SPEED. The Shift key is suppressed at the source rather than the
+    // result being clamped afterwards, so there is still exactly ONE target
+    // speed feeding the accel ramp below and entering or leaving aim is a
+    // deceleration through the normal path, never a discontinuity.
+    const sprint = !this.aimLock
+      && (input.keys.has('ShiftLeft') || input.keys.has('ShiftRight'));
+    const top = this.aimLock ? AIM_SPEED : sprint ? WALK.sprint : WALK.jog;
+    const target = moving ? top : 0;
     const dv = WALK.accel * dt;
     this.speed = this.speed < target
       ? Math.min(target, this.speed + dv)
       : Math.max(target, this.speed - dv);
 
-    // --- heading eases toward the move direction, shortest way around ---
-    if (moving) {
+    // --- heading: the camera's bearing while aiming, else eased toward the
+    //     move direction, shortest way around ---
+    if (this.aimLock) {
+      // SNAPPED, not eased — the header argues this at length: an eased
+      // heading and main.js's auto-follow are two controllers chasing each
+      // other's output, and equality here makes the auto-follow term exactly
+      // zero instead. Normalised because camYaw is a raw mouse accumulator
+      // that grows without bound, and heading is read by the net layer, the
+      // minimap and the exit math, all of which expect −π..π.
+      //
+      // Nothing else has to change for the stick to strafe: (wx, wz) above is
+      // ALREADY camera-relative, so once the body sits on the camera's bearing
+      // the same vector is sideways and backwards motion relative to the face
+      // for free — no second frame conversion, and _dirX/_dirZ keep meaning
+      // the true travel direction that the deceleration glide reads.
+      this.heading = Math.atan2(Math.sin(camYaw), Math.cos(camYaw));
+    } else if (moving) {
       const want = Math.atan2(-wx, -wz);
       let d = want - this.heading;
       d = ((d + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI;
@@ -228,6 +317,13 @@ export class Player {
     // the RUN blend takes over above WALK.runFrom, so the figure walks at a
     // walk, runs flat out at a sprint, and visibly changes gait between.
     this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog), runBlend(this.speed));
+    // LAST, and after _animate deliberately: the combat poses are ADDITIVE and
+    // arms-only, so walk() has to have written the whole skeleton before one of
+    // them overwrites its own joints. The other way round the pose is erased
+    // before it is ever drawn, silently. Only the on-foot path reaches this
+    // line — boarding, riding and exiting all returned at the top of update(),
+    // where the limbs belong to _sit() and a punch would be nonsense anyway.
+    this.combatPose?.(dt);
   }
 
   // ---- boarding ----------------------------------------------------------
@@ -243,6 +339,11 @@ export class Player {
     veh.seats ??= [];                    // the occupancy registry, born here
     if (veh.seats[seat]) return false;   // somebody (maybe remote) got it first
     veh.seats[seat] = this;
+    // You need both hands for a door handle. Dropped HERE rather than in
+    // _finishBoard because the jog to the door is walking too, and a body that
+    // strafed sideways to its own car at 3.1 m/s facing the camera would be
+    // the most obviously broken thing in the game.
+    this.aimLock = false;
     this.boarding = { veh, seat, phase: 'walk', t: 0,
       sx: 0, sy: 0, sz: 0, fromH: this.heading, ...(cbs ?? {}) };
     return true;
@@ -429,6 +530,7 @@ export class Player {
   // game's E key goes through boardVehicle()/beginExit() instead.
   setInCar(car) {
     if (car) {
+      this.aimLock = false;              // same reason as boardVehicle()
       car.seats ??= [];
       if (!car.seats[0]) car.seats[0] = this;
       this.inCar = car;

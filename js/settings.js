@@ -37,6 +37,12 @@ const PRESETS = {
             cloudDist: 'far' },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
+
+// Bumped when a default changes in a way a saved profile would otherwise hide.
+// Applied ONCE, and only to a 'custom' profile — a named preset already gets the
+// fresh table above, and someone who deliberately chose 'low' should keep it.
+const SCHEMA = 2;
+const NEW_ON = ['ao', 'ortho', 'grass'];
 // showNames / nameDist are co-op preferences, not performance knobs: a name
 // tag is a handful of sprites, so they live in "Hra" beside mouse look and
 // never fork the graphics preset. showNames existed as a hardcoded `true` on
@@ -69,6 +75,19 @@ function load() {
     // buildingR added), a profile saved as "medium" must get the new medium —
     // only "custom" keeps hand-tuned values verbatim.
     if (PRESETS[S.preset]) Object.assign(S, PRESETS[S.preset]);
+    // …but a CUSTOM profile keeps its values verbatim, which quietly defeats a
+    // default that changes underneath it: ambient occlusion and the aerial
+    // ground were never in the preset table at all, so every profile that had
+    // touched any graphics toggle carried `ortho: false` forever and the new
+    // default would have looked like it did nothing. A profile written before
+    // this stamp has no opinion about these keys — it only ever recorded the
+    // old absence — so they take the new default once, and stay the user's to
+    // change afterwards.
+    if (!(saved.v >= SCHEMA) && S.preset === 'custom') {
+      for (const k of NEW_ON) S[k] = true;
+      if (!(S.peds > 0)) S.peds = PRESETS.medium.peds;   // a count, not a switch
+    }
+    S.v = SCHEMA;
     // A range that is not one of the offered steps (an old build, a hand-edited
     // blob) would leave the <select> showing nothing and the value unreachable
     // — snap it to the nearest rung instead of trusting it.

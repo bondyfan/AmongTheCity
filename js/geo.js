@@ -762,7 +762,9 @@ const J_MIN_ARMS = 3;       // two ways meeting is a way that was split, not a j
 // SUPPOSED to sit higher. In the tile above every one of the 368 bad overlaps
 // was on the same layer — but the tag is in the data now, and the guard costs
 // one comparison.
-const OVL_STEP = 40;   // m between reconciliation nodes along a long overlap
+const OVL_STEP = 20;   // m between nodes along a long overlap — 40 left the
+                       // mid-span of a parallel pair unreconciled; below 20 the
+                       // segment pairs themselves run out and nothing changes
 const OVL_NEAR = 18;   // m — a real shared node this close already agrees
 const OVL_G = 60;      // m bucket for the segment index
 

@@ -101,8 +101,61 @@
 // Fast hits kill; corpses lie on a separate small budget, bleed a pooled decal,
 // and can be run over again. Slow hits stun: the ped lies a few seconds, gets
 // up and flees. Owners may subscribe:
-//   peds.onPedHit    = (ped, impactSpeed) => {}   // every qualifying hit
+//   peds.onPedHit    = (ped, impact) => {}        // every qualifying hit
 //   peds.onPedKilled = (ped) => {}                // once, when a hit is lethal
+//
+// ---- ONE DOOR FOR EVERY INJURY -------------------------------------------
+//
+// Until now the only thing in the world that could hurt a citizen was a car:
+// _carHit found the overlap and _launch did EVERYTHING else — released the
+// slot, threw the body, set 'rag', fired both hooks and panicked the street. A
+// fist and a bullet want every one of those consequences and none of them want
+// a Škoda, so the hit path is three layers now instead of one:
+//
+//   _throw(p, vx, vy, vz, spin)   the PHYSICS, and nothing else. Cut the body
+//                                 loose from its schedule, give it a velocity
+//                                 and a tumble, put it in the air. Knows
+//                                 nothing about damage, blame or sound.
+//   hurt(p, blow)                 THE DOOR. Takes hp off, decides whether this
+//                                 blow throws the body or merely rocks it,
+//                                 fires onPedHit / onPedKilled, panics the
+//                                 street. Every injury in the game comes
+//                                 through here — a fist, a bullet, a bus.
+//   _launch(p, car, s)            the car, unchanged from the outside: it works
+//                                 out the impulse a bonnet delivers and hands
+//                                 that to hurt().
+//
+// THE BUG THIS SHAPE EXISTS TO PREVENT, because it shipped once already. The
+// first melee build launched a ragdoll on EVERY punch. Hit #1 set state 'rag'
+// — and both _hitPass here and the melee sweep in js/combat.js skip anything
+// in 'rag' — so hits #2 and #3 landed on nobody and a three-punch combo was
+// unreachable by construction. It tested green, because "one punch, one
+// ragdoll" is also what a working punch looks like from the outside. Hence the
+// rule, which is the whole reason hurt() exists rather than four call sites:
+//
+//   A BLOW THAT DOES NOT KILL DOES NOT TOUCH p.state. It costs hp, sets a
+//   short hitCd, leaves a decal and makes them run — and they are still
+//   'walk', still in the hit pass, still standing there to be punched again.
+//   Only a LETHAL blow, or one that explicitly says launch:true, throws a body.
+//
+// p.hp is 100, the same bar js/vitals.js gives the player, so one scale serves
+// both sides of a fight. THE CAR DOES NOT SPEND IT: KILL_SPEED (7 m/s) still
+// decides on its own whether an impact was fatal. A health bar would make one
+// 30 km/h clip survivable for a healthy man and lethal for one who had been
+// punched twice, which contradicts both the existing tests and everybody's
+// intuition about being hit by a car — so the car's blow carries either the
+// whole health bar or none of it, and never a fraction.
+//
+// 'held' — a citizen standing still with their hands up, because somebody is
+// robbing them. It is a STATE and not a flag, and that is not tidiness:
+// freezing the schedule arc alone is not enough, because _schedStep passes
+// Math.max(0.3, …) as the animation speed, so a victim pinned in place JOGS ON
+// THE SPOT. That is the joke breaking rather than landing. 'held' therefore
+// leaves the walk loop entirely — no arc, no facing, and above all no
+// p.animate at all — and js/combat.js drives the pose and the heading for as
+// long as it holds them. The shared schedule keeps walking without them, as it
+// must, and the debt is paid back on release through `rush`: the same bounded,
+// draining local deviation a panic already uses.
 // ==========================================================================
 
 import * as THREE from 'three';
@@ -293,6 +346,33 @@ const RUSH_MAX = 45;       // m of lead a panic may build up before it stops hel
 const RUSH_DECAY = 0.55;   // m/s the debt drains at once they calm down
 const CALM_T = [6, 4];     // s of panic: base + spread
 
+// ---- damage: one door, one scale ----
+// A citizen starts on the same 100 the player does (js/vitals.js), so whoever
+// tunes a fist or a bullet has ONE number to think in and can read "this kills
+// a man in three hits" straight off their own table. The car deliberately does
+// not spend it — see _launch, and the header. Exported so js/combat.js and
+// js/weapons.js can state their damage as a fraction of a man rather than
+// copying the literal 100 into two more files.
+export const PED_HP = 100;
+// A blow that does not kill still has to stop two sources billing one punch
+// inside a single 50 ms step. SHORTER THAN ANY SWING, deliberately: hitCd is
+// read by _hitPass and by nothing else — hurt() never tests it — but a combo
+// whose second punch arrived inside a long cooldown would be silently
+// swallowed, which is the exact failure this whole refactor exists to avoid.
+const FLINCH_CD = 0.18;
+const FLINCH_BLOOD = 0.45; // a split lip, against 1.0–1.4 for a corpse
+// What the hooks are told a blow was worth when the caller does not say. The
+// car has real metres per second; a fist has hp. main.js screams past 3 and
+// js/chatter.js witnesses past 3, so a quarter puts a 14 HP punch (3.5)
+// exactly where a punch belongs: audible, and not a car crash.
+const IMPACT_PER_HP = 0.25;
+// The street reacts to where the blow CAME FROM — one stride back up its own
+// direction — rather than to the body it landed on. For a car that is the
+// bonnet and changes nothing; for a fist it is the difference between the
+// victim running away from their attacker and running away from themselves.
+const PANIC_BACK = 1.2;
+const C_CAR = 'sražení autem';   // Czech: it ends up stamped on a body
+
 // ---- blood decals ----
 const BLOOD_MAX = 40;      // pooled groups of 3 discs, oldest reused
 const BLOOD_GROW = 2;      // s to spread to full size
@@ -367,6 +447,14 @@ const _vdir = new THREE.Vector3();
 const _P = { x: 0, z: 0, dx: 0, dz: 0 };
 const _A = { x: 0, z: 0, dx: 0, dz: 0 };
 const _B = { x: 0, z: 0, dx: 0, dz: 0 };
+// _launch's blow record, rewritten in place. hurt() reads it and keeps no
+// reference, so one object serves every impact for the life of the process.
+// It belongs to _launch alone: an outside caller building a blow should write
+// its own literal — a hit is an event, not a frame, and it can afford one.
+const _blow = {
+  dmg: 0, launch: false, vx: 0, vy: 0, vz: 0,
+  spin: 0, impact: 0, panic: 0, cause: '',
+};
 
 export class Pedestrians {
   constructor(scene, city, terrain = null) {
@@ -804,6 +892,9 @@ export class Pedestrians {
     // --- walk / ragdoll ---
     for (const p of this.peds) {
       if (p.hitCd > 0) p.hitCd -= dt;
+      // 'held' before everything, because it is the one state this file does
+      // NOT drive: no arc, no facing, no animate. See hold().
+      if (p.state === 'held') { this._heldStep(p); continue; }
       if (p.state !== 'walk') { this._ragStep(p, dt); continue; }
       if (p.free) this._freeStep(p, dt);
       else this._schedStep(p, dt, wt);
@@ -872,6 +963,19 @@ export class Pedestrians {
   /** Ground under a pedestrian — 0 while the height map for that tile is absent. */
   _gy(x, z) { return this.terrain ? this.terrain.heightAt(x, z) : 0; }
 
+  // Somebody with their hands up. We keep them standing where they were grabbed
+  // and re-seat them on the ground (a tile can stream in underneath a mugging),
+  // and that is ALL: p.animate is never called, so whatever pose js/combat.js
+  // last wrote survives the frame. Calling it with a floor of 0.3, which is
+  // what _schedStep would do, is a man jogging on the spot — see the header.
+  // p.heading is read here rather than written, so the holder can turn the
+  // victim to face them just by assigning it.
+  _heldStep(p) {
+    p.speed = 0;
+    p.mesh.position.set(p.x, this._gy(p.x, p.z), p.z);
+    p.mesh.rotation.y = p.heading;
+  }
+
   // A body that left its slot — hit, stunned, got up and ran. Its motion is
   // this tab's business alone, so it integrates locally along the beat it was
   // walking and is dropped as soon as nobody can see it go.
@@ -922,7 +1026,13 @@ export class Pedestrians {
         if (p.deadT <= 0 && this._hidden(p.x, p.z, fx, fz)) this._drop(i);
         continue;
       }
-      if (p.state !== 'walk') continue;                 // mid-flight: let it land
+      // mid-flight: let it land. A HELD ghost ages like a walking one on
+      // purpose — the alternative is a body that is immortal for as long as
+      // whoever grabbed it forgets to let go, which is exactly the leak
+      // GHOST_MAX exists to close. js/combat.js must therefore tolerate its
+      // victim vanishing, the same way it must when the sweep detaches a
+      // scheduled one.
+      if (p.state !== 'walk' && p.state !== 'held') continue;
       // A ghost owns no slot, so nothing shared is waiting on it and it may go
       // the instant nobody can see it go — which is what the header has always
       // promised ("they run until they are out of sight and then quietly stop
@@ -1028,6 +1138,12 @@ export class Pedestrians {
       // to still be somebody (js/chatter.js keys a voice and a cooldown on it).
       // Copying it here costs one int per body and survives every path.
       pid: s.seed,
+      // The health bar every blow in the game spends, and the ONE place it is
+      // initialised: js/vitals.js's 100, so a weapon does the same arithmetic
+      // whichever way it is pointed. Nothing but hurt() may change it. Note
+      // that a car ignores it entirely — KILL_SPEED is its rule, and the
+      // header says why at length.
+      hp: PED_HP,
       // feet-to-hair, this person's own — js/chatter.js floats their speech
       // bubble off it. The five archetypes span 15 cm, which is exactly the
       // amount that makes a fixed 1.75 m assumption look like a bug.
@@ -1042,11 +1158,18 @@ export class Pedestrians {
       // free-body state, only meaningful once released. ghostT is the seconds
       // this body has outlived its slot; GHOST_MAX collects it.
       fArc: 0, fDir: 1, fSpan: s.span, ghostT: 0,
-      // hit-physics state: walk | rag (flying/sliding) | down (stunned) | dead
+      // hit-physics state:
+      //   walk | held (hands up, somebody else drives the pose) |
+      //   rag (flying/sliding) | down (stunned) | dead
       state: 'walk', dead: false, y: 0, lieY: 0,
       vx: 0, vy: 0, vz: 0, avx: 0, avz: 0, bounced: false,
       hitCd: 0, hurtS: 0, downT: 0, deadT: 0,
       blend: 0, bx: 0, bz: 0,
+      // Where the beat had them when they were grabbed, and what killed them.
+      // Declared here rather than stamped on at the moment of need: this object
+      // is the hot shape the whole walk loop reads, and a property added later
+      // costs every body a hidden-class transition to save eight bytes.
+      heldArc: 0, cause: null,
     };
     c.group.position.set(p.x, this._gy(p.x, p.z), p.z);
     s.body = p;
@@ -1154,7 +1277,10 @@ export class Pedestrians {
     const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
     const rx = -fz, rz = fx;                     // right of travel
     const hl = car.len / 2, hw = car.wid / 2;
-    const lying = p.state !== 'walk';
+    // A held citizen is on their feet with their hands up, so they are a
+    // standing circle and not a capsule — being robbed does not make you
+    // easier to run over lengthways.
+    const lying = p.state !== 'walk' && p.state !== 'held';
     let hit = rectCircle(dx * fx + dz * fz, dx * rx + dz * rz,
       hl, hw, lying ? LIE_R : PED_R);
     if (!hit && lying) {                         // head/feet ends of the capsule
@@ -1168,32 +1294,219 @@ export class Pedestrians {
   }
 
   // the moment of impact: velocity along the car's travel, a kick upward, a
-  // shove off the bonnet's centerline, tumble spin, splayed limbs
+  // shove off the bonnet's centerline, tumble spin, splayed limbs. Everything
+  // that FOLLOWS from it — the health, the hooks, the blood, the panic — is
+  // hurt()'s, so a bonnet and a fist cannot drift apart on any of it.
   _launch(p, car, s) {
-    this._release(p);                            // physics owns them now, not the beat
     const dirS = car.speed >= 0 ? 1 : -1;        // reversing hits launch backward
     const fx = -Math.sin(car.heading) * dirS, fz = -Math.cos(car.heading) * dirS;
     const k = p.state === 'dead' ? NUDGE_K : 1;  // rolling a corpse, gently
     const kick = (s * 0.9 + 2) * k;
     const side = (p.x - car.x) * -fz + (p.z - car.z) * fx < 0 ? -1 : 1;
-    p.vx = fx * kick - fz * side * 1.2 * k;      // lateral = right-of-travel × side
-    p.vz = fz * kick + fx * side * 1.2 * k;
-    p.vy = Math.min(6, 1.5 + s * 0.25) * k;
-    const spin = Math.min(9, 2 + s * 0.6);
-    p.avx = spin * (Math.random() * 1.4 - 0.7);
-    p.avz = spin * (Math.random() * 1.4 - 0.7);
+    const b = _blow;
+    // THE CAR KEEPS ITS OWN KILL RULE, and the rule is a SPEED and not a health
+    // bar: above KILL_SPEED the blow carries the whole 100, below it, nothing
+    // at all. Billing a car proportionally would mean a 30 km/h clip killed a
+    // man who had been punched twice and left a healthy one standing — two
+    // different answers to "was I run over?", which is a question the tests and
+    // the player both expect exactly one answer to.
+    b.dmg = s > KILL_SPEED ? PED_HP : 0;
+    b.launch = true;                             // a car always throws a body
+    b.vx = fx * kick - fz * side * 1.2 * k;      // lateral = right-of-travel × side
+    b.vz = fz * kick + fx * side * 1.2 * k;
+    b.vy = Math.min(6, 1.5 + s * 0.25) * k;
+    b.spin = Math.min(9, 2 + s * 0.6);
+    b.impact = s;                                // the hooks want metres per second
+    b.panic = PANIC_R;
+    b.cause = C_CAR;
+    b.by = car;                                  // see p.by in hurt()
+    this.hurt(p, b);
+  }
+
+  /**
+   * THE DOOR EVERY INJURY GOES THROUGH. A fist, a bullet, a bus, whatever
+   * weapons.js grows next: this is the only function in the game that takes a
+   * citizen's health, and therefore the only one that can fire onPedHit,
+   * onPedKilled or scatter the street. Nothing outside this file should be
+   * reaching past it to _throw — a body thrown without consequences is a body
+   * nobody screamed at and no policeman ever heard about.
+   *
+   * blow = {
+   *   dmg     hp to take off. 0 is legal: a blow may be pure physics.
+   *   launch  true = throw them whatever the damage did (a car, a rocket). A
+   *           punch leaves it alone and gets a flinch — see the header for the
+   *           combo this rule exists to keep reachable.
+   *   vx, vz  where the body goes, in m/s. A non-launching blow reads only the
+   *   vy      DIRECTION of it, to work out where the blow came from, so a fist
+   *           may hand over a unit vector and nothing moves.
+   *   spin    rad/s of tumble; defaults to something proportional to the throw.
+   *   impact  what the hooks are told this was worth. Defaults to the damage
+   *           through IMPACT_PER_HP.
+   *   panic   metres of street that hears it. Defaults to PANIC_R; 0 for a
+   *           silenced weapon, or a mugging nobody is supposed to notice.
+   *   cause   a short Czech noun, stamped on the body for whoever reads it.
+   * }
+   *
+   * Returns true if there was somebody there to hurt.
+   *
+   * IT DOES NOT TEST hitCd. hitCd is the CAR's gate — decremented in update(),
+   * read in _hitPass — and a melee combo forced to wait on it would drop its
+   * second and third punch on the floor. Rate limiting a weapon is the
+   * weapon's job, and js/combat.js has an absolute deadline of its own for it.
+   */
+  hurt(p, blow) {
+    if (!p || !blow || !p.mesh) return false;
+    // Being hit ends a mugging: the hands come down before the body does.
+    if (p.state === 'held') this.hold(p, false);
+
+    const dmg = blow.dmg > 0 ? blow.dmg : 0;
+    const wasDead = p.dead;
+    // A corpse has no health left to lose; skipping it here is also what keeps
+    // onPedKilled a once-per-body event when a car rolls one down the street.
+    if (dmg > 0 && !wasDead) {
+      p.hp -= dmg;
+      if (!(p.hp > 0)) { p.hp = 0; p.dead = true; }
+    }
+    const imp = Number.isFinite(blow.impact) ? blow.impact : dmg * IMPACT_PER_HP;
+    p.hurtS = imp;
+    if (blow.cause) p.cause = blow.cause;
+    // WHO did it, when anybody did. onPedHit fires for EVERY car in the city,
+    // including AI traffic mowing somebody down two streets away — so a wanted
+    // system that charges the player on that hook alone hands out stars for
+    // accidents they were not part of. The blow carries its author; main.js
+    // compares it against the car the player is actually driving.
+    p.by = blow.by ?? null;
+
+    const vx = blow.vx || 0, vy = blow.vy || 0, vz = blow.vz || 0;
+    if (p.dead || blow.launch === true) {
+      // Lethal, or the caller insisted. Off their feet they go.
+      const spin = Number.isFinite(blow.spin)
+        ? blow.spin
+        : Math.min(9, 2 + Math.sqrt(vx * vx + vz * vz) * 0.6);
+      this._throw(p, vx, vy, vz, spin);
+      p.hitCd = HIT_COOLDOWN;
+    } else if (p.state === 'walk') {
+      // THE FLINCH, and the whole point of this branch is what it does NOT do:
+      // it never touches p.state. They rock, they bleed, they run — and they
+      // are still standing there in 'walk' for the next punch of the combo.
+      p.hitCd = FLINCH_CD;
+      if (dmg > 0) this._spawnBlood(p.x, p.z, FLINCH_BLOOD);
+    }
+
+    // SOUND: body thud (+ scream if fatal) belongs here — subscribe to onPedHit
+    this.onPedHit?.(p, imp);
+    if (p.dead && !wasDead) this.onPedKilled?.(p);
+
+    // SOUND: bystander screams — the crowd scatters. The bang is placed one
+    // stride back up the blow, i.e. roughly where whoever threw it is standing:
+    // panic() decides which way is "away" by sampling the beat, and away from
+    // the victim's own feet is not a direction. For a car the origin lands on
+    // the bonnet and nothing measurable changes.
+    const r = Number.isFinite(blow.panic) ? blow.panic : PANIC_R;
+    if (r > 0) {
+      let ox = p.x, oz = p.z;
+      const l = Math.sqrt(vx * vx + vz * vz);
+      if (l > 1e-4) { ox -= (vx / l) * PANIC_BACK; oz -= (vz / l) * PANIC_BACK; }
+      this.panic(ox, oz, r);
+    }
+    return true;
+  }
+
+  /**
+   * The physics half of a launch: cut the body loose from its schedule, give
+   * it a velocity and a tumble, and put it in the air. It does not know what
+   * hit it, does not read or write hp, fires no hooks and makes no sound —
+   * which is precisely what lets a fist, a bullet and a Škoda all arrive at the
+   * same ragdoll through one function instead of three copies that drift.
+   * Private on purpose: the consequences live in hurt(), and a caller who
+   * skipped them would be inventing a second kind of death.
+   */
+  _throw(p, vx, vy, vz, spin) {
+    if (p.state === 'held') this.hold(p, false);
+    this._release(p);                            // physics owns them now, not the
+                                                 // beat; a no-op if already free
+    p.vx = vx; p.vy = vy; p.vz = vz;
+    const s = Number.isFinite(spin) ? spin : 0;
+    p.avx = s * (Math.random() * 1.4 - 0.7);
+    p.avz = s * (Math.random() * 1.4 - 0.7);
     p.state = 'rag';
     p.bounced = false;
-    p.hitCd = HIT_COOLDOWN;
-    p.hurtS = s;
     p.ragdollPose();
-    const wasDead = p.dead;
-    if (!wasDead && s > KILL_SPEED) p.dead = true;
-    // SOUND: body thud (+ scream if fatal) belongs here — subscribe to onPedHit
-    this.onPedHit?.(p, s);
-    if (p.dead && !wasDead) this.onPedKilled?.(p);
-    // SOUND: bystander screams — the crowd scatters
-    this.panic(p.x, p.z, PANIC_R);
+  }
+
+  /**
+   * Put a citizen into — or out of — 'held': standing still with their hands
+   * up while somebody goes through their pockets. Returns true if the state
+   * actually changed.
+   *
+   * THE POSE IS NOT OURS. 'held' means this file stops driving the body
+   * altogether: no arc, no facing, and no p.animate at all. js/combat.js writes
+   * p.heading and calls the citizen's handsPose() every frame for as long as it
+   * holds them. Freezing the schedule and leaving the walk cycle running is the
+   * version that does not work — the animation floor of 0.3 turns a robbery
+   * into a man jogging on the spot.
+   */
+  hold(p, on) {
+    if (!p || !p.mesh) return false;
+    if (on) {
+      if (p.state !== 'walk') return false;      // only somebody on their feet
+      p.state = 'held';
+      p.speed = 0;
+      p.calm = 0;                                // frozen, not fleeing
+      // Where the beat had them at the moment of the grab, debt included. The
+      // schedule is shared and walks on without them; this is what we owe it.
+      const s = p.sch;
+      p.heldArc = s ? this._arcAt(s, this.now()).arc + p.rush : p.fArc;
+      p.standPose();
+      return true;
+    }
+    if (p.state !== 'held') return false;
+    p.state = 'walk';
+    const s = p.sch;
+    if (s) {
+      // Pay the standing still back through `rush` — the same bounded, draining
+      // deviation a panic uses — so a mugged citizen rejoins their own schedule
+      // instead of snapping forward to wherever it got to without them. A very
+      // long hold saturates at RUSH_MAX; `blend` below eases whatever is left
+      // over, which is the only reason it is safe to clamp at all.
+      const d = p.heldArc - this._arcAt(s, this.now()).arc;
+      p.rush = d > RUSH_MAX ? RUSH_MAX : d < -RUSH_MAX ? -RUSH_MAX : d;
+    } else {
+      p.fArc = p.heldArc;                        // a ghost integrates its own arc
+    }
+    p.bx = p.x; p.bz = p.z; p.blend = 1;
+    p.calm = CALM_T[0];                          // just robbed: they leg it
+    return true;
+  }
+
+  /**
+   * The nearest live citizen to (x, z) within `r`, or null. `want(p)` is an
+   * optional filter — "somebody on their feet", "not the one I am already
+   * holding" — and it is only asked about bodies that are ALREADY closer than
+   * the best candidate so far, so a caller may make it as expensive as it likes
+   * without turning this into an O(n) predicate sweep.
+   *
+   * A scan, not an index, and no allocation on any path: an indexed loop rather
+   * than for..of (which mints an iterator per call, and a combat module aiming
+   * at the crowd calls this every frame), no array of candidates, no sort, no
+   * closure. The fleet is capped near 55 bodies — js/chatter.js's pair scan
+   * does eighty times that work four times a second and is not on anybody's
+   * profile, so a spatial index here would be more code and less speed.
+   */
+  nearest(x, z, r, want = null) {
+    let bd = r > 0 ? r * r : 0;
+    if (!(bd > 0)) return null;
+    const peds = this.peds;
+    let best = null;
+    for (let i = 0; i < peds.length; i++) {
+      const p = peds[i];
+      const dx = p.x - x, dz = p.z - z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= bd) continue;
+      if (want && !want(p)) continue;
+      best = p; bd = d2;
+    }
+    return best;
   }
 
   // one ragdoll/corpse per frame: fly under gravity while tumbling, bounce

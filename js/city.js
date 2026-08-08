@@ -547,8 +547,16 @@ export class CityWorld {
       // with Object.create and never set the flag, and an undefined default
       // would silently hand them the inverted priority.
       const covering = this.coverageFirst !== false ? qi < fill.length : !(ui < up.length);
-      const key = covering ? fill[qi++] : ui < up.length ? up[ui++] : null;
-      if (key === null) break;
+      // Both sides have to answer with null when they run dry. With coverage
+      // first, `covering` is itself the "fill still has one" test and the fill
+      // branch cannot overrun — but with it OFF, `covering` only means "the
+      // upgrade queue is empty", which is exactly when the fill queue is most
+      // likely to be empty too, and `fill[qi++]` then hands back undefined.
+      // undefined is not null, so the guard below waved it through into
+      // key.split(',') and the frame died on a TypeError.
+      const key = covering ? (qi < fill.length ? fill[qi++] : null)
+        : (ui < up.length ? up[ui++] : null);
+      if (key == null) break;
       const [cx, cz] = key.split(',').map(Number);
       const ring = Math.max(Math.abs(cx - fx), Math.abs(cz - fz));
       // the cooldown yields only to a FIRST build right under the player —
