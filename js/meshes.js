@@ -241,7 +241,12 @@ function makeWaterMaterial() {
         // of holding one hardcoded blue around the clock.
         float day = 1.0 - uNight;
         colour *= 0.055 + 0.945 * day;
-        colour = mix(colour, uSky, clamp(0.09 + fresnel * 0.58, 0.0, 0.86));
+        // Held short of a true mirror on purpose. At a grazing angle real water
+        // is very nearly one, but what it would be reflecting here is a single
+        // flat fog colour rather than a scene, and taken to the physical limit
+        // a wide river reads as a sheet of pale concrete. Stopping around 55%
+        // leaves enough of the body colour showing to still look like water.
+        colour = mix(colour, uSky, clamp(0.08 + fresnel * 0.47, 0.0, 0.72));
 
         // the sun, and only while there is one above the horizon
         float above = clamp(uSun.y * 5.0, 0.0, 1.0);
