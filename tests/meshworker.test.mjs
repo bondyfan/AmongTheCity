@@ -108,6 +108,15 @@ function makeWorld() {
     tag({ t: 'service', w: 6, d: 1, v: 20, p: [[30, 45], [110, 42]] }),
     tag({ t: 'service', w: 6, d: 1, v: 20, p: [[80, 20], [76, 60]] }),
   ];
+  // A little web of hard-surfaced footways, well clear of both buildings. It is
+  // here so the DERIVED plaza ground (sealed.js closing a path network into a
+  // surface) is built on both sides of the wire: nothing else in this fixture
+  // carries a `surface` tag, so without it that whole path — and the green,
+  // water and building subtraction it does — went over the worker untested.
+  for (let x = 36; x <= 60; x += 8)
+    roads.push(tag({ t: 'footway', w: 1.8, s: 'paving', d: 0, p: [[x, 60], [x, 76]] }));
+  for (let z = 60; z <= 76; z += 8)
+    roads.push(tag({ t: 'footway', w: 1.8, s: 'paving', d: 0, p: [[36, z], [60, z]] }));
   for (const r of roads) r._len = polylineLength(r.p);
   const trees = [];
   for (let i = 0; i < 24; i++) trees.push(tag({ p: [[70 + (i % 6) * 8, 8 + Math.floor(i / 6) * 9]] }));

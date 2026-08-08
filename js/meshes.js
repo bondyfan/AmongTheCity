@@ -37,6 +37,7 @@ import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKe
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
 import { furnitureInto } from './furniture.js';
+import { sealedRects } from './sealed.js';
 import { entranceOf, brandOf, signBrandOf, classify } from './interiors.js';
 import { INTERIOR } from './config.js';
 
@@ -4587,6 +4588,38 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // merged rectangles per chunk, through the very same tess-and-drape path
     // as every other fill — at LAYER_Y.inferred, under everything OSM said and
     // under every levelled road, which is the entire point of the layer.
+    // The inside of a town square, which OSM plots as a web of footways on sett
+    // and concrete and no area at all — so nothing here has a surface, and the
+    // player walks on either a photograph or a field. sealed.js closes that path
+    // network into ground; this lays paving on it, at LAYER_Y.inferred like the
+    // shipped raster, i.e. under every OSM fill and every levelled road.
+    //
+    // It draws under the photo too, and that is the point: the photograph shows
+    // the square from 300 m up through the crowns of its trees, which is the one
+    // thing it cannot show you the floor of.
+    {
+      // never two plates at one height: where the shipped classifier is about to
+      // surface a cell itself, leave it to the classifier
+      const ceded = !orthoGround && mats.ground
+        ? (x, z) => mats.ground.classAt(x, z) > 0 : null;
+      const rects = sealedRects(cell, cx, cz, ceded);
+      if (rects.length) {
+        const drvS = cell.roads
+          .filter((r) => !r.br && r.p?.length > 1)
+          .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25,
+            lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road }));
+        for (const r of rects) {
+          yield;
+          const nearRoad = drvS.some(({ bb, hw }) =>
+            !(r.x1 < bb[0] - hw || r.x0 > bb[2] + hw || r.z1 < bb[1] - hw || r.z0 > bb[3] + hw));
+          const g = yield* clampUnderRoadsGen(drape(terrainTess(shapePoly(
+            [[r.x0, r.z0], [r.x1, r.z0], [r.x1, r.z1], [r.x0, r.z1]],
+            null, LAYER_Y.inferred, COLORS.inferred.paving, SURF.paving),
+          nearRoad ? 3.5 : undefined), mats.terrain), drvS, mats.terrain);
+          if (g) flat.push(g);
+        }
+      }
+    }
     // …but the classifier's guess at sealed ground stays down under the photo.
     // Unlike a car park it has nothing the photograph gets wrong — it exists
     // precisely to stand in for a photograph that is not there.

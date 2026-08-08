@@ -115,3 +115,42 @@ test('a chunk outside the mapped world grows nothing', () => {
   m.request('0,0'); m.step(50);
   assert.equal(m.heightAt(60, 60), 0);
 });
+
+// ---- and the square nobody drew -------------------------------------------
+// The mask's rule for ground no polygon covers is "a field", which is right in
+// open country and wrong in the middle of a town square. Náměstí Jana Pernera
+// is thirteen ways and no area, so 7 % of that chunk grew 13 cm of grass in the
+// gaps between its paths. sealed.js closes the hard-surfaced network; this is
+// the mask agreeing to it — and refusing to let it overrule a mapped lawn.
+const webOf = (surface) => {
+  const roads = [];
+  for (let x = 20; x <= 100; x += 10)
+    roads.push({ t: 'footway', w: 1.8, s: surface, p: [[x, 20], [x, 100]] });
+  for (let z = 20; z <= 100; z += 10)
+    roads.push({ t: 'footway', w: 1.8, s: surface, p: [[20, z], [100, z]] });
+  return roads;
+};
+
+test('no grass grows between the paths of a paved square', () => {
+  const m = new GrassMask(cityOf({ roads: webOf('paving') }));
+  m.request('0,0'); m.step(60000);
+  assert.equal(m.heightAt(65, 65), 0,
+    'the middle of a paved square is still growing a field');
+});
+
+test('…but a park with gravel paths is still a park', () => {
+  const m = new GrassMask(cityOf({ roads: webOf('gravel') }));
+  m.request('0,0'); m.step(60000);
+  assert.ok(m.heightAt(65, 65) > 0,
+    'gravel paths through a park mowed the whole park to bare ground');
+});
+
+test('a mapped lawn inside a square keeps its grass', () => {
+  const m = new GrassMask(cityOf({
+    roads: webOf('paving'),
+    green: [{ t: 'grass', o: [[50, 50], [80, 50], [80, 80], [50, 80]] }],
+  }));
+  m.request('0,0'); m.step(60000);
+  assert.ok(m.heightAt(65, 65) > 0, 'the derived paving overruled a mapped lawn');
+  assert.equal(m.heightAt(30, 30), 0, 'the rest of the square kept its grass');
+});

@@ -23,6 +23,7 @@
 
 import { CHUNK } from './config.js';
 import { chunkKey } from './geo.js';
+import { sealedGrid, SEAL_RES } from './sealed.js';
 
 const RES = 1;                        // m per mask cell
 const N = CHUNK / RES;                // 120 cells a side
@@ -134,6 +135,23 @@ export class GrassMask {
     for (const b of cell.buildings) if (b.o?.length >= 3) fillPolygon(m, x0, z0, b.o, b.i, 0);
     for (const r of cell.roads) stampLine(m, x0, z0, r.p, (r.w ?? 3) / 2 + 0.6);
     for (const r of cell.rails) stampLine(m, x0, z0, r.p, 2.6);
+    // …and so does ground the map never drew but plainly paved anyway: the
+    // inside of a town square, which OSM plots as a web of footways on sett and
+    // concrete and no area at all. Only UNMAPPED cells may be overruled here —
+    // where OSM drew a lawn the lawn wins, because this is for the silence
+    // between features and not an argument with the map.
+    const sealed = sealedGrid(cell, ci, cj);
+    if (sealed) {
+      const step = SEAL_RES / RES;                    // mask cells per sealed cell
+      for (let j = 0; j < N; j++) {
+        const sj = (j / step) | 0;
+        for (let i = 0; i < N; i++) {
+          const k = j * N + i;
+          if (m[k] !== UNMAPPED) continue;
+          if (sealed[sj * (N / step) + ((i / step) | 0)]) m[k] = 0;
+        }
+      }
+    }
     // …and the classifier's sealed ground says none too. The raster is 4 m
     // cells; asking at each mask metre keeps its edges where it drew them.
     if (this.ground) {
