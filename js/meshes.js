@@ -136,7 +136,19 @@ function makeWaterMaterial() {
     // first water frame can render.
     uniforms: THREE.UniformsUtils.merge([
       THREE.UniformsLib.fog,
-      { uTime: { value: 0 } },
+      {
+        uTime: { value: 0 },
+        // Water shows almost no colour of its own — it shows the sky, the sun
+        // and how dark it is. The first version of this shader was handed none
+        // of those: a constant sun direction and constant blues, so the river
+        // lay there at midnight glowing the same turquoise it had at noon, with
+        // a sun glint on it that no sun in the sky could account for. sky.js
+        // already publishes exactly what is needed (sky.sunDir, sky.nightK) and
+        // clouds.js already reads it; main.js now feeds it here too.
+        uSun: { value: new THREE.Vector3(-0.38, 0.82, -0.27) },
+        uNight: { value: 0 },
+        uSky: { value: new THREE.Color(0x9fb6cc) },
+      },
     ]),
     fog: true,
     side: THREE.DoubleSide,
@@ -153,15 +165,22 @@ function makeWaterMaterial() {
         // World coordinates keep the phase continuous across 120 m chunks.
         // Local coordinates would restart every tile and draw a visible seam
         // down the middle of a river.
-        float a = baseWorld.x * 0.115 + baseWorld.z * 0.071 + t * 1.15;
-        float b = baseWorld.x * -0.047 + baseWorld.z * 0.132 - t * 0.82;
-        float c = baseWorld.x * 0.31 + baseWorld.z * -0.18 + t * 1.9;
-        p.y += sin(a) * 0.070 + sin(b) * 0.045 + sin(c) * 0.012;
+        //
+        // A RIVER IS NOT AN OCEAN. This field used to run at 12.7 cm amplitude
+        // over 45–55 m wavelengths, which on a 40 m wide river means the whole
+        // surface heaves as one body: Atlantic swell in Pardubice. Shortening
+        // the wavelength here cannot fix it either — the water mesh is
+        // tessellated at 8 m, so nothing under about a 16 m wavelength survives
+        // being sampled at the vertices and it would only alias. So the
+        // geometry keeps a slow shallow breath, 1.8 cm at the crest, and every
+        // ripple you can actually see is done per-pixel below, where the
+        // resolution to carry it exists.
+        float a = baseWorld.x * 0.115 + baseWorld.z * 0.071 + t * 0.55;
+        float b = baseWorld.x * -0.047 + baseWorld.z * 0.132 - t * 0.41;
+        p.y += sin(a) * 0.011 + sin(b) * 0.007;
 
-        float dx = cos(a) * 0.070 * 0.115
-          + cos(b) * 0.045 * -0.047 + cos(c) * 0.012 * 0.31;
-        float dz = cos(a) * 0.070 * 0.071
-          + cos(b) * 0.045 * 0.132 + cos(c) * 0.012 * -0.18;
+        float dx = cos(a) * 0.011 * 0.115 + cos(b) * 0.007 * -0.047;
+        float dz = cos(a) * 0.011 * 0.071 + cos(b) * 0.007 * 0.132;
         vWaveNormal = normalize(mat3(modelMatrix) * vec3(-dx, 1.0, -dz));
 
         vec4 world = modelMatrix * vec4(p, 1.0);
@@ -173,37 +192,72 @@ function makeWaterMaterial() {
     `,
     fragmentShader: `
       uniform float uTime;
+      uniform vec3 uSun;
+      uniform float uNight;
+      uniform vec3 uSky;
       varying vec3 vWorld;
       varying vec3 vWaveNormal;
       #include <fog_pars_fragment>
 
+      // The ripples, per PIXEL. Three crossing wavelets at roughly 7 m, 3.5 m
+      // and 1.6 m — the scales a river actually has, and all of them far below
+      // what the 8 m mesh could ever carry as geometry. Only the SLOPE is
+      // wanted, so the analytic derivative goes straight into the normal and no
+      // height is displaced at all.
+      vec3 rippleNormal(vec2 p, float t) {
+        vec2 k1 = vec2(0.72, 0.43);
+        vec2 k2 = vec2(-0.51, 1.02);
+        vec2 k3 = vec2(1.85, -1.31);
+        float p1 = dot(p, k1) + t * 1.45;
+        float p2 = dot(p, k2) - t * 1.02;
+        // the third is warped by the first, so the three do not beat into a
+        // regular grid of dots the way plain crossed sines do
+        float p3 = dot(p, k3) + t * 2.60 + sin(p1) * 0.6;
+        float a1 = 0.052, a2 = 0.034, a3 = 0.019;
+        float dx = cos(p1) * a1 * k1.x + cos(p2) * a2 * k2.x + cos(p3) * a3 * k3.x;
+        float dz = cos(p1) * a1 * k1.y + cos(p2) * a2 * k2.y + cos(p3) * a3 * k3.y;
+        return vec3(-dx, 1.0, -dz);
+      }
+
       void main() {
-        vec3 n = normalize(gl_FrontFacing ? vWaveNormal : -vWaveNormal);
+        vec3 base = normalize(gl_FrontFacing ? vWaveNormal : -vWaveNormal);
+        vec3 rip = rippleNormal(vWorld.xz, uTime);
+        vec3 n = normalize(base + vec3(rip.x, 0.0, rip.z));
         vec3 viewDir = normalize(cameraPosition - vWorld);
-        vec3 sunDir = normalize(vec3(-0.38, 0.82, -0.27));
 
-        float fresnel = pow(1.0 - max(dot(n, viewDir), 0.0), 4.0);
-        float bands = sin(vWorld.x * 0.19 + vWorld.z * 0.13 + uTime * 1.3)
-          * sin(vWorld.x * -0.09 + vWorld.z * 0.23 - uTime * 0.9);
-        vec3 deep = vec3(0.012, 0.075, 0.105);
-        vec3 clearWater = vec3(0.025, 0.19, 0.255);
-        vec3 reflectedSky = vec3(0.16, 0.29, 0.40);
-        vec3 colour = mix(deep, clearWater, 0.52 + bands * 0.08);
-        colour = mix(colour, reflectedSky, 0.15 + fresnel * 0.45);
+        float fresnel = pow(1.0 - max(dot(n, viewDir), 0.0), 5.0);
+        // A lowland Czech river is green-brown and it is MURKY. The turquoise
+        // this used to be belongs to eighteen metres of clear tropical water
+        // over white sand, and it read as a lit sign rather than a river.
+        float bands = sin(vWorld.x * 0.061 + vWorld.z * 0.043 + uTime * 0.31)
+          * sin(vWorld.x * -0.037 + vWorld.z * 0.052 - uTime * 0.22);
+        vec3 deep = vec3(0.019, 0.028, 0.025);
+        vec3 body = vec3(0.052, 0.074, 0.061);
+        vec3 colour = mix(deep, body, 0.55 + bands * 0.14);
 
-        // Narrow, gently curved ripple lines. Crossing two sine fields made a
-        // regular grid of bright dots; one phase warped by a slow second wave
-        // reads as wind travelling across a continuous river surface.
-        float ripplePhase = vWorld.x * 5.2 + vWorld.z * 3.1 + uTime * 3.2
-          + sin(vWorld.x * 0.41 - vWorld.z * 0.37 - uTime * 0.7) * 0.8;
-        float crests = pow(max(sin(ripplePhase), 0.0), 24.0);
-        colour += vec3(0.035, 0.055, 0.07) * crests;
+        // EVERYTHING water shows is borrowed. Its own body darkens with the
+        // day, and what it reflects is the sky's real colour this minute — so
+        // it goes orange at sunset and near-black at midnight for free, instead
+        // of holding one hardcoded blue around the clock.
+        float day = 1.0 - uNight;
+        colour *= 0.055 + 0.945 * day;
+        colour = mix(colour, uSky, clamp(0.09 + fresnel * 0.58, 0.0, 0.86));
 
-        vec3 halfDir = normalize(sunDir + viewDir);
-        float glint = pow(max(dot(n, halfDir), 0.0), 150.0) * 1.15
-          + pow(max(dot(n, halfDir), 0.0), 34.0) * 0.07;
-        colour += vec3(1.0, 0.91, 0.67) * glint;
-        colour += vec3(0.035, 0.055, 0.06) * max(dot(n, sunDir), 0.0);
+        // the sun, and only while there is one above the horizon
+        float above = clamp(uSun.y * 5.0, 0.0, 1.0);
+        vec3 halfDir = normalize(uSun + viewDir);
+        float glint = pow(max(dot(n, halfDir), 0.0), 140.0) * 0.95
+          + pow(max(dot(n, halfDir), 0.0), 30.0) * 0.05;
+        colour += vec3(1.0, 0.93, 0.74) * glint * above;
+        colour += vec3(0.022, 0.032, 0.027) * max(dot(n, uSun), 0.0) * above;
+
+        // and at night the moon does the same trick, faintly, from the other
+        // side of the sky — the one thing that should still catch the eye on
+        // black water
+        vec3 moonDir = normalize(vec3(-uSun.x, abs(uSun.y) + 0.22, -uSun.z));
+        vec3 moonHalf = normalize(moonDir + viewDir);
+        colour += vec3(0.40, 0.46, 0.60)
+          * pow(max(dot(n, moonHalf), 0.0), 110.0) * 0.30 * uNight;
 
         gl_FragColor = vec4(colour, 1.0);
         #include <tonemapping_fragment>

@@ -2957,6 +2957,16 @@ function stepGame(dt) {
   weapons?.update(dt, { cars: _blastList(), peds });
   updateAim(dt);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
+  // …and the water off the same two numbers. One shared material for every
+  // river in the world, so this is one assignment a frame, not one per chunk.
+  // Without it the shader falls back to the constants it was born with and the
+  // Labe glows turquoise at 3 a.m. under a sun that set five hours ago.
+  const wu = world?.mats?.water?.uniforms;
+  if (wu && sky) {
+    if (sky.sunDir) wu.uSun.value.copy(sky.sunDir);
+    wu.uNight.value = sky.nightK ?? 0;
+    if (scene.fog) wu.uSky.value.copy(scene.fog.color);
+  }
   if (traffic) {
     // Shared clock in, shared fleet out. No per-player place factor any more
     // (see the note above trafficTimeK) — this product must be computable from
