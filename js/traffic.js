@@ -576,15 +576,26 @@ const PATROL_SALT = 0x5e17;            // unused by any other draw in this file
 // ~630 m ring while driving, distinct patrols the drive came within 150 m of,
 // and the same census standing still:
 //     0.16    0.67 live    0.20 /min    0.28 live standing
-//     0.30    0.97 live    0.33 /min    1.08 live standing   ← chosen
-//     0.45    1.34 live    0.53 /min    1.79 live standing
+//     0.30    0.97 live    0.33 /min    1.08 live standing
+//     0.45    1.34 live    0.53 /min    1.79 live standing   ← chosen
 // The target is ONE patrol somewhere around you at essentially all times and
 // not two: the ambient layer's job is to make the town feel policed, and the
 // cars that are actually chasing you are js/police.js's to put on the road. If
 // this number tries to do the chasing's work as well, a regional Czech town
 // reads as a checkpoint. It is free to move — the fleet measured 94 cars at
 // every value in the sweep, because a patrol is one car in a hundred.
-const PATROL_P = 0.30;
+// RAISED FROM 0.30 after the first person to play it asked "are there even any
+// police cars? I cannot see any" — and they were right. 0.30 hits its stated
+// target of a MEAN of one patrol in the ring, but a mean of one is a
+// distribution, and a third of the time the answer is zero: measured twice at
+// the station spawn, once with 3 patrols among 53 cars and once with 0 among
+// 48. A police force you meet on a coin flip does not read as a police force,
+// it reads as an absence with occasional exceptions. 0.45 is the top of the
+// sweep above — 1.34 live, one passed every two minutes rather than every
+// three — and it is still comfortably under the "two" the paragraph below
+// warns about. The number that makes the police actually VISIBLE is not this
+// one though; see spawnPatrol's callers for the ones parked outside stations.
+const PATROL_P = 0.45;
 // …and ELIGIBLE means the cell carries a real road to patrol. lenMajor counts
 // DIRECTED major-class edge, so a two-way arterial contributes twice and 200
 // is 100 m of street: enough that a cell merely clipped by the corner of a

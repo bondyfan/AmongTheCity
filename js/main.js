@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR } from './config.js';
-import { loadCity, chunkKey, venueAt } from './geo.js';
+import { loadCity, chunkKey, venueAt, forEachChunkInRadius } from './geo.js';
 import { CityWorld } from './city.js';
 import { planRings } from './streamplan.js';
 import { input } from './input.js';
@@ -120,6 +120,7 @@ const _vitCtx = { car: null, heli: null, jet: null, player: null, onFoot: true }
 const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null };
 const _wntCtx = { x: 0, z: 0, onFoot: true, car: null, police: null };
 const _polCtx = { x: 0, z: 0, car: null };
+let _stationT = 0;
 
 let combat = null;       // fists, and what falls out of people — js/combat.js
 let police = null;       // the patrol that wants you — js/police.js
@@ -1210,6 +1211,121 @@ input.onKey('KeyH', () => {
   horn();                          // no coordinates: this one is your own wheel
   chatter?.honk(game.car.x, game.car.z);
 });
+
+// ---------- police cars you can actually see ----------
+// THE DENSITY WAS NEVER THE ANSWER. js/traffic.js puts about one moving patrol
+// in the 630 m ring around you — which is what a regional Czech town has, and
+// which is also close enough to zero that the first person to play it asked
+// whether there were any police in the game at all. Raising the roll helps a
+// little and costs realism; the thing that actually makes a police force read
+// as present is the same thing that does it in a real town, and it is not a
+// car driving past. It is the row of them parked outside the station.
+//
+// The region carries 348 `police` POIs with real names — Krajské ředitelství,
+// Obvodní oddělení Pardubice 1 and 2, Městská policie. Seven are within 2 km of
+// hlavní nádraží. A patrol parked at each is FREE: spawnPatrol() hands back a
+// car with no schedule and no brain that traffic will never touch, so it costs
+// one mesh and nothing per frame.
+const STATION_R = 70;          // m — how far from the POI we may look for kerb
+const STATION_KEEP = 420;      // m — beyond this the yard is unparked again
+const STATION_MAX = 6;         // meshes; the cap is memory, not plausibility
+let _stations = [];            // every police POI that has streamed in
+const _parkedCops = new Map(); // POI → the car standing in its yard
+
+function indexStations(pois) {
+  for (const p of pois ?? []) if (p.t === 'police' && p.p) _stations.push(p);
+}
+
+// A point on the kerb of the nearest drivable road, pulled clear of the
+// centreline so the car is parked beside the carriageway rather than in it —
+// the same shape as the offline search that placed the hospital respawn.
+function kerbNear(x, z) {
+  let bx = 0, bz = 0, bd = STATION_R * STATION_R, ax = 0, az = 0;
+  // world.city, not `city` — that name is a LOCAL inside boot(), and reaching
+  // for it from a module-level function is a ReferenceError thrown once every
+  // half second inside stepGame. main.js:2166 already goes through world.city
+  // for exactly this reason.
+  forEachChunkInRadius(x, z, 1, (key) => {
+    const cell = world?.city?.chunkIndex?.get(key);
+    for (const r of cell?.roads ?? []) {
+      if (r.d || !r.p || r.p.length < 2) continue;      // d = a footway
+      for (let i = 1; i < r.p.length; i++) {
+        const x1 = r.p[i - 1][0], z1 = r.p[i - 1][1], x2 = r.p[i][0], z2 = r.p[i][1];
+        const dx = x2 - x1, dz = z2 - z1;
+        const L = dx * dx + dz * dz;
+        let t = L ? ((x - x1) * dx + (z - z1) * dz) / L : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const px = x1 + t * dx, pz = z1 + t * dz;
+        const d = (px - x) * (px - x) + (pz - z) * (pz - z);
+        if (d < bd) { bd = d; bx = px; bz = pz; ax = dx; az = dz; }
+      }
+    }
+  });
+  if (bd >= STATION_R * STATION_R) return null;
+  const L = Math.hypot(ax, az) || 1;
+  const nx = -az / L, nz = ax / L;
+  const head = Math.atan2(-ax / L, -az / L);
+  // 4.2 m off the centreline — but WHICH SIDE. The obvious answer, "the side
+  // the station is on", parks the car against the station's own wall: measured
+  // at the three Pardubice stations it put two of them 1.1 m and 1.7 m from a
+  // façade, and a car is 1.8 m wide. Try both kerbs and take the one with room.
+  let best = null, bestClear = -1;
+  for (const s of [1, -1]) {
+    const cx = bx + nx * 4.2 * s, cz = bz + nz * 4.2 * s;
+    const clear = wallClear(cx, cz);
+    if (clear > bestClear) { bestClear = clear; best = { x: cx, z: cz, heading: head }; }
+  }
+  // Neither kerb has 2.4 m of air: this is a narrow street between two blocks
+  // and any car we leave here is embedded in one of them. Better no police car
+  // than one growing out of a wall.
+  return bestClear >= 2.4 ? best : null;
+}
+
+// Metres from (x, z) to the nearest building façade in the 3x3 of chunks around
+// it. Only ever called from kerbNear, i.e. twice per station, once.
+function wallClear(x, z) {
+  let best = 1e9;
+  forEachChunkInRadius(x, z, 1, (key) => {
+    const cell = world?.city?.chunkIndex?.get(key);
+    for (const b of cell?.buildings ?? []) {
+      const o = b.o;
+      if (!o || o.length < 2) continue;
+      for (let i = 1; i < o.length; i++) {
+        const x1 = o[i - 1][0], z1 = o[i - 1][1], x2 = o[i][0], z2 = o[i][1];
+        const dx = x2 - x1, dz = z2 - z1;
+        const LL = dx * dx + dz * dz;
+        let t = LL ? ((x - x1) * dx + (z - z1) * dz) / LL : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const px = x1 + t * dx, pz = z1 + t * dz;
+        const dd = (px - x) * (px - x) + (pz - z) * (pz - z);
+        if (dd < best) best = dd;
+      }
+    }
+  });
+  return Math.sqrt(best);
+}
+
+function updateStationCars(x, z) {
+  // park the near ones…
+  if (_parkedCops.size < STATION_MAX) {
+    for (const s of _stations) {
+      if (_parkedCops.size >= STATION_MAX) break;
+      if (_parkedCops.has(s)) continue;
+      if (Math.hypot(s.p[0] - x, s.p[1] - z) > STATION_KEEP * 0.7) continue;
+      const k = kerbNear(s.p[0], s.p[1]);
+      // No road within 70 m: this station's yard is unreachable, and a police
+      // car sitting in the middle of a lawn is worse than none at all. Mark it
+      // so the search is not repeated every second for the rest of the session.
+      _parkedCops.set(s, k ? traffic.spawnPatrol(k.x, k.z, k.heading) : null);
+    }
+  }
+  // …and let the far ones go
+  for (const [s, car] of _parkedCops) {
+    if (Math.hypot(s.p[0] - x, s.p[1] - z) < STATION_KEEP) continue;
+    if (car) vehicles.remove(car);
+    _parkedCops.delete(s);
+  }
+}
 
 // ---------- the fist ----------
 // Melee is a PRESS, not a hold: input.js exposes attackHeld (left mouse OR
@@ -2442,7 +2558,8 @@ async function boot() {
   initNavigation(city);   // lazy + optional; never blocks the boot
   // the pumps that have streamed in so far, and every one that arrives later
   indexPumps(city.pois);
-  city.onTileLoaded?.((t) => indexPumps(t.pois));
+  indexStations(city.pois);
+  city.onTileLoaded?.((t) => { indexPumps(t.pois); indexStations(t.pois); });
 
   peds = new Pedestrians(scene, city, world.terrain);
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact,
@@ -3064,6 +3181,10 @@ function stepGame(dt) {
   police?.update(dt, _polCtx);
   combatInput(dt);
   updateStars();
+  // 2 Hz: a yard that gains its car a quarter-second late is a yard nobody was
+  // looking at, and kerbNear walks every road segment in a 3x3 of chunks.
+  _stationT -= dt;
+  if (_stationT <= 0) { _stationT = 0.5; updateStationCars(_eyes.x, _eyes.z); }
   // Only a car a HUMAN is driving burns — fuel.burn refuses anything with an
   // .ai, so the traffic schedule can never be stranded by a system it does not
   // know about.
