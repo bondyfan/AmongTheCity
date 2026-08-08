@@ -34,6 +34,7 @@ import { PRICE, pumpBrand, pumpPrice, kc2 } from './prices.js';
 import { Combat } from './combat.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
+import { Ambulance } from './ambulance.js';
 import { ChatBubbles } from './chatbubbles.js';
 import { PostFX } from './postfx.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
@@ -124,6 +125,7 @@ let _stationT = 0;
 
 let combat = null;       // fists, and what falls out of people — js/combat.js
 let police = null;       // the patrol that wants you — js/police.js
+let ambulance = null;    // and the one that comes for the body — js/ambulance.js
 let chatter = null;      // who says what, and when — js/chatter.js
 let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
@@ -1531,6 +1533,13 @@ function _crashList() {
   if (!traffic) return parked;
   const out = sharedCars();
   for (const c of parked) out.push(c);
+  // Ambulances and pursuit units are NOT in traffic.cars — both modules take
+  // their vehicles off the schedule on purpose so traffic will never touch
+  // them again. Leave them out of this list and the player drives straight
+  // through a van standing at a crash with its blues on, which is the single
+  // most obvious lie either system could tell.
+  if (ambulance) for (const c of ambulance.cars) out.push(c);
+  if (police) for (const u of police.units) if (u.car) out.push(u.car);
   return out;
 }
 
@@ -1540,7 +1549,11 @@ function _crashList() {
 // a rocket sailing through a car that is plainly there is a worse lie than a
 // car the peer happens not to draw.
 function _blastList() {
-  return traffic ? [...traffic.cars, ...parked] : parked;
+  if (!traffic) return parked;
+  const out = [...traffic.cars, ...parked];
+  if (ambulance) for (const c of ambulance.cars) out.push(c);
+  if (police) for (const u of police.units) if (u.car) out.push(u.car);
+  return out;
 }
 
 // ---------- how busy the roads are, right now ----------
@@ -2587,6 +2600,11 @@ async function boot() {
     // so an AI Octavia mowing somebody down two streets away no longer hands
     // the player a star for an accident they were not part of.
     if (p.by && p.by === game.car) wanted.add('srazeni');
+    // Somebody is on the tarmac. Above 6 m/s they are not getting up on their
+    // own, which is the line js/ambulance.js draws between a fright and a
+    // casualty — and it comes for the PLACE, not the body, because
+    // pedestrians.js stands survivors back up in two to four seconds.
+    if (v > 6) ambulance?.call(p.x, p.z);
   };
   peds.onPedKilled = (p) => {
     sfxAt('crowd_panic', 0.7, p.x, p.z, 200, 4);
@@ -2596,6 +2614,7 @@ async function boot() {
     // already raised 'zabiti' through onCrime, so charging again here would be
     // the double bill this hook was just fixed for.
     if (p.by && p.by === game.car) wanted.add('zabiti');
+    ambulance?.call(p.x, p.z);
   };
 
   // ---- the city gets a voice (js/chatter.js + js/chatbubbles.js) ----
@@ -2715,6 +2734,7 @@ async function boot() {
     peds.panic(x, z, 18);
   });
   police = new Police({ traffic, vehicles, wanted, city, scene });
+  ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL });
 
   // ---- the body, the wallet and the tank ----
   statusbar.init();
@@ -3199,6 +3219,7 @@ function stepGame(dt) {
   wanted.update(dt, _wntCtx);
   _polCtx.x = _eyes.x; _polCtx.z = _eyes.z; _polCtx.car = game.car;
   police?.update(dt, _polCtx);
+  ambulance?.update(dt, _polCtx);
   combatInput(dt);
   updateStars();
   // 2 Hz: a yard that gains its car a quarter-second late is a yard nobody was
@@ -3556,6 +3577,7 @@ window.__atc = {
   vitals, wallet, fuel, statusbar, wanted,
   get combat() { return combat; },
   get police() { return police; },
+  get ambulance() { return ambulance; },
   get traffic() { return traffic; },
   said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
   get interiors() { return world?.interiors; },
