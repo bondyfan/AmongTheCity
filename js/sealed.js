@@ -47,8 +47,20 @@ const HARD = new Set(['asphalt', 'concrete', 'paving', 'cobble']);
 
 /** Does this way's surface mean the ground around it is sealed? */
 export function isHardWay(r) {
-  return !!r && HARD.has(r.s);
+  // Steps are excluded whatever they are made of. A concrete staircase climbs
+  // a BANK — the one piece of ground guaranteed not to be a paved square — and
+  // in Jinonice the staircases seeding the closing were exactly how a 35 %
+  // hillside got tiled ("kachličky na křivo nad terénem").
+  return !!r && r.t !== 'steps' && HARD.has(r.s);
 }
+
+// A town square is flat; a hillside laced with footpaths is not. Measured where
+// the two meet: náměstí Jana Pernera's sealed cells slope 0.018 median, 0.031
+// max, while the Jinonice bank that grew tiles slopes 0.19 median, 0.56 max —
+// the populations do not touch, and 0.15 sits between them with 5× headroom on
+// the square side. Applied per CELL, so a square on a mild grade keeps every
+// cell and only real banks fall out.
+const SLOPE_MAX = 0.15;
 
 function thickLine(g, x0, z0, pts, hw) {
   if (!pts || pts.length < 2) return;
@@ -111,7 +123,7 @@ function sweep(src, dst, r, wantMax) {
  * Returns an N×N Uint8Array (1 = sealed), or null when the chunk holds no hard
  * ways at all — the common case in open country, and worth not allocating for.
  */
-export function sealedGrid(cell, cx, cz) {
+export function sealedGrid(cell, cx, cz, terrain = null) {
   if (!cell) return null;
   const x0 = cx * CHUNK, z0 = cz * CHUNK;
   const hard = [];
@@ -144,12 +156,21 @@ export function sealedGrid(cell, cx, cz) {
   for (const f of cell.water ?? []) if (f.o?.length >= 3) clearPolygon(closed, x0, z0, f.o, f.i);
   for (const f of cell.buildings ?? []) if (f.o?.length >= 3) clearPolygon(closed, x0, z0, f.o, f.i);
 
-  // Crop the margin away and report only this chunk's own cells.
+  // Crop the margin away and report only this chunk's own cells — dropping any
+  // cell on ground too steep to be a square. Gating on the cropped cells keeps
+  // the terrain reads to the cells actually sealed, which is what makes this
+  // affordable.
   const out = new Uint8Array(N * N);
   let any = 0;
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
-      const v = closed[(j + PAD) * W + (i + PAD)];
+      let v = closed[(j + PAD) * W + (i + PAD)];
+      if (v && terrain) {
+        const px = x0 + (i + 0.5) * SEAL_RES, pz = z0 + (j + 0.5) * SEAL_RES;
+        const gx = (terrain.heightAt(px + SEAL_RES, pz) - terrain.heightAt(px - SEAL_RES, pz)) / (2 * SEAL_RES);
+        const gz = (terrain.heightAt(px, pz + SEAL_RES) - terrain.heightAt(px, pz - SEAL_RES)) / (2 * SEAL_RES);
+        if (gx * gx + gz * gz > SLOPE_MAX * SLOPE_MAX) v = 0;
+      }
       out[j * N + i] = v;
       any += v;
     }
@@ -197,8 +218,8 @@ function crossings(ring, zc, out) {
  * cells somebody else already surfaces, so the derived fill and the shipped
  * classifier raster never lay two plates at the same height and z-fight.
  */
-export function sealedRects(cell, cx, cz, skip = null) {
-  const g = sealedGrid(cell, cx, cz);
+export function sealedRects(cell, cx, cz, skip = null, terrain = null) {
+  const g = sealedGrid(cell, cx, cz, terrain);
   if (!g) return [];
   const x0 = cx * CHUNK, z0 = cz * CHUNK;
   const used = new Uint8Array(N * N);

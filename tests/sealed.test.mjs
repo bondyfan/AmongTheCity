@@ -117,3 +117,70 @@ test('isHardWay is the whole gate, and it is conservative', () => {
     assert.ok(!isHardWay({ s }), `${s} counted as a hard surface`);
   assert.ok(!isHardWay(null) && !isHardWay(undefined));
 });
+
+// ---- the hillside that must NOT be a square --------------------------------
+// Jinonice: a 35 % bank laced with footways and staircases grew paving tiles
+// leaning off the terrain ("kachličky na křivo nad terénem"). Three separate
+// mistakes fed it, each pinned below: stairs counted as seeds, no cell cared
+// how steep it stood, and the plate was clamped against a kerb-only corridor
+// while the ground under it was benched over a far wider one.
+
+test('stairs do not seed sealing — a staircase climbs a bank', () => {
+  const steps = web('paving').map((r) => ({ ...r, t: 'steps' }));
+  assert.equal(sealedGrid(cellOf({ roads: steps }), 0, 0), null,
+    'a web of staircases tiled the bank they climb');
+});
+
+test('ground too steep to be a square falls out, cell by cell', () => {
+  // flat until z=60, then a 40 % bank — Pernera measures 0.031 max, the
+  // Jinonice bank 0.19 median, so 0.15 separates them with real margin
+  const tilt = { heightAt: (x, z) => 200 + Math.max(0, z - 60) * 0.4, ready: () => true };
+  const g = sealedGrid(cellOf({ roads: web('paving') }), 0, 0, tilt);
+  assert.ok(g, 'the gate threw the flat half away too');
+  assert.ok(at(g, 65, 40), 'the flat half of the square was lost');
+  assert.ok(!at(g, 65, 90), 'a 40 % bank got tiled');
+});
+
+test('a plate beside a road cut lies on the bench, not on the raw hillside', async () => {
+  // A plateau at 228 m dropping to lowland at 222, a street in the lowland,
+  // and a paved web crossing it. The chunk ground inside the street's corridor
+  // is benched to the deck; the plate over the same cells must be too —
+  // clamped against a kerb-only list it kept raw plateau height and stood
+  // 4 m proud, which in Jinonice measured as 18 % of the paving floating,
+  // 2.22 m worst.
+  const { buildChunkMeshes, makeMaterials } = await import('../js/meshes.js');
+  const terrain = { res: 20, tile: 4800, missed: false, ready: () => true,
+    heightAt: (x, z) => (z < 55 ? 228 : 222) };
+  const roads = [{ _id: 1, _home: '0,0', t: 'residential', w: 9, d: 1, v: 30,
+    p: [[5, 64], [115, 64]] }];
+  let id = 1;
+  for (let x = 20; x <= 100; x += 10)
+    roads.push({ _id: ++id, _home: '0,0', t: 'footway', w: 1.8, s: 'paving', d: 0,
+      p: [[x, 10], [x, 100]] });
+  for (let z = 10; z <= 100; z += 10)
+    roads.push({ _id: ++id, _home: '0,0', t: 'footway', w: 1.8, s: 'paving', d: 0,
+      p: [[20, z], [100, z]] });
+  const cell = { buildings: [], roads, rails: [], water: [], green: [], paved: [],
+    trees: [], signs: [], crossings: [] };
+  const city = { chunkIndex: new Map([['0,0', cell]]), tile: 4800, pois: [], waterways: [] };
+  const mats = makeMaterials();
+  mats.terrain = terrain;
+  mats.trees = false; mats.facades = false; mats.canopy = null; mats.ground = null; mats.ortho = null;
+  const g = buildChunkMeshes(city, 0, 0, mats, 'full');
+  // the probe strip: sealed plateau cells inside the street's corridor bench,
+  // between two web lines so no footway ribbon reaches into it
+  let worst = -Infinity, n = 0;
+  for (const c of g?.children ?? []) {
+    const p = c.geometry?.attributes?.position;
+    if (!p) continue;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i) + g.position.x, y = p.getY(i) + g.position.y, z = p.getZ(i) + g.position.z;
+      if (x > 63 && x < 67 && z > 51.8 && z < 54) { n++; if (y > worst) worst = y; }
+    }
+  }
+  assert.ok(n > 0, 'the probe strip holds no geometry at all — fixture broke');
+  // bench cap there: deck 222 + rise over the flare ≈ 223.8; raw plateau is 228
+  assert.ok(worst < 225,
+    `geometry in the corridor bench stands at ${worst.toFixed(2)} m — the plate `
+    + 'is on the raw hillside, leaning off a 4 m cut');
+});

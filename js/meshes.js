@@ -4602,20 +4602,25 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       // surface a cell itself, leave it to the classifier
       const ceded = !orthoGround && mats.ground
         ? (x, z) => mats.ground.classAt(x, z) > 0 : null;
-      const rects = sealedRects(cell, cx, cz, ceded);
+      const rects = sealedRects(cell, cx, cz, ceded, mats.terrain);
       if (rects.length) {
-        const drvS = cell.roads
-          .filter((r) => !r.br && r.p?.length > 1)
-          .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25,
-            lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road }));
+        // Clamped against `corr` — the SAME wide corridor list the base ground
+        // uses — and not a narrow kerb-only list. The ground inside a corridor
+        // is benched to the deck over w/2 + 4.5 m with a 5 m flare; a plate
+        // clamped only to w/2 + 0.25 keeps raw terrain height across that
+        // bench, and on a road cut into a hillside raw terrain is metres above
+        // it. Measured in Jinonice: 18 % of the derived paving floated, up to
+        // 2.22 m — slabs leaning against the cut like fallen fence panels.
         for (const r of rects) {
           yield;
-          const nearRoad = drvS.some(({ bb, hw }) =>
-            !(r.x1 < bb[0] - hw || r.x0 > bb[2] + hw || r.z1 < bb[1] - hw || r.z0 > bb[3] + hw));
+          const nearRoad = corr.some(({ bb, hw, flare }) => {
+            const rc = hw + (flare ?? 0);
+            return !(r.x1 < bb[0] - rc || r.x0 > bb[2] + rc || r.z1 < bb[1] - rc || r.z0 > bb[3] + rc);
+          });
           const g = yield* clampUnderRoadsGen(drape(terrainTess(shapePoly(
             [[r.x0, r.z0], [r.x1, r.z0], [r.x1, r.z1], [r.x0, r.z1]],
             null, LAYER_Y.inferred, COLORS.inferred.paving, SURF.paving),
-          nearRoad ? 3.5 : undefined), mats.terrain), drvS, mats.terrain);
+          nearRoad ? 3.5 : undefined), mats.terrain), corr, mats.terrain);
           if (g) flat.push(g);
         }
       }
@@ -4624,19 +4629,19 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // Unlike a car park it has nothing the photograph gets wrong — it exists
     // precisely to stand in for a photograph that is not there.
     if (!orthoGround && mats.ground) {
-      const drvR = cell.roads
-        .filter((r) => !r.br && r.p?.length > 1)
-        .map((r) => ({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 0.25,
-          lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road }));
+      // corr, for the same reason as the derived plaza above: the classifier's
+      // plates lean off the corridor bench on any cut slope exactly the same way
       for (const r of mats.ground.rectsIn(x0, z0)) {
         yield;
         const col = r.c === 2 ? COLORS.inferred.asphalt : COLORS.inferred.paving;
         const sc = r.c === 2 ? SURF.asphalt : SURF.paving;
-        const nearRoad = drvR.some(({ bb, hw }) =>
-          !(r.x1 < bb[0] - hw || r.x0 > bb[2] + hw || r.z1 < bb[1] - hw || r.z0 > bb[3] + hw));
+        const nearRoad = corr.some(({ bb, hw, flare }) => {
+          const rc = hw + (flare ?? 0);
+          return !(r.x1 < bb[0] - rc || r.x0 > bb[2] + rc || r.z1 < bb[1] - rc || r.z0 > bb[3] + rc);
+        });
         const g = yield* clampUnderRoadsGen(drape(terrainTess(shapePoly(
           [[r.x0, r.z0], [r.x1, r.z0], [r.x1, r.z1], [r.x0, r.z1]],
-          null, LAYER_Y.inferred, col, sc), nearRoad ? 3.5 : undefined), mats.terrain), drvR, mats.terrain);
+          null, LAYER_Y.inferred, col, sc), nearRoad ? 3.5 : undefined), mats.terrain), corr, mats.terrain);
         if (g) flat.push(g);
       }
     }

@@ -179,7 +179,7 @@ export class Grass {
   constructor(scene, world, city) {
     this.scene = scene;
     this.world = world;
-    this.mask = new GrassMask(city, world?.ground ?? null);
+    this.mask = new GrassMask(city, world?.ground ?? null, world?.terrain ?? null);
     this.enabled = true;
     this._at = null;                // where the ring on screen was built
     this._needRefill = false;       // a fill hit ground the mask did not have yet

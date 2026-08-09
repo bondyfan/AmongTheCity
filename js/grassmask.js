@@ -21,8 +21,8 @@
 // flag because the same raster then carries the difference between a mown verge
 // and an unmown meadow, which is most of what stops a field looking like a lawn.
 
-import { CHUNK } from './config.js';
-import { chunkKey } from './geo.js';
+import { CHUNK, LAYER_Y } from './config.js';
+import { chunkKey, roadGradeY, polylineLength } from './geo.js';
 import { sealedGrid, SEAL_RES } from './sealed.js';
 
 const RES = 1;                        // m per mask cell
@@ -42,10 +42,12 @@ const MEADOW_TYPES = new Set(['meadow', 'grassland', 'heath', 'scrub', 'village_
 const BARE_GREEN = new Set(['pitch', 'cemetery']);
 
 export class GrassMask {
-  /** @param city the indexed city; @param ground the sealed-ground raster */
-  constructor(city, ground = null) {
+  /** @param city the indexed city; @param ground the sealed-ground raster;
+   *  @param terrain lets the mask see the corridor benching (shear zones) */
+  constructor(city, ground = null, terrain = null) {
     this.city = city;
     this.ground = ground;
+    this.terrain = terrain;
     this.masks = new Map();           // chunk key → Uint8Array(N*N)
     this.queue = [];                  // keys waiting to be rasterised
     this._queued = new Set();
@@ -135,12 +137,29 @@ export class GrassMask {
     for (const b of cell.buildings) if (b.o?.length >= 3) fillPolygon(m, x0, z0, b.o, b.i, 0);
     for (const r of cell.roads) stampLine(m, x0, z0, r.p, (r.w ?? 3) / 2 + 0.6);
     for (const r of cell.rails) stampLine(m, x0, z0, r.p, 2.6);
+    // THE SHEAR ZONE. The chunk ground inside a road's corridor is benched to
+    // the deck — flat over w/2 + 4.5 m, rising back at 55 % over a 5 m flare
+    // (meshes.js clampUnderRoadsGen). A blade's height comes from the raw
+    // height field, so on a road cut into a hillside every blade on the uphill
+    // side of the bench stands on ground that is not there any more — "tráva
+    // je nad realným terénem", floating up to the whole depth of the cut. The
+    // blades that would float are cleared here, with the bench's own formula;
+    // where the bench never bites (flat ground, embankments) nothing changes
+    // and the verges keep their grass.
+    if (this.terrain) {
+      for (const r of cell.roads) {
+        if (!r.br && r.p?.length > 1) shearLine(m, x0, z0, r, (r.w ?? 3) / 2 + 4.5, this.terrain);
+      }
+      for (const r of cell.rails) {
+        if (!r.br && r.p?.length > 1) shearLine(m, x0, z0, r, 2.2 + 4.5, this.terrain);
+      }
+    }
     // …and so does ground the map never drew but plainly paved anyway: the
     // inside of a town square, which OSM plots as a web of footways on sett and
     // concrete and no area at all. Only UNMAPPED cells may be overruled here —
     // where OSM drew a lawn the lawn wins, because this is for the silence
     // between features and not an argument with the map.
-    const sealed = sealedGrid(cell, ci, cj);
+    const sealed = sealedGrid(cell, ci, cj, this.terrain);
     if (sealed) {
       const step = SEAL_RES / RES;                    // mask cells per sealed cell
       for (let j = 0; j < N; j++) {
@@ -167,6 +186,49 @@ export class GrassMask {
 // ---- rasterisers -----------------------------------------------------------
 // Both write into the chunk's own N×N grid and clip to it, so a feature
 // straddling two chunks stamps the part that belongs to each and nothing else.
+
+/**
+ * Clear cells whose raw ground stands above the corridor bench — the cap is
+ * clampUnderRoadsGen's own: gy + lay − 0.05, rising at 55 % past the flat band.
+ * Only cells still carrying grass pay for a terrain read, and only those whose
+ * raw height clears the cap pay for the road profile.
+ */
+const SHEAR_FLARE = 5, SHEAR_OVER = 0.3;
+function shearLine(m, x0, z0, r, hw, terrain) {
+  const pts = r.p;
+  r._len ??= polylineLength(pts);
+  const reach = hw + SHEAR_FLARE, reach2 = reach * reach;
+  let along = 0;
+  for (let k = 0; k < pts.length - 1; k++) {
+    const ax = pts[k][0], az = pts[k][1], bx = pts[k + 1][0], bz = pts[k + 1][1];
+    const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - reach - x0) / RES));
+    const i1 = Math.min(N - 1, Math.ceil((Math.max(ax, bx) + reach - x0) / RES));
+    const j0 = Math.max(0, Math.floor((Math.min(az, bz) - reach - z0) / RES));
+    const j1 = Math.min(N - 1, Math.ceil((Math.max(az, bz) + reach - z0) / RES));
+    const dx = bx - ax, dz = bz - az;
+    const L = Math.hypot(dx, dz), len2 = dx * dx + dz * dz || 1e-9;
+    if (i1 >= i0 && j1 >= j0) {
+      for (let j = j0; j <= j1; j++) {
+        const pz = z0 + (j + 0.5) * RES;
+        for (let i = i0; i <= i1; i++) {
+          if (!m[j * N + i]) continue;
+          const px = x0 + (i + 0.5) * RES;
+          let t = ((px - ax) * dx + (pz - az) * dz) / len2;
+          if (t < 0) t = 0; else if (t > 1) t = 1;
+          const ex = px - (ax + dx * t), ez = pz - (az + dz * t);
+          const d2 = ex * ex + ez * ez;
+          if (d2 > reach2) continue;
+          const d = Math.sqrt(d2);
+          const gy = roadGradeY(r, along + L * t, terrain);
+          if (!Number.isFinite(gy)) continue;
+          const cap = gy + LAYER_Y.road - 0.05 + (d > hw ? (d - hw) * 0.55 : 0);
+          if (terrain.heightAt(px, pz) > cap + SHEAR_OVER) m[j * N + i] = 0;
+        }
+      }
+    }
+    along += L;
+  }
+}
 
 /** Even-odd scanline fill of a ring with holes, at the row centres. */
 function fillPolygon(m, x0, z0, outer, holes, value) {

@@ -154,3 +154,30 @@ test('a mapped lawn inside a square keeps its grass', () => {
   assert.ok(m.heightAt(65, 65) > 0, 'the derived paving overruled a mapped lawn');
   assert.equal(m.heightAt(30, 30), 0, 'the rest of the square kept its grass');
 });
+
+// ---- the shear zone --------------------------------------------------------
+// The chunk ground inside a road corridor is benched to the deck (flat over
+// w/2 + 4.5 m, rising back at 55 % over a 5 m flare), but a blade takes its
+// height from the raw field — so uphill of a road cut into a hillside the
+// blades stood on ground that is not there any more, floating by the depth of
+// the cut. Jinonice measured 1 356 floating cells in one chunk, worst 2.36 m.
+test('blades that would float over a road cut are cleared', () => {
+  // a plateau at 228 falling to lowland at 222, the street in the lowland:
+  // cells on the plateau lip sit inside the corridor, 4 m above the bench
+  const cut = { heightAt: (x, z) => (z < 55 ? 228 : 222), ready: () => true };
+  const road = { t: 'residential', w: 9, d: 1, v: 30, p: [[5, 64], [115, 64]] };
+  const m = new GrassMask(cityOf({ roads: [road] }), null, cut);
+  m.request('0,0'); m.step(60000);
+  assert.equal(m.heightAt(60, 52), 0,
+    'a blade on the plateau lip floats 4 m over the corridor bench');
+  assert.ok(m.heightAt(60, 20) > 0, 'grass far from the road was cleared too');
+});
+
+test('…but a road on flat ground keeps every blade of its verge', () => {
+  const flat = { heightAt: () => 222, ready: () => true };
+  const road = { t: 'residential', w: 9, d: 1, v: 30, p: [[5, 64], [115, 64]] };
+  const m = new GrassMask(cityOf({ roads: [road] }), null, flat);
+  m.request('0,0'); m.step(60000);
+  assert.ok(m.heightAt(60, 52) > 0, 'the bench never bites on flat ground — '
+    + 'yet the verge lost its grass');
+});
