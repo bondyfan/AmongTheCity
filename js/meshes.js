@@ -1451,7 +1451,23 @@ function roadRibbon(sink, f, terrain, cell, key) {
               const w = d <= hwr ? 1 : 1 - (d - hwr) / BLEND;
               if (w > bestW) {
                 const gy2 = r.br ? bridgeDeckHeight(r, al + L * t, terrain) : roadGradeY(r, al + L * t, terrain);
-                if (gy2 !== null && gy2 !== undefined) { bestW = w; bestT = gy2 + LAYER_Y.road - 0.04; }
+                if (gy2 !== null && gy2 !== undefined) {
+                  // The target must live in the same space as the ribbon it is
+                  // blended into. A graded ribbon is ABSOLUTE, so the road's
+                  // deck height is the right target — but a way shorter than
+                  // two profile samples has no profile (levelWay returns null)
+                  // and its ribbon is RELATIVE, draped onto the ground later.
+                  // Blending the absolute deck into that mixed 221 m of
+                  // elevation into a 20 cm layer offset, and the chunk drape
+                  // then added the ground ON TOP: every short footway stub
+                  // beside a carriageway became a striped tower two hundred
+                  // metres tall ("ty věci vysoké ve vzduchu"). Visible only
+                  // since the carriageways widened — the stubs used to sit
+                  // outside the blend's reach.
+                  bestW = w;
+                  bestT = gy2 + LAYER_Y.road - 0.04
+                    - (graded ? 0 : terrain.heightAt(X, Z));
+                }
               }
             }
             al += L;
