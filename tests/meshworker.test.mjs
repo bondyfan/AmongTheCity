@@ -99,14 +99,15 @@ function makeWorld() {
     // than copying. So the levelling those pins produce has to reach the worker
     // inside the road's cached `_prof`, or the two paths quietly disagree about
     // the height of every reconciled deck. Six overlap pins land here.
-    //
-    // They are kept AWAY from the named building at (80, 80): a drivable way
-    // passing close to it makes the two paths build genuinely different
-    // geometry — 18 of its 66 vertices have no counterpart at all. That is a
-    // separate, pre-existing defect (it reproduces with this fixture against
-    // the committed meshes.js and geo.js), and it is not what this test is for.
     tag({ t: 'service', w: 6, d: 1, v: 20, p: [[30, 45], [110, 42]] }),
     tag({ t: 'service', w: 6, d: 1, v: 20, p: [[80, 20], [76, 60]] }),
+    // …and a drivable way passing CLOSE to the named building at (80, 80).
+    // entranceOf's street-facing bonus only fires with a carriageway within
+    // 35 m, and the fascia bands follow the entrance edge — this is the road
+    // that once made the two paths build genuinely different signage, because
+    // meshes.js read the `_ent` cache before computing it: empty on the main
+    // thread's first build, pre-filled in the spec the worker received.
+    tag({ t: 'service', w: 6, d: 1, v: 20, p: [[20, 90], [100, 86]] }),
   ];
   // A little web of hard-surfaced footways, well clear of both buildings. It is
   // here so the DERIVED plaza ground (sealed.js closing a path network into a

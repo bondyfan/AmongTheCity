@@ -2634,13 +2634,17 @@ function brandSignage(f, y0, top, brand, cell, trim, sign, marks) {
   // The sign belongs over the doors, facing the car park — two-longest alone
   // put both bands on the service side of a deep box. Same rule as the near
   // LOD in pieces.js brandSigns; change one, change both.
+  // RESOLVED here, not read off `f._ent`: on a fresh feature that cache is
+  // still empty at this point, so the first build would pick different edges
+  // than a rebuild — or than a worker handed the cache in its spec.
+  const ent = entranceOf(f, cell?.roads, cell?.buildings);
   const edges = [];
   for (let i = 0; i < ring.length; i++) {
     const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
     edges.push({ i, L: Math.hypot(bx - ax, bz - az) });
   }
   edges.sort((a, b) => b.L - a.L);
-  const entI = f._ent?.i;
+  const entI = ent?.i;
   if (entI !== undefined) {
     const k = edges.findIndex((e) => e.i === entI);
     if (k > 0 && edges[k].L >= 8) edges.unshift(edges.splice(k, 1)[0]);
@@ -2672,7 +2676,6 @@ function brandSignage(f, y0, top, brand, cell, trim, sign, marks) {
   }
 
   // ---- the totem by the entrance ----
-  const ent = entranceOf(f, cell?.roads, cell?.buildings);
   if (!ent) return;
   const px = ent.x + ent.nx * 5.5, pz = ent.z + ent.nz * 5.5;
   obbCentre(ring, _ct);
