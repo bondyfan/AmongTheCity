@@ -149,3 +149,31 @@ test('…whichever way it was hit from', () => {
       + `(${top.x.toFixed(1)}, ${top.z.toFixed(1)}) — it should follow the blow`);
   }
 });
+
+// ---- and the traffic-signal masts, which are not instanced -----------------
+test('a free-standing signal pole collides, goes over, and stays down', () => {
+  const p = new Poles(scene());
+  let hidden = false;
+  assert.equal(p.registerOne('sig', 50, 220, 50, () => { hidden = true; }), true);
+  // solid
+  const pos = { x: 50.1, z: 50 };
+  assert.equal(p.collide(pos, 0.5), true, 'the car drove through the signal');
+  // felled: the standing visual goes via ITS OWN hide, and something falls
+  p.strike(50, 50, 0, -14, 1.2);
+  assert.ok(hidden, 'the standing signal is still visible after the hit');
+  assert.equal(p.falling.length, 1, 'no falling signal was spawned');
+  // …and re-registering after a session re-delivery does not resurrect it
+  let hidden2 = false;
+  assert.equal(p.registerOne('sig', 50, 220, 50, () => { hidden2 = true; }), false,
+    'a felled signal registered as standing again');
+});
+
+test('registering the same signal twice leaves one collider, not a phantom', () => {
+  const p = new Poles(scene());
+  p.registerOne('sig', 50, 220, 50, () => {});
+  p.registerOne('sig', 50, 220, 50, () => {});   // re-delivered tile
+  assert.equal(p.near(50, 50, 2).length, 1, 'a twin collider survives felling');
+  p.strike(50, 50, 0, -14, 1.2);
+  const pos = { x: 50.1, z: 50 };
+  assert.equal(p.collide(pos, 0.5), false, 'the phantom twin is still solid');
+});

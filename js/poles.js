@@ -89,6 +89,24 @@ export class Poles {
     return gone;
   }
 
+  /**
+   * A single free-standing pole that is not a row in a batch — a traffic
+   * signal. `hide` removes the standing visual when it goes over. Returns
+   * false when this pole was already felled this session, so the caller can
+   * hide it on the spot instead of standing it back up.
+   */
+  registerOne(key, x, y, z, hide, kind = 'signal') {
+    const id = key10(x, z);
+    if (this.felled.has(id)) return false;
+    const ck = cellKey(x, z);
+    let arr = this.grid.get(ck);
+    if (!arr) this.grid.set(ck, arr = []);
+    // a re-delivered tile re-creates its junctions: same pole, same spot —
+    // one collider, not a phantom twin that survives the felling
+    if (!arr.some((p) => p.id === id)) arr.push({ x, y, z, id, key, hide, kind });
+    return true;
+  }
+
   /** A chunk went away: its standing poles go with it. The felled set does not. */
   unregister(key) {
     for (const [ck, arr] of this.grid) {
@@ -161,10 +179,15 @@ export class Poles {
   fell(p, dx, dz, speed = 8) {
     if (this.felled.has(p.id)) return;
     this.felled.add(p.id);
-    // out of the batch…
-    hideInstance(p.posts, p.i); hideInstance(p.heads, p.i);
-    p.posts.instanceMatrix.needsUpdate = true;
-    p.heads.instanceMatrix.needsUpdate = true;
+    // out of the standing world — a batch row zeroes its matrix, a
+    // free-standing pole brought its own way to disappear
+    if (p.hide) {
+      p.hide();
+    } else {
+      hideInstance(p.posts, p.i); hideInstance(p.heads, p.i);
+      p.posts.instanceMatrix.needsUpdate = true;
+      p.heads.instanceMatrix.needsUpdate = true;
+    }
     // …out of the collision grid
     const ck = cellKey(p.x, p.z);
     const arr = this.grid.get(ck);
@@ -174,7 +197,9 @@ export class Poles {
       if (!arr.length) this.grid.delete(ck);
     }
     // …and into the world as a real, falling object
-    const mesh = new THREE.Mesh(fallGeom(), this.material());
+    const mesh = new THREE.Mesh(
+      p.kind === 'signal' ? signalGeom() : fallGeom(),
+      p.kind === 'signal' ? this.signalMaterial() : this.material());
     mesh.position.set(p.x, p.y, p.z);
     mesh.castShadow = true;
     this.scene?.add(mesh);
@@ -215,6 +240,11 @@ export class Poles {
     return this._mat;
   }
 
+  signalMaterial() {
+    if (!this._sigMat) this._sigMat = new THREE.MeshLambertMaterial({ color: 0x2e3134 });
+    return this._sigMat;
+  }
+
   /** Everything, for a world reset. */
   clear() {
     for (const f of this.falling) { this.scene?.remove(f.mesh); f.mesh.geometry.dispose(); }
@@ -246,6 +276,18 @@ function fallGeom() {
     _fallGeom = mergeGeometries([post, arm, head], false);
   }
   return _fallGeom;
+}
+
+// The signal counterpart, matching traffic.js's sigAssets: a 3.6 m mast with
+// the three-lamp housing near the top. Same base-origin convention as the lamp.
+let _sigGeom = null;
+function signalGeom() {
+  if (!_sigGeom) {
+    const post = new THREE.CylinderGeometry(0.055, 0.09, 3.6, 6).translate(0, 1.8, 0);
+    const head = new THREE.BoxGeometry(0.26, 0.66, 0.18).translate(0, 3.08, 0);
+    _sigGeom = mergeGeometries([post, head], false);
+  }
+  return _sigGeom;
 }
 
 export const _test = { FELL_SPEED, FALL_T, LIE_T, CELL, key10, cellKey };

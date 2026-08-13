@@ -1712,7 +1712,8 @@ export class Traffic {
       // grid would stop answering for it
       const gk = Buckets.key(jn.x, jn.z);
       if (gk !== jn._gk) { this._jgrid.remove(jn._gk, jn); this._jgrid.add(jn.x, jn.z, jn); jn._gk = gk; }
-      jn.sigs.push(this._makePole(x, z, jn.group));
+      const pole = this._makePole(x, z, jn.group);
+      if (pole) jn.sigs.push(pole);
       jn.st0 = jn.st1 = -1;         // force a lamp refresh — new poles start unlit
       (grown ??= new Set()).add(jn);
     }
@@ -1777,8 +1778,8 @@ export class Traffic {
             if (dist(sg.x - pose.x, sg.z - pose.z) < 6) { dup = true; break; }
           }
           if (dup) continue;
-          owner.sigs.push(this._makePole(pose.x, pose.z, owner.group));
-          added = true;
+          const pole = this._makePole(pose.x, pose.z, owner.group);
+          if (pole) { owner.sigs.push(pole); added = true; }
         }
         if (added) {
           owner.st0 = owner.st1 = -1;
@@ -1835,6 +1836,26 @@ export class Traffic {
   // bearing (N-S-ish roads go on phase 0, E-W-ish on phase 1 — the classic
   // 2-phase crossing). One-time cost per signal; meshes freeze their matrices
   // because nothing about a pole ever moves again.
+  /**
+   * Does (x, z) lie inside the carriageway of any edge OTHER than the pole's
+   * own? `own` and its twin are the asphalt the pole deliberately stands
+   * 0.7 m outside of; a collinear continuation edge of the same street is the
+   * same distance away and clears the margin on its own.
+   */
+  _onForeignRoad(x, z, own) {
+    let hit = false;
+    this._egrid.near(x, z, (e) => {
+      if (hit || e === own || e === own.twin) return;
+      const half = (e.road?.w || 6) * 0.5 + 0.3;
+      const p = e.pts;
+      for (let i = 0; i < p.length - 1 && !hit; i++) {
+        if (distPointToSegment(x, z, p[i][0], p[i][1], p[i + 1][0], p[i + 1][1], _snap) < half)
+          hit = true;
+      }
+    });
+    return hit;
+  }
+
   _makePole(x, z, group) {
     const A = sigAssets();
     let best = null, bestD = 25, bestS = 0;
@@ -1853,11 +1874,30 @@ export class Traffic {
       // closer — signals stand at the stop line just before their junction,
       // so the approach with the junction ahead is the one this pole serves
       if (best.twin && bestS < best.len - bestS) { bestS = best.len - bestS; best = best.twin; }
-      const pose = poseAt(best, bestS, 0);
-      dx = pose.dx; dz = pose.dz;
-      const w2 = (best.road.w || 6) * 0.5 + 0.7; // right curb: half width + shoulder
-      px = pose.x - dz * w2;                     // right of travel = (-dz, dx)
-      pz = pose.z + dx * w2;
+      // THE KERB OF ONE APPROACH CAN BE INSIDE ANOTHER. The offset below is
+      // perpendicular to this pole's own edge, and at a junction where service
+      // roads come in at angles, "half width + shoulder" of one road lands in
+      // the running lane of the next — measured on the Pardubice tile: 3 of 19
+      // poles inside a carriageway, the worst 2.35 m in, which with masts now
+      // solid is a steel post standing in traffic. So: right kerb, then the
+      // left, then backed off up the approach — and a spot is only accepted
+      // when no OTHER edge's carriageway claims it. A pole that fits nowhere
+      // is not built; the lights are the schedule's, not the mast's, so the
+      // cars still stop — there is just no post in the lane to prove it.
+      let placed = false;
+      for (const back of [0, 4, 8]) {
+        const pose = poseAt(best, Math.max(1, bestS - back), 0);
+        for (const side of [1, -1]) {
+          const w2 = ((best.road.w || 6) * 0.5 + 0.7) * side;
+          const cx = pose.x - pose.dz * w2, cz = pose.z + pose.dx * w2;
+          if (this._onForeignRoad(cx, cz, best)) continue;
+          px = cx; pz = cz; dx = pose.dx; dz = pose.dz;
+          placed = true;
+          break;
+        }
+        if (placed) break;
+      }
+      if (!placed) return null;
     }
     const g = new THREE.Group();
     // ON THE GROUND. This said `0` — and this world is drawn in ABSOLUTE
@@ -1882,6 +1922,12 @@ export class Traffic {
     for (const c of g.children) { c.updateMatrix(); c.matrixAutoUpdate = false; }
     g.updateMatrix(); g.matrixAutoUpdate = false;
     group.add(g);
+    // …and it is an OBJECT: solid to drive against, felled above 12 km/h, and
+    // it stays down for the session — the lights are the schedule's, so a
+    // junction with its mast in the gutter still cycles and cars still stop.
+    const up = this.world?.poles?.registerOne?.(
+      'sig', px, g.position.y, pz, () => { g.visible = false; }, 'signal');
+    if (up === false) g.visible = false;      // felled earlier this session
     return { x, z, b: Math.abs(dz) >= Math.abs(dx) ? 0 : 1, lamps, mesh: g };
   }
 
