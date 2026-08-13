@@ -4010,6 +4010,9 @@ function signPost(sink, sg, cell, terrain) {
 }
 
 const LAMP_STEP = 34, LAMP_MIN_W = 5.4, LAMP_H = 7.2;
+// clearance a mast keeps from any OTHER carriageway: its own base radius plus
+// enough that a wing mirror does not find it
+const LAMP_CLEAR = 0.45;
 let _lPost = null, _lHead = null;
 function lampTemplates() {
   if (!_lPost) {
@@ -4788,10 +4791,28 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
         for (let d = LAMP_STEP - carry; d < L; d += LAMP_STEP) {
           const px = ax + dx * d, pz = az + dz * d;
           if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue; // this cell only
-          const side = ((spots.length + (r._id % 2)) & 1) ? 1 : -1; // alternate kerbs
-          // arm points at the road: post sits on the kerb, head reaches in
-          const nx = -dz * side, nz = dx * side;
-          spots.push([px + nx * half, pz + nz * half, Math.atan2(-nx, -nz) + Math.PI]);
+          const first = ((spots.length + (r._id % 2)) & 1) ? 1 : -1; // alternate kerbs
+          // A LAMP STANDS ON THE KERB, NEVER IN THE ROAD. The offset is
+          // perpendicular to THIS way, and wherever another carriageway runs
+          // close — a junction, a slip road, the far half of a dual
+          // carriageway — perpendicular to one road points straight into the
+          // other. Measured over the Pardubice tile: 106 of 2 083 lamps stood
+          // on a carriageway, 61 of them more than a metre in, the worst
+          // 4.42 m inside a 9 m primary, which is the middle of it.
+          //
+          // So try the far kerb, and if that is in the road too, place no lamp
+          // at all: one dark stretch of street is invisible, a mast in the
+          // running lane is something you hit at fifty.
+          let spot = null;
+          for (const side of [first, -first]) {
+            const nx = -dz * side, nz = dx * side;
+            const lx = px + nx * half, lz = pz + nz * half;
+            if (onCarriageway(cell, r, lx, lz, LAMP_CLEAR)) continue;
+            // arm points at the road: post sits on the kerb, head reaches in
+            spot = [lx, lz, Math.atan2(-nx, -nz) + Math.PI];
+            break;
+          }
+          if (spot) spots.push(spot);
         }
         carry = (carry + L) % LAMP_STEP;
       }
@@ -4811,6 +4832,14 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       }
       posts.instanceMatrix.needsUpdate = true;
       heads.instanceMatrix.needsUpdate = true;
+      // A mast is an OBJECT — you cannot drive through it and you can put it in
+      // the road. poles.js needs to turn these instance rows back into things
+      // with positions, so the positions travel WITH the batch: named so it can
+      // find them, plain numbers so they survive the worker codec, and in
+      // instance order so row i here is pole i there.
+      posts.name = 'lampPosts';
+      heads.name = 'lampHeads';
+      posts.userData.spots = spots.flat();
       group.add(posts, heads);
     }
   }

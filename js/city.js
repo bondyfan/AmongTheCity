@@ -13,6 +13,7 @@ import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
   clustersIn, clusterHull, clusterDeckY } from './geo.js';
 import { makeMaterials, buildChunkMeshes, buildChunkMeshesGen, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { makeMeshPool } from './meshpool.js';
+import { Poles } from './poles.js';
 import { Interiors } from './interiorsim.js';
 import { Terrain, groundFor } from './terrain.js';
 import { Canopy } from './canopy.js';
@@ -261,6 +262,10 @@ export class CityWorld {
     this.ground.onTileLoaded(() => this._dropGuessedChunks());
     this.interiors = new Interiors(scene, city, this);
     this.mats.hidden = this.interiors.hidden;
+    // Street lamps are collidable, fellable objects rather than scenery. The
+    // manager outlives every chunk: it is what remembers, across rebuilds and
+    // across the whole session, which masts are lying in the road.
+    this.poles = new Poles(scene);
     this.built = new Map();     // key -> Group (or null for empty cells)
     // Turning this OFF inverts the rule below, so upgrades outrank empty
     // cells exactly as the single-FIFO streamer used to. It exists for one
@@ -371,6 +376,7 @@ export class CityWorld {
     // interiors stream on their own schedule (they only matter on foot, and
     // they must keep running even while the chunk streamer has nothing to do)
     this.interiors.update(dt, focus, opts?.onFoot ?? false);
+    this.poles?.update(dt);
     // How fast the focus is actually travelling, eased. Everything below that
     // has to reason about the future — how far to look ahead, how far to
     // prefetch, whether a full-detail cell can be finished before it is
@@ -580,6 +586,7 @@ export class CityWorld {
           this.scene.remove(group);
           group.traverse(o => { o.geometry?.dispose?.(); });
         }
+        this.poles?.unregister(key);
         this.built.delete(key);
         this._detail.delete(key);
         this._px.delete(key);
@@ -724,6 +731,11 @@ export class CityWorld {
     if (prev) { this.scene.remove(prev); prev.traverse(o => o.geometry?.dispose?.()); }
     if (group) this.scene.add(group);
     this.built.set(key, group);
+    // The lamp masts of this chunk become collidable objects. It has to happen
+    // on every build, not once: a rebuild hands over brand-new InstancedMeshes
+    // with every pole upright again, and poles.js is what remembers which of
+    // them are lying in the road.
+    this._registerPoles(key, group);
     this._detail.set(key, lod);
     // …and whatever made it stale has now been answered. Anything that marks
     // it again below re-adds it, which is the ONLY way back into the set.
@@ -984,6 +996,7 @@ export class CityWorld {
         this.scene.remove(group);
         group.traverse(o => { o.geometry?.dispose?.(); });
       }
+      this.poles?.unregister(key);
       this.built.delete(key);
       this._stale?.delete(key);
     }
@@ -1241,6 +1254,26 @@ export class CityWorld {
 
   /** A handful of body-colour chunks off a crashing car — the debris pool is
    *  the interiors', so wrecks and crashes share one budget and one mesh. */
+  /**
+   * Hand this chunk's lamp masts to poles.js, or take them back when the chunk
+   * has gone. Reads them off the batch rather than off the cell, so it works
+   * identically whether the chunk was meshed here or in a worker.
+   */
+  _registerPoles(key, group) {
+    if (!this.poles) return;
+    if (!group) { this.poles.unregister(key); return; }
+    let posts = null, heads = null;
+    group.traverse((o) => {
+      if (o.name === 'lampPosts') posts = o;
+      else if (o.name === 'lampHeads') heads = o;
+    });
+    const flat = posts?.userData?.spots;
+    if (!posts || !heads || !flat?.length) { this.poles.unregister(key); return; }
+    const spots = [];
+    for (let i = 0; i + 2 < flat.length; i += 3) spots.push([flat[i], flat[i + 1], flat[i + 2]]);
+    this.poles.register(key, spots, posts, heads, this.terrain);
+  }
+
   crashDebris(x, y, z, color, n, energy) {
     const d = this.interiors?.debris;
     if (!d) return;
@@ -1291,6 +1324,9 @@ export class CityWorld {
         }
       }
     }
+    // A LAMP MAST IS SOLID. It is instanced geometry, so it never went near
+    // the footprint tests below — you drove through seven metres of steel.
+    pushed = this.poles?.collide(pos, radius) || pushed;
     const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
     if (!cell) return pushed;
     const walker = !!opts?.interior;

@@ -350,6 +350,23 @@ const SOUNDS = [
     'A handbrake yanked on hard in a moving car: the metallic ratchet clack of the lever, then '
     + 'the rear tyres locking with a sudden barking screech of rubber that settles into a scrub. '
     + 'One dry event, close exterior, no engine, no music, no voice', 1.3],
+
+  // ---- v9: a lamp column is an object you can hit --------------------------
+  // Two cues, because felling a mast is two events several hundred milliseconds
+  // apart: the car arriving at it, and seven metres of steel arriving at the
+  // road. Splitting them lets poles.js play the second one when the mast is
+  // actually flat rather than baking a guessed delay into one long sample —
+  // which also means a hit at 30 km/h and one at 90 sound different for free,
+  // since the fall rate scales with the blow.
+  ['pole_hit',
+    'A car at speed striking a hollow steel street-lamp column: a hard metallic '
+    + 'bang with a bright ringing overtone, the mast shearing at its base with a '
+    + 'brief tearing scrape of metal, a little glass tinkle from the lamp head. One '
+    + 'dry event, close exterior, no engine, no music, no voice', 1.4],
+  ['pole_land',
+    'A tall hollow steel pole falling flat onto asphalt: a deep resonant clang with '
+    + 'a long metallic ring-out, a short rattle as it settles, distant street reverb. '
+    + 'One dry event, exterior, no music, no voice', 2.0],
 ];
 
 const exists = async (p) => { try { await access(p); return true; } catch { return false; } };

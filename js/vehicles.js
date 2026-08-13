@@ -1689,6 +1689,24 @@ export function driveStep(car, ctl, dt, world, others) {
   const hl = car.len / 2 - 0.2, hw = car.wid / 2 - 0.1;
   const nPts = car.len > 5.5 ? 6 : 4;
   let hit = false;
+  // A LAMP MAST GOES OVER BEFORE IT IS A WALL. Asked first, because
+  // world.collide() below now treats a standing mast as solid — and a column
+  // you hit at fifty should end up in the gutter, not stop the car dead like
+  // masonry. Below the felling speed nothing happens here and the mast wins
+  // the ordinary way, which is what parking against one should feel like.
+  {
+    const vx = -Math.sin(car.heading) * car.speed, vz = -Math.cos(car.heading) * car.speed;
+    const nose = car.len / 2;
+    const felled = world.poles?.strike?.(
+      car.x - Math.sin(car.heading) * nose, car.z - Math.cos(car.heading) * nose,
+      vx, vz, car.wid / 2 + 0.4) ?? 0;
+    if (felled) {
+      // it costs the car something, but nothing like a wall: a lamp column is
+      // a thin steel tube and the car walks away with a dent
+      car.speed *= 0.86;
+      car.damage = Math.min(1.2, (car.damage ?? 0) + 0.05 * felled);
+    }
+  }
   for (let i = 0; i < nPts; i++) {
     const of = i < 2 ? hl : i < 4 ? -hl : 0, os = i & 1 ? hw : -hw;
     const wox = fx * of + rx * os, woz = fz * of + rz * os;
