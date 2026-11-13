@@ -1,27 +1,27 @@
 // ---- Main menu: the screen before Pardubice ----
 // Fully self-contained like js/settings.js: every bit of DOM and CSS is
 // injected from here, index.html and style.css stay untouched. main.js calls
-// showMenu() BEFORE boot() and awaits the promise — the player picks single
+// showMenu() BEFORE boot() and awaits the promise, the player picks single
 // player ("Hrát") or the shared dedicated server ("Multiplayer (server)"),
 // and only then does the city start streaming.
 //
 // The multiplayer button gates on the server actually being up: the same
-// /health polling pattern as the Woods serverstatus module — enabled only
+// /health polling pattern as the Woods serverstatus module, enabled only
 // while GET {SERVER_URL}/health answers { ready: true }, with the player/room
 // count as the status line, re-checked every few seconds while the menu is
 // open. No WebSocket is touched here; the transport (netcity.js) connects
 // only after the click.
 //
-// Layering: the menu sits at z-index 15 — above the HUD (10) but BELOW the
+// Layering: the menu sits at z-index 15, above the HUD (10) but BELOW the
 // settings gear (20) and panel (40), so "Nastavení" stays reachable from the
 // menu (main.js brings initSettings up before showMenu for exactly this).
 // The #enter-overlay boot cover lives at z-40 and would blanket the menu, so
-// it is stashed (visibility) while the menu is up and restored on the pick —
+// it is stashed (visibility) while the menu is up and restored on the pick:
 // the familiar "Přijíždíte do Pardubic…" spinner then covers the boot.
 //
 // The nickname field is the one thing the server run REQUIRES: a nameplate
 // over a stranger's head is what turns "another citizen" into "someone".
-// Single player accepts an empty one — you are alone, nobody reads it — but
+// Single player accepts an empty one, you are alone, nobody reads it, but
 // it is still remembered and handed back, so a player who types a name once
 // never has to think about it again.
 
@@ -29,6 +29,8 @@ import { SERVER_URL } from '../server-config.js';
 import { browserStore, fmtPlayed } from './savegame.js';
 import { confirmPanel } from './panel.js';
 import { kc } from './prices.js';
+import { MENU_CSS } from './menustyle.js';
+import { startMenuScene } from './menubg.js';
 
 const el = (tag, cls, html) => {
   const e = document.createElement(tag);
@@ -40,11 +42,11 @@ const el = (tag, cls, html) => {
 // ---- nickname ---------------------------------------------------------------
 // Woods' filter plus the blank-nameplate defence. Two classes of character go:
 //
-//   1. markup/JSON breakers  <>&"'`  — the name ends up in a canvas today and
+//   1. markup/JSON breakers  <>&"'`: the name ends up in a canvas today and
 //      could end up in a DOM chat line tomorrow.
 //   2. characters that render as NOTHING. String.trim() only knows Unicode Zs
 //      and line terminators, so U+200B (zero-width space), U+3164 (hangul
-//      filler) and U+2800 (blank braille) all sail straight through it — the
+//      filler) and U+2800 (blank braille) all sail straight through it, the
 //      classic "invisible nickname" trick. Without this the menu's "no name,
 //      no server" gate is one paste away from being bypassed, and U+202E
 //      (right-to-left override) would let a name reverse the text after it.
@@ -57,10 +59,10 @@ const STRIP = /[<>&"'`\u0000-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u
 // characters one at a time is whack-a-mole: the first version of this list
 // caught U+200B and U+3164 and still waved through U+034F (combining grapheme
 // joiner), U+17B5 (Khmer inherent vowel), U+FE0F (variation selector) and the
-// whole U+E00xx tag block — every one of them a perfectly empty nameplate,
+// whole U+E00xx tag block, every one of them a perfectly empty nameplate,
 // verified against the shipped function. So the rule is also stated
 // positively: a nickname must contain at least one character that puts INK on
-// the canvas — not whitespace, not a combining mark, not a format control, not
+// the canvas, not whitespace, not a combining mark, not a format control, not
 // a surrogate, not private-use, not unassigned. U+200D (ZWJ) and the variation
 // selectors deliberately survive the strip above, so a family emoji stays one
 // glyph and a thumbs-up keeps its colour; both are format/mark characters, so
@@ -68,7 +70,7 @@ const STRIP = /[<>&"'`\u0000-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u
 const INK = /[^\s\p{Mn}\p{Me}\p{Cf}\p{Cc}\p{Cs}\p{Cn}\p{Co}]/u;
 
 // Exported because the network layer has to run the SAME filter AGAIN on the
-// way IN — a peer's name arrives over the wire and nothing that arrives over a
+// way IN, a peer's name arrives over the wire and nothing that arrives over a
 // wire is trusted. Keep this body byte-identical to netcity.sanitizeName and
 // nametags.clean, or sender and receiver disagree about what the name is.
 export function sanitizeName(s) {
@@ -78,7 +80,7 @@ export function sanitizeName(s) {
 
 export const NAME_KEY = 'atc-name';
 
-// localStorage throws in some privacy modes — the menu must still open
+// localStorage throws in some privacy modes, the menu must still open
 function loadName() {
   try { return sanitizeName(localStorage.getItem(NAME_KEY) || ''); } catch { return ''; }
 }
@@ -86,83 +88,8 @@ function saveName(n) {
   try { localStorage.setItem(NAME_KEY, n); } catch {}
 }
 
-const CSS = `
-#atc-menu {
-  position: fixed; inset: 0; z-index: 15; display: flex;
-  align-items: center; justify-content: center; text-align: center;
-  color: #e8ecf4; font-family: 'Trebuchet MS','Segoe UI',system-ui,sans-serif;
-  background: radial-gradient(ellipse at 50% 30%, #1b2434 0%, #0d1016 70%);
-  transition: opacity 0.35s ease;
-}
-#atc-menu.atc-menu-out { opacity: 0; pointer-events: none; }
-.atc-menu-inner { max-width: 520px; padding: 24px; }
-.atc-menu-inner h1 {
-  font-size: 44px; letter-spacing: 6px; line-height: 1.15; margin: 0 0 6px;
-  text-shadow: 0 3px 18px rgba(0,0,0,0.8);
-}
-.atc-menu-sub {
-  font-size: 15px; letter-spacing: 4px; opacity: 0.75; margin-bottom: 40px;
-  text-transform: uppercase;
-}
-/* nickname: the same dark panel + #cfe0ff accent as the buttons below it, so
-   the field reads as the first step of the same control, not as a stray form */
-.atc-name-row { margin: 0 0 18px; }
-.atc-menu-name {
-  display: block; width: 100%; padding: 13px 16px; text-align: center;
-  font: inherit; font-size: 17px; font-weight: 700; letter-spacing: 2px;
-  color: #cfe0ff; background: rgba(20, 26, 40, 0.85);
-  border: 1px solid rgba(140,170,220,0.35); border-radius: 12px; outline: none;
-  /* body sets user-select:none and touch-action:none for the canvas; a text
-     field needs both back or a phone cannot place a caret in it */
-  user-select: text; -webkit-user-select: text; touch-action: manipulation;
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-.atc-menu-name::placeholder {
-  color: #93a6c6; font-weight: 400; letter-spacing: 1px;
-}
-.atc-menu-name:focus {
-  background: rgba(30, 40, 62, 0.95); border-color: rgba(160,195,245,0.7);
-}
-.atc-menu-name.name-missing {
-  border-color: #d8574a; animation: atc-name-shake 0.3s;
-}
-@keyframes atc-name-shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-6px); }
-  75% { transform: translateX(6px); }
-}
-.atc-name-note {
-  margin-top: 7px; font-size: 11.5px; letter-spacing: 0.3px; opacity: 0.55;
-  transition: color 0.15s ease, opacity 0.15s ease;
-}
-.atc-name-row.miss .atc-name-note { color: #ff9a8d; opacity: 1; }
-.atc-menu-btn {
-  display: block; width: 100%; margin: 12px 0; padding: 15px 18px;
-  font: inherit; font-size: 18px; font-weight: 700; letter-spacing: 1px;
-  color: #e8ecf4; cursor: pointer; border-radius: 12px;
-  background: rgba(38, 48, 74, 0.75); border: 1px solid rgba(140,170,220,0.35);
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-.atc-menu-btn:hover:not(:disabled) {
-  background: rgba(58, 76, 116, 0.9); border-color: rgba(160,195,245,0.7);
-}
-.atc-menu-btn:disabled { opacity: 0.45; cursor: default; }
-.atc-menu-btn small {
-  display: block; font-size: 12.5px; font-weight: 400; letter-spacing: 0.3px;
-  opacity: 0.8; margin-top: 4px;
-}
-.atc-menu-new {
-  appearance: none; background: none; border: 0; cursor: pointer; font: inherit;
-  font-size: 13.5px; color: #93a6c6; padding: 6px 10px; margin: -2px 0 6px;
-  text-decoration: underline; text-underline-offset: 3px;
-}
-.atc-menu-new:hover { color: #cfe0ff; }
-.atc-menu-hint { margin-top: 34px; font-size: 12.5px; opacity: 0.55; line-height: 1.7; }
-.atc-menu-hint b {
-  background: #26304a; border-radius: 4px; padding: 1px 7px; margin: 0 2px;
-  font-size: 11.5px; color: #cfe0ff; font-weight: 600;
-}
-`;
+// The stylesheet lives in js/menustyle.js and the painted town behind the
+// menu in js/menubg.js; this file keeps the behaviour.
 
 // ---- /health poller (Woods serverstatus pattern, inlined) --------------------
 function healthUrl() {
@@ -203,28 +130,63 @@ export function showMenu() {
     // idempotent: a second showMenu() must not stack a second <style> (and a
     // second copy of the shake keyframes) into <head>
     if (!document.getElementById('atc-menu-css')) {
-      const st = el('style'); st.id = 'atc-menu-css'; st.textContent = CSS;
+      const st = el('style'); st.id = 'atc-menu-css'; st.textContent = MENU_CSS;
       document.head.appendChild(st);
     }
 
     const overlay = el('div'); overlay.id = 'atc-menu';
+    const scene = el('canvas', 'atc-menu-scene');
+    overlay.append(scene, el('div', 'atc-menu-shade'));
+    // where and when: the real hour in Pardubice, so the menu feels like a
+    // window onto the town rather than a title card
+    const chip = el('div', 'atc-menu-chip');
+    chip.append(el('i'), el('span'));
+    const tick = () => {
+      let hm = '';
+      try { hm = new Date().toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Prague' }); } catch {}
+      chip.lastChild.textContent = 'Pardubice' + (hm ? ' · ' + hm : '');
+    };
+    tick();
+    overlay.appendChild(chip);
+
     const inner = el('div', 'atc-menu-inner');
-    inner.appendChild(el('h1', '', 'AMONG THE CITY'));
+    inner.appendChild(el('div', 'atc-menu-kicker', 'Otevřené město · skutečné Pardubice'));
+    // one span per letter: each rises on its own beat and the sheen runs
+    // through the word letter by letter (js/menustyle.js)
+    const title = el('h1', 'atc-menu-title');
+    title.setAttribute('aria-label', 'Among The City');
+    let li = 0;
+    for (const word of ['AMONG', 'THE', 'CITY']) {
+      const w = el('span', 'w');
+      w.setAttribute('aria-hidden', 'true');
+      for (const ch of word) {
+        const l = el('span', 'l', ch);
+        l.style.setProperty('--i', String(li++));
+        w.appendChild(l);
+      }
+      title.appendChild(w);
+    }
+    inner.appendChild(title);
     inner.appendChild(el('div', 'atc-menu-sub', 'Pardubice'));
+    const card = el('div', 'atc-menu-card');
 
     const nameRow = el('div', 'atc-name-row');
+    const nameLbl = el('label', 'atc-name-label', 'Přezdívka');
+    nameLbl.htmlFor = 'atc-menu-name';
+    nameRow.appendChild(nameLbl);
     const nameIn = el('input', 'atc-menu-name');
+    nameIn.id = 'atc-menu-name';
     nameIn.type = 'text';
     nameIn.maxLength = 14;
     nameIn.placeholder = 'Vaše přezdívka';
     nameIn.autocomplete = 'off';
     nameIn.spellcheck = false;
-    // value goes in as a PROPERTY — never through el()'s innerHTML. What sits
+    // value goes in as a PROPERTY, never through el()'s innerHTML. What sits
     // in localStorage is still player input and must never become markup.
     nameIn.value = loadName();
     const note = el('div', 'atc-name-note', NOTE_IDLE);
     nameRow.append(nameIn, note);
-    inner.appendChild(nameRow);
+    card.appendChild(nameRow);
 
     // A returning player CONTINUES by default: the save (js/savegame.js) is
     // read here only to decide what the first button says, and career.js loads
@@ -232,7 +194,7 @@ export function showMenu() {
     // asks first, because it throws that save away. The save is the local
     // player's in either mode, so the multiplayer button continues it too.
     const store = browserStore();
-    const single = el('button', 'atc-menu-btn');
+    const single = el('button', 'atc-menu-btn primary');
     const fresh = el('button', 'atc-menu-new', 'Nová hra');
     fresh.type = 'button';
     const paintSingle = () => {
@@ -259,16 +221,20 @@ export function showMenu() {
     const multi = el('button', 'atc-menu-btn',
       '🌐 Multiplayer (server)<small class="atc-mp-status">hledám server…</small>');
     multi.disabled = true;
-    inner.append(single, fresh, multi);
-
-    inner.appendChild(el('p', 'atc-menu-hint',
-      '<b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>J</b> zakázky · <b>C</b> pohled řidiče · '
-      + '<b>H</b> klakson · <b>M</b> mapa · <b>V</b> raketa (z vrtulníku)'
-      + '<br>Nastavení najdete pod ⚙️ vpravo nahoře.'));
+    card.append(single, fresh, multi);
+    inner.appendChild(card);
     overlay.appendChild(inner);
-    document.body.appendChild(overlay);
 
-    // the boot cover (z-40) would blanket the menu — stash it, restore on pick
+    const keys = [['WASD', 'pohyb'], ['E', 'nastoupit'], ['J', 'zakázky'], ['M', 'mapa'], ['C', 'pohled řidiče'], ['H', 'klakson']];
+    overlay.appendChild(el('div', 'atc-menu-foot',
+      '<div class="atc-menu-keys">' + keys.map(([k, t]) => `<kbd>${k}</kbd>${t}`).join('<span class="sep">·</span>')
+      + '<span class="sep">·</span>nastavení pod ⚙️ vpravo nahoře</div>'
+      + '<div class="atc-menu-credit">Mapová data © přispěvatelé OpenStreetMap · Ortofoto © ČÚZK · Podlažnost © IPR Praha</div>'));
+    document.body.appendChild(overlay);
+    const stopScene = startMenuScene(scene);
+    const clock = setInterval(tick, 15000);
+
+    // the boot cover (z-40) would blanket the menu, stash it, restore on pick
     const cover = document.getElementById('enter-overlay');
     const coverVis = cover ? cover.style.visibility : '';
     if (cover) cover.style.visibility = 'hidden';
@@ -281,6 +247,7 @@ export function showMenu() {
       const { online, detail } = await checkHealth();
       if (closed) return;
       multi.disabled = !online;
+      multi.classList.toggle('online', online);
       status.textContent = detail;
     };
     if (SERVER_URL) { poll(); timer = setInterval(poll, 5000); }
@@ -292,7 +259,7 @@ export function showMenu() {
       const raw = nameIn.value, clean = raw.replace(STRIP, '');
       if (clean !== raw) {
         // hold the caret where the player is typing instead of throwing it to
-        // the end — measure how much of the text BEFORE it survived the strip
+        // the end, measure how much of the text BEFORE it survived the strip
         const at = raw.slice(0, nameIn.selectionStart ?? raw.length)
           .replace(STRIP, '').length;
         nameIn.value = clean;
@@ -305,8 +272,8 @@ export function showMenu() {
     });
 
     // The gate is a click-time REFUSAL, not a disabled button, for two reasons.
-    // (1) `multi.disabled` already means one specific thing — "the server is
-    // not answering" — and the poller rewrites it every 5 s; folding a second
+    // (1) `multi.disabled` already means one specific thing, "the server is
+    // not answering", and the poller rewrites it every 5 s; folding a second
     // condition into it would have the poller undo the name check (and the
     // status line can only tell one story at a time). (2) A disabled button
     // swallows the click, so it can never explain itself; an enabled one that
@@ -329,14 +296,17 @@ export function showMenu() {
       if (closed) return;
       closed = true;
       if (timer) clearInterval(timer);
+      clearInterval(clock);
       if (cover) cover.style.visibility = coverVis;   // spinner covers the boot
-      overlay.classList.add('atc-menu-out');
-      setTimeout(() => overlay.remove(), 400);
+      overlay.classList.add('atc-menu-out');        // the town rushes towards you
+      setTimeout(() => { stopScene(); overlay.remove(); }, 900);
       resolve({ mode, name: sanitizeName(nameIn.value) });
     };
-    // single player never blocks on a name — you are alone — but if one is
+    // single player never blocks on a name, you are alone, but if one is
     // typed it still rides along, so there is only ever one identity
     single.addEventListener('click', () => pick('single'));
+    // Enter in the name field plays, the way a player expects a form to submit
+    nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); single.click(); } });
     multi.addEventListener('click', () => { if (requireName()) pick('server'); });
   });
 }
