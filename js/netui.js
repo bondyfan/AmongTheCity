@@ -409,7 +409,7 @@ export function makeNetUI(opts = {}) {
       // The whole reason this module exists. Persistent — it stays up until
       // the connection is back, because the player needs to know that
       // everything they do from here on is happening in their world only.
-      showBanner('Spojení se serverem ztraceno — hraješ sám', false);
+      showBanner('Spojení se serverem ztraceno, hraješ sám', false);
       toast('Spojení ztraceno, zkouším se připojit…', 'error');
       known = new Map();                 // everyone is gone as far as we can tell
       cnt.textContent = czPlayers(0);

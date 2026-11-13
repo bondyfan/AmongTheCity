@@ -304,7 +304,8 @@ export function initSettings(apply) {
     // this is what keeps a Kaufland reading KAUFLAND from across the car park
     // Clouds sit 1.1–2.4 km above the ground, so the whole sky is in view from
     // anywhere — this is the one draw distance you can always see the effect of.
-    // Each puff is its own draw call, which is where the cost lives.
+    // The whole field is one draw call now (clouds.js); what a longer range
+    // costs is fill, not draws.
     selectRow('cloudDist', 'Dohlednost mraků', [['medium', 'Střední'],
       ['far', 'Daleko'], ['furthest', 'Nejdál']]),
     selectRow('buildingR', 'Dohlednost budov (interiéry)', [[80, 'Krátká'],

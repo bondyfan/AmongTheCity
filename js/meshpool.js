@@ -30,6 +30,44 @@ const MAX_WORKERS = 4;
 // synchronously. Nothing should ever hit it — it exists so a worker that dies
 // silently costs one chunk instead of leaving a hole in the world forever.
 const WATCHDOG_MS = 8000;
+// A worker that has not finished LOADING is a different animal from one that
+// has stopped answering: its module graph is fetched file by file under the
+// dev server, behind the boot's own tile fetches. It is given no work until it
+// says 'ready' (see the end of js/meshworker.js) and it is only written off
+// after this much longer wait.
+const LOAD_MS = 60000;
+// The watchdog counts time the main thread could actually have HEARD an
+// answer in. poll() runs once a frame; after a long stall (tile indexing at
+// boot, a tab coming back from the background) the frame callback can run
+// before the message events that queued up behind it, and a plain wall-clock
+// test then retired healthy workers whose answers were already in the queue.
+// So one poll never adds more than this to a wait.
+const STALL_CAP_MS = 250;
+// ...AND ONLY TIME THE LINE WAS PROVEN OPEN. A worker's reply is a task on
+// this thread's queue, and it is delivered when the tasks in front of it have
+// run, not when it was posted. Measured in wave 3, in the automation pane
+// every engineer of this project verifies in: the frame pump that pane needs
+// had filled the queue with whole frames of work, a worker's reply reached
+// this thread 3.2 to 4.4 s after it was posted and a worker that does nothing
+// but answer took 6.6 s to start. Frames kept coming at full rate the whole
+// time. A chunk's round trip was then longer than a wall-clock watchdog, three
+// healthy workers were retired one after another, and the session (in the
+// build before this work as well) meshed everything on the main thread. A
+// player's browser has no such pump, but a thread whose queue is backed up for
+// any reason has the same shape, and silence is only evidence against a worker
+// while the line is known to be carrying messages. So every worker is pinged a
+// few times a second (it answers between chunks), ANY message from ANY worker
+// is proof the line delivers, and the clocks below only advance on a poll that
+// has such proof. One worker stuck in a loop is still caught in 8 s, because
+// the other three keep answering. Total silence gets this much grace before
+// the clocks run on their own again, which is what catches a pool of one that
+// has died.
+const PING_MS = 120;
+// A ping that takes this long to come back means a chunk sent to a worker is
+// seconds away however fast the worker is. The streamer stops queueing behind
+// the workers then and starts cells on its own thread again, as it used to.
+const SLOW_MS = 1500;
+const SILENT_MS = 20000;
 
 export function poolSize(max = MAX_WORKERS) {
   // …minus one, because the main thread is still rendering. `-1` on a 2-core
@@ -55,13 +93,26 @@ export function makeMeshPool(opts = {}) {
     dead: false,
     get size() { return workers.length; },
     /** How many chunks could be started right now. */
-    free() { return pool.dead ? 0 : workers.reduce((n, h) => n + (h.flight ? 0 : 1), 0); },
+    free() {
+      return pool.dead ? 0 : workers.reduce((n, h) => n + (h.ready && !h.flight ? 1 : 0), 0);
+    },
+    /** Workers that have loaded and said so. Zero for the first moments of a boot. */
+    get ready() { return workers.reduce((n, h) => n + (h.ready ? 1 : 0), 0); },
+    /** Chunks the workers have answered since the pool was made (for diagnostics). */
+    answered: 0,
+    /** The last ping's round trip, ms: the worker's wait behind a chunk plus the line. */
+    rtt: 0,
+    /** The line is too slow to be worth waiting on (see workersFirst in js/city.js). */
+    get slow() { return pool.rtt > SLOW_MS; },
     submit, finish, poll, dispose,
   };
+  let lastPoll = now();
+  let heard = false;            // a message arrived since the last poll
+  let lastHeard = now();        // when the line last proved itself
 
   for (let i = 0; i < poolSize(opts.max ?? MAX_WORKERS); i++) {
     try {
-      const h = { w: spawn(), flight: null,
+      const h = { w: spawn(), flight: null, ready: false, waited: 0, pingAt: -1e9, pingOut: false,
         // What this worker's raster mirror holds. The ledger and the worker's
         // own Map are written from the SAME put/drop list in the same message,
         // which is the only reason the two can be trusted to agree.
@@ -91,11 +142,20 @@ export function makeMeshPool(opts = {}) {
   }
 
   function onReply(h, msg) {
+    heard = true;
+    if (msg?.t === 'ready') { h.ready = true; h.waited = 0; return; }
+    if (msg?.t === 'pong') {
+      // the ping's own send time comes back with it: a ping re-sent while an
+      // older one was still on its way must not make the line look quick
+      h.pingOut = false;
+      if (typeof msg.at === 'number') pool.rtt = now() - msg.at;
+      return;
+    }
     const f = h.flight;
     if (!f || msg?.id !== f.id) return;          // a reply to a lost build
     h.flight = null;
     if (msg.t === 'fail') f.error = msg.error;
-    else f.reply = msg;
+    else { f.reply = msg; pool.answered++; }
     f.done = true;
   }
 
@@ -107,7 +167,9 @@ export function makeMeshPool(opts = {}) {
    */
   function submit(world, cx, cz, lod) {
     if (pool.dead) return null;
-    const h = workers.find((x) => !x.flight);
+    // only a worker that has finished loading: one that has not would sit on
+    // the chunk for as long as its imports take, with the cell stuck in flight
+    const h = workers.find((x) => x.ready && !x.flight);
     if (!h) return null;
     let got;
     try {
@@ -118,7 +180,7 @@ export function makeMeshPool(opts = {}) {
       return null;
     }
     if (!got) return null;                       // outside the mapped city
-    const f = { id: nextId++, cx, cz, lod, ortho: got.ortho, at: now(),
+    const f = { id: nextId++, cx, cz, lod, ortho: got.ortho, at: now(), waited: 0,
       done: false, reply: null, error: null };
     try {
       h.w.postMessage({ t: 'build', id: f.id, spec: got.spec }, got.transfer);
@@ -149,9 +211,33 @@ export function makeMeshPool(opts = {}) {
   /** Fail anything the workers have stopped answering for. Called once a frame. */
   function poll() {
     const t = now();
-    for (const h of workers) {
-      if (h.flight && !h.flight.done && t - h.flight.at > WATCHDOG_MS)
+    let step = 0;
+    if (heard) {
+      // the line delivered since the last poll: credit the time since it last
+      // did, never more than one stall's worth
+      step = Math.min(STALL_CAP_MS, Math.max(0, t - lastHeard));
+      lastHeard = t; heard = false;
+    } else if (t - lastHeard > SILENT_MS) {
+      // nothing from anyone for a long time: the workers themselves are gone
+      step = Math.min(STALL_CAP_MS, Math.max(0, t - lastPoll));
+    }
+    lastPoll = t;
+    // backwards and by index: retire() splices, and a copy of the list here
+    // would be an array made every frame
+    for (let i = workers.length - 1; i >= 0; i--) {
+      const h = workers[i];
+      // keep the line talking. One ping out per worker at a time (a lost one
+      // is re-sent after a second), and none to a worker that has not loaded.
+      if (h.ready && t - h.pingAt > (h.pingOut ? 1000 : PING_MS)) {
+        h.pingAt = t; h.pingOut = true;
+        try { h.w.postMessage({ t: 'ping', at: t }); } catch { /* retired below, in time */ }
+      }
+      if (!h.ready) {
+        if ((h.waited += step) > LOAD_MS) retire(h, 'worker never finished loading');
+      } else if (h.flight && !h.flight.done
+        && (h.flight.waited += step) > WATCHDOG_MS) {
         retire(h, `no answer for chunk ${h.flight.cx},${h.flight.cz}`);
+      }
     }
   }
 
@@ -169,6 +255,28 @@ export function makeMeshPool(opts = {}) {
   return pool;
 }
 
+// ---- a pool that is already awake when the world asks for one ---------------
+// The first thing a boot does is fetch megabytes of tiles, and a worker's
+// module graph is dozens of small requests queued behind them on the same six
+// connections: measured, the four workers said 'ready' 4.7 s after the world
+// was made, by which time the boot had meshed nearly all of its 81 cells on
+// the main thread. Spawned while the MENU is up, with the network idle, they
+// are ready before Hrat is clicked and the boot meshes four cells at a time.
+let warm = null;
+
+/** Start the workers now. Safe to call anywhere: a no-op where there is no Worker. */
+export function prewarmMeshPool() {
+  if (warm || typeof Worker === 'undefined' || typeof window === 'undefined') return;
+  warm = makeMeshPool();
+}
+
+/** The prewarmed pool, once; after that (a second world) every caller makes its own. */
+export function takeMeshPool() {
+  const p = warm && !warm.dead ? warm : null;
+  warm = null;
+  return p ?? makeMeshPool();
+}
+
 /**
  * Everything the decode needs that the worker could not make: the window atlas,
  * the chain wordmarks and the aerial photo are all painted on a <canvas>, and a
@@ -178,8 +286,12 @@ export function makeMeshPool(opts = {}) {
 function resolveMaterials(reply, ortho, mats) {
   mats.codecMats ??= {};
   if (ortho) mats.codecMats.ortho = ortho.mat;
-  for (const k of Object.keys(reply.brands ?? {}))
-    mats.codecMats[k] ??= brandMarkMat(reply.brands[k]);
+  for (const k of Object.keys(reply.brands ?? {})) {
+    const m = (mats.codecMats[k] ??= brandMarkMat(reply.brands[k]));
+    // a chunk is about to wear it: the wordmark sweep (CityWorld._sweepMarks)
+    // only sees BUILT chunks, and this one lands a few frames from now
+    if (m.userData) m.userData.idle = 0;
+  }
   // Building the atlas is a 2048×1024 paint, so it waits for a chunk that
   // actually has facades in it — the same moment the synchronous path builds it.
   if (reply.payload.meta.nodes.some((n) => n.mat === 'facade')) facadeMaterial(mats);

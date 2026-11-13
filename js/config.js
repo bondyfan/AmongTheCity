@@ -24,7 +24,13 @@ export const LAYER_Y = {
   // sit as low as terrain + 0.06 — the sealed ground has to stay clear below it.
   inferred: 0.03,
   green: 0.05, water: 0.08, paved: 0.10, rail: 0.14,
-  footway: 0.16, road: 0.20, marking: 0.26,
+  // `marking` was 0.26: six centimetres of air under every line, which showed
+  // as paint drawn across the bottom of a tyre standing on it. Paint is placed
+  // on the ribbon's own chords now (meshes.js yAt), so 3.5 cm is all the
+  // daylight the depth buffer needs: resolvable past 400 m at the 0.5 m near
+  // plane. A pavement beside a kerbed carriageway rides KERB_H above `road`
+  // (js/streets.js), which puts it over the paint, as it should be.
+  footway: 0.16, road: 0.20, marking: 0.235,
 };
 // Real bridges don't hump: the deck runs FLAT barely above street level and
 // what sells the bridge is the river sunk below it (Labe embankments), so
@@ -94,13 +100,21 @@ export const COLORS = {
   inferred: { paving: 0x9a978f, asphalt: 0x5c5f64, dirt: 0x7a6a55, concrete: 0x8e8b84 },
   water: 0x3f6f95,
   road: {
-    // ONE grey for every carriageway. These used to shade by class, which
-    // reads as information on a map and as PATCHWORK on the ground: every
-    // junction of two classes showed a seam, every dual carriageway a stripe.
-    // Real asphalt does not know its administrative class.
-    motorway: 0x55585e, trunk: 0x55585e, primary: 0x55585e, secondary: 0x55585e,
-    tertiary: 0x55585e, unclassified: 0x55585e, residential: 0x55585e,
-    living_street: 0x55585e, service: 0x55585e, pedestrian: 0x8f8c84,
+    // Asphalt by AGE, not by administrative class. One grey for everything was
+    // the cure for the old patchwork (every junction of two classes showed a
+    // seam under a square pad), and it left every street in the country the
+    // same fresh tarmac. What the eye actually reads on a real network is how
+    // long ago a surface was laid: a motorway is relaid dark every decade, a
+    // main road is dark and patched, a side street has bleached to a pale
+    // warm grey, a yard is paler still. A few percent apart, so a mouth reads
+    // as a mouth and not as a seam: the junction pad takes its widest arm's
+    // tone and meets the others at their mouth lines, which is exactly where
+    // a real resurfacing job stops.
+    motorway: 0x4c4f55, trunk: 0x4e5157, primary: 0x53565c, secondary: 0x56595e,
+    tertiary: 0x5a5c60, unclassified: 0x626365, residential: 0x626364,
+    living_street: 0x696865, service: 0x6b6a67,
+    motorway_link: 0x4e5157, trunk_link: 0x4f5258, primary_link: 0x54575c,
+    secondary_link: 0x575a5e, tertiary_link: 0x5a5c60, pedestrian: 0x8f8c84,
     footway: 0x9a968c, path: 0x8f8a7c, cycleway: 0x7d6f74, steps: 0xa09c92, track: 0x84796a,
     runway: 0x55585d, taxiway: 0x6e7176, taxilane: 0x74777c, airstrip: 0x6a6257,
   },

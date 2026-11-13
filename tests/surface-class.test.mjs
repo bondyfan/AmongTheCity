@@ -207,11 +207,19 @@ test('street furniture stands on the ground, not on twice the ground', () => {
     if (!pos || m.isInstancedMesh) continue;
     for (let i = 0; i < pos.count; i++) top = Math.max(top, pos.getY(i));
   }
-  // the tallest prop here is the 7 m lamp mast, so nothing may reach 10 m up
+  // Since the streetscape pass a mapped lamp is an INSTANCED lamp (lit, solid,
+  // fellable) and no longer a mast in the sink, so the tallest thing in the
+  // sink is the 1.6 m recycling bell: still nowhere near 10 m, still clearly
+  // above the ground it stands on.
   assert.ok(top < GROUND + 10,
     `furniture reaches ${(top - GROUND).toFixed(0)} m above a ${GROUND} m ground`
     + ' — the drape lifted it a second time');
-  assert.ok(top > GROUND + 5, `nothing tall was drawn at all (top ${top})`);
+  assert.ok(top > GROUND + 1.2, `nothing tall was drawn at all (top ${top})`);
+  // …and the lamp itself stands on the same ground, as an instance
+  const lamp = g.children.find((m) => m.name === 'parkPosts' || m.name === 'lampPosts');
+  assert.ok(lamp, 'the mapped lamp was not built as an instanced lamp');
+  assert.ok(Math.abs(lamp.userData.ys[0] - GROUND) < 0.5,
+    `the mapped lamp stands at ${lamp.userData.ys[0]}, the ground is ${GROUND}`);
 });
 
 test('a chunk carrying a power line builds without throwing', () => {

@@ -72,7 +72,12 @@ const stubScene = { add() {}, remove() {} };
 
 // A world epoch far from zero, like the real one (worldT() is ~1.8e7 and
 // climbing): a schedule that only works near t = 0 would be a lie.
-const T0 = 17_900_000;
+// CHANGED ON PURPOSE (wave 2): the crowd follows the hour now (js/dayrhythm.js),
+// and 17 900 000 s is ten to midnight on the shared clock, when the streets are
+// nearly empty by design. These tests are about a crowd, so they start at half
+// past noon of the same day instead. The clock keeps running through them: a
+// ten minute test crosses the whole afternoon and evening, density curve and all.
+const T0 = 17_899_320;
 
 // A camera the way main.js hands one over — the headless shape of
 // setViewer(), which is byte for byte the shape traffic.js takes. 55° vertical

@@ -67,6 +67,9 @@ export function buildChunkPayload(state, spec) {
  * @returns {{reply: object, transfer: ArrayBuffer[]}}
  */
 export function handleMessage(state, msg) {
+  // the pool's proof that the line between the threads is delivering: see the
+  // watchdog in js/meshpool.js
+  if (msg?.t === 'ping') return { reply: { t: 'pong', at: msg.at }, transfer: [] };
   if (msg?.t !== 'build') return { reply: { t: 'unknown', id: msg?.id ?? null }, transfer: [] };
   try {
     const out = buildChunkPayload(state, msg.spec);
@@ -96,4 +99,13 @@ if (typeof self !== 'undefined' && typeof self.postMessage === 'function'
     const { reply, transfer } = handleMessage(state, e.data);
     self.postMessage(reply, transfer);
   };
+  // READY HANDSHAKE. This line runs only after the whole import graph above
+  // (three, meshes.js and everything it pulls in: streets, typology, roofs,
+  // trees, furniture, lamps, signs, terraces) has been fetched and evaluated.
+  // Under the dev server that is dozens of separate requests competing with
+  // the boot's own tile fetches (4.7 s, measured). A worker used to be handed
+  // a chunk the moment it was spawned and the pool's watchdog timed that wait
+  // as if it were the chunk. The pool now gives a worker nothing until it has
+  // said this.
+  self.postMessage({ t: 'ready' });
 }

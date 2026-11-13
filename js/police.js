@@ -971,7 +971,13 @@ export class Police {
     u.seg = pose.seg;
     const targetH = Math.atan2(-pose.dx, -pose.dz);
     u.heading = angWrap(u.heading + angWrap(targetH - u.heading) * Math.min(1, TURN_RATE * dt));
-    const offTgt = Math.min(TRAFFIC.laneOffsetK * e.road.w, TRAFFIC.laneOffsetMax);
+    let offTgt = Math.min(TRAFFIC.laneOffsetK * e.road.w, TRAFFIC.laneOffsetMax);
+    // Cars parked along this kerb (js/kerbparking.js): keep off their flanks,
+    // exactly as traffic.js does for its own cars. This file restated the lane
+    // offset before kerb parking existed, and the car drove through the row.
+    const tr = this.traffic;
+    if (tr?.kerbOf && e.road && tr.kerbOf(e.road) === -e.offSign)
+      offTgt = Math.max(0, Math.min(offTgt, e.road.w / 2 - tr.kerbIntrudes - 0.35 - (u.car?.wid ?? 1.81) / 2));
     u.laneOff += (offTgt - u.laneOff) * Math.min(1, 3 * dt);
     const hx = -Math.sin(u.heading), hz = -Math.cos(u.heading);
     u.x = pose.x - hz * u.laneOff;                 // right of heading = (−hz, hx)

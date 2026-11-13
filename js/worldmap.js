@@ -29,6 +29,7 @@
 // camera underneath.
 
 import { COLORS, CHUNK } from './config.js';
+import { drawMark, MARK_COLOR } from './mapmarks.js';
 
 const PLACES_URL = 'data/places.json';
 const OVERVIEW_URL = 'data/overview.json';
@@ -328,6 +329,9 @@ export class WorldMap {
     this.city = city;
     this.minimap = minimap;
     this.waypoint = null;         // {x,z} | null — main.js drives the HUD arrow
+    // Gameplay marks (job offers, your car, pumps), by reference from
+    // js/career.js. Same array the minimap reads, same glyphs (js/mapmarks.js).
+    this.markers = null;
     this._peers = null;           // co-op roster for THIS frame, by reference
     // Click a friend and the waypoint FOLLOWS them: uid of the peer being
     // chased, or null. A static flag on the spot where somebody stood two
@@ -533,6 +537,10 @@ export class WorldMap {
           ${this._key(css(COLORS.rail, 1.6), 'Železnice')}
           ${this._key(BLD_FILL, 'Zástavba')}
           ${this._key(PEER_FALLBACK, 'Hráči')}
+          ${this._key(MARK_COLOR.courier, 'Rozvoz')}
+          ${this._key(MARK_COLOR.taxi, 'Taxi')}
+          ${this._key(MARK_COLOR.car, 'Tvoje auto')}
+          ${this._key(MARK_COLOR.fuel, 'Pumpa')}
           <!-- "dvojklik na hráče" used to mean YOURSELF, which stopped being an
                unambiguous phrase the moment other players appeared on the map. -->
           <span class="atc-map-hint"><b>táhni</b> posun · <b>kolečko</b> přiblížení ·
@@ -981,6 +989,15 @@ export class WorldMap {
       if (d2 <= bestD2) { bestD2 = d2; best = p; }
     }
     return best;
+  }
+
+  // The public door to the flag, for code that is not a click on this canvas:
+  // a job sets its destination here, and navigation, the GPS line, the compass
+  // and both maps follow exactly as they do for a pin the player dropped.
+  // A job's destination is a place, so chasing a friend stops.
+  setWaypoint(x, z) {
+    if (this.followUid) this.stopFollow();
+    this._setWaypoint(x, z);
   }
 
   _setWaypoint(x, z) {
@@ -1771,6 +1788,19 @@ export class WorldMap {
       }
     }
 
+    // gameplay marks: under the flag, so a job's own destination (which IS the
+    // flag) is never hidden by the offer mark it started as
+    const marks = this.markers;
+    if (marks) {
+      const ms = 5.2 * dpr;
+      for (let i = 0; i < marks.length; i++) {
+        const m = marks[i];
+        const sx = W / 2 + (m.x - this.cx) * k, sy = H / 2 + (m.z - this.cz) * k;
+        if (sx > -20 && sx < W + 20 && sy > -20 && sy < H + 20)
+          drawMark(g, m.kind, sx, sy, ms);
+      }
+    }
+
     // the waypoint flag
     if (wp) {
       const sx = W / 2 + (wp.x - this.cx) * k, sy = H / 2 + (wp.z - this.cz) * k;
@@ -1949,7 +1979,7 @@ export class WorldMap {
     // will until somebody goes there. Without saying so, panning to Prague and
     // finding only the trunk roads looks exactly like a map that failed to
     // load — which is what it was reported as.
-    if (this._noDetail) txt += ' · jen přehledová mapa — detail se načte, až sem dojedeš';
+    if (this._noDetail) txt += ' · jen přehledová mapa, detail se načte, až sem dojedeš';
     // the head count belongs on the map itself: this is where a player looks
     // to find out where everyone is, so it is also where "everyone" is counted
     if (pn > 0) txt += ' · ' + czPlayers(pn) + ' na mapě';

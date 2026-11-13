@@ -32,9 +32,15 @@
 //
 // Usage: node scripts/build-region.mjs
 
-import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import { ORIGIN, M_PER_LAT, M_PER_LON, TILE, tileWanted, wantedTiles } from './lib/world-area.mjs';
 import { venueKind, venueName, joinVenues } from './lib/venues.mjs';
+// round 5, real data (docs/TILE-FORMAT.md): tree species, kerb parking, roof
+// tags, the roof colour off the aerial photo, and the public transport routes
+import { treeExtras, parkingSides, roofTags } from './lib/tagdata.mjs';
+import { RoofPhoto } from './lib/roofphoto.mjs';
+import { buildRoutes } from './lib/routes.mjs';
+import { decodePNG } from './lib/png.mjs';
 
 const px = (lon) => +((lon - ORIGIN.lon) * M_PER_LON).toFixed(1);
 const pz = (lat) => +((ORIGIN.lat - lat) * M_PER_LAT).toFixed(1); // south positive
@@ -271,6 +277,13 @@ function loadIpr() {
 }
 const IPR = loadIpr();
 
+// The aerial photographs scripts/classify-ground.mjs cached, when they are on
+// disk: every building under one gets `rp`, the colour of its roof as seen
+// from the air (scripts/lib/roofphoto.mjs). No photographs, no `rp`, and the
+// rest of the tile is byte for byte the same.
+const ORTHO_DIR = process.env.ORTHO_DIR || 'data/raw-ortho';
+const PHOTO = existsSync(ORTHO_DIR) ? new RoofPhoto(ORTHO_DIR, decodePNG) : null;
+
 const CZ_COLOURS = { // building:colour appears on some RÚIAN buildings
   red: '#b5533c', white: '#e8e4da', yellow: '#d9c47e', brown: '#8a6a4a',
   grey: '#9a9a94', gray: '#9a9a94', green: '#8ba07a', blue: '#7a92a8',
@@ -329,6 +342,13 @@ function processBuildings(els, owns) {
       }
       const mh = parseFloat(t.min_height ?? t['building:min_level'] * LEVEL_H);
       if (mh > 0) b.y = +mh.toFixed(1);
+      // what the roof and the walls are, where a mapper wrote it down (rc, rm,
+      // bm, rl, rh, rd, ro), and what the photograph says the roof looks like
+      // (rp). Three sources for one colour, kept apart so the runtime can
+      // prefer the tag over the photo over its own guess.
+      Object.assign(b, roofTags(t));
+      const rp = PHOTO?.sample(o, i);
+      if (rp) b.rp = rp;
       out.push(b);
     };
     if (el.type === 'way' && el.geometry) {
@@ -452,6 +472,11 @@ function processRoads(els, owns) {
     // Defensive parse: OSM contains values like "0;-1" from botched edits.
     const lay = parseInt(t.layer, 10);
     if (Number.isFinite(lay) && lay !== 0) r.l = lay;
+    // WHERE PEOPLE PARK ALONG IT: [left, right] codes of js/tiledata.js, left
+    // and right of the STORED point order. A oneway=-1 way was reversed above,
+    // so its sides change places with it; a roundabout never is.
+    const pk = parkingSides(t);
+    if (pk) r.pk = t.junction !== 'roundabout' && t.oneway === '-1' ? [pk[1], pk[0]] : pk;
     out.push(r);
   }
   return out;
@@ -639,9 +664,12 @@ function processTrees(els, owns) {
     const k = el.type + '/' + el.id;
     if (seen.has(k)) continue;
     seen.add(k);
+    // species, height, crown and girth where OSM has them: [] for most trees,
+    // so most records stay the bare [x, z] they always were (js/tiledata.js)
+    const extra = treeExtras(t);
     if (isNode) {
       const pt = [px(el.lon), pz(el.lat)];
-      if (owns(pt)) pts.push(pt);
+      if (owns(pt)) pts.push(extra.length ? pt.concat(extra) : pt);
     } else { // tree_row: a tree every ~7 m along the way. Each SAMPLE owns
       // itself — both border tiles sample identical positions from identical
       // geometry, so a row crossing the border splits cleanly with no dupes.
@@ -651,7 +679,8 @@ function processTrees(els, owns) {
         const d = Math.hypot(x2 - x1, z2 - z1), n = Math.max(1, Math.round(d / 7));
         for (let j = 0; j <= n; j++) {
           const pt = [+(x1 + (x2 - x1) * j / n).toFixed(1), +(z1 + (z2 - z1) * j / n).toFixed(1)];
-          if (owns(pt)) pts.push(pt);
+          // every sample of a row is one of the row's trees: same species
+          if (owns(pt)) pts.push(extra.length ? pt.concat(extra) : pt);
         }
       }
     }
@@ -1085,19 +1114,84 @@ const rawTiles = readdirSync(RAW_DIR)
   }
 }
 
+// ---------- public transport routes (scripts/lib/routes.mjs) ----------------
+// A line is not a tile's property: it is collected for the whole world by the
+// splitter (data/raw-region/_routes.json) and written here as one small file
+// per OWNER tile, public/data/routes/<tx>_<tz>.json. Each manifest entry then
+// lists, in `rt`, the files holding a route that passes through that tile,
+// which is how the runtime finds every line near the player from the manifest
+// alone. Always rebuilt whole, also under --tiles: routes do not follow the
+// tile list, and a stale `rt` would point the game at lines that moved.
+const ROUTES_DIR = 'data/routes/';
+let routeStats = null, routesKept = null;
+{
+  const rawFile = `${RAW_DIR}/_routes.json`;
+  const dir = `${OUT_DIR}/routes`;
+  if (existsSync(rawFile)) {
+    mkdirSync(dir, { recursive: true });
+    for (const f of readdirSync(dir)) if (f.endsWith('.json')) unlinkSync(`${dir}/${f}`);
+    for (const t of manifestTiles) delete t.rt;
+    const { files, tileIndex, stats } = buildRoutes(JSON.parse(readFileSync(rawFile, 'utf8')), {
+      px, pz, simplify, TILE, tileWanted, roadClass: (v) => !!ROAD[v],
+    });
+    let rbytes = 0, biggest = 0;
+    for (const [k, f] of files) {
+      const json = JSON.stringify(f);
+      writeFileSync(`${dir}/${k}.json`, json);
+      rbytes += json.length;
+      if (json.length > biggest) biggest = json.length;
+    }
+    for (const t of manifestTiles) {
+      const set = tileIndex.get(t.tx + '_' + t.tz);
+      if (set) t.rt = [...set].sort();
+    }
+    routeStats = { ...stats, files: files.size, sizeMB: +(rbytes / 1e6).toFixed(2), biggestKB: Math.round(biggest / 1e3) };
+  } else {
+    // NO COLLECTED RELATIONS ON THIS MACHINE. _routes.json is 25 MB and is not
+    // in git, while public/data/routes IS, and is what production serves. A
+    // builder that answered "no input" by emptying that directory and dropping
+    // every `rt` would take the lines of the whole world out of the game on the
+    // first rebuild from a fresh clone, the same accident that cut overview.json
+    // down to two tiles. The lines depend on the relations and the world grid
+    // only, never on a tile, so what is on disk is still right: leave the files
+    // alone and carry each tile's `rt` over from the manifest being replaced.
+    let prev = null;
+    try { prev = JSON.parse(readFileSync(`${OUT_DIR}/manifest.json`, 'utf8')); } catch { /* a first build */ }
+    if (prev?.routes) {
+      const rtOf = new Map();
+      for (const t of prev.tiles ?? []) if (t.rt) rtOf.set(t.tx + '_' + t.tz, t.rt);
+      let n = 0;
+      for (const t of manifestTiles) {
+        const rt = rtOf.get(t.tx + '_' + t.tz);
+        if (rt) { t.rt = rt; n++; } else delete t.rt;
+      }
+      routesKept = { dir: prev.routes, tiles: n };
+    }
+  }
+}
+
 writeFileSync(`${OUT_DIR}/manifest.json`, JSON.stringify({
   origin: ORIGIN, mPerLat: +M_PER_LAT.toFixed(1), mPerLon: +M_PER_LON.toFixed(1),
-  tile: TILE, tiles: manifestTiles,
+  tile: TILE, ...(routeStats ? { routes: ROUTES_DIR } : routesKept ? { routes: routesKept.dir } : {}), tiles: manifestTiles,
 }));
 
 overview.urban = urbanRuns();
 const ovJson = JSON.stringify({
   origin: ORIGIN, mPerLat: +M_PER_LAT.toFixed(1), mPerLon: +M_PER_LON.toFixed(1), cell: OV.cell, ...overview,
 });
-writeFileSync(`${OUT_DIR}/overview.json`, ovJson);
-console.log(`overview.json: ${overview.roads.length} roads, ${overview.rails.length} rails, `
-  + `${overview.water.length} water, ${overview.green.length} woods, ${overview.urban.length} built-up runs`
-  + ` — ${(ovJson.length / 1e6).toFixed(2)} MB`);
+// A --tiles run has only seen the tiles it rebuilt, and its overview is a
+// sketch of those alone. Writing that out replaced the map of the whole world
+// with the map of two tiles: the committed overview.json went from 9.9 MB to
+// 32 kB that way, twice (31 July and 7 August), and the world map lost every
+// road outside Pardubice until the next full build. A partial run leaves the
+// file alone.
+if (ONLY.length) console.log('overview.json: kept as it is (a --tiles run sees only part of the world)');
+else {
+  writeFileSync(`${OUT_DIR}/overview.json`, ovJson);
+  console.log(`overview.json: ${overview.roads.length} roads, ${overview.rails.length} rails, `
+    + `${overview.water.length} water, ${overview.green.length} woods, ${overview.urban.length} built-up runs`
+    + `, ${(ovJson.length / 1e6).toFixed(2)} MB`);
+}
 
 if (IPR) console.log(`IPR Praha: ${IPR.used.toLocaleString()} buildings took their storeys`
   + ' and roof from the city survey (datový podklad © IPR Praha)');
@@ -1111,3 +1205,9 @@ console.log(`venues: ${joined.inside.toLocaleString()} landed inside a footprint
   + `${joined.beside.toLocaleString()} in a doorway beside one, `
   + `${joined.taken.toLocaleString()} buildings took a real OSM name from them`);
 console.log({ ...totals, sizeMB: +(bytes / 1e6).toFixed(2) });
+if (routeStats) console.log('routes:', routeStats);
+else console.log(`routes: ${RAW_DIR}/_routes.json absent, `
+  + (routesKept ? `the route files and the rt of ${routesKept.tiles} tiles kept as they are` : 'no lines written')
+  + ' (to rebuild them: node scripts/split-extracts.mjs --routes-only)');
+if (PHOTO) console.log(`roof photo: ${PHOTO.sampled.toLocaleString()} roofs read off the aerial photo`
+  + ' (Podkladová data ČÚZK)');

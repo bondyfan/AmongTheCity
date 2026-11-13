@@ -32,6 +32,7 @@ import { chunkKey, pointInPolygon } from './geo.js';
 import { groundFor } from './terrain.js';
 import { CHUNK, INTERIOR, PLAYER_SCALE } from './config.js';
 import { buildingPlan, hasInterior, entranceOf, planToWorld } from './interiors.js';
+import { landmarkOf } from './landmarks.js';
 import { BuildingModel, Debris, Dust } from './destructible.js';
 import { buildingWallHex, facadeCells, roofGeometry } from './meshes.js';
 import { makeCitizen } from './citizen.js';
@@ -45,6 +46,9 @@ const LEDGE_R = 1.5;            // how far a falling person reaches for an edge
 const LEDGE_T = [3.5, 7];       // seconds they can hang before their grip goes
 const _w = { x: 0, z: 0 };
 const TWO_PI = Math.PI * 2;
+// A frame's share of furnishing ONE building's rooms, and of dressing the
+// people who live in them: see _stepFullQ and _stepPopQ.
+const FULL_SLICE_MS = 3, POP_SLICE_MS = 1.5;
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
@@ -102,8 +106,18 @@ export class Interiors {
     // plus every dirty chunk's re-mesh in ONE frame every quarter second —
     // most of the "posekává se to při rychlé jízdě" that wasn't the chunk
     // streamer's own atomic builds.
+    const t0 = performance.now();
     this._stepShellQ();
     this._drainChunks(1);
+    // ...and the rooms and the residents, which used to be built whole inside
+    // the scan below (up to 258 ms of one frame, measured on a walk through
+    // the centre). They take what a frame has left: nothing at all in a frame
+    // that has just stood a shell up or re-meshed a chunk.
+    // Rooms are a thing of being on foot: boarding a car stops the work at
+    // once (whatever was half worked out is asked for again another day).
+    if (!onFoot) { if (this._fullJob || this._fullQ?.length) { this._fullQ = null; this._fullPending?.clear(); this._fullJob = null; } }
+    else if (performance.now() - t0 < 1.5) this._stepFullQ(t0 + FULL_SLICE_MS);
+    this._stepPopQ(performance.now() + POP_SLICE_MS);
     this._scanT -= dt;
     if (this._scanT > 0) return;
     this._scanT = 1 / Math.max(1, I.buildPerSec) * 2;
@@ -112,6 +126,7 @@ export class Interiors {
     // and shed everything else
     if (!this.enabled) {
       this._shellQ = null; this._shellPending?.clear();
+      this._dropFullQ();
       for (const [id, m] of this.models) if (!m.damaged) this._drop(id);
       this._flushChunks();
       return;
@@ -141,6 +156,8 @@ export class Interiors {
         if (seen.has(f._id)) continue;
         seen.add(f._id);
         if (!hasInterior(f)) continue;
+        // a hand-made landmark is one model at every distance: no shell, no rooms
+        if (landmarkOf(f)) continue;
         const bb = f._bb ??= bboxOf(f.o);
         const d = bbDist(bb, focus.x, focus.z);
         if (d < shellR) cands.push([d, f]);
@@ -161,14 +178,14 @@ export class Interiors {
       const e = entranceOf(f, null, null);
       if (!e || Math.hypot(e.x - focus.x, e.z - focus.z) > 7) continue;
       keep.add(f._id); full.add(f._id);
-      this.activate(f);
+      this._wantFull(f, true);
     }
     // Nearest first through both tiers in one pass: the closest few (on foot)
     // get rooms and people, everything else out to shellR gets the shell.
-    // Interior builds stay inline (two per scan, on foot only — walking pace
-    // never stacks them); SHELLS are only QUEUED here, and stand up one per
-    // frame in _stepShellQ, which is where the hitch budget actually lives.
-    let builtFull = 0;
+    // Nothing is BUILT here any more. Shells are queued and stand up one a
+    // frame in _stepShellQ; interiors are queued and furnished a few
+    // milliseconds a frame in _stepFullQ, the door the player is standing at
+    // first. The scan itself is what is left: under 1.5 ms (measured).
     for (const [d, f] of cands) {
       if (keep.size >= maxShell) break;
       if (keep.has(f._id)) continue;
@@ -197,11 +214,8 @@ export class Interiors {
       if (m) m.lastTouch = this._clock;
       if (onFoot && d < I.activateR && full.size < I.maxActive) {
         full.add(f._id);
-        if (!m || !m.interiorBuilt) {
-          if (builtFull >= 2) continue;
-          this.activate(f);
-          builtFull++;
-        } else if (!m.populated) this._populate(m);
+        if (!m || !m.interiorBuilt) this._wantFull(f, false);
+        else if (!m.populated) this._populate(m);
       } else if (!m) {
         // no model yet: queue it for the per-frame builder. A queued
         // building KEEPS its slot (counts toward maxShell) so the ring's
@@ -227,6 +241,7 @@ export class Interiors {
       for (let i = this.occupants.length - 1; i >= 0; i--)
         if (this.occupants[i].model === m) this._despawn(i);
       m.populated = false;
+      m._pop = null;                    // ...and nobody still on the way in
     }
     // Shed anything undamaged that has drifted out of reach — the +40 m of
     // hysteresis keeps the boundary from flickering as the player oscillates.
@@ -266,6 +281,7 @@ export class Interiors {
     for (const [id, m] of this.models) if (!m.damaged) this._drop(id);
     this._shellQ = null;
     this._shellPending?.clear();
+    this._dropFullQ();
     this._flushChunks();
   }
 
@@ -350,8 +366,72 @@ export class Interiors {
   activate(f) {
     const m = this._model(f, true);
     m.ensureInterior();
-    if (!m.populated) this._populate(m);
+    // whoever asked needs the people this frame (a blast panics them): the
+    // residents come in at once, and so do any who were still on their way
+    if (!m.populated) this._populate(m, true);
+    else if (m._pop) { const job = m._pop; m._pop = null; while (job.left-- > 0) this._spawnOccupant(m); }
     return m;
+  }
+
+  // ---- full interiors, a few milliseconds a frame ---------------------------
+  // The scan asks; this builds. One building at a time: its rooms are worked
+  // out by BuildingModel.ensureInteriorGen in steps of a floor slab row, a
+  // wall run or a room (0.8 ms in all for the median house, 120 for a
+  // department store), FULL_SLICE_MS of them a frame, and added to the model
+  // in one go when the last is in. The shell is already standing, so from the
+  // street nothing changes while this runs; a player who walks in through the
+  // door in the half second a big building takes finds the floor arrive under
+  // him rather than the game stopping. A rocket never waits for any of this:
+  // damage() goes through activate(), which builds everything at once.
+  _wantFull(f, first) {
+    const m = this.models.get(f._id);
+    if (m?.interiorBuilt) { if (!m.populated) this._populate(m); return; }
+    if (this._fullJob?.f === f) return;
+    const pend = this._fullPending ??= new Set();
+    const q = this._fullQ ??= [];
+    if (pend.has(f._id)) {
+      // the door the player has reached jumps the queue
+      if (first && q[0] !== f) { q.splice(q.indexOf(f), 1); q.unshift(f); }
+      return;
+    }
+    pend.add(f._id);
+    if (first) q.unshift(f); else q.push(f);
+  }
+
+  _dropFullQ() {
+    this._fullQ = null; this._fullPending?.clear(); this._fullJob = null;
+    this._popQ = null;
+  }
+
+  _stepFullQ(end) {
+    for (;;) {
+      let job = this._fullJob;
+      if (!job) {
+        const f = this._fullQ?.shift();
+        if (!f) return;
+        this._fullPending.delete(f._id);
+        // walked away while it waited
+        if (this.focus && bbDist(f._bb ??= bboxOf(f.o), this.focus.x, this.focus.z) > I.deactivateR) continue;
+        const had = this.models.has(f._id);
+        const m = this._model(f, true);
+        if (!m) continue;                // nothing to stand up: the far mesh keeps it
+        if (m.interiorBuilt) { if (!m.populated) this._populate(m); continue; }
+        job = this._fullJob = { f, m, gen: m.ensureInteriorGen() };
+        if (!had) return;                // a shell was just built for it: that is this frame's work
+      }
+      // dropped (stale ground, a setting) or finished the fast way by a blast
+      if (this.models.get(job.f._id) !== job.m || job.m.interiorBuilt) {
+        this._fullJob = null;
+        if (job.m.interiorBuilt && this.models.get(job.f._id) === job.m && !job.m.populated) this._populate(job.m);
+        continue;
+      }
+      let it;
+      do { it = job.gen.next(); } while (!it.done && performance.now() < end);
+      if (!it.done) return;
+      this._fullJob = null;
+      if (!job.m.populated) this._populate(job.m);
+      return;                            // the rooms went in this frame: enough
+    }
   }
 
   _drop(id) {
@@ -413,6 +493,9 @@ export class Interiors {
    * be holed; every hit afterwards is just another blast on the same model.
    */
   damage(f, x, y, z, r, power = 1) {
+    // A landmark has no box model to hole (js/landmarks.js): a protected
+    // monument shrugs the blast off rather than turn into a generic block.
+    if (landmarkOf(f)) return 0;
     const m = this.activate(f);          // already carries its shell
     this._flushChunks();                 // …and the facade is already stood down
     if (m.dseq === undefined) m.dseq = ++this._dseq;   // the order it was wrecked in
@@ -504,12 +587,12 @@ export class Interiors {
   /** Is this building's collision handled by pieces rather than a footprint? */
   isActive(f) { return this.models.has(f._id); }
 
-  /** HUD: "Bytový dům" / "Nákupní centrum — Palác Pardubice". */
+  /** HUD: "Bytový dům" / "Nákupní centrum: Palác Pardubice". */
   labelAt(x, z) {
     const m = this.modelAt(x, z);
     if (!m) return null;
     const p = m.plan;
-    return p.name ? `${p.label} — ${p.name}` : p.label;
+    return p.name ? `${p.label}: ${p.name}` : p.label;
   }
 
   /** The nearest doorway to (x,z) among activated buildings, for the hint. */
@@ -528,7 +611,7 @@ export class Interiors {
   // A handful of residents per building, walking between the rooms of their
   // own floor. They are the same box people who walk the pavements, so the
   // scale, palette and stride all match for free.
-  _populate(m) {
+  _populate(m, now) {
     // A building wrecked by a PEER can be kilometres away — damage() activates
     // it wherever it is, and the full activation would otherwise spend the
     // global occupant budget on residents nobody will ever see, starving the
@@ -537,32 +620,60 @@ export class Interiors {
     const f = this.focus;
     if (f && bbDist(m.bb, f.x, f.z) > Math.max(this.drawR, I.activateR) + 40) return;
     m.populated = true;      // set even for the empty cases — never retried
+    m._pop = null;
     const plan = m.plan;
     let n = Math.min(plan.occupants, MAX_OCCUPANTS - this.occupants.length);
     if (n <= 0 || plan.use === 'garage' || plan.use === 'parking') return;
-    for (let i = 0; i < n; i++) {
-      const fi = (Math.random() * plan.storeys) | 0;
-      const room = pickRoom(plan, fi);
-      if (!room) continue;
-      // Indoors gets the five bodies too — a bank full of identical thirty-
-      // year-old men was the same clone-army problem as the pavement, and the
-      // people in here are LOCAL to this client anyway (see this file's header),
-      // so a plain Math.random draw is correct rather than a shortcut.
-      const c = makeCitizen({ archetype: archetypeAt(Math.random()).key });
-      c.group.scale.setScalar(PLAYER_SCALE);
-      this.scene.add(c.group);
-      const spot = roomPoint(plan, room);
-      const o = {
-        model: m, mesh: c.group, animate: c.walk, dispose: c.dispose, fi,
-        x: spot.x, z: spot.z, y: plan.floors[fi].y,
-        vy: 0, heading: Math.random() * TWO_PI, walkT: Math.random() * 10,
-        tx: spot.x, tz: spot.z, wait: Math.random() * 3,
-        flee: 0, speed: OCC_SPEED * (0.85 + Math.random() * 0.4),
-        hang: null,
-      };
-      c.group.position.set(o.x, o.y, o.z);
-      this.occupants.push(o);
+    // A resident is a whole citizen: a skinned body, a wardrobe, a skeleton,
+    // about 1.2 ms each, and a block of flats has twenty-six. All of them in
+    // the frame the rooms arrived was 14 to 34 ms (measured). They move in one
+    // or two a frame instead (_stepPopQ), except when the caller needs them
+    // all this instant.
+    if (now) { while (n-- > 0) this._spawnOccupant(m); return; }
+    (this._popQ ??= []).push(m._pop = { m, left: n });
+  }
+
+  /** The residents still to come, POP_SLICE_MS of them a frame (one at least). */
+  _stepPopQ(end) {
+    const q = this._popQ;
+    while (q?.length) {
+      const job = q[0], m = job.m;
+      // gone home, dropped, or the city is full: this building's queue ends
+      if (m._pop !== job || job.left <= 0 || this.models.get(m.f._id) !== m
+        || this.occupants.length >= MAX_OCCUPANTS) {
+        if (m._pop === job) m._pop = null;
+        q.shift();
+        continue;
+      }
+      job.left--;
+      this._spawnOccupant(m);
+      if (performance.now() >= end) return;
     }
+  }
+
+  _spawnOccupant(m) {
+    const plan = m.plan;
+    const fi = (Math.random() * plan.storeys) | 0;
+    const room = pickRoom(plan, fi);
+    if (!room) return;
+    // Indoors gets the five bodies too: a bank full of identical thirty-
+    // year-old men was the same clone-army problem as the pavement, and the
+    // people in here are LOCAL to this client anyway (see this file's header),
+    // so a plain Math.random draw is correct rather than a shortcut.
+    const c = makeCitizen({ archetype: archetypeAt(Math.random()).key });
+    c.group.scale.setScalar(PLAYER_SCALE);
+    this.scene.add(c.group);
+    const spot = roomPoint(plan, room);
+    const o = {
+      model: m, mesh: c.group, animate: c.walk, dispose: c.dispose, fi,
+      x: spot.x, z: spot.z, y: plan.floors[fi].y,
+      vy: 0, heading: Math.random() * TWO_PI, walkT: Math.random() * 10,
+      tx: spot.x, tz: spot.z, wait: Math.random() * 3,
+      flee: 0, speed: OCC_SPEED * (0.85 + Math.random() * 0.4),
+      hang: null,
+    };
+    c.group.position.set(o.x, o.y, o.z);
+    this.occupants.push(o);
   }
 
   _despawn(i) {
@@ -617,10 +728,23 @@ export class Interiors {
   }
 
   _occupantStep(dt) {
+    // A QUARTER OF THE CROWD PER FRAME. The two questions an occupant asks the
+    // building (is there floor ahead, am I in a wall) walk every piece of its
+    // shell, and a shell is 190 to 1,400 pieces now that it has real roofs,
+    // balconies and glazing: measured in the old town, 81 people indoors cost
+    // 4.3 ms of every frame, three quarters of the whole simulation step, for
+    // figures that stroll at a metre a second behind walls. So a calm occupant
+    // in an intact building asks on every fourth frame (staggered by index) and
+    // looks four steps ahead when it does; in between it only walks, 5 cm at
+    // the most. Anyone fleeing, falling or hanging, and everyone in a building
+    // that has been hit, still asks every frame: that is where a floor can go.
+    const tick = this._occTick = ((this._occTick ?? 0) + 1) & 1023;
     for (let i = this.occupants.length - 1; i >= 0; i--) {
       const o = this.occupants[i];
       if (!this.models.has(o.model.f._id)) { this._despawn(i); continue; }
       const plan = o.model.plan;
+      const careful = o.flee > 0 || o.vy !== 0 || !!o.model.damaged || o.chk !== false
+        || ((i + tick) & 3) === 0;
 
       // ---- hanging off a broken floor ------------------------------------
       // The single best thing a blown-open building can show you: somebody who
@@ -663,6 +787,7 @@ export class Interiors {
           if (room) {
             const spot = roomPoint(plan, room);
             o.tx = spot.x; o.tz = spot.z;
+            o.chk = true;                          // a new way to go: look before the first step
           }
           o.wait = 1.5 + Math.random() * 5;
         }
@@ -672,9 +797,11 @@ export class Interiors {
         // an intact building's lift shaft and stair well are HOLES — nobody
         // strolls into one. A step whose floor is >0.6 m down is refused and
         // the walker re-targets; panicked people are allowed to be careless.
-        if (o.flee <= 0 && !o.model.damaged) {
-          const ns = o.model.supportY(nx2, nz2, o.y + 0.4);
-          if (ns < o.y - 0.6) {
+        if (o.flee <= 0 && !o.model.damaged && careful) {
+          // the next step, and where the three unasked ones after it will end
+          const ax = o.x + (dx / d) * Math.min(d, sp * 4), az = o.z + (dz / d) * Math.min(d, sp * 4);
+          if (o.model.supportY(nx2, nz2, o.y + 0.4) < o.y - 0.6
+            || o.model.supportY(ax, az, o.y + 0.4) < o.y - 0.6) {
             const room = pickRoom(o.model.plan, o.fi);
             if (room) { const spot = roomPoint(o.model.plan, room); o.tx = spot.x; o.tz = spot.z; }
             continue;
@@ -686,10 +813,20 @@ export class Interiors {
         let td = want - o.heading;
         td = ((td + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI;
         o.heading += td * Math.min(1, dt * 7);
-        _w.x = o.x; _w.z = o.z;
-        o.model.pushOut(_w, 0.3, o.y + 0.3, o.y + 1.7);
-        o.x = _w.x; o.z = _w.z;
+        if (careful) {
+          _w.x = o.x; _w.z = o.z;
+          o.model.pushOut(_w, 0.3, o.y + 0.3, o.y + 1.7);
+          o.x = _w.x; o.z = _w.z;
+        }
       }
+      if (!careful) {
+        // walked, not asked: the pose and the stride, nothing else this frame
+        o.mesh.position.set(o.x, o.y, o.z);
+        o.mesh.rotation.y = o.heading;
+        o.animate(o.walkT, 0.7, 0, o.speed);
+        continue;
+      }
+      o.chk = false;
 
       // the floor can be blown out from under them
       const sup = o.model.supportY(o.x, o.z, o.y + 0.4);
@@ -709,7 +846,10 @@ export class Interiors {
       }
       o.mesh.position.set(o.x, o.y, o.z);
       o.mesh.rotation.y = o.heading;
-      o.animate(o.walkT, o.flee > 0 ? 1.3 : 0.7);
+      // with the speed they really move at: from the capped 1.3 alone the gait
+      // took somebody fleeing at five metres a second for a brisk walker and
+      // spun the legs at three strides a second to keep up
+      o.animate(o.walkT, o.flee > 0 ? 1.3 : 0.7, 0, o.flee > 0 ? OCC_FLEE * o.speed : o.speed);
     }
   }
 

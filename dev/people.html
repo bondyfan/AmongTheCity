@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <title>Among The City: people showroom (dev)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body { margin: 0; height: 100%; background: #20242a; overflow: hidden; font: 12px/1.4 system-ui, sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hud { position: fixed; left: 8px; top: 6px; color: #e8edf2; text-shadow: 0 1px 2px #000; white-space: pre; pointer-events: none; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "../libs/three.module.js" } }
+  </script>
+</head>
+<body>
+  <!--
+    Dev-only page, not linked from the game. One navigate gives one clean shot:
+      ?who=all|m30,f30,f60,m60,m90,police,medic,player   (default all)
+      &n=24         a crowd of n seeded citizens instead (also prints ms per frame)
+      &seed=7       which citizens the wardrobe draws
+      &pose=walk|stand|run|sit|bench|rag|punch|kick|aim|hands   (default walk)
+      &view=front|side|back|q|face|top    (default q)
+      &speed=1.4    metres a second on the treadmill (run defaults to 6)
+      &t=0.3        freeze the stride at this phase instead of animating
+      &night=1      the game's night light levels
+      &lod=far      force the distance variant
+      &dist=6       camera distance in metres
+  -->
+  <div id="hud"></div>
+  <script type="module" src="./people.js"></script>
+</body>
+</html>

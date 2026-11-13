@@ -121,6 +121,37 @@ const RIM = {
   neutral: 'rgba(255,255,255,0.34)',
 };
 
+// ---- a bubble at night ----
+// The sprite is unlit and not tone mapped, so its white type was the same
+// white at midnight as at noon: paper under floodlights, hung in a street the
+// eye had adapted to at a third of the light. The camera opens up after dark
+// (sky.js: the exposure runs from 0.86 by day to 2.5 at midnight, mirrored
+// here by hand so this file keeps importing nothing but three), and a bubble
+// has to come down with the scene it hangs in.
+//   * Through the composite (post path) the sprite's colour passes the tone
+//     curve at the frame's exposure. Holding it (day / now) would keep the
+//     DAY's white; it is taken down to about a third of that by midnight,
+//     which lands the type near 62 % on screen: plainly readable on its dark
+//     pill, no longer the brightest thing in the street.
+//   * Straight to the canvas (post off) the colour is written as it is, so
+//     the same screen value is set directly.
+// It runs in the sprite's onBeforeRender: the renderer is the one place that
+// knows both the exposure and which path this frame is taking.
+const EXPOSURE_DAY = 0.86, EXPOSURE_NIGHT = 2.5;
+const NIGHT_POST = 0.34, NIGHT_DIRECT = 0.36;
+/** The colour scale of a bubble: 1 by day on either path. Exported for tests. */
+export function bubbleDim(exposure, post) {
+  let n = (exposure - EXPOSURE_DAY) / (EXPOSURE_NIGHT - EXPOSURE_DAY);
+  n = n < 0 ? 0 : n > 1 ? 1 : n;
+  return post
+    ? (EXPOSURE_DAY / Math.max(EXPOSURE_DAY, exposure)) * (1 + (NIGHT_POST - 1) * n)
+    : 1 + (NIGHT_DIRECT - 1) * n;
+}
+// one function for every bubble: `this` is the sprite
+function dimToScene(renderer) {
+  this.material.color.setScalar(bubbleDim(renderer.toneMappingExposure, renderer.getRenderTarget() !== null));
+}
+
 // Greedy wrap on spaces, with a hard mid-word break for the pathological case
 // (a 30-character compound with no space in it would otherwise run off the
 // canvas and be silently clipped, which is a bug you only find by screenshot).
@@ -345,6 +376,7 @@ export class ChatBubbles {
     });
     const sprite = new THREE.Sprite(mat);
     sprite.renderOrder = 13;      // over name tags, which are 12
+    sprite.onBeforeRender = dimToScene;
     sprite.frustumCulled = true;
     b = { sprite, mat, text, mood, aspect: e.aspect, lineUnits: e.lineUnits, gen: this._gen };
     this._live.set(key, b);

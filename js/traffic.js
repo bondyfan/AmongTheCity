@@ -334,7 +334,9 @@
 
 import * as THREE from 'three';
 import { TRAFFIC, CAR_COLORS } from './config.js';
-import { bridgeDeckHeight, distPointToSegment, roadGradeY } from './geo.js';
+import { bridgeDeckHeight, distPointToSegment, roadGradeY, junctionsIn, clustersIn, junctionHull, clusterHull, pointInPolygon } from './geo.js';
+import { yieldSpeed, needsHardBrake, mayEnter, walkPhaseWait, CTL } from './roadrules.js';
+import { bayAt, roadRank, cornerLift } from './streets.js';
 import { LAYER_Y } from './config.js';
 // namespace import on purpose: pickCarColor is a newer export and a named
 // import of something a stale vehicles.js doesn't have is a hard link error —
@@ -342,6 +344,7 @@ import { LAYER_Y } from './config.js';
 import * as VEH from './vehicles.js';
 import { horn } from './audio.js';   // safe headless — no-ops without an AudioContext
 import { worldT } from './worldclock.js';
+import { sigAssets as sigModel, LAMP_Y, LAMP_Z, PED_Y, PED_X } from './signalmodel.js';
 
 // AI-local tuning (config.js owns the player-facing numbers)
 const ACCEL = 4.0;            // gentle m/s² — commuters, not street racers
@@ -384,6 +387,19 @@ const CROSS_R0 = 8, CROSS_RV = 0.45;
 const CROSS_T = 1.1;          // s of travel to look ahead when predicting
 const CROSS_CLEAR = 4.2;      // m between centres that counts as "the same place"
 const STRAIGHT = Math.PI / 6; // ±30° reads as "carrying straight on"
+// Oncoming traffic is not crossing traffic. The crossing rule compares where
+// two cars will be in CROSS_T seconds, and for two cars passing in opposite
+// lanes of a 5.5 m street that is 2.7 m apart: "the same place". Each read the
+// other as a conflict and stood on the brakes, and two that stopped abreast
+// held each other for good (both yield on a tie). Measured in the old town:
+// that, not the junctions, was most of the standing traffic. Past ONCOMING_COS
+// (140 degrees between headings) the pair is two lanes of one street: no
+// conflict, and where the street is too narrow for both, each pulls over
+// (SQUEEZE_GAP between flanks, at most SQUEEZE_MAX each) and slows to pass.
+const ONCOMING_COS = -0.766;
+const SQUEEZE_GAP = 0.5, SQUEEZE_MAX = 1.1, SQUEEZE_REACH = 14, SQUEEZE_V = 4.5;
+const CROSS_PATIENCE = 3;     // s a driver stands for a car that is itself not moving
+const BLOCK_V = 3;            // m/s: slowed below this by a hull ahead, a car is blocked by it, not by flow
 // (v8's RAMP_K lived here: a flat surcharge for the time a car loses slowing
 // to a corner. v9's pieceTime() models the accel/brake ramps explicitly, so
 // charging for them a second time is exactly the double-count that made the
@@ -392,8 +408,29 @@ const SIG_APPROACH = 8;       // m/s a schedule is doing when it reaches a stop
                               // line. Cars slow for a junction whatever colour
                               // it is; without this the schedule would arrive
                               // at 50 and stop in zero metres.
+// ---- giving way (js/roadrules.js holds the arithmetic) ----
+// A driver who has stood this long for walkers or at a give-way line stops
+// waiting for the road to be EMPTY and settles for it being clear in front of
+// the bonnet: the deadlock guard a real driver has. Spread per driver by hash,
+// so a queue does not lurch forward as one.
+const YIELD_PATIENCE = 9, YIELD_PATIENCE_VAR = 5;
+const CTL_PATIENCE = 6, CTL_PATIENCE_VAR = 5;
+const CREEP_V = 2.4;          // m/s nosing out of a give-way line once patience has run out
+const BUS_STAND = 5;           // s a bus stands at a stop even when it is running late
+const HOLD_MAX = 45;           // s a timetabled bus (js/realtransit.js) waits past its dwell for its time
+const BODY_V = 1.2;           // …and past people, or over somebody lying in the road (under the speed that throws a body)
+const GIVE_V = 5.5;           // m/s a driver rolls up to a give-way line at, ready to stop
+const STOP_STAND = 1.0;       // s a driver stands at a stop sign before looking
+const CTL_REACH = 26;         // m from the line a driver starts reading the junction
+const CTL_BACK_DFLT = 5;      // m the line sits back from the node where the mouth is unknown
+const CTL_CHUNKS_PER_STEP = 1; // junction buckets finished per sim step for the lookup
 const RAM_FRICTION = 4.0;     // m/s² a rammed (AI-suspended) car scrubs while sliding out
 const FAST_EDGE = 50 / 3.6;   // commercial traffic only bothers with ≥50 km/h roads
+// where a signal mast may stand, tried in this order: metres back up the
+// approach from the mapped point, and metres out from the carriageway edge
+const POLE_BACK = [0, 3, 6, 10, 15, 21], POLE_OUT = [0.7, 1.6, 2.8, 4.2];
+const CUL_MAX = 500;          // m of dead end beyond which a street is not a cul-de-sac to its traffic
+const END_ROLL = 15;          // m from the end of its trip a watched car is let off the schedule (enough never to brake for it)
 
 // kind pools BY NAME (vehicles.js owns the roster — indexing into it broke the
 // day the roster was renamed, names don't): škody dominate Czech roads, so the
@@ -401,7 +438,11 @@ const FAST_EDGE = 50 / 3.6;   // commercial traffic only bothers with ≥50 km/h
 // commercial metal exists but ONLY rolls on fast edges — a bus threading a
 // 30 km/h residential loop looks wrong and corners terribly
 const COMMON = ['octavia', 'octavia', 'fabia', 'fabia', 'octavia', 'bmw', 'mercedes', 'tesla'];
-const BIG = ['van', 'van', 'truck', 'bus'];
+// No 'bus' in the random draw any more: buses run on lines to a timetable now
+// (js/buses.js, addFixed below), and a second kind that wandered the town like
+// a private car would make the first kind look like an accident. The slot it
+// held goes to a van, so every other pick in the city comes out as it did.
+const BIG = ['van', 'van', 'truck', 'van'];
 const BIG_CHANCE = 0.22;      // roughly every 5th spawn on a main road is commercial
 
 // per-driver speed factor: desire = edge limit × vK. 0.72 is the pensioner in
@@ -669,7 +710,9 @@ const PATROL_PAINT = 0xe9eae5;
 // behind the windscreen header. If the octavia hull is ever re-authored these
 // two numbers float the bar; they are here rather than in vehicles.js because
 // a light bar is traffic's idea, not the roster's.
-const BAR_Y = 1.44, BAR_Z = 0.14, BAR_W = 1.04;
+// (1.466 since the v6 body: the roof is crowned now and stands 2.6 cm higher on
+// the centreline than the 1.44 plateau the stations describe.)
+const BAR_Y = 1.466, BAR_Z = 0.14, BAR_W = 1.04;
 const BAR_H = 0.055;                   // the dark plinth the lamps ride on
 // THE LAMPS ARE THE BAR NOW. They used to be two 0.34 × 0.105 nubs at ±0.30,
 // which left 36 cm of the 1.04 m bar unlit in the middle and another 10 cm at
@@ -883,6 +926,130 @@ const cornerSpeed = (ang) => Math.max(2.2, Math.sqrt(31.5 / Math.max(ang, 0.06))
 // schedule needs: cornerSpeed(0) is 22.9 m/s and would quietly cap motorways.
 const cornerLimit = (ang) => (ang > 0.06 ? cornerSpeed(ang) : Infinity);
 
+// ---- the junctions the tiles lost ------------------------------------------
+// The graph is cut where two drivable ways SHARE A POINT, and the tile build
+// simplifies every way on its own: the vertex a through street had where a
+// side street joins it is, as far as that street's shape goes, a point on a
+// straight line, and it is dropped. Measured on the Pardubice tile: 1054 of
+// 2896 drivable ways end within half a metre of another way's centreline with
+// no shared vertex there (and 31 pairs cross outright with none). Every one of
+// those was a dead end to the traffic: a car turned in, drove to where the
+// junction should be, and stood there with a queue behind it until the ghost
+// deadline took it (the "stuck at Palackého" report), and nobody could ever
+// turn OUT of such a street either.
+//
+// So before the ways are cut, the lost points are put back, into a COPY of the
+// polyline (r.p belongs to the mesher and is never touched): a vertex that
+// lies on another way's line is moved onto it and the same point is inserted
+// into that way, and two segments that cross get their crossing in both.
+// Same level only: a way over or under another shares nothing with it.
+// Returns Map(way -> points) for the ways that changed. Works on one batch (a
+// tile's ways arrive together, and a way cut at a tile seam ends on a shared
+// endpoint already), with sqrt and division only, so every client restores the
+// same junctions.
+const STITCH_TOL = 0.75;      // m off the other way's centreline that still is "on it"
+const STITCH_END = 0.3;       // nearer than this to that way's own vertex: use the vertex
+const STITCH_G = 32;
+const levelOf = (r) => (r.l ?? 0) + (r.br ? 100 : 0);
+export function stitchWays(ways) {
+  const out = new Map();
+  if (ways.length < 2) return out;
+  const grid = new Map(), segs = [];
+  const used = new Map();              // keyOf -> the one way using it, or 0 for several
+  for (const r of ways) {
+    const p = r.p;
+    for (let i = 0; i < p.length; i++) {
+      const k = keyOf(p[i][0], p[i][1]), u = used.get(k);
+      if (u === undefined) used.set(k, r); else if (u !== r) used.set(k, 0);
+      if (i === p.length - 1) break;
+      const sg = { r, i, ax: p[i][0], az: p[i][1], bx: p[i + 1][0], bz: p[i + 1][1], id: segs.length };
+      segs.push(sg);
+      const x0 = Math.floor((Math.min(sg.ax, sg.bx) - STITCH_TOL) / STITCH_G), x1 = Math.floor((Math.max(sg.ax, sg.bx) + STITCH_TOL) / STITCH_G);
+      const z0 = Math.floor((Math.min(sg.az, sg.bz) - STITCH_TOL) / STITCH_G), z1 = Math.floor((Math.max(sg.az, sg.bz) + STITCH_TOL) / STITCH_G);
+      for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) {
+        const k2 = x + ',' + z;
+        let a = grid.get(k2);
+        if (!a) grid.set(k2, a = []);
+        a.push(sg);
+      }
+    }
+  }
+  const moves = new Map(), inserts = new Map();
+  const move = (r, i, pt) => { let m = moves.get(r); if (!m) moves.set(r, m = new Map()); m.set(i, pt); };
+  const insert = (sg, q, pt) => { let a = inserts.get(sg.r); if (!a) inserts.set(sg.r, a = []); a.push({ i: sg.i, q, pt }); };
+  // 1. a vertex of one way on the line of another
+  for (const r of ways) {
+    const p = r.p, lv = levelOf(r);
+    for (let i = 0; i < p.length; i++) {
+      const x = p[i][0], z = p[i][1];
+      if (used.get(keyOf(x, z)) === 0) continue;         // a junction already
+      const cell = grid.get(Math.floor(x / STITCH_G) + ',' + Math.floor(z / STITCH_G));
+      if (!cell) continue;
+      let best = STITCH_TOL, bs = null, bq = 0, bl = 0;
+      for (const sg of cell) {
+        if (sg.r === r || levelOf(sg.r) !== lv) continue;
+        const ex = sg.bx - sg.ax, ez = sg.bz - sg.az, L2 = ex * ex + ez * ez;
+        if (!(L2 > 1e-6)) continue;
+        let q = ((x - sg.ax) * ex + (z - sg.az) * ez) / L2;
+        q = q < 0 ? 0 : q > 1 ? 1 : q;
+        const d = dist(x - (sg.ax + ex * q), z - (sg.az + ez * q));
+        // ties go to the lower segment id: grid order is insertion order
+        if (d < best || (d === best && bs && sg.id < bs.id)) { best = d; bs = sg; bq = q; bl = Math.sqrt(L2); }
+      }
+      if (!bs) continue;
+      const o = bs.r.p;
+      if (bq * bl < STITCH_END) move(r, i, o[bs.i]);
+      else if ((1 - bq) * bl < STITCH_END) move(r, i, o[bs.i + 1]);
+      else {
+        const pt = [bs.ax + (bs.bx - bs.ax) * bq, bs.az + (bs.bz - bs.az) * bq];
+        move(r, i, pt);
+        insert(bs, bq, pt);
+      }
+    }
+  }
+  // 2. two segments crossing with no point in common. Each pair is handled in
+  // the grid cell its crossing lies in, so once.
+  for (const [ck, cell] of grid) {
+    for (let a = 0; a < cell.length; a++) {
+      const s = cell[a], ls = levelOf(s.r);
+      for (let b = a + 1; b < cell.length; b++) {
+        const u = cell[b];
+        if (u.r === s.r || levelOf(u.r) !== ls) continue;
+        const sx = s.bx - s.ax, sz = s.bz - s.az, ux = u.bx - u.ax, uz = u.bz - u.az;
+        const den = sx * uz - sz * ux;
+        if (Math.abs(den) < 1e-6) continue;
+        const ts = ((u.ax - s.ax) * uz - (u.az - s.az) * ux) / den;
+        const tu = ((u.ax - s.ax) * sz - (u.az - s.az) * sx) / den;
+        const Ls = dist(sx, sz), Lu = dist(ux, uz);
+        // (a crossing this near a vertex of either was a case for pass 1)
+        if (!(ts * Ls > 0.5 && (1 - ts) * Ls > 0.5 && tu * Lu > 0.5 && (1 - tu) * Lu > 0.5)) continue;
+        const pt = [s.ax + sx * ts, s.az + sz * ts];
+        if (Math.floor(pt[0] / STITCH_G) + ',' + Math.floor(pt[1] / STITCH_G) !== ck) continue;
+        insert(s, ts, pt);
+        insert(u, tu, pt);
+      }
+    }
+  }
+  for (const r of ways) {
+    const mv = moves.get(r), ins = inserts.get(r);
+    if (!mv && !ins) continue;
+    const p = r.p.slice();
+    if (mv) for (const [i, pt] of mv) p[i] = pt;
+    if (ins) {
+      ins.sort((a, b) => (b.i - a.i) || (b.q - a.q));     // from the far end: indices stay valid
+      for (const it of ins) p.splice(it.i + 1, 0, it.pt);
+    }
+    // a moved vertex can land on its neighbour: drop the repeats
+    const q = [p[0]];
+    for (let i = 1; i < p.length; i++) {
+      const a = q[q.length - 1];
+      if (keyOf(a[0], a[1]) !== keyOf(p[i][0], p[i][1])) q.push(p[i]);
+    }
+    if (q.length >= 2) out.set(r, q);
+  }
+  return out;
+}
+
 // shared scratch — update paths never allocate
 const _pose = { x: 0, z: 0, dx: 0, dz: 0, seg: 0 };
 const _cand = [], _straight = [];
@@ -891,6 +1058,7 @@ const _snap = { x: 0, z: 0, t: 0 };
 // because three.js writes into it with .set() and returns it
 const _vdir = new THREE.Vector3();
 const _caps = { v0: 0, v1: 0 };
+const _stand = { stop: null, left: 0 };
 
 // How long a real car needs to cover `L` metres when it may enter at v0, must
 // leave at v1, and would cruise at vc in between: accelerate at ACCEL, brake at
@@ -945,28 +1113,12 @@ function poseAt(edge, s, seg) {
   return _pose;
 }
 
-// ---- shared traffic-light assets (built lazily — headless tests never touch THREE) ----
+// ---- shared traffic-light assets: js/signalmodel.js (mast, heads, lenses) ----
 // One geometry + material set for EVERY pole in the region; a light "changes"
-// by swapping the material reference on its three lamp meshes, nothing else.
+// by swapping the material reference on its lens meshes, nothing else. `_S` is
+// that set once the first pole has asked for it (headless tests never do).
 let _S = null;
-function sigAssets() {
-  if (_S) return _S;
-  const pole = new THREE.CylinderGeometry(0.055, 0.09, 3.6, 6);
-  pole.translate(0, 1.8, 0);                       // base at ground, per the group origin
-  const head = new THREE.BoxGeometry(0.26, 0.66, 0.18);
-  head.translate(0, 3.08, 0);                      // 3-lamp housing near the pole top
-  const lamp = new THREE.BoxGeometry(0.13, 0.13, 0.06);
-  const mat = (c) => new THREE.MeshLambertMaterial({ color: c });
-  // lit lamps are overbright like the car lights (×2.2) so bloom bites at night
-  const lit = (c, e) => new THREE.MeshLambertMaterial({ color: c, emissive: e, emissiveIntensity: 2.2 });
-  _S = {
-    pole, head, lamp,
-    poleMat: mat(0x2e3134), headMat: mat(0x1f2224),
-    redOff: mat(0x371313), ambOff: mat(0x38290f), grnOff: mat(0x11301a),
-    redOn: lit(0xff3524, 0xff2418), ambOn: lit(0xffb02e, 0xffa018), grnOn: lit(0x3dff6a, 0x22ff55),
-  };
-  return _S;
-}
+function sigAssets() { return (_S ??= sigModel()); }
 
 // How long the stripe is, following the flank rather than the axis. This is
 // the denominator of every u below and of the canvas aspect, and measuring it
@@ -1000,22 +1152,48 @@ function liveryRun() {
 // and matching the panel's own near-vertical normal is the POINT: a decal that
 // shades differently from the paint under it reads as a separate object stuck
 // to the car, which is exactly the thing a livery must not do.
+// The v6 body (vehicles.js bodySurface): the stations above still say where the
+// band RUNS and how tall it is, but the flank under it is a curve now, with
+// real openings for the wheels. So the strip is re-sampled every 12 cm, takes
+// its x from the body itself (6 mm proud of the widest point it covers) and
+// lifts its lower edge over the arches, where it pinches shut the way a wrap
+// is cut round a wheel. With no bodySurface (an older vehicles.js) it falls
+// back to the chords between the transcribed stations, exactly as before.
+function liveryRows() {
+  const surf = typeof VEH.bodySurface === 'function' ? VEH.bodySurface(PATROL_KIND) : null;
+  const rows = [];
+  for (let i = 0; i < LIVERY_STS.length; i++) {
+    const b = LIVERY_STS[i], a = i ? LIVERY_STS[i - 1] : b;
+    const n = surf && i ? Math.ceil((b[0] - a[0]) / 0.12) : 1;
+    for (let k = i ? 1 : n; k <= n; k++) {
+      const t = k / n;
+      const z = a[0] + (b[0] - a[0]) * t, lo = a[1] + (b[1] - a[1]) * t, hi = a[2] + (b[2] - a[2]) * t;
+      let y0 = lo + (hi - lo) * LIVERY_F0, y1 = lo + (hi - lo) * LIVERY_F1;
+      let x = (a[3] + (b[3] - a[3]) * t) * LIVERY_HALF + LIVERY_OUT;
+      if (surf) {
+        y0 = Math.max(y0, surf.archTop(z) + 0.03);
+        if (y1 < y0) y1 = y0;
+        x = Math.max(surf.halfAt(z, y0), surf.halfAt(z, y1), surf.halfAt(z, (y0 + y1) / 2)) + 0.006;
+      }
+      rows.push([z, x, y0, y1]);
+    }
+  }
+  return rows;
+}
+
 function liveryGeo() {
-  const n = LIVERY_STS.length, run = liveryRun();
+  const rows = liveryRows(), n = rows.length;
+  let run = 0;
+  for (let i = 1; i < n; i++) run += Math.hypot(rows[i][1] - rows[i - 1][1], rows[i][0] - rows[i - 1][0]);
   const pos = [], uvs = [], nor = [], idx = [];
   for (let s = -1; s <= 1; s += 2) {
     const base = pos.length / 3;
     let along = 0;
     for (let i = 0; i < n; i++) {
-      const st = LIVERY_STS[i];
-      if (i) {
-        const p = LIVERY_STS[i - 1];
-        const dz = st[0] - p[0], dx = (st[3] - p[3]) * LIVERY_HALF;
-        along += Math.sqrt(dx * dx + dz * dz);
-      }
-      const x = s * (st[3] * LIVERY_HALF + LIVERY_OUT);
-      const yLo = st[1], span = st[2] - st[1];
-      pos.push(x, yLo + span * LIVERY_F0, st[0], x, yLo + span * LIVERY_F1, st[0]);
+      const st = rows[i];
+      if (i) along += Math.hypot(st[1] - rows[i - 1][1], st[0] - rows[i - 1][0]);
+      const x = s * st[1];
+      pos.push(x, st[2], st[0], x, st[3], st[0]);
       nor.push(s, 0, 0, s, 0, 0);
       // MIND THE u DIRECTION. Seen from outside, the left flank's screen-right
       // is +z and the right flank's is −z, so a u that ran with z on both sides
@@ -1179,6 +1357,19 @@ export class Traffic {
     // read-only to us and never touched by the follow bookkeeping.
     this.actors = null;
     this.blockers = null;   // parked hulls from main.js — see _obst below
+    // People on a carriageway or about to step onto one: pedestrians.js's
+    // `crossers` list, wired by main.js. Each is { cx, cz, rdx, rdz, hw, must,
+    // x, z } (the crossing on the road's centreline, the road's direction and
+    // half width, whether the walker is already committed, and where they
+    // stand). Read-only to us. Like `actors`, braking for these only ever makes
+    // a car LAG its schedule; the walkers themselves are shared, so two clients
+    // looking at the same zebra hold the same queue.
+    this.walkers = null;
+    // (road) -> which side of it has cars parked at the kerb (streets.js `e`,
+    // +1 / -1) or 0, and how far into the carriageway they reach. Wired by
+    // js/citylife.js; without it nobody parks at a kerb and nothing changes.
+    this.kerbOf = null;
+    this.kerbIntrudes = 0;
     // How thick the police are on the ground, 0..1, from the settings panel —
     // the same shape as maxCars above it. It is a SETTING and not a constant
     // because the honest answer to "how many patrols should a regional Czech
@@ -1205,6 +1396,7 @@ export class Traffic {
     this._cells = new Map();        // CELL key → { ci, cj, edges, len, sorted } — the
                                     // shared population lives on this, not on _near
     this._pool = new Map();         // slot key → schedule (with or without a mesh)
+    this._standIn = new Map();      // slot key -> the ghost a blockage made of its car (see _drive's lag clamp)
     this._ghosts = new Set();       // v9: cars the schedule has finished with but
                                     // the local player can still see. NOT part of
                                     // the shared world — see the v9 header.
@@ -1222,6 +1414,8 @@ export class Traffic {
                                     // longer a patrol of ours but its bar still has
                                     // to blink. Self-cleaning — see _tickSirens.
     this._hornPool = HONK_POOL;     // global honk budget, refilled at HONK_RATE/s
+    this._ctlSeen = new Set();      // chunk buckets whose junction controls are worked out
+    this._ctlBudget = 0;
     // ingest whatever is already loaded (legacy whole-city file, or region tiles
     // that landed before we were constructed), then subscribe for the rest —
     // optional chaining because bare test fixtures pass {roads:[…]} without it
@@ -1448,7 +1642,12 @@ export class Traffic {
       if (r.d !== 1 || !r.p || r.p.length < 2 || r._tg) continue;
       r._tg = 1;
       drivable.push(r);
-      for (const [x, z] of r.p) {
+    }
+    // the polylines the GRAPH is cut from: the way's own points, plus the
+    // junction points the tile build simplified away (see stitchWays)
+    const stitched = stitchWays(drivable);
+    for (const r of drivable) {
+      for (const [x, z] of stitched.get(r) ?? r.p) {
         const k = keyOf(x, z);
         const u = this._usage.get(k);
         if (!u) this._usage.set(k, { n: 1, last: r });
@@ -1466,7 +1665,7 @@ export class Traffic {
     // way ENDPOINTS — which are always nodes — so this stays a non-issue in
     // practice and spares us remapping the `s` of every car on a split edge.
     for (const r of drivable) {
-      const p = r.p;
+      const p = stitched.get(r) ?? r.p;
       let start = 0, startOff = 0, d = 0;
       for (let i = 1; i < p.length; i++) {
         d += dist(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]);
@@ -1477,6 +1676,7 @@ export class Traffic {
       }
       if (r._len == null) r._len = d; // loadCity sets it; tests may not
     }
+    this._culDirty = true;            // new arms: what is a dead end has changed
   }
 
   _node(x, z) {
@@ -1856,6 +2056,39 @@ export class Traffic {
     return hit;
   }
 
+  /**
+   * Is (x, z) on the asphalt of a junction pad? The outline is the one the
+   * mesher draws and the wheels stand on (geo.junctionHull / clusterHull); the
+   * kerb band round it (streets.cornerLift) is pavement and answers no. false
+   * wherever the junction index is not there (bare road fixtures).
+   */
+  _onPad(x, z) {
+    const M = 40, C = 120;                 // config.CHUNK; a cluster reaches M over a border
+    const ci = Math.floor(x / C), cj = Math.floor(z / C);
+    const lx = x - ci * C, lz = z - cj * C;
+    for (let i = (lx < M ? -1 : 0); i <= (lx > C - M ? 1 : 0); i++) {
+      for (let j = (lz < M ? -1 : 0); j <= (lz > C - M ? 1 : 0); j++) {
+        const k = (ci + i) + ',' + (cj + j);
+        const js = junctionsIn(k);
+        if (js) for (const o of js) {
+          if (o._cluster || o._ring) continue;         // a member answers through its cluster; no pad drawn
+          const R = o.padR ?? o.pad ?? 6;
+          if ((x - o.x) ** 2 + (z - o.z) ** 2 > R * R) continue;
+          const ring = junctionHull(o);
+          if (ring && pointInPolygon(x, z, ring) && cornerLift(o, x, z) < 0) return true;
+        }
+        const cls = clustersIn(k);
+        if (cls) for (const o of cls) {
+          const R = o.padR ?? 30;
+          if ((x - o.x) ** 2 + (z - o.z) ** 2 > R * R) continue;
+          const ring = clusterHull(o);
+          if (ring && pointInPolygon(x, z, ring) && cornerLift(o, x, z) < 0) return true;
+        }
+      }
+    }
+    return false;
+  }
+
   _makePole(x, z, group) {
     const A = sigAssets();
     let best = null, bestD = 25, bestS = 0;
@@ -1884,16 +2117,29 @@ export class Traffic {
       // when no OTHER edge's carriageway claims it. A pole that fits nowhere
       // is not built; the lights are the schedule's, not the mast's, so the
       // cars still stop — there is just no post in the lane to prove it.
+      //
+      // AND A JUNCTION IS WIDER THAN ITS ROADS. A big crossing is one pad of
+      // asphalt from kerb to kerb, flared and rounded past every arm's own
+      // half width, and "half width + shoulder" of an arm inside it is still
+      // asphalt: at Palackého the masts stood out in the pad, metres from any
+      // kerb. A spot on a pad (js/streets.js draws its kerb band; _onPad asks
+      // the same outline) is refused like a foreign lane, and the search goes
+      // further out sideways, to the pad's own kerb, before it backs off up
+      // the approach to where the plain street begins. The driver's right
+      // first, all the way, then the left.
       let placed = false;
-      for (const back of [0, 4, 8]) {
-        const pose = poseAt(best, Math.max(1, bestS - back), 0);
-        for (const side of [1, -1]) {
-          const w2 = ((best.road.w || 6) * 0.5 + 0.7) * side;
-          const cx = pose.x - pose.dz * w2, cz = pose.z + pose.dx * w2;
-          if (this._onForeignRoad(cx, cz, best)) continue;
-          px = cx; pz = cz; dx = pose.dx; dz = pose.dz;
-          placed = true;
-          break;
+      for (const side of [1, -1]) {
+        for (const back of POLE_BACK) {
+          const pose = poseAt(best, Math.max(1, bestS - back), 0);
+          for (const out of POLE_OUT) {
+            const w2 = ((best.road.w || 6) * 0.5 + out) * side;
+            const cx = pose.x - pose.dz * w2, cz = pose.z + pose.dx * w2;
+            if (this._onForeignRoad(cx, cz, best) || this._onPad(cx, cz)) continue;
+            px = cx; pz = cz; dx = pose.dx; dz = pose.dz;
+            placed = true;
+            break;
+          }
+          if (placed) break;
         }
         if (placed) break;
       }
@@ -1905,7 +2151,7 @@ export class Traffic {
     // 220 m under the asphalt at Pardubice, 380 under Prague. They were built,
     // lit, phase-cycling and parented to the scene the whole time, buried
     // inside the terrain solid. "stále nikde nejsou semafory" was literal.
-    g.position.set(px, this._groundAt(px, pz), pz);
+    g.position.set(px, this._kerbAt(px, pz), pz);
     // lamps are authored on the head's −z face; forward of a mesh yawed by h
     // is (−sin h, −cos h), and we want that pointing AGAINST travel (at the
     // drivers rolling up), so sin h = dx, cos h = dz
@@ -1914,7 +2160,14 @@ export class Traffic {
     g.add(new THREE.Mesh(A.pole, A.poleMat), new THREE.Mesh(A.head, A.headMat));
     for (let i = 0; i < 3; i++) {                // red / amber / green, top down
       const L = new THREE.Mesh(A.lamp, i === 0 ? A.redOff : i === 1 ? A.ambOff : A.grnOff);
-      L.position.set(0, 3.3 - i * 0.22, -0.10);  // poking through the head's front face
+      L.position.set(0, LAMP_Y[i], LAMP_Z);      // on the head's front face, under its hood
+      g.add(L);
+      lamps.push(L);
+    }
+    // the pedestrian head: stop over walk, facing the far kerb (lamps[3], [4])
+    for (let i = 0; i < 2; i++) {
+      const L = new THREE.Mesh(A.ped, i === 0 ? A.redOn : A.grnOff);
+      L.position.set(PED_X, PED_Y[i], 0);
       g.add(L);
       lamps.push(L);
     }
@@ -1926,7 +2179,7 @@ export class Traffic {
     // it stays down for the session — the lights are the schedule's, so a
     // junction with its mast in the gutter still cycles and cars still stop.
     const up = this.world?.poles?.registerOne?.(
-      'sig', px, g.position.y, pz, () => { g.visible = false; }, 'signal');
+      'sig', px, g.position.y, pz, () => { g.visible = false; }, 'signal', g.rotation.y);
     if (up === false) g.visible = false;      // felled earlier this session
     return { x, z, b: Math.abs(dz) >= Math.abs(dx) ? 0 : 1, lamps, mesh: g };
   }
@@ -1942,6 +2195,170 @@ export class Traffic {
     e.sig = jn; e.sigD = d;
     e.sigPh = Math.abs(e.ldz) >= Math.abs(e.ldx) ? 0 : 1;
     e.sigStop = Math.max(1, e.len - SIG_STOP);
+  }
+
+  /**
+   * How long somebody arriving at shared second `t` at (x, z) has to wait
+   * before walking across the road that runs (rdx, rdz) there, needing crossT
+   * seconds to get over. null when no signal governs the spot. Pure arithmetic
+   * on the junction's own clock, so pedestrians.js can bake the answer into a
+   * shared timeline: cars on that road hold phase bucket b, and people walk
+   * while b shows red.
+   */
+  walkWait(x, z, rdx, rdz, t, crossT = 6) {
+    let best = null, bd = SIG_EDGE_R + 6;
+    this._jgrid.near(x, z, (jn) => {
+      const d = dist(jn.x - x, jn.z - z);
+      if (d < bd) { bd = d; best = jn; }
+    });
+    if (!best) return null;
+    const bucket = Math.abs(rdz) >= Math.abs(rdx) ? 0 : 1;
+    return walkPhaseWait(t + best.off, bucket, crossT, SIG_CYCLE, SIG_GREEN + SIG_AMBER);
+  }
+
+  _walkerWithin(x, z, r) {
+    const W = this.walkers;
+    if (!W) return false;
+    for (let i = 0; i < W.length; i++) {
+      const dx = W[i].x - x, dz = W[i].z - z;
+      if (dx * dx + dz * dz < r * r) return true;
+    }
+    return false;
+  }
+
+  // How far along this car's own route the point of it nearest (x, z) lies, if
+  // the route passes within `tol` of the point inside `reach` metres; else -1.
+  // Looks down the current edge and the next five (a car park is all short edges).
+  // `off`: measure against the line the car DRIVES, that far right of the
+  // centreline, instead of the centreline itself. Somebody lying in the lane
+  // of a 9 m road is 2 m off the centreline: outside `tol`, so no route passed
+  // over them and they were only seen from 5 m, at speed.
+  _pathTo(p, x, z, tol, reach, off = 0) {
+    let ri = p.ri, e = p.edge, s0 = p.s, acc = 0;
+    // (the itinerary is hashed step by step, so reading a few steps further
+    // ahead than the schedule has needed yet changes nothing about it)
+    if (p.route && p.route.length <= ri + 5 && !p.ndone) this._routeEnsure(p, ri + 5);
+    for (let hop = 0; hop < 6 && e; hop++) {
+      const pts = e.pts, cum = e.cum;
+      for (let i = hop ? 0 : p.seg; i < pts.length - 1; i++) {
+        if (acc + cum[i] - s0 > reach) return -1;
+        let qx = x, qz = z;
+        if (off) {
+          // right of travel is (-dz, dx): move the point the other way instead
+          const L = (cum[i + 1] - cum[i]) || 1;
+          qx += (pts[i + 1][1] - pts[i][1]) / L * off;
+          qz -= (pts[i + 1][0] - pts[i][0]) / L * off;
+        }
+        if (distPointToSegment(qx, qz, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], _snap) > tol) continue;
+        const along = acc + cum[i] + _snap.t * (cum[i + 1] - cum[i]) - s0;
+        if (along > -3) return along;
+      }
+      acc += e.len - s0; s0 = 0;
+      e = p.route?.[++ri]?.e ?? null;
+    }
+    return -1;
+  }
+
+  /**
+   * Is some car about to drive over the point (cx, cz) of a road of half width
+   * hw? What a walker asks before stepping out (pedestrians.js roadBusy). On a
+   * crossing where drivers are expected to stop (`stops`), only a car that
+   * cannot is a threat; anywhere else the walker wants `need` seconds of gap.
+   */
+  threatens(cx, cz, hw, need, stops) {
+    for (const car of this.cars) {
+      const p = car.ai;
+      if (!p || !(car.speed > 0.3)) continue;                // standing: not coming
+      const dx = cx - p.sx, dz = cz - p.sz;
+      if (dx * dx + dz * dz > 60 * 60) continue;
+      const half = (car.len ?? 4.6) / 2;
+      // a body still PASSING over the spot (an 11 m bus takes a while): nobody
+      // walks into the side of a moving vehicle
+      const hx = -Math.sin(p.sh), hz = -Math.cos(p.sh);
+      const f = dx * hx + dz * hz;
+      if (f > -half - 1.5 && f < half + 1.5 && Math.abs(hx * dz - hz * dx) < hw + 1.5) return true;
+      const along = this._pathTo(p, cx, cz, hw + 1.0, 60);
+      if (along < 0) continue;
+      const d = along - half;                                // nose to the crossing's middle
+      if (d < -1) continue;                                  // nose over it: caught above, or gone
+      if (d < 7) return true;                                // rolling, right at the crossing
+      if (stops) { if (car.speed * car.speed / (2 * Math.max(0.5, d - 2.5)) > 5.5) return true; }
+      else if ((d - 1.5) / (car.speed > 1.6 ? car.speed : 1.6) < need) return true;
+    }
+    return false;
+  }
+
+  // What the END of edge `e` is controlled by, as js/streets.js worked it out
+  // for the markings: CTL.GIVE (triangles), CTL.STOP (a stop line and sign) or
+  // CTL.NONE. Signals are the schedule's business and read as NONE here. The
+  // answer is cached on the edge together with how far back from the node the
+  // line sits. Asking finishes that chunk's junctions (the same call the mesh
+  // build makes), so it is rationed: an edge whose bucket has not had its turn
+  // yet answers NONE for now and is asked again.
+  _ctlOf(e) {
+    if (e.ctl !== undefined) return e.ctl;
+    const bx = e.b.x, bz = e.b.z;
+    const ck = Math.floor(bx / 120), cj = Math.floor(bz / 120);
+    const sEnd = e.off0 + e.offSign * e.len;
+    let found = null, pending = false;
+    for (let i = -1; i <= 1 && !found; i++) for (let j = -1; j <= 1 && !found; j++) {
+      const k = (ck + i) + ',' + (cj + j);
+      if (!this._ctlSeen.has(k)) {
+        if (this._ctlBudget <= 0) { pending = true; continue; }
+        this._ctlBudget--;
+        this._ctlSeen.add(k);
+      }
+      const lists = [junctionsIn(k), clustersIn(k)];
+      for (const l of lists) {
+        if (!l) continue;
+        for (const o of l) {
+          if ((o.x - bx) ** 2 + (o.z - bz) ** 2 > 60 * 60) continue;
+          for (const lg of o._legs ?? []) {
+            if (lg.r !== e.road || lg.dir !== -e.offSign || Math.abs(lg.s - sEnd) > 1.5) continue;
+            found = lg; break;
+          }
+          if (found) break;
+        }
+        if (found) break;
+      }
+    }
+    if (!found && pending) return CTL.NONE;       // not cached: ask again
+    e.ctl = !found ? CTL.NONE : found.ctl === 'give' ? CTL.GIVE : found.ctl === 'stop' ? CTL.STOP : CTL.NONE;
+    e.ctlBack = found ? (found.m ?? 4) + 0.6 : CTL_BACK_DFLT;
+    // NOTHING SIGNED IS NOT NOTHING TO OBEY. streets.js marks the legs that get
+    // paint: 39 of 853 near the station, and it has no leg at all where a
+    // driveway or a car park aisle meets a street. Everywhere else drivers
+    // pulled out of side roads as if they had the main one to themselves. The
+    // rule every driver applies without a sign: coming out of a lesser road
+    // onto one that runs THROUGH the junction (two arms of a higher class),
+    // you wait at its edge. Equal roads keep the give-way-to-the-right rule
+    // of the follow loop, and a signalled approach is the schedule's.
+    if (e.ctl === CTL.NONE && !e.sig && !(found && found.ctl === 'signal')) {
+      const mine = roadRank(e.road);
+      let arms = 0, half = 0;
+      const node = e.b;
+      for (const o of node.out) {
+        if (o === e.twin || roadRank(o.road) <= mine) continue;
+        arms++;
+        if (o.road.w / 2 > half) half = o.road.w / 2;
+      }
+      for (const i of node.inn) {
+        if (i === e || i.twin || roadRank(i.road) <= mine) continue;   // (a two-way arm was counted going out)
+        arms++;
+        if (i.road.w / 2 > half) half = i.road.w / 2;
+      }
+      if (arms >= 2) { e.ctl = CTL.GIVE; e.ctlBack = half + 0.8; }
+    }
+    return e.ctl;
+  }
+
+  /** Does this car's itinerary reach `node` within its next few edges? */
+  _routeMeets(o, node) {
+    if (o.edge.b === node) return true;
+    const R = o.route;
+    if (!R) return false;
+    for (let i = o.ri + 1; i < R.length && i <= o.ri + 4; i++) if (R[i].e.b === node) return true;
+    return false;
   }
 
   // phase state for one bucket of a junction: 0 green, 1 amber, 2 red. The
@@ -1968,6 +2385,11 @@ export class Traffic {
         sg.lamps[0].material = st === 2 ? _S.redOn : _S.redOff;
         sg.lamps[1].material = st === 1 ? _S.ambOn : _S.ambOff;
         sg.lamps[2].material = st === 0 ? _S.grnOn : _S.grnOff;
+        // people cross THIS approach while its cars are held at red
+        if (sg.lamps[3]) {
+          sg.lamps[3].material = st === 2 ? _S.redOff : _S.redOn;
+          sg.lamps[4].material = st === 2 ? _S.grnOn : _S.grnOff;
+        }
       }
     }
   }
@@ -2058,9 +2480,13 @@ export class Traffic {
   _pickNextDet(edge, h) {
     const node = edge.b;
     if (!node.outS || node.outS.length !== node.out.length) node.outS = node.out.slice().sort(cmpEdge);
+    if (this._culDirty) this._culUpdate();
     _cand.length = 0; _straight.length = 0;
+    // nobody turns into a cul-de-sac while the street goes on (see _culUpdate)
+    let open = false;
+    for (const o of node.outS) if (o !== edge.twin && !o.cul) { open = true; break; }
     for (const o of node.outS) {
-      if (o === edge.twin) continue;
+      if (o === edge.twin || (open && o.cul)) continue;
       _cand.push(o);
       const dot = edge.ldx * o.fdx + edge.ldz * o.fdz;
       const crs = edge.ldx * o.fdz - edge.ldz * o.fdx;
@@ -2073,6 +2499,73 @@ export class Traffic {
     // city traffic mostly flows through; side streets soak up the remainder
     const pool = (_straight.length && rnd01(hash32(h, 0x5f1)) < 0.7) ? _straight : _cand;
     return pool[(rnd01(hash32(h, 0xb17)) * pool.length) | 0];
+  }
+
+  // A GHOST DRIVES OUT OF THE PICTURE. It exists only because somebody was
+  // looking when its trip ended, and it is taken away the moment nobody is; so
+  // the one useful thing its remaining road can do is lead out of view. Left to
+  // the hashed walk it wandered about inside the player's field of view for
+  // its two minutes, and since every slot it had left was refilled on time, a
+  // watched street carried its own traffic and the ghosts of the last
+  // generation on top: the old town's standing queues were largely that.
+  // So at each junction a ghost takes the exit that ends furthest off the view
+  // axis (round behind the camera, at best). Local by construction, like the
+  // ghost itself: no shared car ever asks this.
+  _pickNextGhost(edge, h) {
+    const v = this._view;
+    if (!v) return this._pickNextDet(edge, h);
+    const node = edge.b;
+    if (this._culDirty) this._culUpdate();
+    let best = null, bc = Infinity, open = false;
+    for (const o of node.out) if (o !== edge.twin && !o.cul) { open = true; break; }
+    for (const o of node.out) {
+      if (o === edge.twin || (open && o.cul)) continue;
+      const rx = o.b.x - v.x, rz = o.b.z - v.z;
+      const d = dist(rx, rz);
+      // cosine of the angle off the view axis: smallest is furthest out of the
+      // picture. A hair's preference for carrying straight on, so a ghost on a
+      // road that already leads away does not weave.
+      let c = d > 1 ? (rx * v.dx + rz * v.dz) / d : 1;
+      c -= 0.08 * (edge.ldx * o.fdx + edge.ldz * o.fdz);
+      if (c < bc || (c === bc && best && cmpEdge(o, best) < 0)) { bc = c; best = o; }
+    }
+    return best;
+  }
+
+  // ---- culs-de-sac -----------------------------------------------------------
+  // An edge is `cul` when everything beyond its far node, short of turning
+  // round, is a dead end within CUL_MAX metres: a driveway, a courtyard, a car
+  // park with one mouth, a street that stops at the river. Through traffic has
+  // no business there, and it used to pour in: the itinerary is a hashed walk,
+  // three exits in ten are side streets, and a trip that walks into a dead end
+  // is over at its end, in the lane, with whoever followed it queued behind
+  // (the 120 s stands of the Palackého and old town reports). Routes now take
+  // such an edge only when there is nothing else, and nobody is born driving
+  // into one; cars still come OUT of them. Long dead ends (a lane to the next
+  // village, the motorway at the edge of the loaded region) stay open: a trip
+  // is over long before their end.
+  // Leaf stripping over the whole graph, from scratch whenever it has grown
+  // (a few milliseconds for a region). Pure graph arithmetic, so two clients
+  // with the same roads agree; a route step committed before a later tile
+  // changed an answer is the same streaming-frontier caveat _routeEnsure has.
+  _culUpdate() {
+    this._culDirty = false;
+    const E = this.edges, stack = [];
+    for (const e of E) { e.cul = false; e.culD = 0; }
+    const test = (e) => {
+      if (e.cul) return;
+      let d = 0;
+      for (const o of e.b.out) {
+        if (o === e.twin) continue;
+        if (!o.cul) return;
+        if (o.culD > d) d = o.culD;
+      }
+      d += e.len;
+      if (d > CUL_MAX) return;
+      e.cul = true; e.culD = d; stack.push(e);
+    };
+    for (const e of E) test(e);
+    while (stack.length) { const e = stack.pop(); for (const i of e.a.inn) test(i); }
   }
 
   // Grow the itinerary until step `want` exists (or the route is complete).
@@ -2090,7 +2583,8 @@ export class Traffic {
       const last = p.route[p.route.length - 1];
       const end = last.base + last.e.len;
       if (end >= p.routeM) { p.routeEnd = Math.min(p.routeM, end); return; }
-      const nx = this._pickNextDet(last.e, hash32(p.seed, p.route.length, 0x51));
+      const h = hash32(p.seed, p.route.length, 0x51);
+      const nx = p.ghost ? this._pickNextGhost(last.e, h) : this._pickNextDet(last.e, h);
       if (!nx) { p.routeEnd = end; return; }     // dead end: the trip is over here
       const dot = last.e.ldx * nx.fdx + last.e.ldz * nx.fdz;
       const crs = last.e.ldx * nx.fdz - last.e.ldz * nx.fdx;
@@ -2151,8 +2645,16 @@ export class Traffic {
       while (p.nseg < e.pts.length - 2 && p.na >= e.cum[p.nseg + 1]) p.nseg++;
       const segEnd = Math.min(e.cum[p.nseg + 1], limit);
       let tgt = segEnd;
-      let sigHere = false;
+      let sigHere = false, stopHere = false;
       if (!p.nsig && e.sig && e.sigStop > p.na && e.sigStop < tgt) { tgt = e.sigStop; sigHere = true; }
+      // a timetabled stop on this piece (a bus): pull up there and stand
+      if (p.stops) {
+        while (p.nstop < p.stops.length && p.stops[p.nstop].arc - st.base <= p.na + 1e-6) p.nstop++;
+        if (p.nstop < p.stops.length) {
+          const sa = p.stops[p.nstop].arc - st.base;
+          if (sa <= tgt) { tgt = sa; stopHere = true; sigHere = false; }
+        }
+      }
       const L = tgt - p.na;
       // FORWARD PROGRESS IS NOT OPTIONAL. `tgt` is a Float32Array read and
       // `limit` a double, so a piece of zero (or negative) length is a rounding
@@ -2181,7 +2683,7 @@ export class Traffic {
       const v0 = atStart ? _caps.v0 : Math.min(p.vMax, p.nvOut > 2 ? p.nvOut : 2);
       // …and we must be able to STOP at a destination and be slow at a stop
       // line, whatever colour it turns out to be
-      const v1 = atRouteEnd ? 2
+      const v1 = (atRouteEnd || stopHere) ? 2
         : sigHere ? Math.min(p.vMax, SIG_APPROACH)
           : atSegEnd ? _caps.v1 : p.vMax;
       const dur = pieceTime(L, v0, v1, p.vMax);
@@ -2191,6 +2693,21 @@ export class Traffic {
       if (sigHere) {
         p.nsig = 1; p.nwait = redWait(e.sig, e.sigPh, p.nt);
         if (p.nwait > 0) p.nvOut = 2;            // it waited: it pulls away from rest
+      }
+      if (stopHere) {
+        // doors open. The arrival is recorded so the timetable can be read
+        // back out of the schedule (fixedTimes), then it stands its dwell.
+        if (p.stopT) p.stopT[p.nstop] = p.nt;
+        // A TIMETABLED call (js/realtransit.js) has a `hold`: the shared second
+        // before which the bus does not leave, however early it pulled in.
+        // That is what makes the stop a place where every client's copy of
+        // the trip agrees again, whichever stop its schedule was started from.
+        // (Never more than HOLD_MAX past its dwell, though: a bus far ahead of
+        // its time that stood minutes at a shared stop held every bus behind
+        // it there too. Still a pure function of the schedule.)
+        const sp = p.stops[p.nstop], hold = sp.hold ?? 0;
+        const early = hold - p.nt < sp.dwell + HOLD_MAX ? hold - p.nt : sp.dwell + HOLD_MAX;
+        p.nwait = early > sp.dwell ? early : sp.dwell; p.nstop++; p.nvOut = 2;
       }
     }
   }
@@ -2276,6 +2793,119 @@ export class Traffic {
     }
   }
 
+  // One schedule record, with every field the drive loop reads declared up
+  // front (it is the hot shape of the whole file). `e` and `sIn` are the edge
+  // and the arc along it the car starts at; the caller fills in what kind of
+  // schedule it is: a cell's slot (_birth) or a timetabled trip (addFixed).
+  _sched(sk, seed, t0, vK, e, sIn) {
+    return {
+      key: sk, ci: 0, cj: 0, k: 0, cell: null, seed, gen: 0, t0, vK, police: 0,
+      routeM: 0,
+      route: [{ e, base: -sIn, turnIn: 0, turnOut: 0 }],
+      routeEnd: 0,
+      // schedule state
+      ni: 0, na: sIn, nt: t0, nseg: 0, nv: 0, nvOut: 0, nwait: 0, nsig: 0,
+      vMax: e.speed * vK, ndone: 0,
+      // rendered state (only meaningful while attached)
+      car: null, sR: 0, ri: 0, edge: e, s: sIn, seg: 0, next: null, laneOff: 0,
+      sx: 0, sz: 0, sy: 0, sh: 0, px: 0, pz: 0, py: 0, ph: 0,
+      heldT: 0, sigQ: false, graceT: 0, stolen: 0, dead: 0,
+      // v9: local-only. A ghost has left the shared population and drives on
+      // by itself until the player stops looking at it.
+      ghost: 0, ghostT: 0,
+      // a timetabled trip (a bus): its spec, where it stops and when it got there
+      fixed: null, stops: null, nstop: 0, stopT: null, tEnd: 0,
+      // …and the stop its CAR is serving: next one to call at, seconds stood
+      // there, and which one it is standing at now (-1: none)
+      stand: 0, standT: 0, atStop: -1,
+      // giving way: seconds stood for walkers and at a line, and this driver's
+      // own patience for each (hashed, so it is the same driver on every screen)
+      yieldT: 0, yieldMax: YIELD_PATIENCE + rnd01(hash32(seed, 0x71e)) * YIELD_PATIENCE_VAR,
+      yieldOut: 0,     // 1 = patience spent: stays spent until yieldT has drained to nothing
+      ctlT: 0, ctlMax: CTL_PATIENCE + rnd01(hash32(seed, 0x71f)) * CTL_PATIENCE_VAR,
+      ctlE: null, ctlStood: 0, ctlHold: 0, blk: false,
+      crsT: 0,         // seconds stood for crossing traffic that is itself standing
+    };
+  }
+
+  // ---- timetabled trips: a schedule on a FIXED route --------------------------
+  // What js/buses.js runs its lines with. A trip is a schedule like any other
+  // (same lights, same queues, same lag, same "never appears while you look")
+  // except that its route is given rather than hashed, it stands at its stops,
+  // and it has no cell: it lives from spec.t0 until its route is done.
+  //   spec = { key, seed, t0, tEnd, vK, kind, color, route: [{ e, base, turnIn,
+  //            turnOut }], startS, len, stops: [{ arc, dwell, x, z }], tag }
+  // The route array is taken over, not copied: hand each trip its own.
+  _fixed(spec) {
+    const e = spec.route[0].e;
+    const p = this._sched(spec.key, spec.seed, spec.t0, spec.vK, e, spec.startS);
+    p.fixed = spec; p.tEnd = spec.tEnd;
+    p.route = spec.route; p.routeM = p.routeEnd = spec.len;
+    p.stops = spec.stops; p.stopT = new Float64Array(spec.stops.length).fill(Infinity);
+    p.nsig = (e.sig && e.sigStop <= spec.startS) ? 1 : 0;
+    return p;
+  }
+
+  hasSlot(key) { return this._pool.has(key); }
+
+  addFixed(spec) {
+    let p = this._pool.get(spec.key);
+    if (p) return p;
+    p = this._fixed(spec);
+    this._pool.set(spec.key, p);
+    this._nomTo(p, this._wt || this.now());
+    return p;
+  }
+
+  /**
+   * A trip's road has grown (the tile it ran out at has arrived): hand its
+   * schedule the rest. `more` are further route steps, `stops` further calls,
+   * both continuing the arrays the trip was added with; `len` and `tEnd` are
+   * the new totals. A schedule that had already pulled up at its old end
+   * drives on from there.
+   */
+  extendFixed(key, more, stops, len, tEnd) {
+    const p = this._pool.get(key);
+    if (!p || !p.fixed || p.stolen || p.dead || !(len > p.routeEnd)) return false;
+    for (let i = 0; i < more.length; i++) p.route.push(more[i]);
+    for (let i = 0; i < stops.length; i++) p.stops.push(stops[i]);
+    p.routeM = p.routeEnd = len; p.tEnd = tEnd;
+    p.fixed.len = len; p.fixed.tEnd = tEnd;
+    p.ndone = 0;
+    return true;
+  }
+
+  /** A trip is over before its time (the shared clock was stepped): the next sweep retires it. */
+  dropFixed(key) {
+    const p = this._pool.get(key);
+    if (p?.fixed) p.tEnd = -Infinity;
+  }
+
+  /** When a trip is due at each of its stops: the schedule run dry, no car. */
+  fixedTimes(spec) {
+    const p = this._fixed(spec);
+    this._nomTo(p, spec.tEnd + 600);
+    return p.stopT;
+  }
+
+  /** Metres a schedule's car is behind where the schedule says it should be. */
+  lagOf(p, wt) {
+    this._nomTo(p, wt);
+    return this._nomArc(p, wt) - p.sR;
+  }
+
+  /**
+   * A bus standing at a stop: which stop (an entry of its spec.stops) and how
+   * many more seconds the doors stay open, or null if it is not at one.
+   */
+  standingAt(p, wt) {
+    if (!p.stops || p.atStop < 0 || !p.car || p.car.speed > 0.3) return null;
+    const mine = BUS_STAND - p.standT;
+    const tt = (p.nstop - 1 === p.atStop && p.nwait > 0) ? p.nt + p.nwait - wt : 0;
+    _stand.stop = p.stops[p.atStop]; _stand.left = mine > tt ? mine : tt;
+    return _stand;
+  }
+
   // Mint one car's entire existence from hash32(cell, slot, generation).
   // `police` is the ONE thing about a schedule that is not derived from that
   // hash, because it is not a property of the slot but of WHICH slot: the cell
@@ -2285,6 +2915,7 @@ export class Traffic {
   _birth(sk, c, k, ss, gen, t0, wt, police = 0) {
     const arr = this._cellEdges(c);
     if (!arr.length) return;
+    if (this._culDirty) this._culUpdate();
     const seed = hash32(ss, gen, 0x1d3);
     let e = null;
     const i0 = (rnd01(hash32(seed, 1)) * arr.length) | 0;
@@ -2299,7 +2930,7 @@ export class Traffic {
       const cand = arr[(i0 + n) % arr.length];
       // never mint a car on the last edge of a cul-de-sac: it would be born
       // driving into the wall and spend its whole life parked at the end
-      if (cand.len < 14 || cand.a.deg <= 1 || cand.b.deg <= 1) continue;
+      if (cand.len < 14 || cand.a.deg <= 1 || cand.b.deg <= 1 || cand.cul) continue;
       if (police && !MAJOR_RE.test(cand.road.t)) continue;
       e = cand; break;
     }
@@ -2307,22 +2938,9 @@ export class Traffic {
     const sIn = 2 + rnd01(hash32(seed, 2)) * (e.len - 4);
     const vK = police ? PATROL_VK_MIN + rnd01(hash32(seed, 4)) * PATROL_VK_VAR
       : VK_MIN + rnd01(hash32(seed, 4)) * VK_VAR;
-    const p = {
-      key: sk, ci: c.ci, cj: c.cj, k, cell: c, seed, gen, t0, vK, police,
-      routeM: ROUTE_MIN + rnd01(hash32(seed, 3)) * ROUTE_VAR,
-      route: [{ e, base: -sIn, turnIn: 0, turnOut: 0 }],
-      routeEnd: 0,
-      // schedule state
-      ni: 0, na: sIn, nt: t0, nseg: 0, nv: 0, nvOut: 0, nwait: 0, nsig: 0,
-      vMax: e.speed * vK, ndone: 0,
-      // rendered state (only meaningful while attached)
-      car: null, sR: 0, ri: 0, edge: e, s: sIn, seg: 0, next: null, laneOff: 0,
-      sx: 0, sz: 0, sy: 0, sh: 0, px: 0, pz: 0, py: 0, ph: 0,
-      heldT: 0, sigQ: false, graceT: 0, stolen: 0, dead: 0,
-      // v9: local-only. A ghost has left the shared population and drives on
-      // by itself until the player stops looking at it.
-      ghost: 0, ghostT: 0,
-    };
+    const p = this._sched(sk, seed, t0, vK, e, sIn);
+    p.ci = c.ci; p.cj = c.cj; p.k = k; p.cell = c; p.gen = gen; p.police = police;
+    p.routeM = ROUTE_MIN + rnd01(hash32(seed, 3)) * ROUTE_VAR;
     p.routeEnd = p.routeM;
     p.nsig = (e.sig && e.sigStop <= sIn) ? 1 : 0;
     this._pool.set(sk, p);
@@ -2346,9 +2964,12 @@ export class Traffic {
       // (or one claimed over the wire before we ever built it) sits here as a
       // tombstone for exactly that long, so the schedule cannot quietly refill
       // the car out from under the player driving it.
+      // (a timetabled trip, p.fixed, has no cell and no generation: it has an
+      // end, and until then it is owed)
+      if (p.fixed && wt > p.tEnd) { this._retire(p); continue; }
       const ss = hash32(WORLD_SEED, p.ci, p.cj, p.k);
       const gen = Math.floor((wt + rnd01(hash32(ss, 7)) * TRIP_T) / TRIP_T);
-      if (gen !== p.gen) { this._retire(p); continue; }
+      if (!p.fixed && gen !== p.gen) { this._retire(p); continue; }
       if (p.stolen) continue;                    // the player drives it now; not ours
       const cd = dist((p.ci + 0.5) * CELL - px, (p.cj + 0.5) * CELL - pz) - CELL_HALF_DIAG;
       // THE REAP HAS TO AGREE WITH THE MINT, and for the patrol slot the
@@ -2365,10 +2986,10 @@ export class Traffic {
       // still qualifies. The generation check above has already re-tested the
       // coin, so all that is left here is eligibility, which is exactly what
       // can change under a settings change or a late tile.
-      const owed = p.police ? this._patrolOwed(p.cell) : p.k < this._slots(p.cell);
-      if (cd > phR || !owed) { this._retire(p); continue; }
+      const owed = p.fixed || (p.police ? this._patrolOwed(p.cell) : p.k < this._slots(p.cell));
+      if (!owed || (cd > phR && !p.fixed)) { this._retire(p); continue; }
       if (p.car) {
-        if (p.dead) { this._retire(p); continue; }
+        if (p.dead) { const sk = p.key; this._retire(p); this._refill(sk, p, wt); continue; }
         const dx = p.sx - px, dz = p.sz - pz;
         // detaching is not destroying — the schedule keeps running and the car
         // can come back — but it is still a mesh vanishing, so it waits for
@@ -2400,6 +3021,28 @@ export class Traffic {
       if (d2 >= inR2) continue;
       if (this._readableForAttach(pose.x, pose.z)) continue;
       if (d2 > ringR2 && !this._inCone(pose.x, pose.z)) continue;
+      // …and not on top of somebody crossing the road. A mesh arrives at the
+      // schedule's speed, and a car that takes one 3 m short of a zebra with a
+      // person on it has no stopping distance left to use. It asks again in a
+      // quarter of a second, by which time it is past them.
+      if (this._walkerWithin(pose.x, pose.z, 32)) continue;
+      // …nor a few car lengths from a standing hull (the player, their car, a
+      // car left in the lane), for the same reason: a van that took its mesh
+      // 12 m behind a taxi waiting at the kerb drove into it at 20 km/h.
+      // Only a hull AHEAD on this road counts (within the lane offset plus the
+      // follow corridor of the centreline): a car park beside the street is
+      // full of hulls and is nobody's obstacle.
+      let hull = false;
+      for (let i = 0; i < this._obst.length && !hull; i += 3) {
+        const rx = this._obst[i] - pose.x, rz = this._obst[i + 1] - pose.z;
+        const fwd = rx * pose.dx + rz * pose.dz;
+        hull = fwd > -4 && fwd < 32 && Math.abs(pose.dx * rz - pose.dz * rx) < TRAFFIC.laneOffsetMax + LAT_GATE + 0.4;
+      }
+      if (hull) continue;
+      // …and not while this slot's last car is still on the road as a ghost
+      // that a blockage made (see the lag clamp in _drive)
+      const g = this._standIn.get(p.key);
+      if (g) { if (g.car && this._ghosts.has(g)) continue; this._standIn.delete(p.key); }
       this._attach(p, wt, pose);
     }
   }
@@ -2413,6 +3056,21 @@ export class Traffic {
   _retire(p) {
     if (p.car && !p.stolen && this._heldVisible(p)) { this._toGhost(p); return; }
     this._reap(p);
+  }
+
+  // A car whose trip is over has just left the pool (a ghost driving on, or
+  // reaped). Its slot is not empty in the shared world: until the generation
+  // rolls over it holds that finished trip, standing at its end. The cell scan
+  // would put that record back within a quarter of a second, and in between
+  // two clients disagreed about the slot; so it goes back now.
+  _refill(sk, p, wt) {
+    if (p.fixed || !p.cell || this._pool.has(sk)) return;
+    const ss = hash32(WORLD_SEED, p.ci, p.cj, p.k);
+    const ph = rnd01(hash32(ss, 7)) * TRIP_T;
+    const gen = Math.floor((wt + ph) / TRIP_T);
+    if (gen !== p.gen) return;                       // rolled over: the scan mints the next car
+    if (!(p.police ? this._patrolOwed(p.cell) : p.k < this._slots(p.cell))) return;
+    this._birth(sk, p.cell, p.k, ss, gen, gen * TRIP_T - ph, wt, p.police);
   }
 
   _toGhost(p) {
@@ -2463,7 +3121,13 @@ export class Traffic {
     // REQUEST to the owner of vehicles.js: `pickCarColor(kind, r)` taking an
     // optional 0..1, and this hack disappears.
     let kind = null, color = 0;
-    if (!p.police) {
+    if (p.fixed) {
+      // (a trolleybus is a body vehicles.js can build but nobody can buy, so it
+      // is not in CAR_KINDS: normalizeKind knows every kind there is)
+      kind = VEH.CAR_KINDS.includes(p.fixed.kind) ? p.fixed.kind
+        : (VEH.normalizeKind?.(p.fixed.kind) ?? VEH.CAR_KINDS[0]);
+      color = p.fixed.color;
+    } else if (!p.police) {
       const bigOk = e0.speed >= FAST_EDGE && rnd01(hash32(p.seed, 5)) < BIG_CHANCE;
       const pool = bigOk ? BIG : COMMON;
       kind = pool[(rnd01(hash32(p.seed, 6)) * pool.length) | 0];
@@ -2498,6 +3162,11 @@ export class Traffic {
     p.sy = p.py = bridgeY + LAYER_Y.road;
     const car = p.police ? this._buildPatrol(p.sx, p.sz, heading)
       : this.vehicles.add(kind, p.sx, p.sz, heading, color);
+    if (p.stops) {
+      // the next stop this CAR has yet to call at, from where it took its mesh
+      p.stand = 0; p.standT = 0; p.atStop = -1;
+      while (p.stand < p.stops.length && p.stops[p.stand].arc < p.sR - 1) p.stand++;
+    }
     car.vK = p.vK;
     car.speed = this._nomV(p);
     car.ai = p;
@@ -2689,7 +3358,7 @@ export class Traffic {
         // cheating rather than as scenery thinning out. There are at most a
         // handful of patrols inside the ring (see PATROL_P), so exempting
         // them costs the valve a rounding error of its budget.
-        if (p.police || this._heldVisible(p)) continue;
+        if (p.police || p.fixed || this._heldVisible(p)) continue;
         const d = (car.x - px) ** 2 + (car.z - pz) ** 2;
         if (d > wd) { wd = d; worst = car; }
       }
@@ -2745,6 +3414,7 @@ export class Traffic {
 
   _step(dt, T) {
     this._hornPool = Math.min(HONK_POOL, this._hornPool + HONK_RATE * dt);
+    this._ctlBudget = CTL_CHUNKS_PER_STEP;
     for (const car of this.cars) {
       const p = car.ai;
       if (!p) continue;
@@ -2872,9 +3542,23 @@ export class Traffic {
     // that writes routeEnd. Asking for a step number instead would push one
     // leg and leave routeEnd stale.
     this._routeEnsure(p, Number.MAX_SAFE_INTEGER);
+    if (p.routeEnd <= was + 0.5) {
+      // A dead end. The ghost used to coast to a stop there and stand until
+      // GHOST_MAX collected it, two minutes later, with everything that
+      // followed it in queued behind. It turns round and drives back out
+      // instead (the shared schedule still never does: a trip that ends in a
+      // cul-de-sac is over, and this car is nobody's but this screen's).
+      const last = p.route[p.route.length - 1];
+      const tw = last.e.twin;
+      if (tw && last.base + last.e.len <= was + 0.5) {
+        last.turnOut = Math.PI;
+        p.route.push({ e: tw, base: last.base + last.e.len, turnIn: Math.PI, turnOut: 0 });
+        this._routeEnsure(p, Number.MAX_SAFE_INTEGER);
+      }
+    }
     if (p.routeEnd > was + 0.5) { p.ndone = 0; p.nwait = 0; }
-    // a dead end cannot be extended: routeEnd stays put, the ghost coasts to a
-    // stop there, and GHOST_MAX eventually collects it
+    // (a one-way trap has no way back: routeEnd stays put, the ghost stands
+    // there, and GHOST_MAX collects it)
   }
 
   // Place the rendered car at route arc `arc`: find the step it falls in and
@@ -2906,7 +3590,35 @@ export class Traffic {
     // step every other car takes — it is simply not SHARED, which is exactly
     // what a ghost is.
     let Snom = Infinity, lag = 0;
+    // THE END OF A TRIP IS NOT A STOP. The schedule runs out wherever its
+    // hashed length happens to end, which is the middle of somebody's lane, and
+    // the car used to pull up there, stand out RETIRE_GRACE with the street
+    // queued behind it, and only then be handed to the ghost code to drive off.
+    // A car somebody can see is let off the schedule as soon as the schedule is
+    // done with it: it leaves the shared population (exactly as _retire would
+    // do a few seconds later) and drives on without ever standing. One nobody
+    // can see finishes as before and is reaped where it stops.
+    // The slot itself is refilled in the same instant (_refill) with the
+    // finished schedule it would hold anyway, so WHICH cars the shared world
+    // contains stays a function of the clock: a client that is looking and one
+    // that is not hold the same keys at every moment.
+    if (!p.ghost && !p.fixed && p.ndone && p.sR > p.routeEnd - END_ROLL && this._heldVisible(p)) {
+      const sk = p.key;
+      this._toGhost(p);
+      this._refill(sk, p, T);
+    }
     if (p.ghost) {
+      // A ghost's road has to be LAID. The itinerary is lazy and it is the
+      // schedule that lays it (_nomTo, a step ahead of the nominal car); a car
+      // that became a ghost behind a blockage keeps the legs its schedule had
+      // reached and nobody adds another, while routeEnd still says the trip is
+      // 800 m long. It drove to the end of the last leg and stood there, in the
+      // lane, until GHOST_MAX took it: most of the old town's standing traffic
+      // was queued behind one of these.
+      if (p.ri + 3 > p.route.length) {
+        const last = p.route[p.route.length - 1];
+        if (last.base + last.e.len < p.routeEnd - 0.5) this._routeEnsure(p, p.ri + 3);
+      }
       if (p.sR > p.routeEnd - 60) this._ghostExtend(p);
       Snom = p.routeEnd;
     } else {
@@ -2988,6 +3700,7 @@ export class Traffic {
     // frame happened to land.
     const fx = -Math.sin(p.sh), fz = -Math.cos(p.sh);
     let hard = false, held = false, leader = null, leadD = 1e9;
+    let squeeze = 0, crossHeld = false;
     // …and whether a PHYSICAL hull is in the way, which is a different thing
     // from being held by flow: flow resolves itself, a parked car does not.
     let blocked = false;
@@ -3001,10 +3714,27 @@ export class Traffic {
       if (Math.abs(lat) > LAT_GATE || Math.abs(angWrap(o.sh - p.sh)) > HEAD_GATE) {
         // Not a leader — but possibly a collision. Only pairs the follow model
         // has ALREADY discarded reach here, so the two rules never fight.
+        // Somebody waiting at their give-way line is not a collision course,
+        // however their bonnet is pointed: the road with priority drives on.
+        if (o.ctlHold && !p.ctlHold) continue;
         const d2 = rx * rx + rz * rz;
         const reach = CROSS_R0 + Math.max(car.speed, other.speed) * CROSS_RV;
+        const ofx = -Math.sin(o.sh), ofz = -Math.cos(o.sh);
+        if (fx * ofx + fz * ofz < ONCOMING_COS) {
+          // the other lane of this street: make room if there is none, no more
+          if (fwd < SQUEEZE_REACH) {
+            const need = ((car.wid ?? 1.8) + (other.wid ?? 1.8)) / 2 + SQUEEZE_GAP - Math.abs(lat);
+            if (need > 0.1) {
+              if (need / 2 > squeeze) squeeze = need / 2 > SQUEEZE_MAX ? SQUEEZE_MAX : need / 2;
+              if (tgt > SQUEEZE_V) tgt = SQUEEZE_V;
+            }
+          }
+          continue;
+        }
+        // (somebody standing still is waited for a moment, not for ever: the
+        // car that has the right of way may itself be stuck behind something)
+        if (other.speed < 0.5 && p.crsT >= CROSS_PATIENCE) continue;
         if (d2 < reach * reach) {
-          const ofx = -Math.sin(o.sh), ofz = -Math.cos(o.sh);
           const vs = car.speed, vo = other.speed;
           const px = p.sx + fx * vs * CROSS_T, pz = p.sz + fz * vs * CROSS_T;
           const qx = o.sx + ofx * vo * CROSS_T, qz = o.sz + ofz * vo * CROSS_T;
@@ -3017,8 +3747,12 @@ export class Traffic {
             // other one is going to. Ties yield on both sides: two cars both
             // stopping is a moment of hesitation, two cars both continuing is
             // the bug.
+            // (the tie itself is broken by the drivers' own hashes, one way on
+            // every screen: both standing was no moment of hesitation when
+            // both were already at rest, it was for good)
             const olat = ofx * -rz - ofz * -rx;
-            if (lat > 0 || olat <= 0) { tgt = 0; hard = true; held = true; }
+            const mine = lat > 0, theirs = olat > 0;
+            if (mine !== theirs ? mine : (p.seed >>> 0) < (o.seed >>> 0)) { tgt = 0; hard = true; held = true; crossHeld = true; }
           }
         }
         continue;
@@ -3029,16 +3763,209 @@ export class Traffic {
       else { const fv = (gap - TRAFFIC.stopGap) / 2;         // gap/2s rule
              if (fv < tgt) { tgt = fv; held = true; } }
     }
+    // A STANDING HULL IS SEEN FROM AS FAR AS IT TAKES TO STOP FOR IT. The
+    // leader rule's 22 m is enough behind something that is moving; behind a
+    // car standing at the kerb (the player at a taxi pick-up) a driver doing
+    // 60 km/h on a main road had 15 m to lose 17 m/s in and arrived still
+    // doing 20 km/h. The gap/2 s rule wants two seconds of travel, so that is
+    // how far ahead a hull is looked for. And the corridor is as wide as the
+    // vehicle: a bus is 35 cm wider each side than the car LAT_GATE was cut
+    // for, and scraped along what a car passed with a hand to spare.
+    const obstReach = Math.max(TRAFFIC.lookAhead, 2 * car.speed + 10);
+    const obstGate = LAT_GATE + Math.max(0, ((car.wid ?? 1.8) - 1.8) / 2);
+    const obstLong = Math.max(0, ((car.len ?? 4.6) - 4.6) / 2);
     for (let i = 0; i < this._obst.length; i += 3) {
       const rx = this._obst[i] - p.sx, rz = this._obst[i + 1] - p.sz;
       const fwd = rx * fx + rz * fz;
-      if (fwd <= 0 || fwd > TRAFFIC.lookAhead) continue;
-      if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
-      const gap = fwd - this._obst[i + 2];
+      if (fwd <= 0 || fwd > obstReach) continue;
+      if (Math.abs(fx * rz - fz * rx) > obstGate) continue;
+      // (obstLong: the 3.9 m is two car halves; a bus has three metres more nose)
+      const gap = fwd - this._obst[i + 2] - obstLong;
       if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; blocked = true; }
       else { const fv = (gap - TRAFFIC.stopGap) / 2;
-             if (fv < tgt) { tgt = fv; held = true; } }
+             // `blocked` here too: the gap/2 s rule closes on a standing hull
+             // for ever and never quite fills the stop gap, so a driver
+             // creeping up behind the player's parked car was "held by flow",
+             // fell LAG_MAX behind, and was hauled through it at speed.
+             if (fv < tgt) { tgt = fv; held = true; if (fv < BLOCK_V) blocked = true; } }
     }
+
+    if (crossHeld && car.speed < 0.5) p.crsT += dt;
+    else if (p.crsT > 0) p.crsT = Math.max(0, p.crsT - dt * 2);
+
+    // ---- people. A walker on the carriageway ahead, or stepping onto it, is
+    // stopped for; one waiting at a zebra is stopped for by a driver who can do
+    // it without drama (js/roadrules.js yieldSpeed). The stop is short of the
+    // CROSSING, not of the person, so the zebra stays clear. `walkers` holds
+    // one record per person at a kerb or on the road near the player, a
+    // handful at most, so this is a short loop per car.
+    const half = (car.len ?? 4.6) / 2;
+    let yielding = false, creeping = false;
+    const W = this.walkers;
+    if (W && W.length) {
+      const reach = Math.max(TRAFFIC.lookAhead, car.speed * car.speed / (2 * BRAKE) + 12);
+      const r2 = (reach + 12) * (reach + 12);
+      // (a latch, not `yieldT < yieldMax`: the timer starts to drain the frame
+      // the driver moves off, so the bare comparison made them patient again a
+      // frame later and they stood on the brakes; a truck took a minute to
+      // cover five metres that way, with the junction queued up behind it)
+      const patient = !p.yieldOut;
+      const hwCar = (car.wid ?? 1.8) / 2;
+      for (let i = 0; i < W.length; i++) {
+        const w = W[i];
+        const wx = w.x - p.sx, wz = w.z - p.sz;
+        if (wx * wx + wz * wz > r2) continue;
+        // Where is it ON MY ROUTE? Not "in front of my bonnet": a car coming
+        // round a corner has the zebra off to one side until the last metres,
+        // and a straight-ahead test let it arrive at speed.
+        const body = w.body === true;
+        const fwd = body ? this._pathTo(p, w.x, w.z, hwCar + 0.9, reach, p.laneOff)
+          : this._pathTo(p, w.cx, w.cz, w.hw + 1.0, reach);
+        const wf = wx * fx + wz * fz;
+        const inPath = wf > half - 0.2 && wf - half < 5 && Math.abs(fx * wz - fz * wx) < hwCar + 0.8;
+        // Somebody right beside the car, or under it: no faster than cannot
+        // hurt them, until the tail is past (a car pulling away off a zebra
+        // took whoever was walking along its flank with it).
+        // (a body is as long as it lies: the tail has to clear its far end,
+        // or the bumper threw it again as the car pulled away)
+        const beside = wf > -half - (body ? 1.6 : 0.5) && wf <= half && Math.abs(fx * wz - fz * wx) < hwCar + 0.9;
+        if (beside) { blocked = true; if (tgt > BODY_V) tgt = BODY_V; }
+        if (fwd < 0 && !inPath && !(body && beside)) continue;
+        // nose to the stopping point: short of the crossing, and of the person
+        const gap = (fwd < 0 ? wf - 1.0 : body ? fwd - 1.6 : Math.min(fwd - 2.2, inPath ? wf - 1.0 : 1e9)) - half;
+        if (!patient || w.stale === true) {
+          // Patience spent: what counts now is only whether somebody is right
+          // in front of the bonnet. This is the guard against standing for
+          // ever at a zebra that never empties (or behind somebody lying in
+          // the road: at walking pace a car rolls over them without a launch).
+          // A body that has lain there a while (`stale`) gets the same from
+          // every driver: slow right down and go past, no standing.
+          // (in front of the bonnet, or stepping in beside the front wing: a
+          // car edging forward clipped whoever arrived at its corner)
+          if (!body && wf > 0 && wf - half < 5 && Math.abs(fx * wz - fz * wx) < hwCar + 0.8) {
+            tgt = 0; hard = true; yielding = true; blocked = true;
+          } else {
+            // down to the crawl by the time the nose is a few metres off (a
+            // cap that only began at 8 m was met at 50 km/h and overshot).
+            // BODY_V among people on their feet too: it is under the speed at
+            // which a car can knock anybody down (pedestrians.js HIT_MIN_SPEED),
+            // and at CREEP_V the drivers who had run out of patience did.
+            const cv = BODY_V;
+            const ev = gap < 4 ? cv : Math.sqrt(cv * cv + 2 * BRAKE * (gap - 4));
+            if (gap < 8) creeping = true;
+            // (`blocked`: a crawl is a reason to be behind the schedule, and
+            // without it the lag clamp hauled the car over them at speed)
+            if (ev < tgt) { tgt = ev; blocked = true; }
+          }
+          continue;
+        }
+        if (gap <= 0) {
+          // Nose already on the crossing: clear it, unless they are in the way
+          // or about to be. A driver who stopped with the bonnet on the zebra
+          // does not pull away while somebody is still walking past its corner
+          // or along its front wing (anybody level with the back doors is
+          // walking round behind, and is no reason to wait).
+          const lat = Math.abs(fx * wz - fz * wx);
+          if (inPath || (wf > -0.5 && wf - half < 4 && lat < hwCar + 1.7)) {
+            tgt = 0; hard = true; yielding = true; blocked = true;
+          }
+          continue;
+        }
+        const yv = yieldSpeed(gap, car.speed, w.must || inPath, BRAKE, 4.5, BRAKE_HARD * 1.1);
+        if (yv < 0 || yv >= tgt) continue;
+        tgt = yv; yielding = true; blocked = true;
+        if (needsHardBrake(gap, car.speed, BRAKE_SOFT)) hard = true;
+      }
+    }
+    // Patience drains only once the driver is clear of whoever spent it, and
+    // comes back when it has drained to nothing.
+    if (yielding && car.speed < 1) {
+      p.yieldT += dt;
+      if (p.yieldT >= p.yieldMax) { p.yieldT = p.yieldMax; p.yieldOut = 1; }
+    } else if (p.yieldT > 0 && !creeping) p.yieldT = Math.max(0, p.yieldT - dt * 1.5);
+    if (p.yieldOut && p.yieldT <= 0) p.yieldOut = 0;
+
+    // ---- the junction ahead. Where streets.js found a give-way or a stop sign
+    // on this approach (the same classification the triangles and stop lines
+    // on the asphalt are drawn from), the driver obeys it: stand at a stop
+    // line, roll up to a give-way ready to stop, and pull out when no car with
+    // priority is within a few seconds of the junction. Traffic lights are not
+    // here: the schedule stops for those.
+    let ctlHold = 0;
+    const ctl = (dEnd < CTL_REACH && p.next) ? this._ctlOf(e) : CTL.NONE;
+    if (ctl) {
+      if (p.ctlE !== e) { p.ctlE = e; p.ctlT = 0; p.ctlStood = 0; }
+      const dLine = dEnd - e.ctlBack - half;                         // nose to the line
+      if (dLine > -1.5) {
+        let clear = true;
+        if (p.ctlT < p.ctlMax) {
+          const nx = e.b.x, nz = e.b.z;
+          const boxR = e.ctlBack + 3, gapT = ctl === CTL.STOP ? 3.6 : 4.2;
+          for (const other of this.cars) {
+            const o = other.ai;
+            if (!o || o === p || o.edge === e) continue;
+            const ox = nx - o.sx, oz = nz - o.sz;
+            const dn2 = ox * ox + oz * oz;
+            if (dn2 > 70 * 70) continue;
+            const dn = Math.sqrt(dn2);
+            const toward = dn > 0.5 ? (ox * -Math.sin(o.sh) + oz * -Math.cos(o.sh)) / dn : 1;
+            // (only a car whose own way leads through this junction: one on the
+            // next street over, pointing roughly here, held the line for nothing)
+            if (dn >= boxR && !this._routeMeets(o, e.b)) continue;
+            if (!mayEnter(dn, toward, other.speed, !!o.ctlHold, boxR, gapT)) { clear = false; break; }
+          }
+        }
+        // (past p.ctlMax the driver stops asking and noses out: the deadlock
+        // guard. The crossing rule above still keeps them out of a moving car.)
+        if (!clear || (ctl === CTL.STOP && !p.ctlStood)) {
+          const yv = dLine <= 0.4 ? 0 : Math.sqrt(2 * BRAKE * (dLine - 0.4));
+          if (yv < tgt) tgt = yv;
+          ctlHold = 1; blocked = true;
+          if (car.speed < 0.4 && dLine < 2.5) {
+            p.ctlT += dt;
+            if (p.ctlT >= STOP_STAND) p.ctlStood = 1;
+          }
+        } else if (ctl === CTL.GIVE) {
+          const yv = Math.sqrt(GIVE_V * GIVE_V + 2 * BRAKE * Math.max(0, dLine));
+          if (yv < tgt) tgt = yv;
+        } else if (p.ctlT >= p.ctlMax && tgt > CREEP_V && dLine > -1) tgt = CREEP_V;
+      }
+    }
+    p.ctlHold = ctlHold;
+
+    // ---- a bus calls at its stops IN PERSON. The schedule dwells there, but a
+    // bus running half a minute behind it used to arrive after the schedule
+    // had left and drive straight through, doors shut, past the people waiting.
+    // The car pulls up at each stop, and stands for as long as the timetable
+    // still has it there or BUS_STAND seconds, whichever is longer.
+    if (p.stops && p.stand < p.stops.length) {
+      const d = p.stops[p.stand].arc - p.sR;
+      if (d < look + 8) {
+        if (d > 0.7) {
+          const yv = Math.sqrt(2 * BRAKE * (d - 0.5));
+          if (yv < tgt) tgt = yv;
+          p.atStop = -1;
+        // (d > -3: a stop the LAG_MAX clamp below has carried the bus past is
+        // given up. Without that the bus went on "standing" at it for good:
+        // tgt was 0 on every frame while the clamp dragged it along 140 m
+        // behind its schedule, and at the schedule's next halt it stopped in
+        // mid-road, a hundred metres beyond the stop, and reported its doors
+        // open there.)
+        } else if (d > -3 && (p.standT < BUS_STAND || (p.nstop - 1 === p.stand && p.nwait > 0))) {
+          tgt = 0;
+          if (car.speed < 0.3) { p.standT += dt; p.atStop = p.stand; }
+        } else { p.stand++; p.standT = 0; p.atStop = -1; }
+      }
+    }
+
+    // A QUEUE INHERITS ITS REASON. The car behind one that is standing for a
+    // walker, at a give-way line or against a parked hull is held by the same
+    // thing, one car removed. Without this the leader waited correctly and the
+    // follower, merely "held by flow", was hauled forward by the LAG_MAX clamp
+    // straight through the leader and through whoever the leader was waiting
+    // for (measured: the fastest pedestrian hits left in the city were these).
+    if (leader && leader.blk && leadD - 3.9 < TRAFFIC.stopGap + 6) blocked = true;
+    p.blk = blocked;
 
     // ---- the horn. A driver pinned under 30 % of what they WANT to do, for
     // long enough that it's clearly not just flow (2.5 s), by whoever is ahead
@@ -3053,7 +3980,8 @@ export class Traffic {
     // Patience propagates down a queue: the first car at a red is sigHeld, and
     // everyone pinned behind a car that is itself waiting for a reason inherits
     // that reason (_sigQ, one frame late — good enough).
-    p.sigQ = sigHeld || (leader ? !!leader.sigQ : false);
+    // …and so does standing for somebody on a zebra, or at a give-way line.
+    p.sigQ = sigHeld || yielding || ctlHold === 1 || (leader ? !!leader.sigQ : false);
     if (held && !p.sigQ && car.speed < desire * HONK_FRAC) p.heldT += dt;
     else p.heldT = 0;
     if (p.heldT > HONK_HELD && car._hornCd <= 0 && this._hornPool >= 1 &&
@@ -3089,7 +4017,13 @@ export class Traffic {
       // driver, and the sweeper retires it once nobody is looking. Desync is
       // the honest answer here — the obstruction is local to this client.
       if (blocked) {
-        if (!p.ghost) { p.ghost = 1; p.ghostT = 0; this._ghosts.add(p); }
+        // (through _toGhost, which also hands the slot back: flagged a ghost
+        // but left in the pool, it was a ghost holding a shared slot. The slot's
+        // schedule is minted afresh by the next scan and runs on, shared as
+        // ever; it takes no mesh while this car is still standing here, or
+        // every queue would put a second copy of each of its cars on the road
+        // a block further on.)
+        if (!p.ghost) { this._standIn.set(p.key, p); this._toGhost(p); }
       } else {
         arc = Snom - LAG_MAX;
         car.speed = Math.max(car.speed, (arc - p.sR) / dt);
@@ -3123,8 +4057,36 @@ export class Traffic {
     // the lane offset rides on the SMOOTHED heading, so through a corner the
     // car sweeps across its lane instead of teleporting at each vertex; the
     // magnitude eases too because road width changes between edges
-    const offTgt = Math.min(TRAFFIC.laneOffsetK * re.road.w, TRAFFIC.laneOffsetMax);
-    p.laneOff += (offTgt - p.laneOff) * Math.min(1, 3 * dt);
+    // …and never so far that the body hangs over the kerb, with half a metre
+    // to spare: on a 3.6 m service way a bus offset like a car swept a metre of
+    // pavement, and a car hugging the edge round a bend clipped whoever was
+    // standing at the kerb waiting to cross.
+    let offTgt = Math.max(0, Math.min(TRAFFIC.laneOffsetK * re.road.w, TRAFFIC.laneOffsetMax,
+      re.road.w / 2 - (car.wid ?? 1.8) / 2 - 0.5));
+    // Cars parked along this kerb (js/kerbparking.js): drive round them, as
+    // one does, a door's width off their flanks. Only the direction whose
+    // right-hand kerb they stand at moves over; the other lane is as it was.
+    if (this.kerbOf && this.kerbOf(re.road) === -re.offSign)
+      offTgt = Math.max(0, Math.min(offTgt, re.road.w / 2 - this.kerbIntrudes - 0.35 - (car.wid ?? 1.8) / 2));
+    // A bus about to call at a stop pulls into its lay-by where the street has
+    // one (js/streets.js bayAt is the very width the kerb steps out by), and
+    // back out as the taper closes. Where there is no bay it stops in the lane,
+    // as buses do.
+    let bay = 0;
+    if (p.stops) {
+      const st = p.stops[Math.min(p.nstop, p.stops.length - 1)], sp = p.nstop > 0 ? p.stops[p.nstop - 1] : null;
+      if (Math.abs(st.arc - p.sR) < 19 || (sp && Math.abs(sp.arc - p.sR) < 19))
+        bay = bayAt(re.road, re.off0 + re.offSign * p.s, -re.offSign) * 0.9;
+    }
+    // (squeeze: over towards the kerb, into the half metre the usual clamp
+    // keeps free, to let an oncoming car by on a street too narrow for two.
+    // Never over the kerb itself: the pavement is where people walk, and a
+    // wing a hand's width outside the asphalt was a wing in somebody's back.)
+    if (squeeze > 0) {
+      const room = re.road.w / 2 - (car.wid ?? 1.8) / 2 - 0.12 - offTgt;
+      if (squeeze > room) squeeze = room > 0 ? room : 0;
+    }
+    p.laneOff += (offTgt + bay + squeeze - p.laneOff) * Math.min(1, 3 * dt);
     const hx = -Math.sin(p.sh), hz = -Math.cos(p.sh);
     p.sx = pose.x - hz * p.laneOff;               // right of heading = (-hz, hx)
     p.sz = pose.z + hx * p.laneOff;
@@ -3139,6 +4101,8 @@ export class Traffic {
 
   /** Ground under a point. 0 for the bare {roads:[…]} fixtures the tests use. */
   _groundAt(x, z) { return this.world?.terrain?.heightAt(x, z) ?? 0; }
+  /** What a mast stands on: the pavement where the street has one, else the ground. */
+  _kerbAt(x, z) { return this.world?.walkY?.(x, z) ?? this._groundAt(x, z); }
 
   // Poles freeze their matrix (hundreds of static meshes render for free that
   // way), so re-seating one means writing position.y AND updating the matrix
@@ -3148,7 +4112,7 @@ export class Traffic {
       for (const s of jn.sigs) {
         const m = s.mesh;
         if (!m) continue;
-        const y = this._groundAt(m.position.x, m.position.z);
+        const y = this._kerbAt(m.position.x, m.position.z);
         if (Math.abs(y - m.position.y) > 0.05) { m.position.y = y; m.updateMatrix(); }
       }
     }

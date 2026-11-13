@@ -11,15 +11,31 @@
 //     how much open SKY it crosses, giving shafts through gaps in the canopy
 //   * bloom     — threshold at 1.0 ("brighter than white") + separable blur
 //
-// The composite works entirely in LINEAR light and encodes to sRGB exactly
-// once at the end. That last step is easy to lose: a raw ShaderMaterial gets
-// no automatic output encode, and writing linear straight to the canvas
-// darkened every frame ~60% the moment the post path switched on. With it
-// right, pixels that no effect touches come through bit-identical to a direct
-// render — verified by a direct-vs-post pixel diff.
-// (SSAO's screen-space term is still here but unused; canopy AO replaced it.)
+// The composite works entirely in LINEAR light, then applies the tone curve and
+// encodes to sRGB, both exactly once, at the very end. Both steps are easy to
+// lose, because a raw ShaderMaterial gets neither for free:
+//   * without the sRGB encode the whole frame came out about 60 % darker the
+//     moment the post path switched on;
+//   * without the TONE CURVE (the state of things until now) the post path
+//     clipped at 1.0 where the direct path rolled off, so the default presets
+//     (medium and high, post on) and the low preset (post off) were two
+//     different pictures of the same scene. three only tone-maps a material
+//     when it draws to the canvas; into a render target it never does. So the
+//     curve three uses (ACES filmic, same matrices, same exposure, read from
+//     the renderer) is repeated here, on the finished linear frame.
+// Bloom still thresholds on linear light BEFORE the curve: "brighter than
+// white" has to mean the scene's own values, not what is left after roll-off.
+// (At night that is two and a half times screen white, so only real sources
+// bloom: lamp heads and headlamps are kept over it by lightpools.js
+// nightLevels, lit windows and signs are deliberately under it and keep their
+// colour, and so do name tags, which are plain white, and speech bubbles,
+// which js/chatbubbles.js dims to the scene after dark.)
+// (The screen-space AO term below is the live one. The canopy shade path is
+// plumbed through but main.js passes canopy: null.)
 
 import * as THREE from 'three';
+import { AIR_CLEAR_GLSL, airFogUniforms, lookGLSL } from './heightfog.js';
+import { LAMP_GLSL } from './lampmap.js';
 
 const QUAD_VERT = /* glsl */`
   varying vec2 vUv;
@@ -181,21 +197,30 @@ const COMPOSITE_FRAG = /* glsl */`
   uniform vec3  uFlareCol;
   uniform bool useAO;
   uniform bool useCanopy;
+  uniform bool useLamp;           // street light from the lamp map (lampmap.js)
+  uniform vec3 uCamPos;
   uniform bool useBloom;
   uniform bool useRays;
   uniform bool useFXAA;
+  uniform float uExposure;        // renderer.toneMappingExposure
+  uniform vec3  uGradeLift;       // colour pushed into the shadows
+  uniform vec3  uGradeGain;       // colour multiplied into the highlights
+  uniform float uVignette;        // 0 = none
   varying vec2 vUv;
   const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
   // canopy shade: reconstruct the pixel's WORLD position from depth, look up
   // the crown-density map there, and darken only what sits UNDER the crowns
   // (the meta map carries ground + canopy-top heights, so sunlit canopy tops
   // and anything above the foliage stay bright)
-  float canopyShade() {
-    float d = texture2D(tDepth, vUv).x;
-    if (d >= 0.9999) return 1.0;                       // sky
+  vec3 worldAt(float d) {
     vec4 ndc = vec4(vUv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
     vec4 v = uInvProj * ndc;
-    vec3 world = (uCamWorld * vec4(v.xyz / v.w, 1.0)).xyz;
+    return (uCamWorld * vec4(v.xyz / v.w, 1.0)).xyz;
+  }
+  ${AIR_CLEAR_GLSL}
+  ${LAMP_GLSL}
+  float canopyShade(float d, vec3 world) {
+    if (d >= 0.9999) return 1.0;                       // sky
     vec2 uv2 = (world.xz - uCanopyCenter) * uCanopyInvSize + 0.5;
     if (uv2.x <= 0.0 || uv2.x >= 1.0 || uv2.y <= 0.0 || uv2.y >= 1.0) return 1.0;
     float dens = 1.0 - texture2D(tCanopy, uv2).r;      // 0 open … →1 thick woods
@@ -214,6 +239,32 @@ const COMPOSITE_FRAG = /* glsl */`
     // visibly darker from above (a lone tree's crown barely registers).
     float fade = mix(1.0, 0.35, smoothstep(topH * 0.5, topH * 0.95, world.y - groundH));
     return 1.0 - min(dens * fade * uCanopyStrength, 0.75);
+  }
+  // three's ACESFilmicToneMapping, verbatim (libs/three.module.js,
+  // tonemapping_pars_fragment), so this path and the direct path agree to the
+  // last bit about what a given linear value looks like. Own names: three
+  // prepends its originals to this very shader whenever it draws to the canvas.
+  // Both end with the same look (heightfog.js lookGLSL): open toe, saturation.
+  ${lookGLSL('atcLookPost')}
+  vec3 atcRRTAndODTFit(vec3 v) {
+    vec3 a = v * (v + 0.0245786) - 0.000090537;
+    vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+    return a / b;
+  }
+  vec3 aces(vec3 color) {
+    const mat3 ACESInputMat = mat3(
+      vec3(0.59719, 0.07600, 0.02840),
+      vec3(0.35458, 0.90834, 0.13383),
+      vec3(0.04823, 0.01566, 0.83777));
+    const mat3 ACESOutputMat = mat3(
+      vec3( 1.60475, -0.10208, -0.00327),
+      vec3(-0.53108,  1.10813, -0.07276),
+      vec3(-0.07367, -0.00605,  1.07602));
+    color *= uExposure / 0.6;
+    color = ACESInputMat * color;
+    color = atcRRTAndODTFit(color);
+    color = ACESOutputMat * color;
+    return atcLookPost(clamp(color, 0.0, 1.0));
   }
   vec3 s2l(vec3 c){ return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
   vec3 l2s(vec3 c){ c = max(c, 0.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
@@ -277,22 +328,35 @@ const COMPOSITE_FRAG = /* glsl */`
       }
       c = acc / 7.0;
     }
+    // one depth read and one world position for everything below that asks
+    // where a pixel IS (tree shade, street light)
+    float sceneD = 1.0;
+    vec3 world = vec3(0.0);
+    if (useCanopy || useLamp) { sceneD = texture2D(tDepth, vUv).x; world = worldAt(sceneD); }
+    vec3 wdx = dFdx(world), wdy = dFdy(world);
+    // Street light is worked out from the frame BEFORE any screen-space shade
+    // (the shade under a crown is the sun's, and a lamp stands under the crown)
+    // and added after it.
+    vec3 lamp = vec3(0.0);
+    if (useLamp && sceneD < 0.9999) lamp = lampLight(c, world, wdx, wdy, world - uCamPos, uCamPos.y);
     if (useAO || useCanopy) {
-      float occl = 1.0;
+      float occl = 1.0, ao = 1.0;
       if (useAO) {
-        float ao = texture2D(tAO, vUv).r;          // 1 = open (guard pins it), <1 = occluded
+        ao = texture2D(tAO, vUv).r;                // 1 = open (guard pins it), <1 = occluded
         ao = mix(1.0, ao, aoStrength);             // scale the occlusion amount
         ao = max(ao, aoFloor);                     // deepest allowed darkening
         occl = ao;
       }
       // the canopy term is where the visible "AO" now lives: shade pools
       // under tree crowns and deepens where many crowns overlap
-      if (useCanopy) occl *= canopyShade();
+      if (useCanopy) occl *= canopyShade(sceneD, world);
       // spare near-white highlights so speculars don't get gouged
       float hl = smoothstep(0.9, 1.0, dot(c, LUMA));
       float f = mix(occl, 1.0, hl);
       c *= f;                                       // occlusion is a LINEAR-light multiply
+      lamp *= ao;                                   // a crease is a crease under a lamp too
     }
+    c += lamp;
     // shafts land BEFORE bloom so the brightest ones bloom too (they were
     // additively lit by the sun, so they take the sun's current colour —
     // white at noon, deep gold at sunset)
@@ -326,6 +390,22 @@ const COMPOSITE_FRAG = /* glsl */`
       // loses the aperture anyway
       float edge = 1.0 - smoothstep(0.55, 1.15, length(vec2((uFlareUv.x - 0.5) * aspect, uFlareUv.y - 0.5)));
       c += uFlareCol * ((halo + ghosts) * uFlare * edge);
+    }
+    // ---- the look: one tone curve, then a light grade --------------------
+    c = aces(max(c, 0.0));
+    // A split tone, in display-linear light after the curve so it cannot push
+    // anything back over white: shadows lean one way, highlights the other.
+    // main.js feeds the two colours from the sun's height (cool shade and warm
+    // light through the golden hour, a blue cast at night, neutral at noon).
+    // Both are (0,0,0) and (1,1,1) when grading is off, and then this is exact
+    // identity.
+    float gl = dot(c, LUMA);
+    c = c * mix(vec3(1.0), uGradeGain, smoothstep(0.0, 0.85, gl))
+      + uGradeLift * (1.0 - gl) * (1.0 - gl);
+    // a vignette you should not be able to point at: 8 % in the far corners
+    if (uVignette > 0.0) {
+      vec2 vq = vUv - 0.5;
+      c *= 1.0 - uVignette * smoothstep(0.30, 0.80, dot(vq, vq) * 2.0);
     }
     gl_FragColor = vec4(l2s(c), 1.0);              // LINEAR → sRGB for the canvas
   }`;
@@ -408,8 +488,28 @@ export class PostFX {
       uFlareCol: { value: new THREE.Color(1, 0.92, 0.8) },
       aoStrength: { value: 0.25 }, aoFloor: { value: 0.30 }, bloomStrength: { value: 0.55 },
       useAO: { value: false }, useCanopy: { value: false },
+      useLamp: { value: false }, tLamp: { value: null },
+      uLampMap: { value: new THREE.Vector4() }, uLampAmb: { value: new THREE.Color(0.02, 0.03, 0.04) },
+      uLampShape: { value: new THREE.Vector4(0.55, 1.3, 8.5, 0.5) },
+      uLampSurf: { value: new THREE.Vector3(0.55, 1.0, 1.0) },
+      // the headlight fans' own map, and what the lamp term needs to know a
+      // moon shadow when it lights one (lampmap.js)
+      tBeam: { value: null }, uBeamMap: { value: new THREE.Vector3() },
+      tSunShadow: { value: null }, uSunShadowMat: { value: new THREE.Matrix4() },
+      uSunShadowK: { value: new THREE.Vector3(0, 0.15, 1 / 2048) },
+      uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uSunCol: { value: new THREE.Color(0, 0, 0) },
+      uHemiSky: { value: new THREE.Color(0, 0, 0) }, uHemiGround: { value: new THREE.Color(0, 0, 0) },
+      uCamPos: { value: new THREE.Vector3() }, uFogWall: { value: new THREE.Vector2(600, 900) },
+      ...airFogUniforms(),
       useBloom: { value: false }, useRays: { value: false }, useFXAA: { value: false },
+      uExposure: { value: 1 },
+      uGradeLift: { value: new THREE.Color(0, 0, 0) },
+      uGradeGain: { value: new THREE.Color(1, 1, 1) },
+      uVignette: { value: 0 },
     });
+    // the lamp term takes dFdx/dFdy of the world position: built in on WebGL2,
+    // an extension that has to be asked for on a WebGL1 context
+    this.compositeMat.extensions.derivatives = true;
     this._sunWorld = new THREE.Vector3();
     this._camFwd = new THREE.Vector3();
     this._flareUv = new THREE.Vector2(0.5, 0.5);
@@ -431,7 +531,11 @@ export class PostFX {
     this.renderer.render(this.quadScene, this.quadCam);
   }
 
-  // opts: { ssao, bloom, aoRadius, aoStrength, aoFloor, canopy, rays }
+  // opts: { ssao, bloom, aoRadius, aoStrength, aoFloor, canopy, rays, grade, lamps }
+  // lamps:  the LightPools (lightpools.js). Its bake() draws this frame's lamp
+  //         map and returns where it lies, or null by day
+  // grade:  { lift: Color, gain: Color, vignette } from gradeFor() below, or
+  //         nothing for a neutral frame
   // canopy: { densTex, metaTex, cx, cz, size, strength } — the world-space
   // crown-shade map maintained by canopy.js
   // rays:   { dir, color, strength } — dir is the world-space direction TO the
@@ -439,6 +543,8 @@ export class PostFX {
   render(scene, camera, opts = {}) {
     const r = this.renderer;
     this._flareFacing = 0;          // recomputed below when the sun is in front
+    // before the scene: bake() also takes the pool quads out of it for this frame
+    const lamp = opts.lamps?.bake?.(r, camera) ?? null;
     r.setRenderTarget(this.rtScene);
     r.render(scene, camera);
 
@@ -528,6 +634,12 @@ export class PostFX {
     c.useBloom.value = !!opts.bloom;
     // the scene target is MSAA-resolved — FXAA on top only smears fine detail
     c.useFXAA.value = false;
+    // the same exposure the direct path uses, whatever main.js has set it to
+    c.uExposure.value = r.toneMappingExposure;
+    const g = opts.grade;
+    if (g) { c.uGradeLift.value.copy(g.lift); c.uGradeGain.value.copy(g.gain); }
+    else { c.uGradeLift.value.setRGB(0, 0, 0); c.uGradeGain.value.setRGB(1, 1, 1); }
+    c.uVignette.value = g ? (g.vignette ?? 0) : 0;
     c.aoStrength.value = opts.aoStrength ?? 0.25;
     c.aoFloor.value = opts.aoFloor ?? 0.30;
     // motion blur: main.js hands us a strength and, optionally, where the
@@ -553,14 +665,47 @@ export class PostFX {
     c.rayStrength.value = rayK;
     if (rayK > 0 && opts.rays.color) c.rayColor.value.copy(opts.rays.color);
     const cp = opts.canopy;
+    c.useLamp.value = !!lamp;
+    c.tLamp.value = lamp ? lamp.tex : this.rtAOb.texture;
+    c.tBeam.value = lamp ? lamp.beamTex : this.rtAOb.texture;
+    // The moon's shadow map, read AFTER the scene was drawn: three stores the
+    // matrix with the map when it draws it, so the two always belong together
+    // (also on the frames js/shadowpace.js skips the pass).
+    const sun = lamp?.sun, smap = sun?.castShadow && r.shadowMap.enabled ? sun.shadow.map : null;
+    c.tSunShadow.value = smap ? smap.texture : this.rtAOb.texture;
+    c.uSunShadowK.value.x = smap ? 1 : 0;
+    if (lamp) {
+      c.uLampMap.value.set(lamp.cx, lamp.cz, 1 / lamp.size, lamp.baseY);
+      c.uBeamMap.value.set(lamp.bx, lamp.bz, 1 / lamp.beamSize);
+      c.uLampAmb.value.copy(lamp.amb);
+      c.uLampShape.value.set(lamp.knee, lamp.lit, lamp.top, lamp.beamKnee ?? lamp.knee);
+      c.uLampSurf.value.set(lamp.wall, lamp.soft, lamp.leaf ?? 0);
+      c.uFogWall.value.set(scene.fog?.near ?? 1e5, scene.fog?.far ?? 2e5);
+      if (smap) {
+        c.uSunShadowMat.value.copy(sun.shadow.matrix);
+        c.uSunShadowK.value.set(1, sun.shadow.normalBias, 1 / sun.shadow.mapSize.x);
+        // the direction the map was DRAWN from (sky.js holds it in steps), not
+        // where the moon is this instant
+        c.uSunDir.value.subVectors(sun.position, sun.target.position).normalize();
+        c.uSunCol.value.copy(sun.color).multiplyScalar(sun.intensity);
+        const hm = lamp.hemi;
+        if (hm) {
+          c.uHemiSky.value.copy(hm.color).multiplyScalar(hm.intensity);
+          c.uHemiGround.value.copy(hm.groundColor).multiplyScalar(hm.intensity);
+        }
+      }
+    }
+    if (cp || lamp) {
+      c.uInvProj.value.copy(camera.projectionMatrixInverse);
+      c.uCamWorld.value.copy(camera.matrixWorld);
+      c.uCamPos.value.setFromMatrixPosition(camera.matrixWorld);
+    }
     c.useCanopy.value = !!cp;
     // always bind real textures (unbound samplers trip driver warnings)
     c.tDepth.value = this.rtScene.depthTexture;
     c.tCanopy.value = cp ? cp.densTex : this.rtAOb.texture;
     c.tCanopyMeta.value = cp ? cp.metaTex : this.rtAOb.texture;
     if (cp) {
-      c.uInvProj.value.copy(camera.projectionMatrixInverse);
-      c.uCamWorld.value.copy(camera.matrixWorld);
       c.uCanopyCenter.value.set(cp.cx, cp.cz);
       c.uCanopyInvSize.value = 1 / cp.size;
       c.uCanopyStrength.value = cp.strength ?? 0.9;
@@ -572,4 +717,21 @@ export class PostFX {
     for (const rt of [this.rtScene, this.rtAO, this.rtAOb, this.rtA, this.rtB, this.rtRay]) rt.dispose();
     this.rtScene.depthTexture?.dispose();
   }
+}
+
+// ---- the grade, as numbers ----
+// One reused object: main.js calls this every frame and hands the result to
+// render(). `warm` is 0 with the sun high and 1 with it on the horizon (the
+// same curve sky.js colours the sun with); `nightK` is sky.nightK.
+const _grade = { lift: new THREE.Color(), gain: new THREE.Color(), vignette: 0.08 };
+export function gradeFor(warm, nightK) {
+  // golden hour: light goes amber, shade goes blue. It has to stay a hint:
+  // the sun and the haze already carry the colour, this only separates them.
+  const w = warm * (1 - nightK);
+  // night: lift the shadows a touch toward blue so the dark has a hue instead
+  // of being a hole, and let the highlights (lamps, windows) keep their warmth
+  const n = nightK;
+  _grade.lift.setRGB(0.000 * w + 0.0010 * n, 0.006 * w + 0.0018 * n, 0.020 * w + 0.0050 * n);
+  _grade.gain.setRGB(1 + 0.045 * w, 1 + 0.010 * w, 1 - 0.050 * w + 0.0 * n);
+  return _grade;
 }

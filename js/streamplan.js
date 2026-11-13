@@ -4,12 +4,25 @@
 // you can SEE; speed decides how fast the far edge has to move; and this file
 // is where those two arguments are settled against what the machine can hold.
 //
-// MEASURED, 169 real Pardubice cells (scratch harness, node, facades on):
+// MEASURED, the 169 real Pardubice cells round the station (node harness, real
+// tiles and terrain, facades on). Re-measured in wave 3, after the streets,
+// roofs, trees, lamps, signs and street furniture went into the full tier:
 //
-//   tier     mesh time              geometry     draw calls
-//   ground   0.69 ms                  211 kB        1.0
-//   shell    2.4 ms                   258 kB        2.0
-//   full     26.5 + 0.096·features    950 kB        4.9     (160 ms worst)
+//   tier     mesh time              geometry   (from a worker)   draw calls
+//   ground   0.8 ms                   211 kB        69 kB           1.0
+//   shell    1.7 ms                   256 kB        81 kB           2.9
+//   full     10.3 + 0.39·features    1778 kB       668 kB           6.6    (119 ms worst)
+//
+// "geometry" is a cell built on this thread (float attributes); a cell that
+// came from a mesher worker stays quantised on the GPU and holds the smaller
+// figure. The budget below is priced at the larger one: it is a ceiling, and
+// the fallback path is the one that has to fit under it. Before wave 1 the
+// same harness gave 1300 kB (465 from a worker) and 5.6 draws for a full cell,
+// and the 950 kB and 4.9 this table carried were older still: the planner was
+// under-pricing full detail by nearly half.
+// (Mesh time: the same cells took 74 + 1.40·features ms before wave 3, which
+// was the road-cutting clamp walking every segment of every road for every
+// vertex. See roadSegs in js/meshes.js.)
 //
 // The mesher pool absorbs the FIRST column and NEITHER OF THE OTHER TWO, and
 // that is the whole reason this file exists. Ring area grows quadratically, so
@@ -33,6 +46,9 @@ import { CHUNK } from './config.js';
 // The altitude caps, unchanged: what a helicopter at 300 m gets today.
 export const AIR_VIEW = 10, AIR_SHELL = 10, AIR_FAR = 14;
 const FULL_ALT = 300;                  // m AGL at which the air rings are fully out
+// The ground window of the low preset (js/settings.js viewChunks) and the share
+// of the air rings a machine on it is given. See planRings.
+const LOW_BASE = 3, LOW_AIR = 0.6;
 
 // Seconds of world in front of the nose. This is the number that used to
 // saturate: `Math.min(1, speed / 260)` meant nothing grew past 936 km/h, which
@@ -49,8 +65,8 @@ const HORIZON_S = 6;
 const DETAIL_FADE_LO = 140, DETAIL_FADE_HI = 420;
 
 const cells = (r) => (2 * r + 1) * (2 * r + 1);
-const CELL_KB = { ground: 211, shell: 258, full: 950 };
-const CELL_DRAWS = { ground: 1.0, shell: 2.0, full: 4.9 };
+const CELL_KB = { ground: 211, shell: 256, full: 1778 };
+const CELL_DRAWS = { ground: 1.0, shell: 2.9, full: 6.6 };
 
 /** What a window of these three rings costs the GPU. */
 export function windowCost(view, shell, far) {
@@ -77,13 +93,23 @@ const clamp01 = (t) => (t < 0 ? 0 : t > 1 ? 1 : t);
  */
 export function planRings(speed, agl, base = 6) {
   const climb = clamp01((agl ?? 0) / FULL_ALT);
-  const viewAlt = Math.max(base, Math.round(base + (AIR_VIEW - base) * climb));
+  // THE LOW PRESET FLIES TOO. The air window was one size for every machine:
+  // hover at 300 m and the low preset's three rings became the same 21 × 21
+  // full-detail cells inside a 69 × 69 window that the high preset gets,
+  // 1.8 million triangles and 1,240 draw calls at the resolution of a weak
+  // laptop (measured, wave 3: 19 ms a frame against 3.5 on the ground). A
+  // player who asked for the smallest window on the ground gets six tenths of
+  // every air ring: 13 × 13 full cells, 41 × 41 in all.
+  const air = base <= LOW_BASE ? LOW_AIR : 1;
+  const airView = Math.round(AIR_VIEW * air), airShell = Math.round(AIR_SHELL * air),
+    airFar = Math.round(AIR_FAR * air);
+  const viewAlt = Math.max(base, Math.round(base + (airView - base) * climb));
   // The shell ring opens FASTER than the others (√climb): altitude is not what
   // makes you see far, ANGLE is. At 120 m over a village you are already
   // looking a kilometre and a half down the valley, and that is exactly the
   // height at which the missing houses were reported.
-  const shellAlt = Math.round(AIR_SHELL * Math.sqrt(climb));
-  const farAlt = Math.round(AIR_FAR * climb);
+  const shellAlt = Math.round(airShell * Math.sqrt(climb));
+  const farAlt = Math.round(airFar * climb);
 
   // FULL detail contracts with speed, coverage extends with it. Both are the
   // same decision: at 555 m/s the frontier of the full ring alone asks for

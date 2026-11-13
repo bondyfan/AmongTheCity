@@ -367,7 +367,17 @@ test('ghosts never enter the shared world and never pile up', () => {
     assert.ok(p.key.includes('#g'), 'a ghost kept the live slot string as its id');
     assert.equal(A.t.slotKey(p.car), null, 'a ghost must not be broadcast as a slot');
   }
-  assert.ok(A.t._ghosts.size < 25, `${A.t._ghosts.size} ghosts is a leak, not a deferral`);
+  // (bound moved from 25 to 32 on purpose. Side streets now give way to the
+  // through road at every junction, so on this grid of equally busy streets a
+  // handful of cars are always queued at a line, and one that has waited long
+  // enough to fall LAG_MAX behind its schedule is a ghost while it stands
+  // there: 21 at this instant before that rule, 25 or 26 with it. What a LEAK
+  // looks like is asserted directly instead: a ghost that has been standing
+  // about for a long time, which is what piled up when ghosts stopped at the
+  // end of a road nobody had laid for them.)
+  assert.ok(A.t._ghosts.size < 32, `${A.t._ghosts.size} ghosts is a leak, not a deferral`);
+  for (const p of A.t._ghosts)
+    assert.ok(!(p.ghostT > 60 && p.car && Math.abs(p.car.speed) < 0.3), `a ghost has been standing in view for ${p.ghostT.toFixed(0)} s`);
   // and no ghost outlives its cap by a sweep or two
   for (const p of A.t._ghosts) assert.ok(p.ghostT <= GHOST_MAX + 1, `ghost lived ${p.ghostT}s`);
 });

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <title>Among The City: car showroom (dev)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body { margin: 0; height: 100%; background: #20242a; overflow: hidden; font: 12px/1.4 system-ui, sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hud { position: fixed; left: 8px; top: 6px; color: #e8edf2; text-shadow: 0 1px 2px #000; white-space: pre; pointer-events: none; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "../libs/three.module.js" } }
+  </script>
+</head>
+<body>
+  <!--
+    Dev-only page, not linked from the game. One navigate gives one clean shot:
+      ?kind=octavia|fabia|bmw|mercedes|tesla|van|truck|bus|all   (default all)
+      &view=q|rq|front|rear|side|top|low|wheel|fp                (default q)
+      &night=1      dusk-to-night lighting, lamps driven the way main.js drives them
+      &env=0        no scene.environment (what the low preset sees)
+      &color=1f3048 paint, hex without the hash
+      &dist=15      camera distance in metres (overrides the framing)
+      &lod=far      force the distance variant
+      &dent=1       crumple the nose the way a crash does
+      &brake=1      hold the brake lights on
+      &n=120        performance grid of n cars, prints ms per frame
+      &steer=0.4    front wheels turned (radians)
+      &sun=game     the game's fixed sun direction instead of one that follows the view
+      &veh=./x.js   load another build of vehicles.js (for a before/after timing)
+  -->
+  <div id="hud"></div>
+  <script type="module" src="./showroom.js"></script>
+</body>
+</html>

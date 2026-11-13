@@ -306,15 +306,19 @@ test('a fast-food pavilion is glass where it faces the car park', () => {
 });
 
 test('a panelák hangs balconies off its long facades', () => {
-  // prefab type, or six storeys and up: a grid of balcony slabs with weak
-  // rail panels, every storey above the first
+  // a grid of balcony slabs with weak rail panels, every storey above the first.
+  // WHICH buildings changed on purpose with typology.js: the gate used to be
+  // the OSM type `panel` (no tile carries it) or six storeys and up, which hung
+  // loggias on every tall tenement and courtyard block in Prague. It is the
+  // `panel` typology now (a tall flat-roofed rectangle), and the balconies sit
+  // on the bays where the far mesh paints them.
   let checked = 0;
   for (const b of city.buildings) {
     if (!hasInterior(b)) continue;
     if (classify(b) !== 'flats') continue;
     const plan = buildingPlan(b, null);
     if (plan.nova || plan.storeys < 3) continue;
-    if (!(plan.osmT === 'panel' || plan.storeys >= 6)) continue;
+    if (plan.typ !== 'panel') continue;
     let maxL = 0;
     for (let i = 0; i < b.o.length; i++) {
       const [ax, az] = b.o[i], [bx, bz] = b.o[(i + 1) % b.o.length];

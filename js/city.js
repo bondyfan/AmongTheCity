@@ -10,14 +10,41 @@ import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
   roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull,
-  clustersIn, clusterHull, clusterDeckY } from './geo.js';
+  clustersIn, clusterHull, clusterDeckY, streetOf } from './geo.js';
+import { holdVerges } from './geo.js';
+import { vergeAt, vergeLift, inZone, bayAt, cornerLift, FOOT_LIFT, BAY_W } from './streets.js';
 import { makeMaterials, buildChunkMeshes, buildChunkMeshesGen, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
-import { makeMeshPool } from './meshpool.js';
+import { footPullW } from './meshes.js';
+import { railGradeY } from './geo.js';
+import { takeMeshPool, prewarmMeshPool } from './meshpool.js';
 import { Poles } from './poles.js';
+import { sweepBrandMats } from './meshes.js';
+import { sweepWordmarks } from './destructible.js';
+import { computeVergeGen } from './streets.js';
+const LAMP_BATCHES = [['lampPosts', 'lampHeads'], ['parkPosts', 'parkHeads']];
 import { Interiors } from './interiorsim.js';
+import { landmarkSolids, solidHas } from './landmarks.js';
 import { Terrain, groundFor } from './terrain.js';
 import { Canopy } from './canopy.js';
 import { GroundClass } from './groundclass.js';
+
+// Wake the mesher workers as soon as the page has this module, which is while
+// the menu is still up: see prewarmMeshPool. Nothing happens under node.
+prewarmMeshPool();
+
+// Give a chunk's GPU memory back. Its geometries, and ALSO the instance buffers
+// of its InstancedMeshes (far trees, lamp posts and heads, park lanterns):
+// three frees those only when the mesh itself is disposed, and a geometry-only
+// walk left one matrix buffer and one colour buffer behind for every batch of
+// every cell the streamer ever dropped. They are WebGL buffers, so they never
+// showed in renderer.info.memory; they only grew, a few kilobytes a cell, for
+// as long as the player kept driving. Materials are shared and stay.
+function shed(group) {
+  group?.traverse((o) => {
+    o.geometry?.dispose?.();
+    if (o.isInstancedMesh) o.dispose();
+  });
+}
 
 // how much of a chunk each tier builds, poorest first — the streamer compares
 // these to decide whether a cell it already has is good enough
@@ -38,6 +65,8 @@ const TILE_REACH_MIN = 2600;
 // the helicopter's top speed, and comfortably under the 576 km/h at which the
 // holes were measured to start.
 const RUSH_FILL = 110;
+// Seconds between two looks at which shop wordmarks are still worn: see _sweepMarks.
+const MARK_SWEEP_S = 8;
 
 const _closest = { x: 0, z: 0, t: 0 };
 
@@ -51,6 +80,11 @@ const lineBB = (f) => {
   return (f._sbb = [a, b, c, d]);
 };
 const _surf = { y: 0, road: false };   // surfaceY's reusable answer
+const _pull = { w: 0, t: 0 };          // _footPull's
+// How far a kerbed street's verge can reach past its carriageway edge (a lawn
+// strip out to a mapped footway, js/streets.js), and how far past a junction's
+// outline its corner pavement can: the widening of the bbox rejects below.
+const VERGE_REACH = 10.5, CORNER_REACH = 7;
 
 // ---- WHICH surface, when a place has more than one -------------------------
 // A bridge and the road beneath it stand on the same ground, and "how high is
@@ -119,19 +153,8 @@ const HIT_IDS_MAX = 8192;          // dedupe set ceiling — see _rememberHit
 const CONFORM_FALL = 14;      // m of shoulder blending deck grade into survey
 const CONFORM_FOOT = 5;       // …for footways, which move far less earth
 
-export function conformTerrainTile(terrain, city, tx, tz) {
-  const key = tx + ',' + tz;
-  const g = terrain.grids.get(key);
-  if (!g) return false;
-  terrain._conformed ??= new Set();
-  if (terrain._conformed.has(key)) return false;
-  terrain._raw ??= new Map();
-  if (!terrain._raw.has(key)) terrain._raw.set(key, g.slice());
-  const raw = terrain._raw.get(key);
-  const n = terrain.n, res = terrain.res, T = terrain.tile;
-  const x0 = tx * T, z0 = tz * T;
-
-  // every road touching the tile, via the chunk index (which is cross-tile)
+// every road touching a terrain tile, via the chunk index (which is cross-tile)
+function tileRoads(city, x0, z0, T) {
   const roads = new Map();
   for (let cx = Math.floor(x0 / CHUNK); cx < Math.floor((x0 + T) / CHUNK); cx++) {
     for (let cz = Math.floor(z0 / CHUNK); cz < Math.floor((z0 + T) / CHUNK); cz++) {
@@ -149,7 +172,43 @@ export function conformTerrainTile(terrain, city, tx, tz) {
       }
     }
   }
-  if (!roads.size) { terrain._conformed.add(key); return false; }
+  return roads;
+}
+
+export function conformTerrainTile(terrain, city, tx, tz, st) {
+  // levels only: a way's verge waits for its first real use (geo.holdVerges)
+  holdVerges(1);
+  try {
+    const gen = conformTileGen(terrain, city, tx, tz, null, st);
+    let it;
+    do { it = gen.next(); } while (!it.done);
+    return it.value;
+  } finally { holdVerges(-1); }
+}
+// THE BAKE, WITH PLACES TO STOP. One tile was one bite: up to 45 ms of a frame
+// in play (measured in wave 3), nearly all of it the stamping loop below, with
+// the levels already warm. So it is a generator: the caller with a clock
+// (CityWorld._bakeStep) runs it a few milliseconds a frame, everybody else
+// drains it in one go and gets exactly what the function used to return.
+// Nothing is WRITTEN to the grid until the stamping is complete, so a bake
+// abandoned half way (a height map landed under it) leaves no trace.
+// `list` is the tile's roads if the caller already has them (the warm-up
+// does); `st.applied` is raised once the grid has been written.
+function* conformTileGen(terrain, city, tx, tz, list, st) {
+  const key = tx + ',' + tz;
+  const g = terrain.grids.get(key);
+  if (!g) return false;
+  terrain._conformed ??= new Set();
+  if (terrain._conformed.has(key)) return false;
+  terrain._raw ??= new Map();
+  if (!terrain._raw.has(key)) terrain._raw.set(key, g.slice());
+  const raw = terrain._raw.get(key);
+  const n = terrain.n, res = terrain.res, T = terrain.tile;
+  const x0 = tx * T, z0 = tz * T;
+
+  const roads = list ?? [...tileRoads(city, x0, z0, T).values()];
+  if (!roads.length) { terrain._conformed.add(key); return false; }
+  yield;
 
   // Profiles FIRST, against the pristine survey — they are cached on the way,
   // so every later consumer (ribbons, cars, this bake) reads the same line.
@@ -157,47 +216,99 @@ export function conformTerrainTile(terrain, city, tx, tz) {
   // bake still runs — a shaped guess beats a cliff — but the tile is NOT
   // marked conformed, so the pass returns and re-bakes from the pristine
   // survey once the neighbour lands. It used to mark itself done forever.
-  let profReady = true;
-  for (const r of roads.values()) {
+  let profReady = true, step = 0;
+  for (const r of roads) {
     const pr = roadProfile(r, terrain);
     if (pr && !pr.ready) profReady = false;
+    if ((++step & 63) === 0) yield;
   }
 
   // Road-major stamping: per segment, visit only the grid samples its
   // corridor + shoulder can reach, and keep the strongest claim per sample.
   const tBest = new Float32Array(n * n);
   const hBest = new Float32Array(n * n);
-  for (const r of roads.values()) {
-    const fall = r.d ? CONFORM_FALL : r.t ? CONFORM_FOOT : 8;   // rails: 8 m bed
-    const hw = (r.w ?? 3) / 2;
-    const reach = hw + fall;
-    let along = 0;
-    for (let k = 0; k < r.p.length - 1; k++) {
-      const [ax, az] = r.p[k], [bx, bz] = r.p[k + 1];
-      const segLen = Math.hypot(bx - ax, bz - az);
-      const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - reach - x0) / res));
-      const i1 = Math.min(n - 1, Math.ceil((Math.max(ax, bx) + reach - x0) / res));
-      const j0 = Math.max(0, Math.floor((Math.min(az, bz) - reach - z0) / res));
-      const j1 = Math.min(n - 1, Math.ceil((Math.max(az, bz) + reach - z0) / res));
-      for (let j = j0; j <= j1; j++) {
-        for (let i = i0; i <= i1; i++) {
-          const x = x0 + i * res, z = z0 + j * res;
-          const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-          if (d >= reach) continue;
-          const o = j * n + i;
-          let t = d <= hw ? 1 : 1 - (d - hw) / fall;
-          t = t * t * (3 - 2 * t);                    // smooth shoulder
-          if (t <= tBest[o]) continue;
-          const s2 = along + Math.hypot(_closest.x - ax, _closest.z - az);
-          const gy = roadGradeY(r, s2, terrain);
-          if (gy === null || gy === undefined) continue;
-          tBest[o] = t;
-          hBest[o] = gy;
-        }
-      }
-      along += segLen;
-    }
+  for (const r of roads) {
+    if ((++step & 3) === 0) yield;
+    stampWay(r, terrain, x0, z0, n, res, tBest, hBest);
   }
+  yield;
+  // from here to the marks below is one piece: the grid and its books move together
+  if (st) st.applied = true;
+  const moved = applyStamp(g, raw, tBest, hBest, n);
+  // The grid is mutated IN PLACE, so anything holding a copy of it — a mesher
+  // worker's raster mirror — now holds the wrong ground. This counter is how
+  // the pool notices: a tile whose version has moved is re-sent.
+  if (moved) {
+    terrain._gridVer ??= new Map();
+    terrain._gridVer.set(key, (terrain._gridVer.get(key) ?? 0) + 1);
+  }
+  if (profReady) terrain._conformed.add(key);
+  // an unready tile must NOT be retried every frame: a road running off the
+  // loaded world keeps its profile unready forever, and re-baking a 4800 m
+  // tile per frame is a hang. Stamp the attempt; retry only after new ground.
+  else (terrain._conformTried ??= new Map()).set(key, terrain._loads ?? 0);
+  // ...and so is every BRIDGE DECK over this tile. A deck is never under the
+  // ground along its span (geo.bridgeDeckHeight), it asks the grid as it
+  // stands, and the answer is kept: a footbridge first meshed before this bake
+  // kept a deck worked out over the survey, one meshed after it stands over
+  // the shaped ground. So the same bridge was two shapes, by which of the two
+  // a session happened to do first: chunks -2,-2 and -2,1 at the spawn were
+  // 12 and 24 vertices apart between a boot into the place and a walk to it
+  // (a hump over the street against a level deck), which two co-op players
+  // would each have seen their own way. The bake forgets the decks it moved
+  // the ground under (forgetGround, with the other memos); `st.decks` names
+  // the home cells to mesh again, for a bridge drawn from a neighbouring tile.
+  const decks = moved ? (st ? (st.decks = new Set()) : new Set()) : null;
+  // Ground memos measured against the survey are stale now. (A column of
+  // cells a step: a town tile holds sixty thousand buildings. The chunks over
+  // them are only re-queued when this returns, so nothing reads a stale memo
+  // into a mesh that is kept.)
+  for (let cx = Math.floor(x0 / CHUNK); cx < Math.floor((x0 + T) / CHUNK); cx++) {
+    forgetGround(city, cx, z0, T, decks);
+    yield;
+  }
+  return moved > 0;
+}
+
+// The three loops of the bake live in plain functions, not in the generator
+// above, for a reason that only shows on a stopwatch: a loop that runs long
+// inside ONE call of a generator is never swapped for compiled code while it
+// runs, so the first bakes of a session (the ones a boot waits for) stamped in
+// the interpreter. Measured over the sixteen tiles round the spawn, CPU time
+// of a cold bake: 9.1 to 9.2 s with the loops inline, 8.9 s like this, and
+// 8.7 to 9.0 s for the function this generator replaced.
+function stampWay(r, terrain, x0, z0, n, res, tBest, hBest) {
+  const fall = r.d ? CONFORM_FALL : r.t ? CONFORM_FOOT : 8;   // rails: 8 m bed
+  const hw = (r.w ?? 3) / 2;
+  const reach = hw + fall;
+  let along = 0;
+  for (let k = 0; k < r.p.length - 1; k++) {
+    const [ax, az] = r.p[k], [bx, bz] = r.p[k + 1];
+    const segLen = Math.hypot(bx - ax, bz - az);
+    const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - reach - x0) / res));
+    const i1 = Math.min(n - 1, Math.ceil((Math.max(ax, bx) + reach - x0) / res));
+    const j0 = Math.max(0, Math.floor((Math.min(az, bz) - reach - z0) / res));
+    const j1 = Math.min(n - 1, Math.ceil((Math.max(az, bz) + reach - z0) / res));
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const x = x0 + i * res, z = z0 + j * res;
+        const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
+        if (d >= reach) continue;
+        const o = j * n + i;
+        let t = d <= hw ? 1 : 1 - (d - hw) / fall;
+        t = t * t * (3 - 2 * t);                    // smooth shoulder
+        if (t <= tBest[o]) continue;
+        const s2 = along + Math.hypot(_closest.x - ax, _closest.z - az);
+        const gy = roadGradeY(r, s2, terrain);
+        if (gy === null || gy === undefined) continue;
+        tBest[o] = t;
+        hBest[o] = gy;
+      }
+    }
+    along += segLen;
+  }
+}
+function applyStamp(g, raw, tBest, hBest, n) {
   let moved = 0;
   for (let o = 0; o < n * n; o++) {
     if (!tBest[o] || raw[o] === -32768) continue;
@@ -206,27 +317,24 @@ export function conformTerrainTile(terrain, city, tx, tz) {
     const v = Math.round(h1 * 10);
     if (v !== g[o]) { g[o] = v; moved++; }
   }
-  // The grid is mutated IN PLACE, so anything holding a copy of it — a mesher
-  // worker's raster mirror — now holds the wrong ground. This counter is how
-  // the pool notices: a tile whose version has moved is re-sent.
-  if (moved) {
-    terrain._gridVer ??= new Map();
-    terrain._gridVer.set(key, (terrain._gridVer.get(key) ?? 0) + 1);
-  }
-  // Ground memos measured against the survey are stale now.
-  for (let cx = Math.floor(x0 / CHUNK); cx < Math.floor((x0 + T) / CHUNK); cx++) {
-    for (let cz = Math.floor(z0 / CHUNK); cz < Math.floor((z0 + T) / CHUNK); cz++) {
-      const cell = city.chunkIndex.get(cx + ',' + cz);
-      if (!cell) continue;
-      for (const b of cell.buildings) { delete b._gy; delete b._gfall; }
+  return moved;
+}
+function forgetGround(city, cx, z0, T, decks) {
+  for (let cz = Math.floor(z0 / CHUNK); cz < Math.floor((z0 + T) / CHUNK); cz++) {
+    const cell = city.chunkIndex.get(cx + ',' + cz);
+    if (!cell) continue;
+    for (const b of cell.buildings) { delete b._gy; delete b._gfall; }
+    if (!decks) continue;
+    for (const list of [cell.roads, cell.rails]) for (const r of list) {
+      if (!r.br) continue;
+      if (r._bridgeProfile) { r._bridgeProfile = null; if (r._home) decks.add(r._home); }
+      // (one grade for a whole viaduct: every member reads it, wherever homed)
+      if (r._chain?.profile) {
+        r._chain.profile = null;
+        for (const m of r._chain.members ?? [r]) if (m._home) decks.add(m._home);
+      }
     }
   }
-  if (profReady) terrain._conformed.add(key);
-  // an unready tile must NOT be retried every frame — a road running off the
-  // loaded world keeps its profile unready forever, and re-baking a 4800 m
-  // tile per frame is a hang. Stamp the attempt; retry only after new ground.
-  else (terrain._conformTried ??= new Map()).set(key, terrain._loads ?? 0);
-  return moved > 0;
 }
 
 export class CityWorld {
@@ -266,6 +374,7 @@ export class CityWorld {
     // manager outlives every chunk: it is what remembers, across rebuilds and
     // across the whole session, which masts are lying in the road.
     this.poles = new Poles(scene);
+    this.poles.groundAt = (x, z) => this.walkY(x, z);
     this.built = new Map();     // key -> Group (or null for empty cells)
     // Turning this OFF inverts the rule below, so upgrades outrank empty
     // cells exactly as the single-FIFO streamer used to. It exists for one
@@ -338,8 +447,23 @@ export class CityWorld {
     // the frame is a spec and a decode (measured 3.85 ms against 79.5 ms for
     // the same chunk built here), so the cap on those is the pool size.
     this._inflight = new Map();
-    this.pool = makeMeshPool();
+    this.pool = takeMeshPool();
     this._poolFails = 0;
+    // On the ground, in play: a full-detail cell waits for a worker instead of
+    // being started on this thread. Set by main.js with the other pacing
+    // knobs; off (the old behaviour) during boot, in the air and in tests.
+    this.workersFirst = false;
+    // Bytes of worker-built geometry one frame may take: see _landFlights.
+    // Unbounded until main.js says the game is in play (a boot wants it all).
+    this.landBytes = Infinity;
+    // Milliseconds a frame for levelling the roads of a tile whose earthworks
+    // are due: see _warmRoads. Unbounded (the whole tile in one go) until
+    // main.js says the game is in play.
+    this.conformBudgetMs = Infinity;
+    // Milliseconds a frame for making the verges of the streets ahead of the
+    // chunk specs that need them: see _warmVerges. Off until main.js says the
+    // player is on the ground, in play.
+    this.vergeBudgetMs = 0;
     this._initHits();
     city.onTileLoaded?.((t) => {
       this._requeueCells(t.cells);
@@ -352,6 +476,7 @@ export class CityWorld {
       // neighbours (a border road reaches into them): clearing the whole set
       // re-baked every loaded tile after every data tile, ~0.9 s of main
       // thread each, which was most of the after-boot stutter.
+      this._dataLanded(t);                     // ...and whatever was half way through the old roads starts again
       if (this.terrain._conformed && t.tx !== undefined) {
         for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
           this.terrain._conformed.delete((t.tx + ox) + ',' + (t.tz + oz));
@@ -434,19 +559,30 @@ export class CityWorld {
       // is re-marked below and re-baked from the pristine survey.
       // the FOCUS tile first: the boot gate waits for the ground under the
       // player, and insertion order used to conform five far tiles before it
-      const fk = Math.floor(focus.x / (this.city.tile || 4800)) + ','
-        + Math.floor(focus.z / (this.city.tile || 4800));
-      for (const tk of [fk, ...this.terrain.grids.keys()]) {
+      // …and after it the NEAREST tile, not the next in insertion order: the
+      // spawn stands 25 m from a tile border, and the tile across it used to
+      // wait behind four tiles nobody could see. With the bake paced over
+      // frames (below) that wait would be the ground under the next street
+      // settling long after play began.
+      const TT = this.city.tile || 4800;
+      let pick = null, pickD = Infinity, ptx = 0, ptz = 0;
+      for (const tk of this.terrain.grids.keys()) {
         if (!this.terrain.grids.get(tk)) continue;
         if (this.terrain._conformed?.has(tk)) continue;
         // tried while some profile was provisional, and nothing new has
         // landed since — trying again would compute the same guess
         if (this.terrain._conformTried?.get(tk) === (this.terrain._loads ?? 0)) continue;
         const [ttx, ttz] = tk.split(',').map(Number);
-        if (conformTerrainTile(this.terrain, this.city, ttx, ttz)) {
-          this._dropTileChunks(ttx, ttz);
-        }
-        break;
+        const d = Math.max(ttx * TT - focus.x, focus.x - (ttx + 1) * TT,
+          ttz * TT - focus.z, focus.z - (ttz + 1) * TT, 0);
+        if (d < pickD) { pickD = d; pick = tk; ptx = ttx; ptz = ttz; }
+      }
+      // in play the bake waits until its roads have been levelled, a few
+      // milliseconds a frame: see _warmRoads
+      if (pick !== null && !this._bake && this._warmRoads(pick, ptx, ptz)) {
+        const roads = this._warm?.key === pick ? this._warm.roads : null;
+        this._warm = null;
+        this._startBake(pick, ptx, ptz, roads);
       }
       // These two are only read INSIDE the built window — the canopy for the
       // tree scatter, the ground class for what unmapped ground is sealed with
@@ -461,7 +597,8 @@ export class CityWorld {
       // running it here spent unbudgeted milliseconds before the ring scan had
       // been offered its first one. It runs below, on what the ring scan left.
       this._ribbonDue = true;
-    }
+    } else if (this._bake) this._bakeStep();
+    else if (this._warm) this._warmRoads(this._warm.key, this._warm.tx, this._warm.tz);
     // The ring centre leads a moving focus by ~2.2 s of travel, capped at two
     // chunks, so the cells ahead build while they are still far — the pop-in
     // happens out in the fog and the hitch happens before you are close enough
@@ -525,6 +662,7 @@ export class CityWorld {
     const budget = performance.now() + this.buildBudgetMs;
     this.pool?.poll();
     this._landFlights(budget, fx, fz, outer);
+    this._landRibbons();
     if (this._syncFlight) this._pumpBuild(budget, fx, fz, outer);
     const coolOff = this.buildCooldownMs
       && performance.now() - (this._lastBuildAt ?? 0) < this.buildCooldownMs;
@@ -584,7 +722,7 @@ export class CityWorld {
       if (Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) > outer + 2) {
         if (group) {
           this.scene.remove(group);
-          group.traverse(o => { o.geometry?.dispose?.(); });
+          shed(group);
         }
         this.poles?.unregister(key);
         this.built.delete(key);
@@ -593,8 +731,197 @@ export class CityWorld {
         this._hadTerrain.delete(key);
         this._missBy.delete(key);
         this._stale.delete(key);
+        this._rasterRetried?.delete(key);
       }
     }
+    this._warmVerges(fx, fz);
+    if ((this._markT = (this._markT ?? MARK_SWEEP_S) - dt) <= 0) { this._markT = MARK_SWEEP_S; this._sweepMarks(); }
+  }
+
+  // THE BAKE ITSELF, A SLICE A FRAME. _warmRoads below took the levelling out
+  // of the frame the bake ran in; what was left was the bake, one bite of up
+  // to 45 ms a tile. In play it now runs inside the same conformBudgetMs a
+  // frame, on the frames the warm-up is not using. Boot and tests (no budget)
+  // bake the tile at once, as before.
+  _startBake(key, tx, tz, roads) {
+    const st = { applied: false };
+    if (!((this.conformBudgetMs ?? Infinity) < Infinity)) {
+      if (conformTerrainTile(this.terrain, this.city, tx, tz, st)) this._dropTileChunks(tx, tz);
+      if (st.decks) this._requeueCells(st.decks);
+      return;
+    }
+    this._bake = { key, tx, tz, st, loads: this.terrain._loads ?? 0,
+      gen: conformTileGen(this.terrain, this.city, tx, tz, roads, st) };
+    this._bakeStep();
+  }
+
+  // A DATA TILE LANDED WHILE WORK WAS SPREAD OVER FRAMES. Three things read the
+  // roads and houses as they were: a bake still stamping (it has written
+  // nothing, so it is dropped), the verge warm-up (new streets, or the houses
+  // that make one a street), and the road warm-up, whose LIST of the tile's
+  // ways is handed to the bake when it is done. That list is from before the
+  // new ways arrived: a border road of the new tile would never be stamped
+  // into this one, and the tile would still be marked as shaped. So the list
+  // is gathered again (the levels already worked out are cached on the ways,
+  // the second walk only pays for the new ones).
+  _dataLanded(t) {
+    if (this._bake && !this._bake.st.applied) this._bake = null;
+    this._vergeWarm = null;
+    if (t?.roads?.length) this._warm = null;
+  }
+
+  _bakeStep() {
+    const b = this._bake;
+    // a height map landed under it: the levels it was reading have moved. It
+    // has written nothing yet, so it is dropped and the next pass starts it
+    // again from the survey.
+    if (!b.st.applied && b.loads !== (this.terrain._loads ?? 0)) { this._bake = null; return; }
+    const end = performance.now() + (this.conformBudgetMs ?? Infinity);
+    let it;
+    holdVerges(1);            // as conformTerrainTile: levels, not verges
+    try { do { it = b.gen.next(); } while (!it.done && performance.now() < end); }
+    finally { holdVerges(-1); }
+    if (!it.done) return;
+    this._bake = null;
+    if (it.value) this._dropTileChunks(b.tx, b.tz);
+    if (b.st.decks) this._requeueCells(b.st.decks);
+  }
+
+  // VERGES BEFORE THE SPEC THAT NEEDS THEM. A way's verge (kerb, pavement,
+  // lawn strip: js/streets.js) is worked out on first use, and since the fix
+  // round the first use is the spec of a chunk about to go to a worker: 60 to
+  // 210 microseconds a way, every way of nine cells, inside one spec. Measured
+  // driving into fresh streets, 5 to 15 ms a spec and 15 to 50 at worst, and a
+  // spec is not budgeted. So the same derivation is done HERE first, for the
+  // ways of the cells the full-detail ring is about to ask for, nearest ring
+  // first, inside vergeBudgetMs a frame; the spec then finds them made. It is
+  // the same derivation reading the same index, a few frames earlier, and a cell
+  // is only warmed once the data tiles its verges read are fully indexed (a
+  // verge asks where the houses are), which the spec itself never waited for.
+  // On the ground in play only (main.js sets the budget): a boot has no frame
+  // to protect, and an aircraft crosses cells faster than this could prepare.
+  _warmVerges(fx, fz) {
+    const budget = this.vergeBudgetMs ?? 0;
+    if (!(budget > 0)) return;
+    let s = this._vergeWarm;
+    if (!s || s.fx !== fx || s.fz !== fz) s = this._vergeWarm = { fx, fz, r: 0, k: 0, i: 0, gen: null, done: false };
+    if (s.done) return;
+    const R = this.viewChunks + 1;           // a spec reads the eight cells round its own
+    const end = performance.now() + budget;
+    for (; s.r <= R; s.r++, s.k = 0) {
+      const side = 2 * s.r + 1, cells = s.r ? 8 * s.r : 1;
+      for (; s.k < cells; s.k++, s.i = 0) {
+        // the k-th cell of ring r, walked round its four sides
+        let dx = 0, dz = 0;
+        if (s.r) {
+          const e = Math.floor(s.k / (side - 1)), o = s.k % (side - 1);
+          if (e === 0) { dx = -s.r + o; dz = -s.r; }
+          else if (e === 1) { dx = s.r; dz = -s.r + o; }
+          else if (e === 2) { dx = s.r - o; dz = s.r; }
+          else { dx = -s.r; dz = s.r - o; }
+        }
+        const cx = fx + dx, cz = fz + dz, key = cx + ',' + cz;
+        const cell = this.city.chunkIndex.get(key);
+        if (!cell || !this._vergeDataIn(cx, cz)) continue;
+        const roads = cell.roads;
+        for (; s.i < roads.length; s.i++) {
+          const r = roads[s.i];
+          if (r._vg !== undefined) { s.gen = null; continue; }
+          // one way can be a street the length of the town: it is worked out a
+          // segment at a time too, and only becomes the way's verge when whole
+          s.gen ??= computeVergeGen(this.city, r);
+          let it;
+          do { it = s.gen.next(); } while (!it.done && performance.now() < end);
+          if (!it.done) return;
+          s.gen = null;
+          // (a spec or a wheel that needed it meanwhile made it the fast way:
+          // the same answer from the same index, and theirs stands)
+          if (r._vg === undefined) r._vg = it.value;
+          if (performance.now() >= end) { s.i++; return; }
+        }
+        // ...and the kerbs of this cell's junction pads, which are first-use
+        // work behind the same door (geo.junctionsIn / clustersIn)
+        junctionsIn(key); clustersIn(key);
+        if (performance.now() >= end) { s.k++; s.i = 0; return; }
+      }
+    }
+    s.done = true;
+  }
+
+  /** Are the data tiles a verge in this cell reads (its own, and the one across
+   *  a border within a cell of it) fully indexed? Always, off the tile manifest. */
+  _vergeDataIn(cx, cz) {
+    const tiles = this.city.manifestTiles, T = this.city.tile;
+    if (!tiles || !T) return true;
+    let by = this._tileBy;
+    if (!by) { by = this._tileBy = new Map(); for (const t of tiles) by.set(t.tx + ',' + t.tz, t); }
+    const x0 = (cx - 1) * CHUNK, x1 = (cx + 2) * CHUNK - 1e-3, z0 = (cz - 1) * CHUNK, z1 = (cz + 2) * CHUNK - 1e-3;
+    for (let tx = Math.floor(x0 / T); tx <= Math.floor(x1 / T); tx++) {
+      for (let tz = Math.floor(z0 / T); tz <= Math.floor(z1 / T); tz++) {
+        const t = by.get(tx + ',' + tz);
+        if (t && t.state !== 2) return false;
+      }
+    }
+    return true;
+  }
+
+  // WORDMARKS NOBODY WEARS. Every shop name is a 1024 x 256 canvas and a
+  // texture, cached by name in two places: the far tier's (js/meshes.js) and
+  // the box shells' (js/destructible.js). Neither cache ever let go, so a
+  // session held every name it had driven past: 430 boards at the old town
+  // after three laps of a tour, about a megabyte of canvas and 1.3 of GPU
+  // memory each, and the "5 to 10 textures a lap" nobody had traced. Every few
+  // seconds the materials actually worn (by a built chunk or a standing shell)
+  // are gathered and the two caches drop what has been idle for two sweeps
+  // running. A dropped name is painted again the next time a build asks.
+  _sweepMarks() {
+    const used = this._marksUsed ??= new Set();
+    used.clear();
+    const note = this._markNote ??= (o) => {
+      const m = o.material;
+      if (!m) return;
+      if (Array.isArray(m)) { for (const e of m) if (e.map) used.add(e); } else if (m.map) used.add(m);
+    };
+    for (const [key, g] of this.built) if (g && this._detail.get(key) !== 'ground') g.traverse(note);
+    for (const m of this.interiors?.models?.values() ?? []) m.group?.traverse(note);
+    sweepWordmarks(used);
+    const gone = sweepBrandMats(used);
+    const cm = this.mats?.codecMats;
+    if (gone && cm) for (const k in cm) if (gone.includes(cm[k])) delete cm[k];
+    used.clear();
+  }
+
+  // LEVEL A TILE'S ROADS BEFORE ITS EARTHWORKS, A SLICE A FRAME. The bake
+  // above reads every road's levelled profile, and for a tile nobody has
+  // driven through yet that is the FIRST ask for each of several thousand
+  // ways: the levelling, its junction heights and (since the streets went in)
+  // the verge of every one, all in the single frame the bake ran in. Measured
+  // in wave 3 on the drive out of the station, one tile a second for the
+  // first seconds of play: 837, 583, 516 and 408 ms of this thread, against
+  // 12 to 38 ms for the same bake once the profiles exist. The profiles are
+  // cached on the ways, so they are simply asked for here first, inside
+  // conformBudgetMs a frame, and the bake runs when the last one is in.
+  // Infinity (boot, where the gate waits for this ground, and tests) keeps
+  // the old all-at-once behaviour.
+  // @returns true when the tile's roads are levelled and it may be baked
+  _warmRoads(tk, tx, tz) {
+    const budget = this.conformBudgetMs ?? Infinity;
+    if (!(budget < Infinity)) return true;
+    let s = this._warm;
+    if (!s || s.key !== tk) {
+      const T = this.terrain.tile;
+      s = this._warm = { key: tk, tx, tz, i: 0,
+        roads: [...tileRoads(this.city, tx * T, tz * T, T).values()] };
+    }
+    const end = performance.now() + budget;
+    // at least one a call, whatever the clock says, or a late frame stalls it
+    holdVerges(1); try {      // as the bake itself: levels now, verges on first use
+    while (s.i < s.roads.length) {
+      roadProfile(s.roads[s.i++], this.terrain);
+      if (performance.now() >= end) break;
+    }
+    } finally { holdVerges(-1); }
+    return s.i >= s.roads.length;
   }
 
   /** Is there a worker sitting idle? (The pool is absent in headless tests.) */
@@ -617,6 +944,7 @@ export class CityWorld {
       hadTerrain: this.terrain.ready(cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2),
       stale: false,
     };
+    let declined = false;
     if (this._freeWorker()) {
       const job = this.pool.submit(this, cx, cz, lod);
       if (job) {
@@ -627,8 +955,24 @@ export class CityWorld {
       }
       // submit() declined — no city data for this cell, or a spec it could not
       // gather. Either way the generator can answer and the worker cannot.
+      declined = true;
     }
     if (this._syncFlight) return false;     // …but the one slot is taken
+    // WORKERS FIRST. With every worker busy the old rule started this cell on
+    // the main thread at once, so a healthy pool still left this thread meshing
+    // in 7 ms slices for most of a drive (measured over 3 km round the station:
+    // 149 cells started here against 98 sent to the four workers), and a full
+    // cell is 40 percent more work than it was before the streets, roofs, trees
+    // and street furniture went in. A worker comes free within a few hundred
+    // milliseconds and the view ring is sixteen seconds of driving deep, so on
+    // the ground a full cell simply waits its turn. Two things do not wait: a
+    // cell the workers cannot take (declined above), and a HOLE within a cell
+    // of the player, where being late is a missing street under the wheels.
+    // And nothing waits on a line that is delivering seconds late (pool.slow).
+    if (this.workersFirst && !declined && lod === 'full'
+      && this.pool && !this.pool.dead && this.pool.ready > 0 && !this.pool.slow
+      && !(Math.max(Math.abs(cx - fx), Math.abs(cz - fz)) <= 1 && !this.built.has(key)))
+      return false;
     flight.gen = buildChunkMeshesGen(this.city, cx, cz, this.mats, lod);
     // the guess-tracking flags live on SHARED material objects; a paused
     // build stashes its own copies here — see _pumpBuild
@@ -649,10 +993,21 @@ export class CityWorld {
    */
   _landFlights(budget, fx, fz, outer) {
     if (!this._inflight.size) return;
-    let landed = 0;
+    let landed = 0, bytes = 0;
     for (const flight of [...this._inflight.values()]) {
       if (!flight.job?.done) continue;
       if (landed++ && performance.now() > budget) break;
+      // WHAT LANDS HERE IS PAID FOR IN THE NEXT DRAW. Taking a worker chunk
+      // costs this thread 0.2 ms, so the millisecond budget above let forty
+      // of them land in one frame once the pool was healthy, and the renderer
+      // then uploaded all forty before it could draw: measured on a drive
+      // round the station, 27 draws over 30 ms and one of 238 ms, with the
+      // streamer itself asleep. So a frame also takes a bounded WEIGHT of
+      // geometry (always one chunk, however big): about two full cells, or
+      // twenty of the ground-only cells a jet needs.
+      if (landed > 1 && bytes > (this.landBytes ?? Infinity)) break;
+      const bufs = flight.job.reply?.payload?.buffers;
+      if (bufs) for (let i = 0; i < bufs.length; i++) bytes += bufs[i].byteLength;
       this._inflight.delete(flight.key);
       let out;
       try {
@@ -719,7 +1074,7 @@ export class CityWorld {
     const { key, cx, cz, lod } = inf;
     const ring = Math.max(Math.abs(cx - fx), Math.abs(cz - fz));
     if (ring > outer) {                          // drifted out while building
-      group?.traverse((o) => o.geometry?.dispose?.());
+      shed(group);
       // a data tile landed mid-build: the OLD group may still sit in `built`
       // (eviction hysteresis is outer+2), drawn from pre-tile data — hand it
       // to _requeueCells, which drops what lies beyond the ring, so the
@@ -728,7 +1083,7 @@ export class CityWorld {
       return;
     }
     const prev = this.built.get(key);            // rebuilt / upgraded in place
-    if (prev) { this.scene.remove(prev); prev.traverse(o => o.geometry?.dispose?.()); }
+    if (prev) { this.scene.remove(prev); shed(prev); }
     if (group) this.scene.add(group);
     this.built.set(key, group);
     // The lamp masts of this chunk become collidable objects. It has to happen
@@ -746,7 +1101,7 @@ export class CityWorld {
       const far = this._farRibbons?.get(key);
       if (far) {
         this.scene.remove(far);
-        far.traverse((o) => o.geometry?.dispose?.());
+        shed(far);
         this._farRibbons.delete(key);
       }
     }
@@ -802,6 +1157,24 @@ export class CityWorld {
     if (!this.terrain.ready?.(pos.x, pos.z)) return false;
     const tk = Math.floor(pos.x / this.city.tile) + ',' + Math.floor(pos.z / this.city.tile);
     if (this.city.tile && !this.terrain._conformed?.has(tk)) return false;
+    // ...and so is every other tile under the window. The spawn stands 25 m
+    // from a tile corner, so three more tiles are in view, and a bake that
+    // lands after the reveal re-meshes the ground the player is looking at.
+    // They are the nearest, so the pick in update bakes them first anyway: a
+    // tile with no height map yet, or one whose profiles cannot be final
+    // (tried, nothing new since), does not hold the gate. (Boot does NOT skip
+    // the tiles out of view: deferring them to play moved the bake order, and
+    // a way across a tile border keeps the profile it was first levelled to,
+    // so a boot into the old town left chunk 16,-2 up to 1.16 m off what a
+    // walk there builds; nor did it make boot any faster.)
+    if (this.city.tile) {
+      const T = this.terrain;
+      for (const k of T.grids.keys()) {
+        if (!T.grids.get(k) || T._conformed?.has(k) || T._conformTried?.get(k) === (T._loads ?? 0)) continue;
+        const c = k.indexOf(',');
+        if (this._tileInView(+k.slice(0, c), +k.slice(c + 1), pos)) return false;
+      }
+    }
     if (this._guessDropWanted) return false;     // guessed chunks awaiting redo
     // every windowed cell BUILT — not "queue empty": arriving photo
     // supertiles re-queue built chunks for sharper textures indefinitely,
@@ -853,6 +1226,23 @@ export class CityWorld {
       if (this._farRibbons.has(hk)) continue;
       if (builds >= 2 || performance.now() > budget) break;
       const [cx, cz] = hk.split(',').map(Number);
+      // TO A WORKER WHEN ONE IS FREE. "A rural ribbon build is milliseconds"
+      // stopped being true when a carriageway got kerbs, pavements, rounded
+      // corners and junction pads: measured on a drive east of the station in
+      // wave 3, one of these was 271 ms of this thread in a single call, the
+      // worst hitch of the whole drive. The ribbon is a chunk like any other
+      // to the mesher, so it goes the same way and lands in _landRibbons; the
+      // slot holds null meanwhile, exactly as it does for a home with nothing
+      // to draw, so the pass does not ask twice.
+      if (this._freeWorker() && !this._ribbonLocal?.has(hk)) {
+        const job = this.pool.submit(this, cx, cz, 'roads');
+        if (job) {
+          (this._ribbonFlights ??= new Map()).set(hk, { job, pool: this.pool });
+          this._farRibbons.set(hk, null);
+          builds++;
+          continue;
+        }
+      }
       const group = buildChunkMeshes(this.city, cx, cz, this.mats, 'roads');
       this._farRibbons.set(hk, group ?? null);
       if (group) this.scene.add(group);
@@ -861,11 +1251,43 @@ export class CityWorld {
     // retire what nothing needs any more — or what the real chunk now draws
     for (const [hk, group] of this._farRibbons) {
       if (needed.has(hk) && this._detail.get(hk) !== 'full') continue;
+      if (this._ribbonFlights?.has(hk)) continue;      // still being meshed: _landRibbons decides
       if (group) {
         this.scene.remove(group);
-        group.traverse((o) => o.geometry?.dispose?.());
+        shed(group);
       }
       this._farRibbons.delete(hk);
+    }
+  }
+
+  /** Take the far ribbons the workers have finished. Once a frame; nearly free. */
+  _landRibbons() {
+    if (!this._ribbonFlights?.size) return;
+    for (const [hk, fl] of this._ribbonFlights) {
+      if (!fl.job.done) continue;
+      this._ribbonFlights.delete(hk);
+      let out = null;
+      try { out = fl.pool.finish(fl.job, this.mats); }
+      catch (err) {
+        // not worth a retired pool: forget the slot and the next pass builds
+        // this one here, on the path that always works
+        console.warn(`city: worker ribbon ${hk} failed:`, err?.message ?? err);
+        this._farRibbons.delete(hk);
+        // ...and it is built HERE: a ribbon a worker cannot mesh would
+        // otherwise be sent, fail and be sent again once a second for as long
+        // as it was in view
+        (this._ribbonLocal ??= new Set()).add(hk);
+        continue;
+      }
+      // the real chunk may have arrived, or the home left the window, while
+      // the ribbon was away
+      if (!this._farRibbons.has(hk) || this._detail.get(hk) === 'full') {
+        shed(out.group);
+        this._farRibbons.delete(hk);
+        continue;
+      }
+      this._farRibbons.set(hk, out.group ?? null);
+      if (out.group) this.scene.add(out.group);
     }
   }
 
@@ -891,6 +1313,14 @@ export class CityWorld {
       if (!this.built.has(k)) return Math.max(0, d - step);
     }
     return maxM;
+  }
+
+  /** Does world tile tx,tz lie under the built window round `pos` (one chunk of margin)? */
+  _tileInView(tx, tz, pos) {
+    const T = this.city.tile || 4800;
+    const r = (this.viewChunks + this.shellChunks + this.farChunks + 1) * CHUNK;
+    const fx = (Math.floor(pos.x / CHUNK) + 0.5) * CHUNK, fz = (Math.floor(pos.z / CHUNK) + 0.5) * CHUNK;
+    return tx * T < fx + r && (tx + 1) * T > fx - r && tz * T < fz + r && (tz + 1) * T > fz - r;
   }
 
   // built / wanted counts over the whole streaming window, for the boot label
@@ -994,12 +1424,25 @@ export class CityWorld {
       const group = this.built.get(key);
       if (group) {
         this.scene.remove(group);
-        group.traverse(o => { o.geometry?.dispose?.(); });
+        shed(group);
       }
       this.poles?.unregister(key);
       this.built.delete(key);
       this._stale?.delete(key);
+      this._forget(key);
     }
+  }
+
+  // The four per-cell notes that go with a built chunk. The ring eviction has
+  // always cleared them; the two other ways a chunk is dropped did not, and a
+  // session that changed preset over a full air window was carrying 4,680
+  // notes for 81 chunks (measured, wave 3).
+  _forget(key) {
+    this._rasterRetried?.delete(key);
+    this._detail.delete(key);
+    this._px.delete(key);
+    this._hadTerrain.delete(key);
+    this._missBy.delete(key);
   }
 
   /** Drop the built chunks of ONE terrain tile — its ground just moved. */
@@ -1029,8 +1472,12 @@ export class CityWorld {
     for (const [key, group] of this.built) {
       if (group) {
         this.scene.remove(group);
-        group.traverse(o => { o.geometry?.dispose?.(); });
+        shed(group);
       }
+      // a cell outside today's window is never rebuilt: its lamp posts must
+      // not stay behind as things to drive into, nor its notes as books
+      this.poles?.unregister(key);
+      this._forget(key);
     }
     this.built.clear();
     this.queue.length = 0;
@@ -1065,21 +1512,27 @@ export class CityWorld {
       for (const dz of zs) {
         const key2 = (ci + dx) + ',' + (cj + dz);
         const js = junctionsIn(key2);
+        // …and the kerb round each pad (js/streets.js): the corner of a
+        // pavement is where people stand to cross, and it is drawn 12 cm up
         if (js) for (const j of js) {
           if (j._cluster || j._ring) continue;   // cluster answers / no pad drawn
-          const r = j.padR ?? 6;
+          const r = (j.padR ?? 6) + CORNER_REACH;
           if ((x - j.x) ** 2 + (z - j.z) ** 2 > r * r) continue;
           const ring = junctionHull(j);
-          if (!ring || !pointInPolygon(x, z, ring)) continue;
-          levels.add(junctionDeckY(j, x, z, this.terrain) + LAYER_Y.road + 0.012);
+          if (!ring) continue;
+          if (pointInPolygon(x, z, ring)) { levels.add(junctionDeckY(j, x, z, this.terrain) + LAYER_Y.road + 0.012); continue; }
+          const up = cornerLift(j, x, z);
+          if (up >= 0) levels.add(junctionDeckY(j, x, z, this.terrain) + LAYER_Y.road + up);
         }
         const cls = clustersIn(key2);
         if (cls) for (const cl of cls) {
-          const r = cl.padR;
+          const r = cl.padR + CORNER_REACH;
           if ((x - cl.x) ** 2 + (z - cl.z) ** 2 > r * r) continue;
           const ring = clusterHull(cl);
-          if (!ring || !pointInPolygon(x, z, ring)) continue;
-          levels.add(clusterDeckY(cl, x, z, this.terrain) + LAYER_Y.road + 0.012);
+          if (!ring) continue;
+          if (pointInPolygon(x, z, ring)) { levels.add(clusterDeckY(cl, x, z, this.terrain) + LAYER_Y.road + 0.012); continue; }
+          const up = cornerLift(cl, x, z);
+          if (up >= 0) levels.add(clusterDeckY(cl, x, z, this.terrain) + LAYER_Y.road + up);
         }
       }
     }
@@ -1099,22 +1552,44 @@ export class CityWorld {
     for (const r of cell.roads) {
       if (!r.d) continue;
       const half = r.w / 2 + 0.35;               // a wheel just off the kerb still rides the kerb
+      // A kerbed street is wider than its carriageway: the pavement beside it
+      // is a surface a wheel can be put on, 12 cm up, and a bus lay-by is
+      // carriageway the centreline's width does not know about.
+      const vg = r.br ? null : streetOf(r);
+      const reach = half + (vg ? VERGE_REACH : 0) + (r._bays ? BAY_W : 0);
       const bb = lineBB(r);
-      if (x < bb[0] - half || x > bb[2] + half || z < bb[1] - half || z > bb[3] + half) continue;
-      let along = 0;
+      if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+      // The verge is asked of the NEAREST segment only. Round a bend a point
+      // in the lane is inside the carriageway of the segment beside it and
+      // "a metre past the kerb" of the one before, measured to that one's end:
+      // judged segment by segment, every bend had a phantom kerb in its lane.
+      let along = 0, bd = Infinity, bs = 0, be = 1;
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-        if (d < half) {
+        if (d < reach) {
           const s = along + Math.hypot(_closest.x - ax, _closest.z - az);
-          // The HIGHER of the ground and the graded profile — the same max()
-          // meshes.js laid the ribbon at, so the wheels are on the surface that
-          // was drawn and not on either of the two things it was made from.
-          const gy = r.br ? bridgeDeckHeight(r, s, this.terrain)
-            : (roadGradeY(r, s, this.terrain) ?? ground);
-          levels.add(gy + LAYER_Y.road);
+          const e = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
+          if (d < bd) { bd = d; bs = s; be = e; }
+          const bay = r._bays ? bayAt(r, s, e) : 0;
+          if (d < half + bay) {
+            // The HIGHER of the ground and the graded profile: the same max()
+            // meshes.js laid the ribbon at, so the wheels are on the surface that
+            // was drawn and not on either of the two things it was made from.
+            const gy = r.br ? bridgeDeckHeight(r, s, this.terrain)
+              : (roadGradeY(r, s, this.terrain) ?? ground);
+            levels.add(gy + LAYER_Y.road);
+          }
         }
         along += Math.hypot(bx - ax, bz - az);
+      }
+      if (vg && bd < reach && !inZone(r, bs)) {
+        const xo = bd - r.w / 2 - (r._bays ? bayAt(r, bs, be) : 0);
+        const v = vergeAt(r, bs, be > 0 ? 1 : 0);
+        if (xo > 0 && v.w > 0.05 && xo <= v.w) {
+          const gy = roadGradeY(r, bs, this.terrain);
+          if (gy !== null && gy !== undefined) levels.add(gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo));
+        }
       }
     }
     this._padLevels(x, z);
@@ -1143,7 +1618,7 @@ export class CityWorld {
     const ground = this.terrain.heightAt(x, z);
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
     if (!cell) return ground;
-    levels.reset(near).add(ground);
+    levels.reset(near);          // (the ground is offered last: see the foot of this function)
     // rails too: the drawn bed is an absolute graded surface (sleepers at
     // grade + LAYER_Y.rail), and feet that only knew the terrain sank into
     // it — a metre, on a rail bridge
@@ -1155,52 +1630,243 @@ export class CityWorld {
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-        if (d < 2.6) {
+        // (a tram's panel is 2.84 m wide with its chamfers, and no wider than
+        // that underfoot: at a railway's 2.6 m either side, feet stepped up
+        // onto its level a pace before the concrete began)
+        if (d < (r.t === 'tram' && !r.br ? 1.42 : 2.6)) {
           const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
           if (r.br) levels.add(bridgeDeckHeight(r, along, this.terrain));
           else {
-            const gy = roadGradeY(r, along, this.terrain);
-            if (gy !== null && gy !== undefined) levels.add(gy + LAYER_Y.rail);
+            // the level the mesh laid it at (geo.railGradeY): a tram's is the
+            // deck of the street it runs in, a railway's its own bed
+            const gy = railGradeY(r, along, this.terrain);
+            // a tram runs on a panel set in the street, a touch over the
+            // carriageway (meshes.railWay); heavy rail on its sleepers
+            if (gy !== null && gy !== undefined) levels.add(gy + (r.t === 'tram' ? LAYER_Y.road + 0.03 : LAYER_Y.rail));
           }
         }
         dist += Math.hypot(bx - ax, bz - az);
       }
     }
+    // ---- the footway level, the way the mesh draws it ------------------------
+    // A footway is its own levelled strip (LAYER_Y.footway over its own grade)
+    // BLENDED toward whatever carriageway it runs beside or arrives at: the
+    // pavement level of a kerbed street (kerb height, down a dropped kerb at a
+    // crossing), a touch under the asphalt of any other. meshes.roadRibbon
+    // does exactly this per vertex; the numbers here are the same numbers, so
+    // feet stand on the paving that was drawn. `footOwn` is the footway's own
+    // level, `upW` / `upT` the strongest pull on it, and `onRoad` says the
+    // point is on a carriageway, where no footway is drawn at all.
+    //
+    // The pull is asked at the footway's CENTRELINE, not under the feet: the
+    // drawn slab is flat across its width at the level its centreline came out
+    // at, and a pull judged point by point tilted the answer across it (and
+    // flipped it outright where two streets pulled about equally), so along
+    // one edge of a lifted footway feet stood a hand deep in the paving.
+    let footOwn = -Infinity, fcx = 0, fcz = 0, onRoad = false;
     for (const r of cell.roads) {
       // Bridges, yes — but ALSO embanked ordinary roads: a levelled deck may
       // ride up to GRADE_FILL above the terrain, and feet that only knew the
       // terrain sank into it to the knees on a fill and to the neck on a big
       // one. Any graded deck IS the ground where it runs.
       const br = !!r.br;
-      const reach = r.w / 2 + (br ? 1.5 : 5);   // 5 m: the embankment bank
+      const vg = r.d && !br ? streetOf(r) : null;
+      const reach = r.w / 2 + (br ? 1.5 : vg ? VERGE_REACH + (r._bays ? BAY_W : 0) : 5);   // 5 m: the embankment bank
       const bb = lineBB(r);
       if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
-      let dist = 0;
+      // (the verge and its pull are asked of the NEAREST segment only: see surfaceY)
+      let dist = 0, bd = Infinity, bs = 0, be = 1;
+      const half = r.w / 2;
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-        const half = r.w / 2;
-        if (d < half + (br ? 1.5 : 5)) {
+        if (d < reach) {
           const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
           if (br) { if (d < half + 1.5) levels.add(bridgeDeckHeight(r, along, this.terrain)); }
           else {
             const gy = roadGradeY(r, along, this.terrain);
             if (gy !== null && gy !== undefined) {
-              if (d < half + 0.35) levels.add(gy + LAYER_Y.road);
+              if (!r.d) {
+                // a footway, path or track: its own strip
+                // (a hand past its edge and no more: a lifted footway is a
+                // slab now, and 35 cm of grace stood people on the air beside it)
+                if (d < half + 0.12 && gy + LAYER_Y.footway > footOwn) {
+                  footOwn = gy + LAYER_Y.footway; fcx = _closest.x; fcz = _closest.z;
+                }
+              } else {
+                const e = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
+                if (d < bd) { bd = d; bs = along; be = e; }
+                const xo = d - half - (r._bays ? bayAt(r, along, e) : 0);   // metres past the kerb line
+                if (xo < 0.35) levels.add(gy + LAYER_Y.road);
+                if (xo < 0.3) onRoad = true;
+              }
               // the embankment bank the mesh draws beside the deck is
               // standable — snug under the edge, falling at 55 %
-              const bank = gy + LAYER_Y.road - 0.45
-                - (d > half ? (d - half) * 0.55 : 0);
-              if (bank > ground) levels.add(bank);
+              if (d < half + 5) {
+                const bank = gy + LAYER_Y.road - 0.45
+                  - (d > half ? (d - half) * 0.55 : 0);
+                if (bank > ground) levels.add(bank);
+              }
             }
           }
         }
         dist += Math.hypot(bx - ax, bz - az);
       }
+      if (r.d && !br && bd < reach) {
+        const gy = roadGradeY(r, bs, this.terrain);
+        if (gy !== null && gy !== undefined) {
+          const bay = r._bays ? bayAt(r, bs, be) : 0;
+          const xo = bd - half - bay;
+          const v = vg ? vergeAt(r, bs, be > 0 ? 1 : 0) : null;
+          // the generated pavement itself
+          if (v && v.u && xo > 0 && v.w > 0.05 && xo <= v.w && !inZone(r, bs)) {
+            levels.add(gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo));
+          }
+        }
+      }
     }
+    let slab = -Infinity;
+    if (footOwn > -Infinity && !onRoad) {
+      this._footPull(cell, fcx, fcz, footOwn);
+      slab = footOwn + (_pull.t - footOwn) * _pull.w;
+      levels.add(slab);
+    }
+    // THE GROUND, except over a path's own slab. The drawn ground dives under
+    // every way's strip (meshes.js clamps it under each corridor), but the
+    // height grid does not: where the earthworks of a street beside the path
+    // have raised the 20 m samples (the shoulder of an embankment), the grid
+    // arches back over the path, and feet that were offered it walked on
+    // ground that is not drawn, up to 0.8 m over the cycleway at the foot of
+    // the flyover by Kaufland once the kerb pull stopped lifting that path
+    // (2.8 km of path within 2.4 km of the spawn had the grid over 15 cm
+    // above its slab). On a path's strip the slab is what is there.
+    if (slab === -Infinity || ground <= slab) levels.add(ground);
     this._padLevels(x, z);
     return levels.value(ground);
   }
+
+  // The strongest pull of a carriageway on a footway whose centreline passes
+  // (x, z), into _pull: the pavement level of a kerbed street out to 6 m and
+  // fading over the next 4, a touch under the asphalt of any other within
+  // 3.5 m. The same numbers, asked at the same place, as meshes.roadRibbon
+  // blends each footway station with, and capped by the same function
+  // (meshes.footPullW) against `own`, the footway's own level there: a street
+  // up on an embankment does not lift the path at the foot of it.
+  _footPull(cell, x, z, own) {
+    let upW = 0, upT = 0;
+    for (const r of cell.roads) {
+      if (!r.d || r.br || !r.p) continue;
+      const vg = streetOf(r), half = r.w / 2;
+      const reach = half + (vg ? VERGE_REACH + (r._bays ? BAY_W : 0) : 5);
+      const bb = lineBB(r);
+      if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+      let dist = 0, bd = Infinity, bs = 0, be = 1;
+      for (let i = 0; i < r.p.length - 1; i++) {
+        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+        const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
+        if (d < bd) {
+          bd = d; bs = dist + Math.hypot(_closest.x - ax, _closest.z - az);
+          be = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
+        }
+        dist += Math.hypot(bx - ax, bz - az);
+      }
+      if (bd >= reach) continue;
+      const gy = roadGradeY(r, bs, this.terrain);
+      if (gy === null || gy === undefined) continue;
+      const bay = r._bays ? bayAt(r, bs, be) : 0;
+      const xo = bd - half - bay;
+      const v = vg ? vergeAt(r, bs, be > 0 ? 1 : 0) : null;
+      if (v && v.u) {
+        const t = gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo) + FOOT_LIFT;
+        const w = footPullW(xo <= 6 ? 1 : xo >= 10 ? 0 : 1 - (xo - 6) / 4, t - own, xo, v.w);
+        if (w > upW) { upW = w; upT = t; }
+      } else {
+        const t = gy + LAYER_Y.road - 0.04;
+        const w = footPullW(xo + bay <= 0 ? 1 : 1 - (xo + bay) / 3.5, t - own, xo + bay);
+        if (w > upW) { upW = w; upT = t; }
+      }
+    }
+    _pull.w = upW; _pull.t = upT;
+  }
+
+  // Where a WALKER's feet are at (x, z), for callers that only have a position
+  // and no height of their own to hint with (the crowd): the highest surface
+  // within a storey of the bare ground, so a pavement, a kerb, an embankment or
+  // a low deck counts and a flyover overhead does not. `footing` wraps it in
+  // the one-method shape pedestrians.js already asks its terrain for.
+  //
+  // The 2.6 m hint plus SNAP_UP reaches 4.1 m over the ground, and that made
+  // every low bridge deck the floor of whoever walked UNDER it: a path passing
+  // beneath a footbridge lifted its walkers onto the deck for the width of the
+  // bridge and dropped them again (and a signal mast under a flyover stood on
+  // the flyover). Hinting at the bare ground instead would do the opposite:
+  // everybody ON a bridge between 1.5 and 4.1 m up would walk the valley floor
+  // (measured: 620 m of footbridge within 2.4 km of the spawn). A position
+  // alone cannot tell the two apart, so the way underfoot decides, and only
+  // where the answer really is a bridge: a footway drawn up the side of an
+  // embanked street stands as far over the bare ground as any deck, and it is
+  // the floor (taking those for decks dropped walkers through a kilometre of
+  // raised paving). A deck counts as overhead when the point lies on a way
+  // that is on the ground, and the answer is then what it would have been
+  // without that deck (asked again, because one flyover may cross another).
+  walkY(x, z) {
+    const g = this.terrain.heightAt(x, z);
+    let y = this.heightAt(x, z, g + 2.6);
+    // (nothing more than SNAP_UP over the ground: both hints agree)
+    for (let k = 0; k < 3 && y > g + SNAP_UP; k++) {
+      const deck = this._deckAt(x, z, y);
+      if (!deck || !this._onGroundWay(x, z, deck === 1)) break;
+      y = this.heightAt(x, z, y - SNAP_UP - 0.05);
+    }
+    return y;
+  }
+  // Is the `y` heightAt answered at (x, z) a bridge deck? 0: no, 1: a
+  // footbridge, 2: a road or rail bridge. The same ways, reaches and heights
+  // as heightAt itself.
+  _deckAt(x, z, y) {
+    const cell = this.city.chunkIndex.get(chunkKey(x, z));
+    if (!cell) return 0;
+    for (let pass = 0; pass < 2; pass++) {
+      const list = pass ? cell.rails : cell.roads;
+      if (!list) continue;
+      for (const r of list) {
+        if (!r.br || !r.p || r.p.length < 2) continue;
+        const reach = pass ? 2.6 : r.w / 2 + 1.5;
+        const bb = lineBB(r);
+        if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+        let dist = 0;
+        for (let i = 0; i < r.p.length - 1; i++) {
+          const ax = r.p[i][0], az = r.p[i][1], bx = r.p[i + 1][0], bz = r.p[i + 1][1];
+          if (distPointToSegment(x, z, ax, az, bx, bz, _closest) < reach
+            && Math.abs(bridgeDeckHeight(r, dist + Math.hypot(_closest.x - ax, _closest.z - az), this.terrain) - y) < 1e-3) {
+            return pass || r.d ? 2 : 1;
+          }
+          dist += Math.hypot(bx - ax, bz - az);
+        }
+      }
+    }
+    return 0;
+  }
+  // Is (x, z) on a way that lies on the ground: a path's own strip, or a
+  // carriageway and the pavement beside it? Under a FOOTBRIDGE (`walked`) only
+  // a path's own strip counts: the people at that point of a street are the
+  // ones crossing over it, and they are on the bridge (counting the street
+  // dropped them onto its asphalt for the width of the road).
+  _onGroundWay(x, z, walked) {
+    const cell = this.city.chunkIndex.get(chunkKey(x, z));
+    if (!cell) return false;
+    for (const r of cell.roads) {
+      if (r.br || !r.p || r.p.length < 2 || (walked && r.d)) continue;
+      const reach = r.w / 2 + (r.d ? 2 : 0.3);
+      const bb = lineBB(r);
+      if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+      for (let i = 0; i < r.p.length - 1; i++) {
+        if (distPointToSegment(x, z, r.p[i][0], r.p[i][1], r.p[i + 1][0], r.p[i + 1][1], _closest) < reach) return true;
+      }
+    }
+    return false;
+  }
+  get footing() { return (this._footing ??= { heightAt: (x, z) => this.walkY(x, z) }); }
 
   // What is (x, z) standing on, at or below `maxY`? Terrain and bridge decks
   // as before, plus the floor slabs and stairs of any streamed-in interior —
@@ -1244,6 +1910,17 @@ export class CityWorld {
     if (!cell) return 0;
     let best = 0;
     for (const b of cell.buildings) {
+      // a hand-made landmark answers with its own solids (js/landmarks.js):
+      // the hotel stands 13 m over the station hall it shares a footprint with
+      const lm = landmarkSolids(b);
+      if (lm) {
+        const g = this._base(b);
+        for (const s of lm) {
+          const t = g + s.top;
+          if (t > best && t <= fromY + 0.05 && solidHas(s, x, z)) best = t;
+        }
+        continue;
+      }
       const top = this._top(b);
       if (top <= best || top > fromY + 0.05) continue;
       if (this.interiors.hidden.has(b._id)) continue;
@@ -1262,16 +1939,17 @@ export class CityWorld {
   _registerPoles(key, group) {
     if (!this.poles) return;
     if (!group) { this.poles.unregister(key); return; }
-    let posts = null, heads = null;
-    group.traverse((o) => {
-      if (o.name === 'lampPosts') posts = o;
-      else if (o.name === 'lampHeads') heads = o;
-    });
-    const flat = posts?.userData?.spots;
-    if (!posts || !heads || !flat?.length) { this.poles.unregister(key); return; }
-    const spots = [];
-    for (let i = 0; i + 2 < flat.length; i += 3) spots.push([flat[i], flat[i + 1], flat[i + 2]]);
-    this.poles.register(key, spots, posts, heads, this.terrain);
+    // two batches at most: street columns and park lanterns (meshes.lampBatch)
+    let n = 0;
+    for (const [pn, hn] of LAMP_BATCHES) {
+      const posts = group.getObjectByName(pn), heads = group.getObjectByName(hn);
+      const flat = posts?.userData?.spots;
+      if (!posts || !heads || !flat?.length) continue;
+      const spots = [];
+      for (let i = 0; i + 2 < flat.length; i += 3) spots.push([flat[i], flat[i + 1], flat[i + 2]]);
+      this.poles.register(key, spots, posts, heads, this.terrain, n++ > 0);
+    }
+    if (!n) this.poles.unregister(key);
   }
 
   crashDebris(x, y, z, color, n, energy) {
@@ -1341,6 +2019,18 @@ export class CityWorld {
     const above = opts?.aboveY;
     for (const b of cell.buildings) {
       if (b.y > 0.5) continue; // skyway/arch — walk under it
+      // A hand-made landmark is solid where its MODEL is and as high as its
+      // walls stand, not to the tile's height tag: the Green Gate only beside
+      // its passage (a piece with `bot` is the masonry over one).
+      const lm = landmarkSolids(b);
+      if (lm) {
+        const g = above !== undefined ? this._base(b) : 0;
+        for (const s of lm) {
+          if (s.bot > 0.5 || (above !== undefined && g + s.top <= above)) continue;
+          pushed = this._pushOutOfPoly(pos, radius, s.ring, s.holes, true) || pushed;
+        }
+        continue;
+      }
       if (above !== undefined && this._top(b) <= above) continue;
       if (walker && this.interiors.isActive(b)) continue;   // its boxes did it
       pushed = this._pushOutOfPoly(pos, radius, b.o, b.i, true) || pushed;
@@ -1427,6 +2117,12 @@ export class CityWorld {
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
     if (!cell) return null;
     for (const b of cell.buildings) {
+      const lm = landmarkSolids(b);            // as in roofY: its own solids
+      if (lm) {
+        const g = this._base(b);
+        for (const s of lm) if (y <= g + s.top && y >= g + s.bot && solidHas(s, x, z)) return b;
+        continue;
+      }
       if (y > this._top(b) || y < this._base(b) + (b.y ?? 0)) continue;
       if (this.interiors.hidden.has(b._id)) continue;
       if (pointInPolygon(x, z, b.o) && !(b.i ?? []).some(h => pointInPolygon(x, z, h))) return b;
@@ -1621,7 +2317,7 @@ export class CityWorld {
     const old = group.getObjectByName('buildings');
     if (old) {
       group.remove(old);
-      old.traverse((o) => o.geometry?.dispose?.());   // it is a Group: walls,
+      shed(old);   // it is a Group: walls,
     }                                                 // door trim and signs
     const [cx, cz] = key.split(',').map(Number);
     const m = buildBuildingsMesh(this.city, cx, cz, this.mats);

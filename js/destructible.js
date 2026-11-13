@@ -31,8 +31,9 @@
 
 import * as THREE from 'three';
 import { DESTRUCTION, INTERIOR } from './config.js';
-import { interiorPieces, shellPieces } from './pieces.js';
+import { interiorPieces, interiorPiecesGen, shellPieces } from './pieces.js';
 import { sfxAt } from './audio.js';   // safe headless — no-ops without an AudioContext
+import { NIGHT, PANE_GLOW_GLSL } from './facadeatlas.js';   // the one uniform every lit window reads, and a lit shop front
 
 // One material for every model's roof: the geometry carries its own colours, so
 // the only thing that varies between buildings is already in the vertices.
@@ -42,6 +43,8 @@ function roofMaterial() {
 }
 
 const D = DESTRUCTION;
+const SHELL_GAIN = 1.15;                         // 1 / the unit box's mean gradient
+const PIN_GAIN = 1.19;                           // 1 / the plaster pin texel's luminance
 const CELL = 4;                                  // spatial-hash cell, meters
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
@@ -159,6 +162,31 @@ function wordmarkMat(text, bg = 0xffffff, fg = 0x1c1c1c) {
   return mat;
 }
 
+/**
+ * Give back the wordmark boards nothing wears any more. `inUse` is every
+ * material some live mesh holds (js/city.js gathers it); a board outside it is
+ * first only NOTED, and freed if the next sweep finds it idle again, so a shop
+ * that left the shell ring and comes straight back keeps its canvas. The cache
+ * used to keep every name the player had ever walked past: 430 boards of
+ * 1024 x 256 after three laps of a tour, a megabyte of canvas and 1.3 of
+ * texture each. A freed name is simply painted again when it is next needed.
+ * @returns how many boards were freed
+ */
+export function sweepWordmarks(inUse) {
+  let n = 0;
+  for (const [key, mat] of _wordmarks) {
+    if (inUse.has(mat)) { mat.userData.idle = 0; continue; }
+    if ((mat.userData.idle = (mat.userData.idle ?? 0) + 1) < 2) continue;
+    mat.map?.dispose();
+    mat.dispose();
+    _wordmarks.delete(key);
+    n++;
+  }
+  return n;
+}
+/** How many wordmark boards are cached (diagnostics). */
+export const wordmarkCount = () => _wordmarks.size;
+
 // The box the wordmark instances draw with: the two LARGE faces (local ±z, the
 // board's front and back) map the full 0..1 canvas, every other face pins to
 // the bg-colour corner swatch. Face selection goes by the baked normals rather
@@ -187,6 +215,53 @@ function mats() {
       vertexColors: true, transparent: true, opacity: 0.42,
       depthWrite: false, side: THREE.DoubleSide,
     });
+    // LIT WINDOWS. The far facade lights a window by multiplying a per-bay
+    // colour into its painted glass; here the window is a real pane, so the
+    // pane itself glows. Each instance carries aLit = the room's colour and the
+    // rank at which it switches on (pieces.js stamps it from the same hash the
+    // far mesh uses, so the same windows are lit either side of the tier swap),
+    // and NIGHT is the shared uniform main.js drives for the whole city. A lit
+    // pane also goes nearly opaque: you see the lamp, not the room behind it.
+    _glassMat.onBeforeCompile = (sh) => {
+      sh.uniforms.uNight = NIGHT;
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>',
+          '#include <common>\nattribute vec4 aLit;\nvarying vec4 vLit;\nvarying vec2 vPane;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLit = aLit;\nvPane = uv;');
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>',
+          '#include <common>\nuniform vec2 uNight;\nvarying vec4 vLit;\nvarying vec2 vPane;' + PANE_GLOW_GLSL)
+        .replace('#include <color_fragment>', `#include <color_fragment>
+          // aLit.a is the switch-on rank; +8 marks a pane with no glazing bars
+          // (a shop window, a curtain-wall band)
+          float plain = step(4.0, vLit.a);
+          float litOn = step(vLit.a - 8.0 * plain, uNight.x) * step(0.004, vLit.r + vLit.g + vLit.b);
+          // A window has a frame and bars. The far facade paints them; a bare
+          // box of glass has none, and read as a hole with film over it.
+          float bars = max(step(abs(vPane.x - 0.5), 0.024), step(abs(vPane.y - 0.68), 0.017));
+          bars = max(bars * (1.0 - plain), 1.0 - step(0.035, min(min(vPane.x, 1.0 - vPane.x) * 0.9,
+            min(vPane.y, 1.0 - vPane.y) * 1.6)));
+          // Glass is see-through when you stand at it and a dark mirror from
+          // across the street. Without the second half a shell whose rooms are
+          // not built yet read as a hollow frame, and its panes turned from pale
+          // film to painted dark glass at the tier swap.
+          float far = smoothstep(9.0, 55.0, length(vViewPosition));
+          diffuseColor.rgb *= mix(1.0, 0.42, far);
+          diffuseColor.a = mix(diffuseColor.a, 0.94, far);
+          diffuseColor.a = mix(diffuseColor.a, 0.9, litOn * min(1.0, uNight.y));
+          diffuseColor = mix(diffuseColor, vec4(0.62, 0.61, 0.58, 1.0), bars);`)
+        .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+          // A lit pane is not a flat card: the lamp is under the ceiling, the
+          // curtains hang at the sides, and the glazing bars stand dark against
+          // it. The far facade paints exactly this into its window mask.
+          float room = mix(0.62, 1.0, smoothstep(0.0, 0.7, vPane.y))
+            * (0.6 + 0.4 * smoothstep(0.0, 0.2, vPane.x) * smoothstep(1.0, 0.8, vPane.x));
+          // (a pane without bars is a shop front: a room seen through glass,
+          // not a card, see facadeatlas.js PANE_GLOW_GLSL)
+          totalEmissiveRadiance += vLit.rgb * (litOn * uNight.y * (1.0 - 0.8 * bars))
+            * atcPaneGlow(vPane, -vViewPosition, plain * litOn, room);`);
+    };
+    _glassMat.customProgramCacheKey = () => 'atc-glass-lit-2';
   }
   return [_solidMat, _glassMat];
 }
@@ -194,7 +269,7 @@ function mats() {
 // scratch — none of the hot paths may allocate
 const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion();
 const _v = new THREE.Vector3(), _s = new THREE.Vector3();
-const _up = new THREE.Vector3(0, 1, 0), _c = new THREE.Color();
+const _up = new THREE.Vector3(0, 1, 0), _c = new THREE.Color(), _c2 = new THREE.Color();
 
 // world AABB half-extents of a yaw-rotated box — cached on the piece, used by
 // the hash, the support graph, collision and the blast test alike
@@ -204,6 +279,18 @@ function stampBounds(p) {
   p.az = sa * p.hx + ca * p.hz;
   p.top = p.y + p.hy;
   p.bot = p.y - p.hy;
+}
+
+// note piece `p`, which is (or will be) pieces[i], in every hash cell it covers
+function hashInto(grid, p, i) {
+  const x0 = Math.floor((p.x - p.ax) / CELL), x1 = Math.floor((p.x + p.ax) / CELL);
+  const z0 = Math.floor((p.z - p.az) / CELL), z1 = Math.floor((p.z + p.az) / CELL);
+  for (let cx = x0; cx <= x1; cx++) for (let cz = z0; cz <= z1; cz++) {
+    const key = cx + ',' + cz;
+    let a = grid.get(key);
+    if (!a) grid.set(key, a = []);
+    a.push(i);
+  }
 }
 
 // ---- debris --------------------------------------------------------------
@@ -365,6 +452,20 @@ export class Dust {
 }
 
 // ---- the model -----------------------------------------------------------
+// The fields one set of a model's meshes lives in (see BuildingModel._meshSet).
+const MESH_FIELDS = ['_solid', '_glass', '_lit', '_sign', '_words', '_wordIdx', '_wCursor',
+  '_shell', '_uvRect'];
+/** Take a set of meshes off its group and free them. */
+function disposeSet(S) {
+  for (const m of [S._solid, S._glass, S._shell, S._sign, ...(S._words ?? [])]) {
+    if (!m) continue;
+    m.parent?.remove(m);
+    m.dispose();               // wordmark geometry + materials are shared caches
+    // the per-model clones that carry aUvRect / aLit
+    if (m === S._shell || m === S._glass) m.geometry.dispose();
+  }
+}
+
 export class BuildingModel {
   /**
    * @param scene  THREE.Scene
@@ -393,6 +494,7 @@ export class BuildingModel {
     this.shellPieces = 0;
     this.lastTouch = 0;        // seconds-since-boot stamp for the LRU
     this._dirty = true;
+    this._ver = 0;             // sync() count: a sliced mesh fill checks it did not go stale
     this._solid = null;
     this._glass = null;
     this._shell = null;      // the atlas-textured outer leaf
@@ -421,6 +523,72 @@ export class BuildingModel {
     this._add(list);
   }
 
+  // ensureInterior for a building nobody needs this very frame: the same
+  // pieces in the same order, worked out a pause at a time (the caller decides
+  // how many steps a frame, see Interiors._stepFullQ) and added in one go, so
+  // the model is never seen half furnished. A rocket does not wait: blast()
+  // still calls ensureInterior, and whatever this had worked out is dropped.
+  *ensureInteriorGen() {
+    if (this.interiorBuilt) return;
+    const gen = interiorPiecesGen(this.plan);
+    let it;
+    while (!(it = gen.next()).done) yield;
+    if (this.interiorBuilt) return;
+    let list = it.value;
+    if (this.shelled) list = list.filter((p) => p.leaf !== 'lin');
+    // _add, with its own per-piece half (bounds and the spatial hash, 3 ms for
+    // a department store) taken in steps too, into a grid of its own. Only the
+    // mesh rebuild is left for the frame the rooms appear in.
+    const base = this.pieces.length, grid = new Map();
+    for (let j = 0; j < list.length; j++) {
+      const p = list[j];
+      p.dead = false;
+      stampBounds(p);
+      hashInto(grid, p, base + j);
+      if ((j & 255) === 255) yield;
+    }
+    // (pieces are only ever added by the shell, which stood before this began,
+    // and by the rooms themselves; if that ever stops being true, the indices
+    // above are stale and the plain path is the safe one)
+    const stale = () => this.interiorBuilt || this.pieces.length !== base;
+    if (stale()) { if (!this.interiorBuilt) { this.interiorBuilt = true; this._add(list); } return; }
+    // ...and the meshes, which were the last bite: 15 to 32 ms for the eight
+    // biggest buildings of the old town (13k to 24k pieces), one matrix and
+    // one colour a piece. The new set is sized, and its buffers are filled a
+    // thousand pieces a step, OFF the scene, by the same writer sync() uses;
+    // the old set keeps showing the shell meanwhile, and the swap is one step.
+    // If a standing piece changed between two steps (sync ran: _ver moved),
+    // what was written is stale, and the swap rewrites the lot as before.
+    const S = this._meshSet(this.pieces, list);
+    yield;
+    const ver = this._ver, cur = { iS: 0, iG: 0, iF: 0, iB: 0 };
+    let j = 0;
+    for (const src of [this.pieces, list]) {
+      for (let i = 0; i < src.length; i++) {
+        if (!src[i].dead) this._fill(S, src[i], cur);
+        if ((++j & 1023) === 0) {
+          yield;
+          if (stale()) { disposeSet(S); if (!this.interiorBuilt) { this.interiorBuilt = true; this._add(list); } return; }
+        }
+      }
+    }
+    yield;
+    if (stale()) { disposeSet(S); if (!this.interiorBuilt) { this.interiorBuilt = true; this._add(list); } return; }
+    this.interiorBuilt = true;
+    for (const p of list) this.pieces.push(p);
+    for (const [key, ids] of grid) {
+      const a = this.grid.get(key);
+      if (a) for (const i of ids) a.push(i); else this.grid.set(key, ids);
+    }
+    this.alive += list.length;
+    this._install(S);
+    // (a change marked but not yet synced counts as stale too: what the steps
+    // wrote may predate it, and clearing _dirty below would hide it for good)
+    if (this._ver !== ver || this._dirty) { this._dirty = true; this.sync(); return; }
+    this._dirty = false;
+    this._finish(this, cur);
+  }
+
   // ---- piece bookkeeping -------------------------------------------------
   _add(list) {
     const base = this.pieces.length;
@@ -434,24 +602,29 @@ export class BuildingModel {
     this._rebuildMeshes();
   }
 
-  _hash(i) {
-    const p = this.pieces[i];
-    const x0 = Math.floor((p.x - p.ax) / CELL), x1 = Math.floor((p.x + p.ax) / CELL);
-    const z0 = Math.floor((p.z - p.az) / CELL), z1 = Math.floor((p.z + p.az) / CELL);
-    for (let cx = x0; cx <= x1; cx++) for (let cz = z0; cz <= z1; cz++) {
-      const key = cx + ',' + cz;
-      let a = this.grid.get(key);
-      if (!a) this.grid.set(key, a = []);
-      a.push(i);
-    }
-  }
+  _hash(i) { hashInto(this.grid, this.pieces[i], i); }
 
   // three cannot grow an InstancedMesh, so adding pieces means new meshes.
   // That happens at most twice per building (shell tier, then the rooms).
   _rebuildMeshes() {
+    this._install(this._meshSet(this.pieces, null));
+    this._dirty = true;
+    this.sync();
+  }
+
+  /**
+   * A new set of meshes sized for `pieces` (and `more`, pieces about to be
+   * added), not yet on the scene. Its fields are named as the model's own, so
+   * _fill and _finish write either one.
+   */
+  _meshSet(pieces, more) {
     let nS = 0, nG = 0, nF = 0, nB = 0;
     let wq = null;                       // wordmark key → { text, bg, fg, n }
-    for (const p of this.pieces) {
+    // `pin` pieces are outer wall without an atlas cell (pieces.js): they ride
+    // in the facade batch on the plain plaster texel whenever there is an atlas
+    const pinOK = this.plan.facades !== false && !!this.plan.cells;
+    for (const src of more ? [pieces, more] : [pieces]) for (const p of src) {
+      if (p.pin && pinOK && !p.uv) p.uv = this.plan.cells.pin.concat(this.plan.cells.pin);
       if (p.uv) nF++;
       else if (p.kind === 'glass') nG++;
       else if (p.kind === 'sign' && p.signText) {
@@ -473,41 +646,43 @@ export class BuildingModel {
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       return m;
     };
-    for (const old of [this._solid, this._glass, this._shell, this._sign,
-      ...(this._words ?? [])]) {
-      if (!old) continue;
-      this.group.remove(old);
-      old.dispose();
-      if (old === this._shell) old.geometry.dispose();  // the per-model aUvRect clone
+    const S = { _solid: mk(nS, solidMat, true), _glass: mk(nG, glassMat, false), _lit: null,
+      _sign: null, _words: null, _wordIdx: null, _wCursor: null, _shell: null, _uvRect: null };
+    if (S._glass) {
+      S._lit = new THREE.InstancedBufferAttribute(new Float32Array(nG * 4), 4);
+      S._lit.setUsage(THREE.DynamicDrawUsage);
+      S._glass.geometry = unitBox().clone();   // per-model, it carries aLit
+      S._glass.geometry.setAttribute('aLit', S._lit);
     }
-    this._solid = mk(nS, solidMat, true);
-    this._glass = mk(nG, glassMat, false);
-    this._sign = mk(nB, signMat(), false);
-    this._words = this._wordIdx = this._wCursor = null;
+    S._sign = mk(nB, signMat(), false);
     if (wq) {
-      this._words = []; this._wordIdx = new Map();
+      S._words = []; S._wordIdx = new Map();
       for (const [key, e] of wq) {
-        this._wordIdx.set(key, this._words.length);
-        this._words.push(mk(e.n, wordmarkMat(e.text, e.bg, e.fg), false, wordBox()));
+        S._wordIdx.set(key, S._words.length);
+        S._words.push(mk(e.n, wordmarkMat(e.text, e.bg, e.fg), false, wordBox()));
       }
-      this._wCursor = new Array(this._words.length).fill(0);
+      S._wCursor = new Array(S._words.length).fill(0);
     }
-    this._shell = null;
     if (nF) {
       const c = this.plan.cells;
-      this._shell = mk(nF, shellMat(c.atlas, c.pin[0], c.pin[1]), true);
-      this._uvRect = new THREE.InstancedBufferAttribute(new Float32Array(nF * 4), 4);
-      this._uvRect.setUsage(THREE.DynamicDrawUsage);
-      this._shell.geometry = unitBox().clone();   // per-model, it carries aUvRect
-      this._shell.geometry.setAttribute('aUvRect', this._uvRect);
+      S._shell = mk(nF, shellMat(c.atlas, c.pin[0], c.pin[1]), true);
+      S._uvRect = new THREE.InstancedBufferAttribute(new Float32Array(nF * 4), 4);
+      S._uvRect.setUsage(THREE.DynamicDrawUsage);
+      S._shell.geometry = unitBox().clone();   // per-model, it carries aUvRect
+      S._shell.geometry.setAttribute('aUvRect', S._uvRect);
     }
+    return S;
+  }
+
+  /** Retire the meshes on the scene and put the set `S` there instead. */
+  _install(S) {
+    disposeSet(this);
+    for (const k of MESH_FIELDS) this[k] = S[k];
     if (this._solid) this.group.add(this._solid);
     if (this._shell) this.group.add(this._shell);
     if (this._sign) this.group.add(this._sign);
     if (this._words) for (const m of this._words) this.group.add(m);
     if (this._glass) this.group.add(this._glass);
-    this._dirty = true;
-    this.sync();
   }
 
   // Write the survivors into the instance buffers. Called after every change,
@@ -515,45 +690,71 @@ export class BuildingModel {
   sync() {
     if (!this._dirty) return;
     this._dirty = false;
-    let iS = 0, iG = 0, iF = 0, iB = 0;
+    this._ver++;                         // see ensureInteriorGen
+    const cur = { iS: 0, iG: 0, iF: 0, iB: 0 };
     if (this._wCursor) this._wCursor.fill(0);
-    for (const p of this.pieces) {
-      if (p.dead) continue;
-      _v.set(p.x, p.y, p.z);
-      _q.setFromAxisAngle(_up, p.yaw);
-      _s.set(p.hx * 2, p.hy * 2, p.hz * 2);
-      _m4.compose(_v, _q, _s);
-      _c.setHex(p.col).multiplyScalar(p.k);
-      if (p.uv) {
-        if (this._shell) {
-          this._shell.setMatrixAt(iF, _m4); this._shell.setColorAt(iF, _c);
-          this._uvRect.setXYZW(iF, p.uv[0], p.uv[1], p.uv[2], p.uv[3]);
-          iF++;
-        }
-      } else if (p.kind === 'glass') {
-        if (this._glass) { this._glass.setMatrixAt(iG, _m4); this._glass.setColorAt(iG, _c); iG++; }
-      } else if (p.kind === 'sign') {
-        // wordmark boards carry their colours in the texture — no instance tint
-        const wi = p._wkey !== undefined && this._wordIdx
-          ? this._wordIdx.get(p._wkey) : undefined;
-        if (wi !== undefined) this._words[wi].setMatrixAt(this._wCursor[wi]++, _m4);
-        else if (this._sign) { this._sign.setMatrixAt(iB, _m4); this._sign.setColorAt(iB, _c); iB++; }
-      } else if (this._solid) {
-        this._solid.setMatrixAt(iS, _m4); this._solid.setColorAt(iS, _c); iS++;
+    for (const p of this.pieces) if (!p.dead) this._fill(this, p, cur);
+    this._finish(this, cur);
+  }
+
+  /** One surviving piece into the set `S` (the model's own, or one being made). */
+  _fill(S, p, cur) {
+    _v.set(p.x, p.y, p.z);
+    _q.setFromAxisAngle(_up, p.yaw);
+    _s.set(p.hx * 2, p.hy * 2, p.hz * 2);
+    _m4.compose(_v, _q, _s);
+    _c.setHex(p.col).multiplyScalar(p.k);
+    // The unit box bakes a 0.74..1 vertical gradient into every piece, which
+    // is what stops a wall of panels reading as an atlas, and which also
+    // makes the wall 13 % darker on average than the far mesh paints it. The
+    // outer leaf gets that back, so a building keeps its value at the swap.
+    if (p.leaf === 'ext' && p.kind === 'ext') _c.multiplyScalar(SHELL_GAIN);
+    // A pinned roof deck is multiplied by the plain plaster texel (0.84 in
+    // linear light); the far mesh's roof is its own colour exactly.
+    else if (p.kind === 'roof' && p.pin && p.uv) _c.multiplyScalar(PIN_GAIN);
+    if (p.uv) {
+      if (S._shell) {
+        const i = cur.iF++;
+        S._shell.setMatrixAt(i, _m4); S._shell.setColorAt(i, _c);
+        S._uvRect.setXYZW(i, p.uv[0], p.uv[1], p.uv[2], p.uv[3]);
       }
+    } else if (p.kind === 'glass') {
+      if (S._glass) {
+        const i = cur.iG++;
+        S._glass.setMatrixAt(i, _m4); S._glass.setColorAt(i, _c);
+        // rank 2 never switches on: an unlit pane
+        if (p.lit) {
+          _c2.setRGB(p.lit[0] / 255, p.lit[1] / 255, p.lit[2] / 255, THREE.SRGBColorSpace);
+          S._lit.setXYZW(i, _c2.r, _c2.g, _c2.b, p.lit[3] / 255 + (p.plain ? 8 : 0));
+        } else S._lit.setXYZW(i, 0, 0, 0, p.plain ? 10 : 2);
+      }
+    } else if (p.kind === 'sign') {
+      // wordmark boards carry their colours in the texture: no instance tint
+      const wi = p._wkey !== undefined && S._wordIdx
+        ? S._wordIdx.get(p._wkey) : undefined;
+      if (wi !== undefined) S._words[wi].setMatrixAt(S._wCursor[wi]++, _m4);
+      else if (S._sign) { const i = cur.iB++; S._sign.setMatrixAt(i, _m4); S._sign.setColorAt(i, _c); }
+    } else if (S._solid) {
+      const i = cur.iS++;
+      S._solid.setMatrixAt(i, _m4); S._solid.setColorAt(i, _c);
     }
-    for (const [mesh, n] of [[this._solid, iS], [this._glass, iG],
-      [this._shell, iF], [this._sign, iB]]) {
+  }
+
+  /** The counts and upload flags once every survivor is written. */
+  _finish(S, cur) {
+    for (const [mesh, n] of [[S._solid, cur.iS], [S._glass, cur.iG],
+      [S._shell, cur.iF], [S._sign, cur.iB]]) {
       if (!mesh) continue;
       mesh.count = n;
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
-    if (this._words) for (let i = 0; i < this._words.length; i++) {
-      this._words[i].count = this._wCursor[i];
-      this._words[i].instanceMatrix.needsUpdate = true;
+    if (S._words) for (let i = 0; i < S._words.length; i++) {
+      S._words[i].count = S._wCursor[i];
+      S._words[i].instanceMatrix.needsUpdate = true;
     }
-    if (this._uvRect) this._uvRect.needsUpdate = true;
+    if (S._uvRect) S._uvRect.needsUpdate = true;
+    if (S._lit) S._lit.needsUpdate = true;
   }
 
   // The outer wall + roof, built the moment the building is activated at any
@@ -569,7 +770,11 @@ export class BuildingModel {
    */
   addRoof(geo) {
     if (this._roof || !geo) return;
-    this._roof = new THREE.Mesh(geo, roofMaterial());
+    // The far mesh's own wall material when the atlas is on: it is what tiles a
+    // roof in courses, so the tiles survive the swap to boxes. (It also reads
+    // the geometry's uv1, which a roof pins to the night texture's dark texel.)
+    const mat = this.plan.facades !== false && geo.attributes.uv && this.plan.cells?.roofMat;
+    this._roof = new THREE.Mesh(geo, mat || roofMaterial());
     this._roof.castShadow = this._roof.receiveShadow = true;
     this._roof.frustumCulled = false;
     this.group.add(this._roof);
@@ -974,12 +1179,7 @@ export class BuildingModel {
   dispose() {
     this.dropRoof();
     this.scene.remove(this.group);
-    for (const m of [this._solid, this._glass, this._shell, this._sign,
-      ...(this._words ?? [])]) {
-      if (!m) continue;
-      m.dispose();               // wordmark geometry + materials are shared caches
-      if (m === this._shell) m.geometry.dispose();   // the per-model aUvRect clone
-    }
+    disposeSet(this);
     this._solid = this._glass = this._shell = this._sign = null;
     this._words = this._wordIdx = this._wCursor = null;
     this.pieces.length = 0;

@@ -21,8 +21,16 @@
 //
 // Usage: node scripts/split-extracts.mjs [extract.osm.pbf …]   (default: all
 // four regions in data/raw-osm). Existing raw tiles are OVERWRITTEN.
+//
+// PUBLIC TRANSPORT (round 5): the same pass also writes data/raw-region/_routes.json,
+// every bus, trolleybus and tram route relation with the geometry of its member
+// ways and the position and name of its stops (see ROUTES below). It is one
+// file for the whole world, not a tile: a line is not a local thing, and which
+// tile owns it is the builder's decision. `--routes-only` rewrites just that
+// file and leaves the 2 GB of raw tiles exactly as they are.
 
 import { readdirSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { RouteCollector } from './lib/route-collect.mjs';
 import { readPbf } from './lib/osmpbf.mjs';
 import { TILE, xOf, zOf, tileWanted, nearestWanted, wantedTiles, nodeWanted } from './lib/world-area.mjs';
 import { isVenue } from './lib/venues.mjs';
@@ -198,10 +206,10 @@ class NodeIndex {
 }
 
 // ---- one extract -----------------------------------------------------------
-function splitExtract(file, tiles) {
+function splitExtract(file, tiles, routes) {
   const t0 = Date.now();
   const idx = new NodeIndex();
-  const stats = { nodes: 0, ways: 0, rels: 0, poi: 0, dropped: 0 };
+  const stats = { nodes: 0, ways: 0, rels: 0, poi: 0, dropped: 0, routes: 0 };
 
   // Way geometry has to survive until the relations arrive, because a
   // multipolygon's outline is made of member ways that carry no tags of their
@@ -247,6 +255,7 @@ function splitExtract(file, tiles) {
       if (!nodeWanted(lat, lon)) return;
       idx.push(id, lat, lon);
       stats.nodes++;
+      routes.node(id, tags);
       if (wantNode(tags)) {
         const [tx, tz] = place(lat, lon);
         tiles.add(tx, tz, { type: 'node', id, lat, lon, tags });
@@ -267,6 +276,7 @@ function splitExtract(file, tiles) {
       if (wayIds.length && id < wayIds[wayIds.length - 1])
         throw new Error(`${file}: way ids are not ascending — findWay needs a sort pass`);
       wayIds.push(id); pushRefs(nodes);
+      routes.way(id, tags);
       if (!wantWay(tags)) return;
       const geometry = new Array(nodes.length);
       for (let i = 0; i < nodes.length; i++)
@@ -276,6 +286,11 @@ function splitExtract(file, tiles) {
       stats.ways++;
     },
     onRelation(id, members, tags) {
+      // a route is never also a multipolygon, so this cannot double-handle one
+      if (routes.relation(id, members, tags, {
+        way: (ref) => { const w = findWay(ref); return w < 0 ? null : geomOf(w); },
+        node: (ref) => { const n = idx.find(ref); return n < 0 ? null : [idx.lat[n] / 1e7, idx.lon[n] / 1e7]; },
+      })) { stats.routes++; return; }
       if (!wantRelation(tags)) return;
       const out = [];
       for (const m of members) {
@@ -295,12 +310,16 @@ function splitExtract(file, tiles) {
   if (!idx.sorted) throw new Error(`${file}: node ids are not ascending — the index needs a sort pass`);
   console.log(`  ${file.split('/').pop()}: ${stats.nodes.toLocaleString()} nodes in envelope, `
     + `${stats.ways.toLocaleString()} ways, ${stats.rels.toLocaleString()} relations, `
-    + `${stats.poi.toLocaleString()} poi nodes  (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
+    + `${stats.poi.toLocaleString()} poi nodes, ${stats.routes.toLocaleString()} transit relations`
+    + `  (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
+  routes.endExtract();
 }
 
 // ---- run -------------------------------------------------------------------
-const files = process.argv.slice(2).length
-  ? process.argv.slice(2)
+const ROUTES_ONLY = process.argv.includes('--routes-only');
+const argFiles = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const files = argFiles.length
+  ? argFiles
   : readdirSync(OSM_DIR).filter(f => f.endsWith('.osm.pbf')).map(f => `${OSM_DIR}/${f}`);
 if (!files.length) {
   console.error(`no .osm.pbf in ${OSM_DIR} — run: node scripts/fetch-world.mjs`);
@@ -311,15 +330,23 @@ mkdirSync(RAW_DIR, { recursive: true });
 // A stale raw-region from the Overpass era would leave the old 72 tiles mixed
 // with the new split — same tiles, month-old data, and no `owned` flag. The
 // builder reads whatever is on disk, so the directory starts empty.
-for (const f of readdirSync(RAW_DIR)) if (f.endsWith('.json')) unlinkSync(`${RAW_DIR}/${f}`);
-const tiles = new TileWriter(RAW_DIR);
-console.log(`world: ${wantedTiles().length} tiles; splitting ${files.length} extracts`);
-for (const f of files) splitExtract(f, tiles);
+if (!ROUTES_ONLY) for (const f of readdirSync(RAW_DIR)) if (f.endsWith('.json')) unlinkSync(`${RAW_DIR}/${f}`);
+// --routes-only: the same walk over the extracts with the tile writer muted
+const tiles = ROUTES_ONLY ? { add() {}, close() {} } : new TileWriter(RAW_DIR);
+const routes = new RouteCollector();
+console.log(`world: ${wantedTiles().length} tiles; splitting ${files.length} extracts`
+  + (ROUTES_ONLY ? ' (routes only, raw tiles untouched)' : ''));
+for (const f of files) splitExtract(f, tiles, routes);
 tiles.close();
+{
+  const json = routes.toJSON();
+  writeFileSync(`${RAW_DIR}/_routes.json`, json);
+  console.log(`_routes.json: ${routes.summary()}, ${(json.length / 1e6).toFixed(1)} MB`);
+}
 
 let bytes = 0, n = 0;
 for (const f of readdirSync(RAW_DIR)) {
-  if (!f.endsWith('.json')) continue;
+  if (!/^-?\d+_-?\d+\.json$/.test(f)) continue;
   const s = statSync(`${RAW_DIR}/${f}`).size;
   if (s > 2) { bytes += s; n++; }
 }

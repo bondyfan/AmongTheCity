@@ -762,3 +762,214 @@ html, body { overscroll-behavior: none; touch-action: none; }
   #wanted .wt-star { width: 13px; height: 13px; }
   #fuel { width: 106px; bottom: 62px; }
 }
+
+/* =========================================================================
+   GAMEPLAY LAYER: hunger bar, objective tracker, toasts, panels
+   (js/tracker.js, js/toasts.js, js/panel.js and the panels built on it)
+
+   Everything here borrows the status HUD's vocabulary on purpose: the same
+   glass (--hud-glass), the same cold 1px edge (--hud-edge), the same three
+   semantic colours. A second visual language for "the game part" would make
+   the HUD read as two products.
+   ========================================================================= */
+
+/* ---- hunger: the third bar ----
+   Thinner than armour and warm, so the stack reads red / cold / amber from the
+   top and no two can be confused in peripheral vision. No leading edge: at
+   4px tall the white sliver would be most of the bar. */
+.vt-en { height: 4px; }
+.vt-en > i { background: var(--sem-warn); opacity: 0.8; box-shadow: none; }
+.vt-en.low > i { background: var(--sem-bad); opacity: 1; animation: hpPulse 1s ease-in-out infinite; }
+
+/* ---- objective tracker ----
+   Top left is the one corner nothing lived in (the FPS meter is opt-in, and
+   the card steps down under it when it is on). Fixed width so the text inside
+   can change every second without the box breathing. */
+#objective {
+  position: absolute; z-index: 12; pointer-events: none;
+  top: calc(14px + env(safe-area-inset-top, 0px));
+  left: calc(14px + env(safe-area-inset-left, 0px));
+  width: min(300px, calc(100vw - 200px));
+  padding: 9px 12px 10px; border-radius: 10px;
+  background: var(--hud-glass); color: #e8ecf4;
+  box-shadow: inset 0 0 0 1px var(--hud-edge), 0 4px 16px rgba(0,0,0,0.35);
+  border-left: 3px solid var(--sem-warn);
+  font: 500 13px/1.35 "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+}
+#fps-meter:not(.hidden) ~ #objective { top: calc(58px + env(safe-area-inset-top, 0px)); }
+#objective.taxi { border-left-color: #ffd21a; }
+#objective.courier { border-left-color: #ff9d5c; }
+#objective.intro { border-left-color: var(--sem-cool); }
+#objective.urgent { border-left-color: var(--sem-bad); }
+#objective .ob-head { display: flex; align-items: baseline; gap: 7px; }
+#objective .ob-icon { font-size: 14px; flex: none; }
+#objective .ob-title { font-weight: 700; font-size: 14px; letter-spacing: 0.2px; flex: 1; min-width: 0; }
+#objective .ob-pay {
+  flex: none; font-weight: 700; color: var(--sem-good);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+#objective .ob-where {
+  margin-top: 2px; color: #cfd6e4; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+#objective .ob-row {
+  display: flex; justify-content: space-between; gap: 10px; margin-top: 5px;
+  font-variant-numeric: tabular-nums; font-weight: 700; font-size: 15px;
+}
+#objective .ob-dist { color: var(--sem-warn); }
+#objective .ob-time { color: #f2f5fb; }
+#objective.urgent .ob-time { color: var(--sem-bad); animation: hpPulse 0.7s ease-in-out infinite; }
+#objective .ob-keys { margin-top: 6px; font-size: 12px; color: #aab6cc; line-height: 1.7; }
+#objective .ob-keys kbd {
+  background: #26304a; border-radius: 4px; padding: 1px 6px; margin: 0 1px;
+  font-family: inherit; font-size: 11.5px; color: #cfe0ff;
+}
+#objective .ob-pay:empty, #objective .ob-where:empty, #objective .ob-keys:empty,
+#objective .ob-dist:empty, #objective .ob-time:empty { display: none; }
+#objective .ob-row:has(.ob-dist:empty):has(.ob-time:empty) { display: none; }
+
+/* ---- toasts ----
+   A short stack on the right rail, under the settings gear. Each one is an
+   EVENT (paid, discovered, unlocked) and leaves by itself; nothing in here is
+   ever clickable, so the whole layer is click-through. */
+#toasts {
+  /* 37: over the HUD and the map's chrome, UNDER a panel's backdrop (38). On a
+     narrow window the stack and a centred panel share pixels, and the panel is
+     the one being read; a toast raised meanwhile is dimmed, not lost. */
+  position: fixed; z-index: 37; pointer-events: none;
+  top: calc(146px + env(safe-area-inset-top, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  width: min(300px, calc(100vw - 24px));
+  font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+}
+.atc-toast {
+  display: flex; align-items: center; gap: 9px; max-width: 100%;
+  padding: 7px 12px 7px 10px; border-radius: 9px;
+  background: rgba(10, 14, 21, 0.86); color: #e8ecf4;
+  box-shadow: inset 0 0 0 1px var(--hud-edge), 0 4px 14px rgba(0,0,0,0.4);
+  border-right: 3px solid var(--sem-cool);
+  animation: toastIn 0.28s cubic-bezier(0.16, 0.84, 0.3, 1) both;
+}
+.atc-toast.out { animation: toastOut 0.32s ease-in both; }
+.atc-toast.good { border-right-color: var(--sem-good); }
+.atc-toast.warn { border-right-color: var(--sem-bad); }
+.atc-toast.ach { border-right-color: var(--sem-warn); }
+.atc-toast .tt-icon { font-size: 17px; flex: none; }
+.atc-toast .tt-text { min-width: 0; font-size: 13.5px; font-weight: 700; line-height: 1.25; }
+.atc-toast .tt-sub { display: block; font-size: 12px; font-weight: 400; color: #b9c4d8; }
+.atc-toast .tt-sub:empty { display: none; }
+@keyframes toastIn { from { opacity: 0; transform: translateX(24px); } }
+@keyframes toastOut { to { opacity: 0; transform: translateX(24px); } }
+
+/* ---- panels ----
+   The settings panel's shape (slate gradient, 2px border, 16px radius, the
+   bordered ✕) on a dimmed backdrop. The BACKDROP is the click-outside target:
+   js/panel.js closes only when both the press and the release landed on it. */
+.atc-pn-back {
+  position: fixed; inset: 0; z-index: 38; display: none;
+  align-items: center; justify-content: center; padding: 12px;
+  background: rgba(6, 9, 14, 0.5);
+}
+.atc-pn-back.atc-open { display: flex; }
+.atc-pn {
+  width: min(600px, 100%); max-height: min(84vh, 100%); display: flex; flex-direction: column;
+  color: #e8ecf4; font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+  background: linear-gradient(#1b2230, #131926);
+  border: 2px solid #3d4f74; border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+}
+.atc-pn.narrow { width: min(430px, 100%); }
+.atc-pn-head {
+  display: flex; align-items: center; gap: 10px; padding: 13px 18px;
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+}
+.atc-pn-head h2 { font-size: 19px; letter-spacing: 0.8px; margin: 0; min-width: 0; }
+.atc-pn-sub { font-size: 12.5px; color: #8ea3c0; margin-left: auto; white-space: nowrap; }
+.atc-pn-close {
+  flex: none; width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
+  background: none; border: 1px solid rgba(255,255,255,0.3); color: inherit; font-size: 16px;
+}
+.atc-pn-sub + .atc-pn-close { margin-left: 0; }
+.atc-pn-head h2 + .atc-pn-close { margin-left: auto; }
+.atc-pn-close:hover { background: rgba(255,255,255,0.1); }
+.atc-pn-body { padding: 12px 18px 16px; overflow-y: auto; touch-action: auto; }
+.atc-pn-h3 {
+  font-size: 12.5px; letter-spacing: 2px; text-transform: uppercase; opacity: 0.7;
+  margin: 14px 0 8px;
+}
+.atc-pn-h3:first-child { margin-top: 2px; }
+.atc-pn-note { font-size: 12.5px; color: #9fb0c9; line-height: 1.5; margin: 10px 2px 0; }
+.atc-pn-note kbd, .atc-pn-row kbd {
+  background: #26304a; border-radius: 4px; padding: 1px 6px; margin: 0 1px;
+  font-family: inherit; font-size: 11.5px; color: #cfe0ff;
+}
+.atc-pn-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-bottom: 8px;
+  border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);
+}
+.atc-pn-row.active { border-color: #ffb454; background: rgba(255,180,84,0.08); }
+.atc-pn-row .pr-icon { font-size: 22px; flex: none; width: 28px; text-align: center; }
+.atc-pn-row .pr-main { flex: 1; min-width: 0; }
+.atc-pn-row .pr-title { font-weight: 700; font-size: 14.5px; }
+.atc-pn-row .pr-line { font-size: 12.5px; color: #b9c4d8; line-height: 1.45; overflow-wrap: anywhere; }
+.atc-pn-row .pr-side { flex: none; text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.atc-pn-row .pr-pay { font-weight: 700; color: #8fe3a0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.atc-pn-row .pr-pay.cost { color: #ffd166; }
+.atc-btn {
+  appearance: none; cursor: pointer; font: 700 13px "Trebuchet MS", "Segoe UI", sans-serif;
+  color: #0b111b; background: #ffb454; border: 0; border-radius: 8px; padding: 7px 14px;
+  white-space: nowrap;
+}
+.atc-btn:hover:not(:disabled) { background: #ffc577; }
+.atc-btn:active:not(:disabled) { transform: translateY(1px); }
+.atc-btn:disabled { opacity: 0.4; cursor: default; }
+.atc-btn.ghost { color: #e8ecf4; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.25); }
+.atc-btn.ghost:hover:not(:disabled) { background: rgba(255,255,255,0.16); }
+.atc-btn.danger { color: #fff; background: #b8473c; }
+.atc-btn.danger:hover:not(:disabled) { background: #d0574b; }
+.atc-pn-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.atc-pn-empty { padding: 18px 8px; text-align: center; color: #9fb0c9; font-size: 13.5px; line-height: 1.6; }
+
+/* stats: number tiles, then the achievements as rows that light up */
+.atc-stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.atc-stat {
+  padding: 9px 11px; border-radius: 10px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);
+}
+.atc-stat b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
+.atc-stat span { font-size: 11.5px; color: #9fb0c9; letter-spacing: 0.3px; }
+.atc-ach { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.atc-ach .atc-pn-row { margin-bottom: 0; padding: 8px 10px; gap: 9px; }
+.atc-ach .atc-pn-row.locked { opacity: 0.5; }
+.atc-ach .atc-pn-row.locked .pr-icon { filter: grayscale(1); }
+.atc-ach .atc-pn-row:not(.locked) { border-color: rgba(255,209,102,0.5); }
+.atc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.atc-chip {
+  font-size: 12.5px; padding: 3px 10px; border-radius: 999px;
+  background: rgba(127,168,232,0.16); border: 1px solid rgba(127,168,232,0.35);
+}
+
+/* the menu's confirm dialog rides the same panel, above the menu (z 15) */
+@media (max-width: 620px) {
+  .atc-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .atc-ach { grid-template-columns: 1fr; }
+  .atc-pn-row { flex-wrap: wrap; }
+  .atc-pn-row .pr-side { flex-direction: row; align-items: center; margin-left: auto; }
+}
+@media (max-width: 760px) {
+  #objective { width: min(250px, calc(100vw - 150px)); font-size: 12px; padding: 7px 10px 8px; }
+  #objective .ob-title { font-size: 13px; }
+  #objective .ob-row { font-size: 13.5px; }
+  #objective .ob-keys { display: none; }
+  #toasts { top: calc(140px + env(safe-area-inset-top, 0px)); width: min(240px, calc(100vw - 24px)); }
+}
+@media (max-height: 520px) {
+  /* a short window: the card keeps its two facts and drops the prose */
+  #objective .ob-keys, #objective .ob-where { display: none; }
+  .atc-pn { max-height: 96vh; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .atc-toast, .atc-toast.out { animation-duration: 0.01s; }
+  .vt-en.low > i, #objective.urgent .ob-time { animation: none; }
+}

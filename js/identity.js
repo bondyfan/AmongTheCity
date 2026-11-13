@@ -34,6 +34,8 @@
 // the jacket as a unique key (a kill feed, a scoreboard, a "follow the green
 // one" instruction) is wrong by construction; use the uid.
 
+import { pickOutfit, seededRnd } from './wardrobe.js';
+
 // ---- hashing --------------------------------------------------------------
 // FNV-1a with a final avalanche. The old `h = h * 31 + c` hash was fine for
 // hash maps but terrible here: it barely mixes into the LOW bits, and the low
@@ -104,6 +106,8 @@ export function jacketIndexForUid(uid) {
   return slot(uid, 'jacket', PLAYER_JACKETS.length);
 }
 
+const OUTFITS = new Map();      // 'jacketIdx\0uid' to a frozen js/wardrobe.js record
+
 // The whole outfit, deterministic. jacketIdx overrides the hashed jacket when
 // something authoritative (a server-assigned slot) knows better; pass null to
 // derive it. Every field is always filled in — a caller must never be left to
@@ -115,12 +119,30 @@ export function lookForUid(uid, jacketIdx = null) {
     // a negative or out-of-range index must still land in the palette
     ? ((jacketIdx % PLAYER_JACKETS.length) + PLAYER_JACKETS.length) % PLAYER_JACKETS.length
     : jacketIndexForUid(id);
-  return {
+  const look = {
     jacket: PLAYER_JACKETS[ji],
     pants: PLAYER_PANTS[slot(id, 'pants', PLAYER_PANTS.length)],
     skin: PLAYER_SKINS[slot(id, 'skin', PLAYER_SKINS.length)],
     hair: PLAYER_HAIRS[slot(id, 'hair', PLAYER_HAIRS.length)],
   };
+  // The four colours above are the identity and must not move: other players
+  // already know you by them. Everything else a body now has (the cut of the
+  // top, the haircut, a cap, glasses, a backpack) is drawn from the same uid
+  // through js/wardrobe.js, so it is just as stable and just as shared. It is
+  // always the adult build: js/citizen.js keeps players on that one body.
+  // Remembered per person and jacket: js/netcity.js asks for every peer's
+  // look once a FRAME (the map dots), and a wardrobe draw is thirty hashes
+  // and a record. Readers copy it (js/citizen.js) and never write to it.
+  const key = ji + '\u0000' + id;
+  let outfit = OUTFITS.get(key);
+  if (!outfit) {
+    outfit = pickOutfit('m30', seededRnd(strHash('outfit\u0000' + id)), look);
+    outfit.player = true;
+    if (OUTFITS.size >= 512) OUTFITS.clear();     // a long evening of strangers
+    OUTFITS.set(key, Object.freeze(outfit));
+  }
+  look.outfit = outfit;
+  return look;
 }
 
 // ---- uid ------------------------------------------------------------------

@@ -247,11 +247,17 @@ test('the instanced batches keep their colours, count and bounding sphere', () =
     assert.equal(!!b[i].instanceColor, !!a[i].instanceColor);
     if (!a[i].instanceColor) continue;
     withColor++;
+    // EXACT bytes, not "within a step": the low bits of a crown's colour carry
+    // the tree's species (js/treeshapes.js crownColor), and the near models and
+    // the far shader both decode it from whichever path built the chunk
     for (let k = 0; k < a[i].count; k++) for (const c of ['getX', 'getY', 'getZ'])
-      assert.ok(Math.abs(a[i].instanceColor[c](k) - b[i].instanceColor[c](k)) <= 1 / 255,
-        'a tree crown changed colour');
+      assert.equal(Math.round(b[i].instanceColor[c](k) * 255), Math.round(a[i].instanceColor[c](k) * 255),
+        'a tree changed colour, and with it its species tag');
   }
-  assert.equal(withColor, 1, 'the crowns are the batch that carries instanceColor');
+  // Two since the trees got species: the crowns carry the leaf colour and the
+  // trunks the bark (a birch is white, a pine orange). It was one while every
+  // trunk in the world was the same brown.
+  assert.equal(withColor, 2, 'crowns and trunks are the batches that carry instanceColor');
 });
 
 test('the payload really is transferable — it survives a postMessage', () => {

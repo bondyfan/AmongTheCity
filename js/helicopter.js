@@ -86,8 +86,12 @@ const rotorMat = new THREE.MeshLambertMaterial({ color: 0x2a2d31 });
 // The spinning disc: NOT additive — a rotor darkens the sky behind it as much
 // as it lightens it, and depthWrite:false keeps it from punching a hole in the
 // city when the camera looks down through it.
-const discMat = new THREE.MeshBasicMaterial({
-  color: 0xb9c2cb, transparent: true, opacity: 0.16,
+// LIT, not basic: an unlit grey is three times brighter under the night
+// exposure and the disc was a pale ellipse hanging in a dark sky. Lambert takes
+// the sun and the sky by day (the same grey as before, near enough) and almost
+// nothing from a moonlit night.
+const discMat = new THREE.MeshLambertMaterial({
+  color: 0xd8dfe6, transparent: true, opacity: 0.16,
   depthWrite: false, side: THREE.DoubleSide,
 });
 // Anti-collision beacon. Same trick as the car lamps: overbright emissive with

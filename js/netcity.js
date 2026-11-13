@@ -353,7 +353,7 @@ const TAG_VEH_H = 2.1;   // fallback when we never found their real seat
 // this far to sit on the cushion instead of standing with their head through
 // the headliner. Duplicated here rather than imported because netcity does not
 // own player.js — if that constant moves, this one has to move with it.
-const SIT_DROP = 0.78 * PLAYER_SCALE;
+const SIT_DROP = 0.82 * PLAYER_SCALE;   // js/seating.js: the thigh rests on the cushion
 
 // approximate vehicle identity for v1: colour+kind hash. Two clients seeing
 // "the same" stolen Škoda agree often enough for a name tag / seat lookup.
@@ -781,7 +781,10 @@ class NetGame {
           dp = Math.atan2(Math.sin(dp), Math.cos(dp));
           r.walkT += dp * Math.min(1, dt * 3);
         }
-        r.cit.walk(r.walkT, Math.min(1.25, r.speed / WALK.jog));
+        // the TRUE speed goes with it: speedK is capped at a jog, and from that
+        // alone the gait drew a sprinting player with a jogger's stride and the
+        // legs spinning half as fast again as on the sprinter's own screen
+        r.cit.walk(r.walkT, Math.min(1.25, r.speed / WALK.jog), 0, r.speed);
       }
     }
   }

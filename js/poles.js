@@ -32,10 +32,11 @@
 import * as THREE from 'three';
 import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { sfxAt } from './audio.js';   // safe headless — no-ops without a context
+import { lampFallGeom } from './streetlamps.js';
+import { sigAssets } from './signalmodel.js';
 
 const CELL = 20;                       // m — spatial grid for collision queries
 export const POLE_R = 0.16;            // m — mast radius the car feels
-const POLE_H = 7.2;                    // must match LAMP_H in meshes.js
 // Below this you have merely bumped it: the mast wins, the car stops. A parked
 // nudge should never fell a steel column, and 12 km/h is about where a real one
 // starts to lose.
@@ -55,6 +56,7 @@ export class Poles {
     this.grid = new Map();        // cell key → array of standing poles
     this.felled = new Set();      // key10 of every pole knocked down this session
     this.falling = [];            // the handful in motion or lying
+    this.groundAt = null;         // (x, z) => what a free-standing pole stands on, if the owner knows
     this._mat = null;
   }
 
@@ -62,12 +64,23 @@ export class Poles {
    * A chunk has just built its lamp masts. `spots` is [[x, z, rot], …] in the
    * SAME order as the instances, so an index here is an index there.
    * Returns the number that were already down, which the caller hides.
+   *
+   * A chunk can own more than one batch (street columns and park lanterns are
+   * different shapes): the first call for a key replaces what the key held,
+   * `more` adds to it. `posts.userData.ys` is each lamp's base height when the
+   * mesher wrote one (a lamp stands on the PAVEMENT, not on the ground under
+   * it), and `posts.userData.kind` names the shape that falls over.
+   *
+   * `rot` is kept with the pole: the falling mesh starts from the pose the
+   * standing one had. Dropped, a column that stood turned to its road went
+   * over with its 1.8 m arm snapped round to world -z on the frame it was hit.
    */
-  register(key, spots, posts, heads, terrain) {
-    this.unregister(key);
+  register(key, spots, posts, heads, terrain, more = false) {
+    if (!more) this.unregister(key);
+    const ys = posts?.userData?.ys, kind = posts?.userData?.kind ?? 'street';
     let gone = 0;
     for (let i = 0; i < spots.length; i++) {
-      const [x, z] = spots[i];
+      const [x, z, rot = 0] = spots[i];
       const id = key10(x, z);
       if (this.felled.has(id)) {
         // rebuilt while it was lying in the road: it does not stand up again
@@ -75,8 +88,8 @@ export class Poles {
         gone++;
         continue;
       }
-      const y = terrain ? terrain.heightAt(x, z) : 0;
-      const p = { x, y, z, id, key, i, posts, heads };
+      const y = ys?.[i] ?? (terrain ? terrain.heightAt(x, z) : 0);
+      const p = { x, y, z, id, key, i, posts, heads, kind, rot };
       const ck = cellKey(x, z);
       let arr = this.grid.get(ck);
       if (!arr) this.grid.set(ck, arr = []);
@@ -93,9 +106,13 @@ export class Poles {
    * A single free-standing pole that is not a row in a batch — a traffic
    * signal. `hide` removes the standing visual when it goes over. Returns
    * false when this pole was already felled this session, so the caller can
-   * hide it on the spot instead of standing it back up.
+   * hide it on the spot instead of standing it back up. `rot` is its yaw, so
+   * the head still faces its approach as the mast goes over. `look` is for a
+   * pole whose falling shape is its own (a trolley mast and its bracket, each
+   * one a different length): { geo, mat }, the geometry built about the foot
+   * and owned by the pole, so it is disposed when the felled mast is retired.
    */
-  registerOne(key, x, y, z, hide, kind = 'signal') {
+  registerOne(key, x, y, z, hide, kind = 'signal', rot = 0, look = null) {
     const id = key10(x, z);
     if (this.felled.has(id)) return false;
     const ck = cellKey(x, z);
@@ -103,9 +120,12 @@ export class Poles {
     if (!arr) this.grid.set(ck, arr = []);
     // a re-delivered tile re-creates its junctions: same pole, same spot —
     // one collider, not a phantom twin that survives the felling
-    if (!arr.some((p) => p.id === id)) arr.push({ x, y, z, id, key, hide, kind });
+    if (!arr.some((p) => p.id === id)) arr.push({ x, y, z, id, key, hide, kind, rot, look });
     return true;
   }
+
+  /** Was the pole standing at (x, z) knocked down this session? */
+  isFelled(x, z) { return this.felled.has(key10(x, z)); }
 
   /** A chunk went away: its standing poles go with it. The felled set does not. */
   unregister(key) {
@@ -198,17 +218,34 @@ export class Poles {
     }
     // …and into the world as a real, falling object
     const mesh = new THREE.Mesh(
-      p.kind === 'signal' ? signalGeom() : fallGeom(),
-      p.kind === 'signal' ? this.signalMaterial() : this.material());
-    mesh.position.set(p.x, p.y, p.z);
+      p.look ? p.look.geo : p.kind === 'signal' ? signalGeom() : lampFallGeom(p.kind === 'park' ? 'park' : 'street'),
+      p.look ? p.look.mat : p.kind === 'signal' ? this.signalMaterial() : this.material());
+    // A signal is registered when its tile is indexed, which can be before the
+    // ground under it has loaded: its recorded height is then a guess (zero),
+    // and the mast fell over two hundred metres under the street. Ask again now.
+    const y = p.kind === 'signal' && this.groundAt ? this.groundAt(p.x, p.z) : p.y;
+    mesh.position.set(p.x, y, p.z);
+    // as it stood, until the first update() tips it
+    mesh.quaternion.setFromAxisAngle(_up, p.rot ?? 0);
     mesh.castShadow = true;
     this.scene?.add(mesh);
     // The hinge is horizontal and perpendicular to the blow, so the mast goes
     // over the way it was pushed. The SIGN matters and is easy to get backwards:
     // a right-handed turn about +x carries the top toward +z, so to send it
     // toward the blow the axis is (dz, 0, −dx), not (−dz, 0, dx).
+    // A pole of its own shape is a tall thing with a bracket on it, and where it
+    // lands is not where it stood: a trolley mast at the back of a verge goes
+    // over onto paving 16 cm higher, and lying at its foot's height it was
+    // buried in the street, gone. So it comes to rest on the highest ground
+    // under its length (a hand over it), its foot lifting as it goes down.
+    let lift = 0;
+    if (p.look && this.groundAt) {
+      let hi = y;
+      for (let d = 1; d <= 7; d += 2) hi = Math.max(hi, this.groundAt(p.x + dx * d, p.z + dz * d));
+      lift = hi - y + 0.08;
+    }
     this.falling.push({
-      mesh, ax: dz, az: -dx, t: 0,
+      mesh, ax: dz, az: -dx, t: 0, rot: p.rot ?? 0, own: !!p.look, y0: y, lift,
       // a harder hit takes it over faster, but never so fast it reads as a whip
       rate: Math.min(1.9, 0.75 + speed / 26),
     });
@@ -224,12 +261,16 @@ export class Poles {
         // a rod hinged at its base does not fall linearly: it barely moves,
         // then goes. t² is close enough and costs nothing.
         const k = Math.min(1, f.t / FALL_T);
+        // the tilt about the hinge, applied to the mast AS IT STOOD (its own
+        // yaw first): the arm goes over from where it was pointing
         f.mesh.quaternion.setFromAxisAngle(
           _axis.set(f.ax, 0, f.az).normalize(), (Math.PI / 2) * k * k);
+        if (f.rot) f.mesh.quaternion.multiply(_yaw.setFromAxisAngle(_up, f.rot));
+        if (f.lift) f.mesh.position.y = f.y0 + f.lift * k * k;
         if (f.t >= FALL_T) sfxAt('pole_land', 0.9, f.mesh.position.x, f.mesh.position.z, 200);
       } else if (f.t > LIE_T) {
         this.scene?.remove(f.mesh);
-        f.mesh.geometry.dispose();
+        if (f.own) f.mesh.geometry.dispose();
         this.falling.splice(i, 1);
       }
     }
@@ -247,7 +288,7 @@ export class Poles {
 
   /** Everything, for a world reset. */
   clear() {
-    for (const f of this.falling) { this.scene?.remove(f.mesh); f.mesh.geometry.dispose(); }
+    for (const f of this.falling) { this.scene?.remove(f.mesh); if (f.own) f.mesh.geometry.dispose(); }
     this.falling.length = 0;
     this.grid.clear();
     this.felled.clear();
@@ -256,36 +297,23 @@ export class Poles {
 
 const _scratch = [], _struck = [];
 const _axis = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0), _yaw = new THREE.Quaternion();
 const _zero = new THREE.Matrix4().makeScale(0, 0, 0);
 function hideInstance(m, i) { if (m && i < m.count) m.setMatrixAt(i, _zero); }
 
-// One geometry for every falling mast: a column with the lamp arm on it, built
-// about its BASE so rotating the mesh swings the top over — which is what a
-// hinge at the pavement is.
-let _fallGeom = null;
-function fallGeom() {
-  if (!_fallGeom) {
-    const post = new THREE.CylinderGeometry(0.075, 0.11, POLE_H, 6, 1)
-      .translate(0, POLE_H / 2, 0);
-    const arm = new THREE.BoxGeometry(1.05, 0.11, 0.11).translate(0.5, POLE_H - 0.16, 0);
-    const head = new THREE.BoxGeometry(0.66, 0.17, 0.3).translate(1.0, POLE_H - 0.3, 0);
-    // …through the project's own merge. Cylinders and boxes are INDEXED, so
-    // concatenating their position arrays by hand produces a bag of unrelated
-    // triangles; `false` here drops the groups, which is right because all
-    // three pieces share one material.
-    _fallGeom = mergeGeometries([post, arm, head], false);
-  }
-  return _fallGeom;
-}
+// What falls is the lamp itself (js/streetlamps.js: steel and lens merged, built
+// about its BASE so rotating the mesh swings the top over, which is what a hinge
+// at the pavement is). Those geometries are shared by every felled lamp of a
+// kind, so retiring one does not dispose them.
 
-// The signal counterpart, matching traffic.js's sigAssets: a 3.6 m mast with
-// the three-lamp housing near the top. Same base-origin convention as the lamp.
+// The signal counterpart: the mast and housing js/signalmodel.js builds, as one
+// piece. Same base-origin convention as the lamp.
 let _sigGeom = null;
 function signalGeom() {
   if (!_sigGeom) {
-    const post = new THREE.CylinderGeometry(0.055, 0.09, 3.6, 6).translate(0, 1.8, 0);
-    const head = new THREE.BoxGeometry(0.26, 0.66, 0.18).translate(0, 3.08, 0);
-    _sigGeom = mergeGeometries([post, head], false);
+    const A = sigAssets();
+    const strip = (g) => { const n = g.index ? g.toNonIndexed() : g.clone(); n.deleteAttribute('uv'); return n; };
+    _sigGeom = mergeGeometries([strip(A.pole), strip(A.head)], false);
   }
   return _sigGeom;
 }

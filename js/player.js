@@ -95,6 +95,7 @@ import { localUid, baseUid, lookForUid } from './identity.js';
 import { seatAnchor as carSeatAnchor } from './vehicles.js';
 import { seatAnchor as heliSeatAnchor } from './helicopter.js';
 import { seatAnchor as jetSeatAnchor } from './aircraft.js';
+import { SIT_DROP, seatX } from './seating.js';
 
 const TWO_PI = Math.PI * 2;
 // v5: the player now has a y. Buildings have floors, so "the ground" stopped
@@ -117,8 +118,8 @@ const EXIT_T = 0.35;         // s — the seat-to-pavement step-out
 const DOOR_R = 0.32;         // m — "at the door" arrival radius
 const DOOR_OUT = 0.5;        // m — door point past the flank; exit lands wider
 // seat anchors give the CUSHION TOP; the citizen group's origin (its feet)
-// goes this far below it so the folded hips (pivot 0.86·scale) rest on it
-const SIT_DROP = 0.78 * PLAYER_SCALE;
+// goes SIT_DROP below it, and in a car the body sits inboard of the anchor
+// so that all of it is inside the shell: js/seating.js has both numbers.
 const smooth = (k) => k * k * (3 - 2 * k);
 
 // ---- the gun walk --------------------------------------------------------
@@ -143,6 +144,14 @@ const isJet = (v) => v.throttle !== undefined && v.reheat !== undefined;
 export function localSeatAnchor(veh, i = 0) {
   return isJet(veh) ? jetSeatAnchor(veh, i)
     : isHeli(veh) ? heliSeatAnchor(veh, i) : carSeatAnchor(veh, i);
+}
+
+// Where the BODY sits on that seat. Cars only: a helicopter's and a jet's
+// anchors are already where their open cockpits want the pilot.
+function bodySeat(veh, i = 0) {
+  const a = localSeatAnchor(veh, i);
+  if (!isJet(veh) && !isHeli(veh)) a.x = seatX(a.x);
+  return a;
 }
 
 // …and in WORLD space, off the vehicle's live pose. Exported for main.js,
@@ -316,7 +325,7 @@ export class Player {
     // Cadence saturates (a faster run is longer strides, not blurred legs) and
     // the RUN blend takes over above WALK.runFrom, so the figure walks at a
     // walk, runs flat out at a sprint, and visibly changes gait between.
-    this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog), runBlend(this.speed));
+    this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog), runBlend(this.speed), this.speed);
     // LAST, and after _animate deliberately: the combat poses are ADDITIVE and
     // arms-only, so walk() has to have written the whole skeleton before one of
     // them overwrites its own joints. The other way round the pose is erased
@@ -367,7 +376,7 @@ export class Player {
     // us, or a remotely-piloted machine leaving the deck → back to walking
     if (!veh.mesh?.parent || veh.seats?.[b.seat] !== this
         || (veh.airborne && b.phase === 'walk')) { this.cancelBoarding(); return; }
-    const a = localSeatAnchor(veh, b.seat);
+    const a = bodySeat(veh, b.seat);
     const vy = veh.y ?? veh.mesh.position.y ?? 0;
     const h = veh.heading, ch = Math.cos(h), sh = Math.sin(h);
     // local → world, ARCHITECTURE.md rotation: +x → (cos h, −sin h), −z → dir(h)
@@ -411,7 +420,7 @@ export class Player {
         // Cadence saturates (a faster run is longer strides, not blurred legs) and
     // the RUN blend takes over above WALK.runFrom, so the figure walks at a
     // walk, runs flat out at a sprint, and visibly changes gait between.
-    this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog), runBlend(this.speed));
+    this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog), runBlend(this.speed), this.speed);
         return;
       }
       // at the door: remember where we stand IN THE VEHICLE'S FRAME so the
@@ -478,7 +487,7 @@ export class Player {
     if (!veh || this.exiting) return false;
     if (veh.seats?.[this.seat] === this) veh.seats[this.seat] = null;
     this.inCar = null;
-    const a = localSeatAnchor(veh, this.seat);
+    const a = bodySeat(veh, this.seat);
     const h = veh.heading, ch = Math.cos(h), sh = Math.sin(h);
     const vy = veh.y ?? veh.mesh?.position.y ?? 0;
     const ox = Math.sign(a.x || -1) * ((veh.wid ?? 1.62) / 2 + 0.9);
@@ -535,7 +544,7 @@ export class Player {
       if (!car.seats[0]) car.seats[0] = this;
       this.inCar = car;
       this.seat = 0;
-      const a = localSeatAnchor(car, 0);
+      const a = bodySeat(car, 0);
       const carrier = car.mesh?.userData?.body ?? car._body ?? car.mesh;
       if (carrier) {
         carrier.add(this.mesh);

@@ -32,6 +32,7 @@
 
 import { polygonArea, distPointToSegment, pointInPolygon } from './geo.js';
 import { INTERIOR, INTERIOR_PALETTES } from './config.js';
+import { typologyOf, roofOf, facadeRows, litOf } from './typology.js';
 
 const I = INTERIOR;
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -987,6 +988,41 @@ function houseLayout(f, plan, fi) {
   return { walls, rooms };
 }
 
+// ---- storeys --------------------------------------------------------------
+/**
+ * storeyPlan(f, use) -> { total, usable, storeys, sH, singleVolume }
+ * How many storeys a building's WALL is divided into and how tall each one is.
+ * One function on purpose: the far mesh paints one atlas row per storey and the
+ * near shell stands one row of boxes per storey, and for as long as each worked
+ * its own number out (round(h / 3.1) there, usable / levels here) a building's
+ * windows moved the moment you walked up to it. The top 0.5 m of the extrusion
+ * is the roof build-up and belongs to neither.
+ */
+export function storeyPlan(f, use = classify(f)) {
+  const brand = brandOf(f);
+  // `f.y` is a skyway's underside ABOVE ITS OWN GROUND, and `f.h` its total
+  // height above the same.
+  const total = Math.max(2.4, (f.h ?? 6) - (f.y ?? 0));
+  // the roof eats the top of the extrusion; what's left is habitable
+  const usable = Math.max(2.4, total - 0.5);
+  let levels = f.lv ?? Math.max(1, Math.round(usable / 3.1));
+
+  // Uses that are one tall volume regardless of what the level tag claims. A
+  // named supermarket ALWAYS is: a Kaufland or a Lidl is a single hall under a
+  // flat roof, whatever RÚIAN's 10.5 m height tag divides into.
+  const singleVolume = use === 'industrial' || use === 'church' || use === 'garage'
+    || use === 'restaurant'
+    || (use === 'supermarket' && (brand ? !brand.storeys : usable < 12))
+    || (use === 'shop' && usable < 7.5);
+  if (singleVolume) levels = 1;
+  else if (brand?.storeys) levels = brand.storeys;
+  levels = clamp(Math.round(levels), 1, Math.max(1, Math.floor(usable / I.minStorey)));
+  let sH = clamp(usable / levels, I.minStorey, I.maxStorey);
+  const storeys = Math.max(1, Math.min(levels, Math.floor(usable / sH + 0.01)));
+  if (storeys === 1) sH = Math.min(usable, singleVolume ? usable : I.maxStorey);
+  return { total, usable, storeys, sH, singleVolume };
+}
+
 // ---- the plan ------------------------------------------------------------
 
 /**
@@ -1011,24 +1047,10 @@ export function buildingPlan(f, roads, neighbours, ground = 0) {
   // height above the same — so the ground is added once, here, and everything
   // downstream keeps working in absolute metres.
   const y0 = ground + (f.y ?? 0);
-  const total = Math.max(2.4, (f.h ?? 6) - (f.y ?? 0));
-  // the roof eats the top of the extrusion; what's left is habitable
-  const usable = Math.max(2.4, total - 0.5);
-  let levels = f.lv ?? Math.max(1, Math.round(usable / 3.1));
-
-  // Uses that are one tall volume regardless of what the level tag claims. A
-  // named supermarket ALWAYS is: a Kaufland or a Lidl is a single hall under a
-  // flat roof, whatever RÚIAN's 10.5 m height tag divides into.
-  const singleVolume = use === 'industrial' || use === 'church' || use === 'garage'
-    || use === 'restaurant'
-    || (use === 'supermarket' && (brand ? !brand.storeys : usable < 12))
-    || (use === 'shop' && usable < 7.5);
-  if (singleVolume) levels = 1;
-  else if (brand?.storeys) levels = brand.storeys;
-  levels = clamp(Math.round(levels), 1, Math.max(1, Math.floor(usable / I.minStorey)));
-  let sH = clamp(usable / levels, I.minStorey, I.maxStorey);
-  let storeys = Math.max(1, Math.min(levels, Math.floor(usable / sH + 0.01)));
-  if (storeys === 1) sH = Math.min(usable, singleVolume ? usable : I.maxStorey);
+  const typ = typologyOf(f, use);
+  const sp = storeyPlan(f, use);
+  const { total, usable } = sp;
+  let { sH, storeys } = sp;
 
   const plan = {
     // `brand` drives the LOOK (wall colour, cladding, storey rules) and must
@@ -1052,8 +1074,15 @@ export function buildingPlan(f, roads, neighbours, ground = 0) {
     // offices (continuous glass bands vs a grid of dark-framed windows).
     osmT: f.t ?? null,
     nova: !!f._nova,
+    // what it is BUILT like, and its roof (typology.js): the shell's roof deck,
+    // parapet and balconies follow these, exactly as the far mesh does
+    typ, roof: roofOf(f, typ),
+    lit: litOf(f, typ),
     officeVar: use === 'office' ? (rnd(f._id, 80) < 0.5 ? 'bands' : 'grid') : null,
   };
+
+  // the facade rows the shell is cut from (and the far mesh is painted from)
+  plan.rows = facadeRows(f, use, plan.officeVar);
 
   // Multi-storey buildings need a way up or their upper floors are a lie.
   // If the core does not fit anywhere inside the real outline, the building

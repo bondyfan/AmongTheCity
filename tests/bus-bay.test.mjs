@@ -60,7 +60,11 @@ test('a lane too narrow to give 3 m away keeps all of it', () => {
   // nobody builds one there
   const bare = build([], 4.5, 'living_street');
   const withStop = build([{ t: 'bus_stop', p: [60, 64], n: 'Test' }], 4.5, 'living_street');
-  const bay = beside(withStop, ROAD_Z + 2.0, ROAD_Z + 5.5).length
+  // (the stop's own post is not a bay: since the streetscape pass it is a
+  // round column on a base collar, a few dozen vertices at deck level, where
+  // it used to be two crossed fins. Left out by position, at 60, 64.)
+  const noPost = (v) => v.filter(([x, , z]) => Math.hypot(x - 60, z - 64) > 0.3);
+  const bay = noPost(beside(withStop, ROAD_Z + 2.0, ROAD_Z + 5.5)).length
     - beside(bare, ROAD_Z + 2.0, ROAD_Z + 5.5).length;
   assert.ok(bay < 20, `a narrow street grew a ${bay}-vertex bay it has no room for`);
 });

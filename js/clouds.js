@@ -9,14 +9,19 @@
 // under it, above it, inside it — the silhouette has depth instead of being
 // one card that flips to a line when you circle it.
 //
-// WHY individual THREE.Sprites and not one InstancedMesh: these are soft,
-// NORMAL-blended, depth-write-free quads that constantly overlap each other,
-// and overlapping alpha is order-dependent. The renderer sorts transparent
-// objects back-to-front every frame, which is exactly the sort we need and
-// costs us nothing; an InstancedMesh would freeze the blend order into the
-// instance buffer, and flying around a cluster would smear its grey underside
-// over its sunlit top. ~100 extra draw calls is noise next to the ~450 the
-// traffic already issues.
+// ONE DRAW CALL, AND WHY IT TOOK A SORT. These are soft, NORMAL-blended,
+// depth-write-free quads that constantly overlap each other, and overlapping
+// alpha is order-dependent: draw them in a fixed order and flying around a
+// cluster smears its grey underside over its sunlit top. The first version
+// got the order for free by making every puff its own THREE.Sprite and letting
+// the renderer sort them, back when there were a hundred. The field grew to
+// 2 900 puffs on the default setting (7 600 on the furthest), each a draw call
+// with its own material: the single largest item in the frame, more than the
+// whole city. So the puffs are now instances of one quad in one mesh, and the
+// order is put back by hand: update() already visits every puff to fade and
+// light it, and it now also drops each into a distance bucket and writes the
+// instance buffers far-to-near (a counting sort: linear, no comparator, no
+// allocation). Same picture, one draw.
 //
 // WHY the field is infinite: the clusters live on a 3600 m torus. Every frame
 // each cluster's offset from the camera is wrapped into ±1800 m, i.e. we draw
@@ -105,21 +110,27 @@ const PUFF_D = [300, 520];       // puff sprite diameter, meters
 const WIND = { x: 2.7, z: 0.95 };// prevailing westerly, drifting east-southeast
 
 // ---- look ----
-// Linear working-space colours (Color(r,g,b) is linear here). The sprites are
-// toneMapped like every other object in the scene, so >1 values are legal and
-// merely land high on the ACES curve — but they stay under the postfx bloom
-// threshold (1.0 AFTER tone mapping), because a blooming sky would wash the
-// whole frame the way the overbright lamps are meant to.
+// Linear working-space colours (Color(r,g,b) is linear here). The puffs are
+// tone-mapped like every other object in the scene, so values near 1 merely
+// land high on the ACES curve. They must stay UNDER 1.0 though: the bloom pass
+// thresholds on linear light before the curve, and a sky that blooms washes
+// the whole frame the way only the overbright lamps are meant to. (The tops
+// used to sit at 1.45 and did exactly that.)
 // Contrast is the whole game here. The first pass used #dbdfe5 puffs against a
 // horizon sky that is ALSO pale grey-blue — measured as very nearly the same
 // value, so the field rendered correctly and still read as "no clouds". Tops
 // now sit clearly above the sky's brightness and undersides clearly below it.
-const LIT = new THREE.Color(1.45, 1.43, 1.38);   // sun-facing cauliflower tops
+const LIT = new THREE.Color(0.98, 0.97, 0.94);   // sun-facing cauliflower tops
 const SHADE = new THREE.Color(0.26, 0.31, 0.44); // grey-blue undersides
-const LIT_W = new THREE.Color(1.55, 0.92, 0.52); // golden hour: lit sides go amber
+const LIT_W = new THREE.Color(0.99, 0.60, 0.33); // golden hour: lit sides go amber
 const SHADE_W = new THREE.Color(0.34, 0.27, 0.38);
-const LIT_N = new THREE.Color(0.13, 0.16, 0.24); // night: barely-there moonlit grey
-const SHADE_N = new THREE.Color(0.06, 0.07, 0.12);
+// night: barely-there moonlit grey. Small numbers, because sky.js opens the
+// exposure up after dark and these are seen through it.
+// (A quarter down from 0.040 / 0.012: the tone curve's toe is open now
+// (heightfog.js lookGLSL) and the old values came out as pale daytime puffs
+// in a midnight sky.)
+const LIT_N = new THREE.Color(0.029, 0.037, 0.060);
+const SHADE_N = new THREE.Color(0.009, 0.011, 0.021);
 const OPACITY = 0.82;            // master alpha; puffs jitter ±18 % around it
 
 // ---- fades (the two reasons nothing ever pops) ----
@@ -235,22 +246,73 @@ function makePuffTextureHeadless() {
   return tex;
 }
 
-// scratch — the update loop must not allocate, it runs on every sub-step
+// scratch: the update loop must not allocate, it runs on every sub-step
 const _lit = new THREE.Color(), _shade = new THREE.Color();
+
+// ---- the one material ----
+// A camera-facing quad per instance, built in view space exactly as
+// THREE.Sprite builds its own: all four corners share the centre's depth, so
+// the far-fade reasoning above still holds word for word.
+//   iPos  xyz world centre, w diameter
+//   iCol  rgb linear colour, a opacity
+//   iRot  cos and sin of the puff's fixed in-plane rotation
+const PUFF_VERT = /* glsl */`
+  attribute vec4 iPos;
+  attribute vec4 iCol;
+  attribute vec2 iRot;
+  varying vec2 vUv;
+  varying vec4 vCol;
+  void main() {
+    vUv = uv;
+    vCol = iCol;
+    vec4 mv = viewMatrix * vec4(iPos.xyz, 1.0);
+    vec2 q = position.xy * iPos.w;
+    mv.xy += vec2(q.x * iRot.x - q.y * iRot.y, q.x * iRot.y + q.y * iRot.x);
+    gl_Position = projectionMatrix * mv;
+  }`;
+const PUFF_FRAG = /* glsl */`
+  uniform sampler2D map;
+  varying vec2 vUv;
+  varying vec4 vCol;
+  void main() {
+    vec4 t = texture2D(map, vUv);
+    gl_FragColor = vec4(vCol.rgb * t.rgb, vCol.a * t.a);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+  }`;
+
+// distance buckets for the back-to-front sort. A puff is 300 m and more
+// across, so buckets a few metres deep order them as well as an exact sort.
+const BUCKETS = 1024;
 
 export class Clouds {
   constructor(scene, dist = CLOUD_DIST_DEFAULT) {
     this.scene = scene;
     this.tex = makePuffTexture();
     this.group = new THREE.Group();
-    this.group.matrixAutoUpdate = false; // stays at the origin; sprites carry world pos
+    this.group.matrixAutoUpdate = false; // stays at the origin; instances carry world pos
+    this.mat = new THREE.ShaderMaterial({
+      vertexShader: PUFF_VERT, fragmentShader: PUFF_FRAG,
+      uniforms: { map: { value: this.tex } },
+      transparent: true,
+      depthWrite: false,   // puffs must not carve each other out of the depth buffer
+      depthTest: true,     // …but the CITY still occludes them, as it must
+      fog: false,          // they live above the fog wall; fogging them greys the sky out
+    });
+    this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), this.mat);
+    this.mesh.frustumCulled = false;  // the instances span the whole sky
+    this.mesh.renderOrder = -900;     // behind every other transparent thing (glass, rotor disc)
+    this.mesh.matrixAutoUpdate = false;
+    this.group.add(this.mesh);
     this.clusters = [];
     this.puffCount = 0;
+    this.drawn = 0;                   // puffs on screen after the last update()
+    this._bucket = new Uint32Array(BUCKETS + 1);
     this._build(dist);
   }
 
   /** Swap the draw distance. Rebuilds the field, which is a fresh set of
-   *  sprites — cheap enough for a settings panel and never for a frame. */
+   *  instance buffers: cheap enough for a settings panel and never for a frame. */
   setDist(dist) {
     if (dist === this.dist || !CLOUD_RANGES[dist]) return;
     this._build(dist);
@@ -259,10 +321,6 @@ export class Clouds {
   _build(dist) {
     const cfg = CLOUD_RANGES[dist] ?? CLOUD_RANGES[CLOUD_DIST_DEFAULT];
     this.dist = CLOUD_RANGES[dist] ? dist : CLOUD_DIST_DEFAULT;
-    // tear the old sky down before building the new one
-    for (const cl of this.clusters) {
-      for (const p of cl.puffs) { this.group.remove(p.sprite); p.mat.dispose(); }
-    }
     this.clusters = [];
     this.puffCount = 0;
     this.range = cfg.range;
@@ -323,33 +381,53 @@ export class Clouds {
         // belly — without deforming the actual volume.
         const ny = oy * 3.2;
         const nl = Math.sqrt(ox * ox + ny * ny + oz * oz) || 1;
-        const mat = new THREE.SpriteMaterial({
-          map: this.tex,
-          transparent: true,
-          depthWrite: false,   // puffs must not carve each other out of the depth buffer
-          depthTest: true,     // …but the CITY still occludes them, as it must
-          fog: false,          // they live above the fog wall; fogging them greys the sky out
-          sizeAttenuation: true,
-          rotation: rnd() * Math.PI * 2, // one texture, 100 different-looking blobs
-          opacity: 0,
-        });
-        const sprite = new THREE.Sprite(mat);
-        sprite.scale.set(d, d, 1);
-        sprite.renderOrder = -900;  // behind every other transparent thing (glass, rotor disc)
-        sprite.visible = false;
-        this.group.add(sprite);
+        // one texture, 100 different-looking blobs: a fixed in-plane rotation.
+        // Drawn here, in the same place in the random stream the sprite's
+        // material used to draw it, so the sky is cloud for cloud the old one.
+        const rot = rnd() * Math.PI * 2;
         cl.puffs.push({
-          sprite, mat, ox, oy, oz, r: d * 0.5,
+          ox, oy, oz, r: d * 0.5,
           nx: ox / nl, ny: ny / nl, nz: oz / nl,   // unit shading normal
           a: 0.82 + rnd() * 0.18,                  // per-puff opacity jitter
+          cr: Math.cos(rot), sr: Math.sin(rot),
         });
         this.puffCount++;
       }
       this.clusters.push(cl);
     }
+    this._alloc(this.puffCount);
     // the group is added once and reused across rebuilds — setDist() swaps the
-    // sprites inside it, not the group itself
+    // instance buffers inside it, not the group itself
     if (this.group.parent !== this.scene) this.scene.add(this.group);
+  }
+
+  // Instance buffers for `n` puffs, and the scratch the sort works in. Called
+  // on a rebuild only; update() never allocates.
+  _alloc(n) {
+    this.mesh.geometry.dispose();     // let go of the old sky's buffers
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(
+      [-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0], 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+    geo.setIndex([0, 1, 2, 0, 2, 3]);
+    const dyn = (arr, size) => {
+      const at = new THREE.InstancedBufferAttribute(arr, size);
+      at.setUsage(THREE.DynamicDrawUsage);
+      return at;
+    };
+    this._aPos = dyn(new Float32Array(n * 4), 4);
+    this._aCol = dyn(new Float32Array(n * 4), 4);
+    this._aRot = dyn(new Float32Array(n * 2), 2);
+    geo.setAttribute('iPos', this._aPos);
+    geo.setAttribute('iCol', this._aCol);
+    geo.setAttribute('iRot', this._aRot);
+    geo.instanceCount = 0;
+    this.mesh.geometry = geo;
+    // pass one of update() parks each visible puff here, pass two reads it
+    // back in sorted order: 10 floats a puff, plus its bucket
+    this._tmp = new Float32Array(n * 10);
+    this._key = new Uint16Array(n);
+    this.drawn = 0;
   }
 
   // dt seconds; camera drives the recentre; sunDir/nightK come straight from
@@ -390,6 +468,11 @@ export class Clouds {
     const invFar = 1 / Math.max(1, farOut - farIn);
 
     const cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
+    // ---- pass one: fade, light and bucket every puff that is visible ----
+    const tmp = this._tmp, key = this._key, bucket = this._bucket;
+    bucket.fill(0);
+    const toBucket = (BUCKETS - 1) / Math.max(1, farOut);
+    let n = 0;
     for (const cl of this.clusters) {
       // THE RECENTRE. Stateless modular wrap into [−FIELD, +FIELD]: the cluster
       // is drawn at whichever of its infinitely many tiled copies is nearest.
@@ -411,18 +494,44 @@ export class Clouds {
         // the view and thins out instead of blinking
         const fNear = smooth01(d / (p.r * FADE_NEAR_K));
         const alpha = master * p.a * fFar * fNear;
-        // Below 1/255 the framebuffer cannot represent the sprite at all, so
-        // dropping it there saves the draw call without being a visible cut —
+        // Below 1/255 the framebuffer cannot represent the puff at all, so
+        // dropping it there saves the fill without being a visible cut:
         // this is the ONE hard threshold in the module, and it sits under the
         // hardware's own quantisation floor.
-        if (alpha <= 0.004) { p.sprite.visible = false; continue; }
-        p.sprite.visible = true;
-        p.mat.opacity = alpha;
-        p.sprite.position.set(cx + px, cy + py, cz + pz);
+        if (alpha <= 0.004) continue;
         // sun-facing side bright, underside grey-blue — one dot product
         const k = smooth01(0.5 + 0.62 * (kx * p.nx + ky * p.ny + kz * p.nz));
-        p.mat.color.setRGB(sr + (lr - sr) * k, sg + (lg - sg) * k, sb + (lb - sb) * k);
+        const o = n * 10;
+        tmp[o] = cx + px; tmp[o + 1] = cy + py; tmp[o + 2] = cz + pz; tmp[o + 3] = p.r * 2;
+        tmp[o + 4] = sr + (lr - sr) * k; tmp[o + 5] = sg + (lg - sg) * k;
+        tmp[o + 6] = sb + (lb - sb) * k; tmp[o + 7] = alpha;
+        tmp[o + 8] = p.cr; tmp[o + 9] = p.sr;
+        // bucket 0 is the FARTHEST, so ascending bucket order is draw order
+        const b = (BUCKETS - 1) - Math.min(BUCKETS - 1, (d * toBucket) | 0);
+        key[n] = b;
+        bucket[b + 1]++;
+        n++;
       }
     }
+    // ---- pass two: counting sort straight into the instance buffers ----
+    for (let b = 0; b < BUCKETS; b++) bucket[b + 1] += bucket[b];
+    const aPos = this._aPos.array, aCol = this._aCol.array, aRot = this._aRot.array;
+    for (let i = 0; i < n; i++) {
+      const at = bucket[key[i]]++;
+      const o = i * 10, q = at * 4, r2 = at * 2;
+      aPos[q] = tmp[o]; aPos[q + 1] = tmp[o + 1]; aPos[q + 2] = tmp[o + 2]; aPos[q + 3] = tmp[o + 3];
+      aCol[q] = tmp[o + 4]; aCol[q + 1] = tmp[o + 5]; aCol[q + 2] = tmp[o + 6]; aCol[q + 3] = tmp[o + 7];
+      aRot[r2] = tmp[o + 8]; aRot[r2 + 1] = tmp[o + 9];
+    }
+    this.drawn = n;
+    this.mesh.geometry.instanceCount = n;
+    this.mesh.visible = n > 0;
+    // only the part in use goes to the GPU
+    flush(this._aPos, n); flush(this._aCol, n); flush(this._aRot, n);
   }
+}
+
+function flush(at, n) {
+  if (at.clearUpdateRanges) { at.clearUpdateRanges(); at.addUpdateRange(0, n * at.itemSize); }
+  at.needsUpdate = true;
 }

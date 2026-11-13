@@ -17,7 +17,9 @@
 // queues; the MESHING is priced rather than performed, from a least-squares fit
 // over 169 real cells (scratch harness):
 //
-//     ground 0.69 ms    shell 2.45 ms    full 26.5 + 0.096·features ms
+//     ground 0.8 ms    shell 2.45 ms    full 10.3 + 0.39·features ms
+//
+// (re-fitted in wave 3, see meshMs below)
 //
 // and the main thread is charged the 3.85 ms a dense worker chunk costs it
 // (meshpool.js). The clock is virtual so the frame budget bites deterministically
@@ -91,8 +93,14 @@ const weightOf = (cell) => !cell ? 0
   : (cell.buildings?.length ?? 0) + (cell.roads?.length ?? 0) * 2
   + (cell.green?.length ?? 0) + (cell.paved?.length ?? 0) + (cell.trees?.length ?? 0) * 0.2
   + (cell.barriers?.length ?? 0) * 0.5;
-const meshMs = (lod, w) => lod === 'ground' ? 0.69 : lod === 'shell' ? 2.45 + 0.004 * w
-  : lod === 'roads' ? 1.2 + 0.02 * w : 26.5 + 0.096 * w;
+// RE-FITTED IN WAVE 3 over the same 169 cells, after two waves of work put
+// streets, roofs, trees, lamps, signs and furniture into the full tier (and
+// after the road-cutting clamp stopped walking every segment per vertex). The
+// full tier used to be priced 26.5 + 0.096 w; that slope was a quarter of what
+// a dense cell really costs today, so the old model flattered exactly the
+// downtown cells the reported holes are over. Ground and shell did not move.
+const meshMs = (lod, w) => lod === 'ground' ? 0.8 : lod === 'shell' ? 2.45 + 0.004 * w
+  : lod === 'roads' ? 1.2 + 0.02 * w : 10.3 + 0.39 * w;
 const mainMs = (lod, w) => lod === 'ground' ? 0.5 : 0.5 + 0.012 * w;
 
 function makeClock() {
@@ -260,7 +268,7 @@ test('a low fast pass keeps up too — that is where the ring is narrowest', asy
 // ---- and the half that no worker can absorb --------------------------------
 test('no speed can ask for a window bigger than the one already shipping', () => {
   // The far ground ring is 211 kB and one draw call per cell; the full ring is
-  // 950 kB and 4.9. Ring area is quadratic, so a rule that grows rings with
+  // 1778 kB and 6.6 (re-measured in wave 3, js/streamplan.js). Ring area is quadratic, so a rule that grows rings with
   // speed has to be bounded by COST or it ends in a VRAM wall rather than a
   // stall. Nothing planRings can return may cost more than the widest window
   // the altitude rule already asks for.
@@ -274,6 +282,23 @@ test('no speed can ask for a window bigger than the one already shipping', () =>
         `${WINDOW.draws.toFixed(0)} ceiling`);
     }
   }
+});
+
+test('the low preset gets a smaller window in the air, and nobody else does', () => {
+  // The air rings were one size for every machine: a hovering helicopter gave
+  // the low preset the high preset's 1.8 million triangles (measured, wave 3).
+  const cost = (base) => { const r = planRings(0, 300, base); return windowCost(r.view, r.shell, r.far); };
+  assert.deepEqual(planRings(0, 300, 6), { view: 10, shell: 10, far: 14 });
+  assert.deepEqual(planRings(0, 300, 4), { view: 10, shell: 10, far: 14 });
+  const low = planRings(0, 300, 3);
+  assert.ok(low.view >= 3 && low.view <= 6, 'low full ring in the air: ' + low.view);
+  assert.ok(cost(3).kb < 0.45 * cost(4).kb,
+    `low holds ${(cost(3).kb / 1024).toFixed(0)} MB in the air against ${(cost(4).kb / 1024).toFixed(0)}`);
+  // on the ground nothing changed, and a fast aircraft still gets ground ahead
+  assert.deepEqual(planRings(0, 0, 3), { view: 3, shell: 0, far: 0 });
+  const jet = planRings(555, 400, 3);
+  assert.ok(jet.view + jet.shell + jet.far >= Math.floor(555 * 6 / CHUNK) - 1,
+    'the low preset lost its look-ahead at speed: ' + JSON.stringify(jet));
 });
 
 test('the rings scale with actual speed instead of saturating at 936 km/h', () => {

@@ -25,18 +25,18 @@ export const isDevMode = () => /(^|[?&])devmode(=|&|$)/.test(location.search);
 // amid the tracks, and arriving between the rails is not a useful teleport.
 export const DEV_PLACES = [
   { n: 'Pardubice hl. nádraží', x: 25, z: -122, h: Math.PI },
-  { n: 'Pardubice — most přes Labe', x: -802, z: -995, h: 0 },
+  { n: 'Pardubice, most přes Labe', x: -802, z: -995, h: 0 },
   { n: 'Pardubice letiště', x: -1257, z: 2032, h: 0 },
-  { n: 'Praha — Václavské nám.', x: -95270, z: -5517, h: Math.PI },
-  { n: 'Praha — letiště', x: -107193, z: -7688, h: 0 },
+  { n: 'Praha, Václavské nám.', x: -95270, z: -5517, h: Math.PI },
+  { n: 'Praha, letiště', x: -107193, z: -7688, h: 0 },
   // …and the east. Zlín is 163 km from the spawn, which is four minutes in the
   // Gripen and two hours in an Octavia, so it needs a door of its own.
-  { n: 'Olomouc — Horní nám.', x: 107101, z: 48709, h: Math.PI },
+  { n: 'Olomouc, Horní nám.', x: 107101, z: 48709, h: Math.PI },
   { n: 'Otrokovice', x: 127335, z: 91433, h: 0 },
   // …on třída Tomáše Bati rather than on the square itself: náměstí Míru is
   // roofed by OC Zlaté jablko, and arriving inside a shopping centre is not a
   // useful teleport (the same reason the station entry is its forecourt).
-  { n: 'Zlín — tř. T. Bati', x: 136864, z: 89742, h: Math.PI / 2 },
+  { n: 'Zlín, tř. T. Bati', x: 136864, z: 89742, h: Math.PI / 2 },
   { n: 'Kudlov', x: 135947, z: 92122, h: 0 },
   { n: 'Březůvky', x: 140461, z: 97194, h: 0 },
 ];

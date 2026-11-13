@@ -105,3 +105,41 @@ test('a second bake starts from the survey, not from the last bake', () => {
   for (let o = 0; o < after1.length; o++) if (after1[o] !== after2[o]) drift++;
   assert.equal(drift, 0, `${drift} samples drifted on re-bake — it compounded`);
 });
+
+// ---- in play, a tile's roads are levelled over frames before it is baked ----
+// Measured in wave 3 on the drive out of the station: the bake was the first
+// ask for the profile of every road of a tile, 400 to 840 ms of the main
+// thread in one frame, one tile a second for the first seconds of play. The
+// streamer now asks for those profiles a few milliseconds a frame and bakes
+// when the last one is in (CityWorld._warmRoads).
+test('with a frame budget the roads of a tile are levelled in slices, and all of them', async () => {
+  const { CityWorld } = await import('../js/city.js');
+  const t = lumpyTerrain();
+  const roads = [];
+  for (let k = 0; k < 400; k++)
+    roads.push({ d: 1, t: 'residential', w: 6, p: [[100 + k * 10, 300], [100 + k * 10, 2300]] });
+  const city = cityWith(roads);
+  const w = Object.assign(Object.create(CityWorld.prototype), { terrain: t, city });
+
+  // no budget (boot, and every other test): nothing to wait for
+  assert.equal(w._warmRoads('0,0', 0, 0), true);
+  assert.equal(w._warm, undefined, 'an unbudgeted world kept warm-up state');
+
+  // a budget no levelling fits in: one road a call, never none (or it stalls)
+  w.conformBudgetMs = 1e-6;
+  let calls = 0;
+  while (!w._warmRoads('0,0', 0, 0)) {
+    calls++;
+    assert.equal(w._warm.i, calls, 'a slice made no progress');
+    assert.ok(calls < 1000, 'the warm-up never finished');
+  }
+  assert.ok(calls >= 100, `the whole tile was levelled in ${calls} slices: nothing was paced`);
+  for (const r of roads) assert.ok(r._prof, 'a road was left unlevelled');
+
+  // and the bake that follows gives the ground the unpaced bake gives
+  conformTerrainTile(t, city, 0, 0);
+  const t2 = lumpyTerrain();
+  const roads2 = roads.map((r) => ({ d: r.d, t: r.t, w: r.w, p: r.p }));
+  conformTerrainTile(t2, cityWith(roads2), 0, 0);
+  assert.deepEqual(t.grids.get('0,0'), t2.grids.get('0,0'));
+});

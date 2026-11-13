@@ -81,7 +81,7 @@
 // ==========================================================================
 
 import { money, onChange } from './wallet.js';
-import { hp, hpMax, armour, down as isDown, onDown, onRevive } from './vitals.js';
+import { hp, hpMax, armour, energy, energyMax, down as isDown, onDown, onRevive } from './vitals.js';
 import { fuelTypeOf, levelOf, frac, dry } from './fuel.js';
 import { kc } from './prices.js';
 
@@ -153,6 +153,7 @@ let _rescanAt = 0;
 // elements, all nullable, all re-read by _scan()
 let _root = null, _mnVal = null, _mnTick = null;
 let _hpFill = null, _arBar = null, _arFill = null;
+let _enBar = null, _enFill = null, _lastEn = -1, _lastEnLow = null;
 let _fuelEl = null, _fuFill = null, _fuType = null, _fuRange = null;
 let _red = null, _ban = null;
 
@@ -228,6 +229,12 @@ function _scan() {
   const mnTick = mn ? mn.querySelector('.mn-tick') : null;
   const hpFill = vt ? vt.querySelector('.vt-hp i') : null;
   const arFill = arBar ? arBar.querySelector('i') : null;
+  // Hunger rides outside the moved-element comparison below on purpose: it is
+  // optional markup (an older index.html has no .vt-en), and re-reading it on
+  // every scan costs one query a second at most.
+  _enBar = vt ? vt.querySelector('.vt-en') : null;
+  const enFill = _enBar ? _enBar.querySelector('i') : null;
+  if (enFill !== _enFill) { _enFill = enFill; _lastEn = -1; _lastEnLow = null; }
   const fuFill = fuel ? fuel.querySelector('.fu-bar i') : null;
   const fuType = fuel ? fuel.querySelector('.fu-type') : null;
   const fuRange = fuel ? fuel.querySelector('.fu-range') : null;
@@ -364,6 +371,15 @@ function _vitals() {
   if (_arBar) {
     const off = !(a > 0);
     if (off !== _lastArOff) { _lastArOff = off; _arBar.classList.toggle('hidden', off); }
+  }
+  // Hunger: its own scale (energyMax), and a .low flag under a fifth so the
+  // stylesheet can make an emptying stomach noticeable without a number.
+  if (_enFill) {
+    const e = fin(energy(), 0) / Math.max(1, fin(energyMax(), 100));
+    const p = pct(e);
+    if (p !== _lastEn) { _lastEn = p; _enFill.style.width = PCT[p]; }
+    const low = e < 0.2;
+    if (low !== _lastEnLow) { _lastEnLow = low; _enBar.classList.toggle('low', low); }
   }
 }
 

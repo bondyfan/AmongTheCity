@@ -223,6 +223,18 @@ const C_OTHER = 'zranění';
 
 // ---- state ---------------------------------------------------------------
 let _hp = HP_MAX;
+// ---- hunger ----
+// One more number, and deliberately a quiet one. Energy runs from a full
+// stomach to an empty one over about one game day of play (the day is 24 real
+// minutes), and it does exactly one thing: ON EMPTY, THE BODY STOPS MENDING.
+// No damage, no slowed walk, no nagging death: a hungry player is simply one
+// who no longer gets the free climb back to REGEN_FLOOR, which makes the six
+// plates in PRICE.food (they heal AND fill) worth walking into a restaurant
+// for. Anything harsher would turn a city to explore into a meter to feed.
+const ENERGY_MAX = 100;
+const ENERGY_DRAIN = ENERGY_MAX / (21 * 60);   // per second: empty in 21 minutes
+const ENERGY_REVIVE = 45;                      // the hospital feeds you, a little
+let _energy = ENERGY_MAX;
 let _armour = 0;
 let _down = false;
 // The module's own monotonic clock, in seconds of stepped game time, and the
@@ -430,6 +442,36 @@ export function heal(n) {
   _hp = _hp + d > HP_MAX ? HP_MAX : _hp + d;
 }
 
+/** 0..100: how long since the last meal. See the hunger note at the top. */
+export function energy() { return _energy; }
+export function energyMax() { return ENERGY_MAX; }
+export function hungry() { return _energy <= 0; }
+
+/** A meal: `n` points of energy. The HP a plate also gives goes through
+ *  heal(), so a caller feeding the player calls both. Ignored while down. */
+export function eat(n) {
+  if (_down) return;
+  const d = Number.isFinite(n) ? n : 0;
+  if (d <= 0) return;
+  _energy = _energy + d > ENERGY_MAX ? ENERGY_MAX : _energy + d;
+}
+
+/**
+ * Put a SAVED body back (js/career.js, on "Pokračovat"). Not a heal and not a
+ * revive: it sets the three numbers outright and voids the motion samples,
+ * because the caller has just placed the body somewhere else and a stale
+ * sample would bill the move as a crash. A corrupt field keeps what was there.
+ */
+export function restore(st) {
+  if (!st || _down) return;
+  if (Number.isFinite(st.hp)) _hp = st.hp < 1 ? 1 : st.hp > HP_MAX ? HP_MAX : st.hp;
+  if (Number.isFinite(st.armour)) _armour = st.armour < 0 ? 0 : st.armour > ARMOUR_MAX ? ARMOUR_MAX : st.armour;
+  if (Number.isFinite(st.energy)) _energy = st.energy < 0 ? 0 : st.energy > ENERGY_MAX ? ENERGY_MAX : st.energy;
+  _calmAt = _now;
+  forgetRide();
+  _foot.valid = false;
+}
+
 export function addArmour(n) {
   const d = Number.isFinite(n) ? n : 0;
   if (d <= 0) return;
@@ -464,6 +506,10 @@ function regen(dt) {
   // and a body that healed past the floor while the death card was up would
   // stand up mid-animation.
   if (_down || dt <= 0) return;
+  // The stomach empties whether or not anything hurts, and an empty one is
+  // what switches the mending below off.
+  if (_energy > 0) { _energy -= ENERGY_DRAIN * dt; if (_energy < 0) _energy = 0; }
+  if (_energy <= 0) return;
   if (_hp >= REGEN_FLOOR || _now < _calmAt) return;
   const v = _hp + REGEN_RATE * dt;
   _hp = v > REGEN_FLOOR ? REGEN_FLOOR : v;
@@ -484,6 +530,7 @@ export function revive() {
   _down = false;
   _hp = REVIVE_HP;
   _armour = 0;
+  if (_energy < ENERGY_REVIVE) _energy = ENERGY_REVIVE;
   _calmAt = _now;
   forgetRide();
   _foot.valid = false;
@@ -498,6 +545,7 @@ export function revive() {
 export function reset() {
   _hp = HP_MAX;
   _armour = 0;
+  _energy = ENERGY_MAX;
   _down = false;
   _now = 0;
   _calmAt = 0;

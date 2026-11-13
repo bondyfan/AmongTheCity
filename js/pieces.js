@@ -44,12 +44,42 @@
 import { pointInPolygon, polygonArea, distPointToSegment } from './geo.js';
 import { INTERIOR, ROOF_DARKEN, WALL_AO } from './config.js';
 import { planToWorld } from './interiors.js';
+import { rowFor, edgeRoles, litPane, NOVA_RAIL, signBand, signOverGround, hasParapet,
+  cellRect, trimRect, TRIM_BANDS, BAYS } from './typology.js';
 
 // The facade's own wall colour for this building, stamped onto the plan by
 // interiorsim before anything is built. It comes from meshes.js (which owns the
 // palette and needs three.js to mix it) and is passed in rather than imported,
 // so this module stays a pure-data unit the headless tests can exercise.
 const wallHexOf = (plan) => plan.wallHex ?? plan.pal.trim;
+
+// The facade rows of a plan (typology.facadeRows, stamped by buildingPlan): the
+// atlas cell per storey row, where the window sits in it, which bays are blank
+// or carry a balcony. The far mesh reads the very same rows, which is the whole
+// of why a building does not change face when its boxes take over. A plan that
+// came from somewhere else (an old save, a bare test fixture) falls back to the
+// two-cell rule the shell used to have.
+function rowsOf(plan) {
+  if (plan._rows) return plan._rows;
+  let rows = plan.rows;
+  if (rows) {
+    for (const k of ['mid', 'ground', 'top', 'gable', 'door', 'store'])
+      if (rows[k] && !rows[k].uv) rows[k].uv = cellRect(rows[k].cell[0], rows[k].cell[1]);
+  } else {
+    const c = plan.cells;
+    rows = {
+      mid: { uv: c?.cellA ?? [0, 0.75, 0.125, 1], band: c?.band ?? [0.29, 0.74],
+        frac: c?.frac ?? 0.54, solid: false, store: false },
+      ground: null, top: null, gable: null, door: null, balc: null, blank: null,
+      store: c?.storeC ? { uv: c.storeC, band: [0.055, 0.80], frac: 0.86, solid: false, store: true } : null,
+      front: c?.storeC ? 'all' : null, trim: TRIM_BANDS.coping,
+    };
+  }
+  return (plan._rows = rows);
+}
+// which window bays are lit after dark: the far tier's own hash (typology.litPane)
+const litOf = (plan, fi, ei, i, store) =>
+  (plan.lit ? litPane(plan.lit, plan.id, fi, ei, i, store) : null);
 
 const I = INTERIOR;
 // Ground-floor slab height. This has to clear the WHOLE of config's LAYER_Y
@@ -191,6 +221,13 @@ function emitWall(out, plan, w, fy, thick, col, kind, panelW, weak, doorH) {
 // opening at the size the plan asked for, at the cost of a few dozen pieces
 // per floor instead of a coarser grid everywhere.
 function emitSlab(out, plan, top, voids, tile, col, kind, dark, split, thick) {
+  const gen = emitSlabGen(out, plan, top, voids, tile, col, kind, dark, split, thick);
+  while (!gen.next().done) { /* every row, now */ }
+}
+// One ROW of tiles a step: a hall's floor is 2,400 tiles, each asked whether it
+// fits inside the outline, and that one call was up to 24 ms of the 120 a
+// department store's rooms cost. See interiorPiecesGen for who stops here.
+function* emitSlabGen(out, plan, top, voids, tile, col, kind, dark, split, thick) {
   const fr = plan.fr, test = plan._foot;
   const kLo = (dark ?? 1) * 0.86, kHi = (dark ?? 1) * 1.05;
   const nu = Math.max(1, Math.ceil((fr.hu * 2) / tile));
@@ -243,6 +280,7 @@ function emitSlab(out, plan, top, voids, tile, col, kind, dark, split, thick) {
         emit(cu, cv2, su / 2, sv / 2);
       }
     }
+    const seq = _seq; yield; _seq = seq;
   }
 }
 
@@ -254,6 +292,12 @@ function emitSlab(out, plan, top, voids, tile, col, kind, dark, split, thick) {
 // either case — a sill piece, a glass pane, a spandrel above — because a
 // window you can blow out of its frame is worth three of a painted one.
 function emitPerimeter(out, plan, fi, leaf) {
+  const gen = emitPerimeterGen(out, plan, fi, leaf);
+  while (!gen.next().done) { /* every edge, now */ }
+}
+// One EDGE of the outline a step, for the same caller as emitSlabGen: a storey
+// of a long block is hundreds of panels, each tested against the footprint.
+function* emitPerimeterGen(out, plan, fi, leaf) {
   const ring = plan.ring, fr = plan.fr;
   const sgn = polygonArea(ring) > 0 ? 1 : -1;
   const fy = plan.floors[fi].y;
@@ -263,9 +307,13 @@ function emitPerimeter(out, plan, fi, leaf) {
   // facade atlas maps one cell per full storey anyway, so ext panels spanning
   // sH also line the paint up better with the flat-facade LOD.
   const roomH = plan.storeys === 1 ? plan.usable : plan.sH - I.slabT;
-  const wallH = leaf === 'ext'
-    ? (plan.storeys === 1 ? plan.usable + I.slabT : plan.sH)
-    : roomH;
+  // The outer leaf stands on the STOREY GRID (y0 + fi·sH), the one the far
+  // mesh paints its window rows on, not on the floor slab: the ground floor is
+  // lifted 30 cm over the pavement layers, and an outer wall that started there
+  // left a gap at its foot and overlapped the storey above by the same 30 cm.
+  // What is left between the last row and the roof is emitRoof's frieze.
+  const wallH = leaf === 'ext' ? plan.sH : roomH;
+  const base = leaf === 'ext' ? plan.y0 + fi * plan.sH : fy;
   const thick = leaf === 'ext' ? I.extT + I.linT : I.linT;
   const pal = plan.pal;
   // The OUTER leaf wears the facade's own colour and the facade's own window
@@ -274,8 +322,8 @@ function emitPerimeter(out, plan, fi, leaf) {
   // only changes what can happen to it. The inner lining stays interior white.
   const col = leaf === 'ext' ? wallHexOf(plan) : pal.wall;
   // the outer leaf panels ARE atlas bays, so their width is the atlas bay pitch
-  const cells = plan.cells ?? { cellA: [0, 0.75, 0.125, 1], storeC: null, bays: 4, atlasN: 8, bayW: 2.7 };
-  const panelW = leaf === 'ext' ? cells.bayW : plan.panel;
+  const rows = rowsOf(plan);
+  const panelW = leaf === 'ext' ? 2.7 : plan.panel;
   const ent = plan.entrance;
   // industrial halls and parking decks are mostly blank wall with strip
   // glazing high up; housing is windows everywhere. This one number is why a
@@ -296,8 +344,11 @@ function emitPerimeter(out, plan, fi, leaf) {
   const surK = leaf === 'ext' && (plan.use === 'house' || plan.use === 'flats')
     && !plan.nova && rnd(plan.id, 83) < 0.4 ? 1.13 : 1;
   const N = ring.length;
+  // shopfront, blank gable or garage-door front, per edge (typology's rule)
+  const roles = leaf === 'ext' ? edgeRoles(ring, rows, ent?.i) : null;
 
   for (let ei = 0; ei < ring.length; ei++) {
+    if (ei) { const seq = _seq; yield; _seq = seq; }
     const a = ring[ei], b = ring[(ei + 1) % ring.length];
     const dx = b[0] - a[0], dz = b[1] - a[1];
     const L = Math.hypot(dx, dz);
@@ -332,7 +383,7 @@ function emitPerimeter(out, plan, fi, leaf) {
     for (let i = 0; i < n; i++) {
       const s = (i + 0.5) * pw;
       const px = a[0] + ux * s + inx * off, pz = a[1] + uz * s + inz * off;
-      let yB = fy, yT = fy + wallH;
+      let yB = base, yT = base + wallH;
       const isDoor = door && Math.abs(s - door.c) < door.w / 2 + pw * 0.5;
       if (isDoor) {
         // the entrance: only the lintel above it, and only if there is room
@@ -341,7 +392,14 @@ function emitPerimeter(out, plan, fi, leaf) {
       }
 
       if (leaf === 'ext') {
-        const yTw = fy + wallH;
+        const yTw = base + wallH;
+        const row = rowFor(rows, fi, plan.storeys, roles[ei]);
+        // stamp a pane with the light the far tier gives this very bay
+        // (`plain`: a shop window or a curtain-wall band carries no glazing bars)
+        const pane = (p, store, plain = store) => {
+          p.leaf = 'ext'; p.lit = litOf(plan, fi, ei, i, store); p.plain = !!plain;
+          return p;
+        };
         // flat-colour bay piece (no atlas) — the special facade grammars below
         // are exactly the buildings whose real counterparts DON'T wear Czech
         // plaster-and-sill paint, so they emit plain boxes and let colour and
@@ -353,8 +411,21 @@ function emitPerimeter(out, plan, fi, leaf) {
           const p = push(out, cx2, (y0 + y1) / 2, cz2, (u1f - u0f) * pw / 2,
             (y1 - y0) / 2, thick / 2, yaw, c2, 'ext', false, lo, hi);
           p.leaf = 'ext';
+          // `pin`: outer wall with no atlas cell of its own. destructible.js
+          // draws it with the facade material on the plain plaster texel, so it
+          // is lit like the rest of the wall (the interior batch carries a
+          // bounce-light glow that made these blocks ghost-pale at night).
+          p.pin = true;
           return p;
         };
+
+        // a stub of wall too short for a window (typology.STUB_EDGE): bare
+        // plaster in every grammar, exactly as the far mesh leaves it
+        if (row.plain && !isDoor) {
+          const kA = ao(base + wallH / 2);
+          flat(base, yTw, 0, 1, col, kA * 0.95, kA * 1.02);
+          continue;
+        }
 
         // ---- GLAZED FRONTAGE: fast-food pavilion / mall entrance portal ----
         // Big panes between thin dark mullions; the restaurant hangs its
@@ -377,12 +448,13 @@ function emitPerimeter(out, plan, fi, leaf) {
           // the pane — a door bay keeps its opening and gets a glass header
           const pB = isDoor ? fy + I.entryH + 0.05 : gB;
           if (gT - pB > 0.3)
-            push(out, px + inx * thick * 0.22, (pB + gT) / 2,
+            pane(push(out, px + inx * thick * 0.22, (pB + gT) / 2,
               pz + inz * thick * 0.22, pw / 2 - 0.08, (gT - pB) / 2, 0.028,
-              yaw, GLASS_C, 'glass', true, 0.9, 1.05).leaf = 'ext';
+              yaw, GLASS_C, 'glass', true, 0.9, 1.05), true).lit = isDoor || fi > 0 ? null
+              : litOf(plan, fi, ei, i, true);
           // base strip under the glass, cladding band above it
-          if (!isDoor && gB - fy > 0.04)
-            flat(fy, gB, 0, 1, clad, 0.9, 0.98);
+          if (!isDoor && gB - base > 0.04)
+            flat(base, gB, 0, 1, clad, 0.9, 0.98);
           if (yTw - gT > 0.05) flat(gT, yTw, 0, 1, clad, 0.95, 1.03);
           continue;
         }
@@ -392,53 +464,56 @@ function emitPerimeter(out, plan, fi, leaf) {
         // fraction lands ~0.8); 'grid' = a grid of tall windows in dark frames.
         // Both wear wallHex — classify() stamped the cool grey onto f.c, so
         // the far LOD's flat box is already the same colour.
-        if (officeVar && !(fi === 0 && cells.storeC)) {
+        if (officeVar && !row.store) {
           if (isDoor) { flat(yB, yTw, 0, 1, col, 0.94, 1.0); continue; }
-          const kA = ao(fy + wallH * 0.5);
+          const kA = ao(base + wallH * 0.5);
           if (officeVar === 'bands') {
-            const gB = fy + wallH * 0.30, gT = fy + wallH * 0.88;
-            flat(fy, gB, 0, 1, col, kA * 0.92, kA * 1.0);       // spandrel
+            const gB = base + wallH * 0.30, gT = base + wallH * 0.88;
+            flat(base, gB, 0, 1, col, kA * 0.92, kA * 1.0);     // spandrel
             flat(gT, yTw, 0, 1, col, kA * 0.94, kA * 1.02);     // floor strip
             flat(gB, gT, 0, 0.045, FRAME_C, 0.96, 1.0);         // band joint
             if (i === n - 1) flat(gB, gT, 0.955, 1, FRAME_C, 0.96, 1.0);
-            push(out, px + inx * thick * 0.22, (gB + gT) / 2,
+            pane(push(out, px + inx * thick * 0.22, (gB + gT) / 2,
               pz + inz * thick * 0.22, pw / 2 - 0.09, (gT - gB) / 2, 0.028,
-              yaw, GLASS_C, 'glass', true, 0.9, 1.05).leaf = 'ext';
+              yaw, GLASS_C, 'glass', true, 0.9, 1.05), false, true);
           } else {
-            const wy0 = fy + wallH * 0.20, wy1 = fy + wallH * 0.84;
+            const wy0 = base + wallH * 0.20, wy1 = base + wallH * 0.84;
             const gFrac = 0.64, gj = (1 - gFrac) / 2;
-            flat(fy, wy0, 0, 1, col, kA * 0.9, kA * 0.98);
+            flat(base, wy0, 0, 1, col, kA * 0.9, kA * 0.98);
             flat(wy1, yTw, 0, 1, col, kA * 0.94, kA * 1.02);
             flat(wy0, wy1, 0, gj, FRAME_C, 0.94, 1.0);          // dark frame
             flat(wy0, wy1, 1 - gj, 1, FRAME_C, 0.94, 1.0);
-            push(out, px + inx * thick * 0.22, (wy0 + wy1) / 2,
+            pane(push(out, px + inx * thick * 0.22, (wy0 + wy1) / 2,
               pz + inz * thick * 0.22, gFrac * pw / 2 - 0.02, (wy1 - wy0) / 2,
-              0.028, yaw, GLASS_C, 'glass', true, 0.9, 1.05).leaf = 'ext';
+              0.028, yaw, GLASS_C, 'glass', true, 0.9, 1.05), false, true);
           }
           continue;
         }
 
         // ---- NOVOSTAVBA: white plaster, tall windows, French balconies ----
-        if (novaExt && !(fi === 0 && cells.storeC)) {
+        if (novaExt && !row.store) {
           if (isDoor) { flat(yB, yTw, 0, 1, col, 0.94, 1.02); continue; }
-          const kA = ao(fy + wallH / 2);
-          if (wallH < 2.2 || rnd(plan.id, 8100 + fi * 89 + ei * 11 + i) < 0.15) {
-            flat(fy, yTw, 0, 1, col, kA * 0.95, kA * 1.03);
+          const kA = ao(base + wallH / 2);
+          // (one bay in seven used to be hash-blanked here; the far mesh paints
+          // a window on every bay, so the shell now cuts one on every bay too)
+          if (wallH < 2.2) {
+            flat(base, yTw, 0, 1, col, kA * 0.95, kA * 1.03);
             continue;
           }
-          const wy0 = fy + wallH * 0.24, wy1 = fy + wallH * 0.88;
+          const wy0 = base + wallH * 0.24, wy1 = base + wallH * 0.88;
           const gFrac = 0.6, gj = (1 - gFrac) / 2;
-          flat(fy, wy0, 0, 1, col, kA * 0.93, kA * 1.0);
+          flat(base, wy0, 0, 1, col, kA * 0.93, kA * 1.0);
           flat(wy1, yTw, 0, 1, col, kA * 0.96, kA * 1.04);
           flat(wy0, wy1, 0, gj, col, kA * 0.9, kA * 0.97);
           flat(wy0, wy1, 1 - gj, 1, col, kA * 0.9, kA * 0.97);
-          push(out, px + inx * thick * 0.22, (wy0 + wy1) / 2,
+          pane(push(out, px + inx * thick * 0.22, (wy0 + wy1) / 2,
             pz + inz * thick * 0.22, gFrac * pw / 2 - 0.05, (wy1 - wy0) / 2,
-            0.028, yaw, GLASS_C, 'glass', true, 0.9, 1.05).leaf = 'ext';
+            0.028, yaw, GLASS_C, 'glass', true, 0.9, 1.05), false);
           // the French balcony: a flush dark rail across the pane's lower half
           // — floor-to-ceiling glass on an upper storey NEEDS one to read as a
-          // dwelling rather than an office
-          if (fi > 0 && rnd(plan.id, 8200 + fi * 131 + ei * 17 + i) < 0.6)
+          // dwelling rather than an office. On the bays the far mesh paints one
+          // (typology.NOVA_RAIL), so the rails do not shuffle at the swap.
+          if (fi > 0 && NOVA_RAIL[i % BAYS])
             push(out, px - inx * (off + 0.05), wy0 + 0.55, pz - inz * (off + 0.05),
               pw * gFrac / 2 - 0.02, 0.5, 0.03, yaw, FRENCH_C, 'rail', true,
               0.9, 1.0).french = true;
@@ -456,9 +531,9 @@ function emitPerimeter(out, plan, fi, leaf) {
         // That is why the atlas's window band is fixed (WIN_BAND / WIN_FRAC in
         // meshes.js): the paint and the hole have to agree on where the window
         // is, or you get a painted window next to a real one.
-        const cell = (fi === 0 && cells.storeC) ? cells.storeC : cells.cellA;
-        const cu = cell[0] + ((i % cells.bays) / cells.bays) * (1 / cells.atlasN);
-        const cw = 1 / (cells.bays * cells.atlasN);
+        const cell = row.uv;
+        const cw = (cell[2] - cell[0]) / BAYS;
+        const cu = cell[0] + (i % BAYS) * cw;
         const cv0 = cell[1], cvH = cell[3] - cell[1];
         const uvOf = (fu0, fu1, fv0, fv1) =>
           [cu + cw * fu0, cv0 + cvH * fv0, cu + cw * fu1, cv0 + cvH * fv1];
@@ -482,23 +557,27 @@ function emitPerimeter(out, plan, fi, leaf) {
           p.uv = plan.facades === false ? null : uv;
           return p;
         };
-        const storefront = fi === 0 && cells.storeC && !isDoor;
+        const storefront = row.store && !isDoor;
         // a storefront is GLASS nearly wall to wall — a shop you cannot see
-        // into is a painted shop, which is exactly the complaint this fixes
-        const b0 = storefront ? 0.055 : (cells.band?.[0] ?? 0.29);
-        const b1 = storefront ? 0.80 : (cells.band?.[1] ?? 0.74);
-        const frac = storefront ? 0.86 : (cells.frac ?? 0.54);
+        // into is a painted shop, which is exactly the complaint this fixes.
+        // Where the window is comes from the ROW (typology.FAMILIES): a
+        // tenement's is tall and narrow, a family house's wide, a shop's the
+        // whole bay, and the painter drew its glass from the same numbers.
+        const b0 = row.band?.[0] ?? 0.29, b1 = row.band?.[1] ?? 0.74;
+        const frac = row.frac || 0.54;
         const wy0 = yB + (yT - yB) * b0, wy1 = yB + (yT - yB) * b1;
-        // a door bay or a windowless use stays solid
-        const solid = isDoor || (!storefront && winChance < 0.35) || (yT - yB) < 2.2;
+        // a door bay, a blank bay or a windowless family (hall cladding, a
+        // blank gable, garage doors) stays one solid painted panel
+        const solid = isDoor || row.solid || !row.band || (yT - yB) < 2.2
+          || (!row.store && rows.blank && rows.blank[i % BAYS]);
         if (solid) {
-          const fv0 = (yB - fy) / wallH, fv1 = (yT - fy) / wallH;
+          const fv0 = (yB - base) / wallH, fv1 = (yT - base) / wallH;
           put(yB, yT, 0, 1, uvOf(0, 1, fv0, fv1));
           continue;
         }
         const j0 = (1 - frac) / 2, j1 = 1 - j0;
-        const fvB = (yB - fy) / wallH, fvT = (yT - fy) / wallH;
-        const fw0 = (wy0 - fy) / wallH, fw1 = (wy1 - fy) / wallH;
+        const fvB = (yB - base) / wallH, fvT = (yT - base) / wallH;
+        const fw0 = (wy0 - base) / wallH, fw1 = (wy1 - base) / wallH;
         put(yB, wy0, 0, 1, uvOf(0, 1, fvB, fw0));            // under the sill
         put(wy1, yT, 0, 1, uvOf(0, 1, fw1, fvT));            // over the lintel
         put(wy0, wy1, 0, j0, uvOf(0, j0, fw0, fw1), surK);   // left jamb
@@ -507,8 +586,8 @@ function emitPerimeter(out, plan, fi, leaf) {
         // directions — this is what lets you look into a lit room from the
         // street without anybody having to fire a rocket at it first
         const gx = px + inx * thick * 0.22, gz = pz + inz * thick * 0.22;
-        push(out, gx, (wy0 + wy1) / 2, gz, frac * pw / 2, (wy1 - wy0) / 2, 0.025,
-          yaw, 0x9fb4c4, 'glass', true, 0.9, 1.05).leaf = 'ext';
+        pane(push(out, gx, (wy0 + wy1) / 2, gz, frac * pw / 2, (wy1 - wy0) / 2, 0.025,
+          yaw, 0x9fb4c4, 'glass', true, 0.9, 1.05), storefront);
         continue;
       }
 
@@ -540,13 +619,46 @@ function emitPerimeter(out, plan, fi, leaf) {
   }
 }
 
-// Roof + parapet. Only ever built in the shell phase, because until something
-// tears the building open the chunk mesh's own roof cap is doing the job.
+// Roof deck, frieze and parapet. Only ever built in the shell phase, because
+// until something tears the building open the chunk mesh's own roof is doing
+// the job. Three things, and each mirrors what the far mesh draws:
+//   · the DECK, in the roof's own colour (typology.roofOf: felt, gravel, tile),
+//     no longer the wall colour darkened;
+//   · the FRIEZE, the band of wall between the top row of windows and the roof
+//     line, wearing the trim cell (cornice, coping, eave shadow);
+//   · the PARAPET, only where a flat roof really has an upstand. A pitched roof
+//     arrives as its own mesh (meshes.roofGeometry) and a ring of boxes poking
+//     up through its eaves was never a parapet.
 function emitRoof(out, plan) {
-  // the facade caps its roof at wall × ROOF_DARKEN; match it, or every damaged
-  // building suddenly grows a different-coloured lid
   const wall = wallHexOf(plan);
-  emitSlab(out, plan, plan.top, null, plan.tile * 1.6, wall, 'roof', ROOF_DARKEN, false);
+  const roof = plan.roof ?? null;
+  // legacy plans (no roof stamped) keep the old darkened-wall lid
+  if (roof) {
+    const n0 = out.length;
+    emitSlab(out, plan, plan.top, null, plan.tile * 1.6, roof.hex, 'roof', 1, false);
+    // one sheet of felt or gravel, not a chessboard: the slab's usual per-tile
+    // brightness spread is squeezed to a couple of percent around the roof colour
+    // `pin`: the deck is drawn with the facade material like the walls around it.
+    // In the interior batch it carried that batch's bounce-light glow, so at
+    // night every flat roof near the player was a grey slab on a black town
+    // and went black again at the tier swap.
+    for (let i = n0; i < out.length; i++) {
+      out[i].k = 0.97 + (out[i].k - 0.86) * 0.2;
+      out[i].pin = true;
+    }
+  } else emitSlab(out, plan, plan.top, null, plan.tile * 1.6, wall, 'roof', ROOF_DARKEN, false);
+  const rows = rowsOf(plan);
+  const parapet = roof ? hasParapet(plan.typ, roof, plan.area) : true;
+  // nova and office shells are flat boxes with no atlas; their trims stay flat too
+  const atlas = plan.facades !== false && !(plan.nova && plan.use === 'flats')
+    && plan.use !== 'office';
+  const tr = trimRect(rows.trim ?? TRIM_BANDS.coping);
+  const gridTop = plan.y0 + plan.storeys * plan.sH;
+  const fB = Math.max(gridTop, plan.top - 0.5);
+  // the far mesh runs ONE trim band from fB to the parapet's top; split it here
+  const span = plan.top + (parapet ? 0.55 : 0) - fB;
+  const vAt = (y) => tr[1] + (tr[3] - tr[1]) * Math.max(0, Math.min(1, (y - fB) / span));
+  const thick = I.extT + I.linT;
   const ring = plan.ring;
   const sgn = polygonArea(ring) > 0 ? 1 : -1;
   for (let ei = 0; ei < ring.length; ei++) {
@@ -555,14 +667,32 @@ function emitRoof(out, plan) {
     if (L < 0.25) continue;
     const ux = dx / L, uz = dz / L, inx = -sgn * uz, inz = sgn * ux;
     const yaw = Math.atan2(-uz, ux);
-    const n = Math.max(1, Math.round(L / (plan.panel * 1.4)));
-    const pw = L / n;
+    // one piece per run of four bays, like the far mesh's quads
+    const cols = Math.max(1, Math.round(L / 2.7)), n = Math.ceil(cols / BAYS);
     for (let i = 0; i < n; i++) {
-      const s = (i + 0.5) * pw;
+      const b0 = i * BAYS, b1 = Math.min(cols, b0 + BAYS);
+      const s = (b0 + b1) / 2 * (L / cols), hl = (b1 - b0) / 2 * (L / cols);
+      const u1 = tr[0] + (tr[2] - tr[0]) * (b1 - b0) / BAYS;
+      const band = (y0, y1, off, hz, kLo, kHi) => {
+        if (y1 - y0 < 0.03) return;
+        const p = push(out, a[0] + ux * s + inx * off, (y0 + y1) / 2, a[1] + uz * s + inz * off,
+          hl, (y1 - y0) / 2, hz, yaw, wall, 'ext', false, kLo, kHi);
+        p.leaf = 'ext';
+        if (atlas) p.uv = [tr[0], vAt(y0), u1, vAt(y1)];
+        else p.pin = true;
+      };
+      // plain wall where a tall single volume leaves a gap under the trim
+      if (fB - gridTop > 0.04) {
+        const p = push(out, a[0] + ux * s + inx * thick / 2, (gridTop + fB) / 2,
+          a[1] + uz * s + inz * thick / 2, hl, (fB - gridTop) / 2, thick / 2, yaw, wall,
+          'ext', false, 0.95, 1.0);
+        p.leaf = 'ext'; p.pin = true;
+      }
+      // (2 cm shy of the deck: the roof slab's top face is at plan.top exactly)
+      band(fB, plan.top - 0.02, thick / 2, thick / 2, 0.96, 1.0);
       // the parapet starts a few centimetres ABOVE the roof deck: sharing the
       // plane with the slab it stands on is a z-fight waiting to happen
-      push(out, a[0] + ux * s + inx * 0.16, plan.top + 0.31, a[1] + uz * s + inz * 0.16,
-        pw / 2, 0.26, 0.16, yaw, wall, 'ext', false, ROOF_DARKEN * 0.95, ROOF_DARKEN * 1.08);
+      if (parapet) band(plan.top + 0.05, plan.top + 0.57, 0.16, 0.16, 0.96, 1.0);
     }
   }
 }
@@ -1036,9 +1166,26 @@ function furnish(out, plan, floor, room, fi) {
  * stairs, railings, furniture). The chunk mesh keeps drawing the facade.
  */
 export function interiorPieces(plan) {
+  const gen = interiorPiecesGen(plan);
+  let it;
+  do { it = gen.next(); } while (!it.done);
+  return it.value;
+}
+
+// THE SAME LIST, WITH PLACES TO STOP. The rooms of one building are 0.8 ms of
+// work at the median and 120 ms for a department store (measured over the 486
+// buildings round Pernštýnské náměstí, most of it the footprint test of every
+// floor tile), and walking up to that store used to spend all of it in the
+// frame the scan noticed the player. A caller with a clock (interiorsim's
+// full-interior queue) takes this a pause at a time instead. Nothing about
+// the pieces changes: the one piece of module state the emitters share, the
+// colour-jitter counter, is put back after every pause, because another
+// building's shell may have been built in between.
+export function* interiorPiecesGen(plan) {
   const out = [];
   out._seed = plan.id;
   _seq = 0;
+  let seq = 0;
   plan._foot = footTest(plan);
   const pal = plan.pal;
   // Guard the piece budget by coarsening the slab grid until an estimate of the
@@ -1063,9 +1210,11 @@ export function interiorPieces(plan) {
     // underside out of the LAYER_Y ladder as well as its top (the first fix
     // moved the top clear and left the soffit shimmering against the grass at
     // 0.05), and gives the support solver a proper anchor at street level.
-    emitSlab(out, plan, floor.y, floor.open,
+    yield* emitSlabGen(out, plan, floor.y, floor.open,
       tile, pal.floor, 'floor', 1, true, fi === 0 ? GROUND_LIFT + 0.5 : undefined);
-    emitPerimeter(out, plan, fi, 'lin');
+    seq = _seq; yield; _seq = seq;
+    yield* emitPerimeterGen(out, plan, fi, 'lin');
+    seq = _seq; yield; _seq = seq;
     for (const w of floor.walls) {
       const isShop = w.kind === 'shopfront';
       emitWall(out, plan, w, floor.y,
@@ -1074,6 +1223,7 @@ export function interiorPieces(plan) {
         isShop ? 'glass' : 'wall', plan.panel, isShop,
         isShop ? 2.6 : I.doorH);
     }
+    seq = _seq; yield; _seq = seq;
     if (floor.stair) emitStair(out, plan, floor.stair, pal.trim);
     for (const r of floor.rails) emitRail(out, plan, r, floor.y, pal.trim);
     // the výtah: the plan already carries the shaft walls and the slab holes;
@@ -1095,7 +1245,7 @@ export function interiorPieces(plan) {
             plan.fr.yaw, 0xb4b8bc, 'prop', true, 0.94, 1.02);
       }
     }
-    for (const room of floor.rooms) furnish(out, plan, floor, room, fi);
+    for (const room of floor.rooms) { furnish(out, plan, floor, room, fi); seq = _seq; yield; _seq = seq; }
   }
   // the top floor needs a ceiling of its own — the facade's roof cap is
   // single-sided, so without this you would look up into the sky from indoors
@@ -1103,7 +1253,7 @@ export function interiorPieces(plan) {
   // the ceiling does NOT subdivide at the boundary: a two-metre inset up there
   // is hidden by the wall head, and subdividing it tripled the piece count of
   // every wide-span building in the city
-  emitSlab(out, plan, topFloor.y + plan.sH, topFloor.open, tile * 1.35, pal.ceil, 'ceil', 1, false);
+  yield* emitSlabGen(out, plan, topFloor.y + plan.sH, topFloor.open, tile * 1.35, pal.ceil, 'ceil', 1, false);
   return out;
 }
 
@@ -1130,42 +1280,50 @@ function edgeFrame(ring, sgn, i) {
 }
 
 // Panelák balconies: a grid of protruding slabs + side cheeks + a weak rail
-// panel on the two longest facades, every storey above the first, 2–3 bays
-// apart. The slab top sits 2 cm under the room floor so the two never share a
-// plane; the rail is `weak` — the first thing a blast throws off, exactly
-// like the atrium railings.
-function emitBalconies(out, plan) {
+// panel on the two longest facades, every storey above the first. WHICH bays
+// is the facade row's own pattern (typology.PANEL_BALC): the far mesh paints a
+// loggia front on those bays of its atlas cell, so the boxes grow out of the
+// paint instead of appearing beside it. The slab top sits 2 cm under the room
+// floor so the two never share a plane; the rail is `weak`, the first thing a
+// blast throws off, exactly like the atrium railings.
+function emitBalconies(out, plan, rows) {
   const ring = plan.ring, sgn = polygonArea(ring) > 0 ? 1 : -1;
   const wall = wallHexOf(plan), id = plan.id;
   const railC = RAIL_CS[Math.floor(rnd(id, 87) * RAIL_CS.length) % RAIL_CS.length];
   const D = 1.35, W = 2.4;                       // balcony depth and width
+  const roles = edgeRoles(ring, rows, plan.entrance?.i);
   const byLen = [];
   for (let i = 0; i < ring.length; i++) {
     const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
-    byLen.push({ i, L: Math.hypot(bx - ax, bz - az) });
+    if (roles[i] !== 2) byLen.push({ i, L: Math.hypot(bx - ax, bz - az) });
   }
   byLen.sort((p, q) => q.L - p.L);
   for (const ed of byLen.slice(0, 2)) {          // the long facades only
     if (ed.L < 9) continue;
     const e = edgeFrame(ring, sgn, ed.i);
-    const step = 2.7 * (rnd(id, 88 + ed.i) < 0.5 ? 2 : 3);   // 2–3 atlas bays
-    const cnt = Math.floor((ed.L - 2.2) / step);
-    if (cnt < 1) continue;
-    const margin = (ed.L - (cnt - 1) * step) / 2;
+    const cols = Math.max(1, Math.round(ed.L / 2.7)), pw = ed.L / cols;
     for (let fi = 1; fi < plan.storeys; fi++) {
-      const by = plan.floors[fi].y;
-      for (let k = 0; k < cnt; k++) {
-        const s = margin + k * step;
+      // Only where the facade row is the loggia row. The top storey samples
+      // rows.top, a cell painted with plain silled windows under the attic
+      // band, so boxes hung there appeared over windows with no loggia front
+      // the moment the near shell swapped in.
+      if (rowFor(rows, fi, plan.storeys, roles[ed.i]) !== rows.mid) continue;
+      const by = plan.y0 + fi * plan.sH;
+      for (let k = 0; k < cols; k++) {
+        if (!rows.balc[k % BAYS]) continue;
+        const s = (k + 0.5) * pw;
         const bx = e.a[0] + e.ux * s, bz = e.a[1] + e.uz * s;
-        push(out, bx + e.ox * (D / 2 + 0.03), by - 0.11, bz + e.oz * (D / 2 + 0.03),
-          W / 2, 0.09, D / 2, e.yaw, wall, 'ext', false, 0.88, 0.98).balcony = true;
+        // (`pin`, like every other outside piece: lit as the wall is, so a
+        // balcony is not a pale box on a dark facade at night)
+        const bal = (p) => { p.balcony = true; p.pin = true; };
+        bal(push(out, bx + e.ox * (D / 2 + 0.03), by - 0.11, bz + e.oz * (D / 2 + 0.03),
+          W / 2, 0.09, D / 2, e.yaw, wall, 'ext', false, 0.88, 0.98));
         for (const sd of [-1, 1])                // side cheeks
-          push(out, bx + e.ux * sd * (W / 2 - 0.06) + e.ox * (D / 2 + 0.03),
+          bal(push(out, bx + e.ux * sd * (W / 2 - 0.06) + e.ox * (D / 2 + 0.03),
             by + 0.5, bz + e.uz * sd * (W / 2 - 0.06) + e.oz * (D / 2 + 0.03),
-            0.06, 0.52, D / 2 - 0.03, e.yaw, wall, 'ext', false, 0.86, 0.95)
-            .balcony = true;
-        push(out, bx + e.ox * (D - 0.05), by + 0.53, bz + e.oz * (D - 0.05),
-          W / 2, 0.5, 0.035, e.yaw, railC, 'rail', true, 0.92, 1.04).balcony = true;
+            0.06, 0.52, D / 2 - 0.03, e.yaw, wall, 'ext', false, 0.86, 0.95));
+        bal(push(out, bx + e.ox * (D - 0.05), by + 0.53, bz + e.oz * (D - 0.05),
+          W / 2, 0.5, 0.035, e.yaw, railC, 'rail', true, 0.92, 1.04));
       }
     }
   }
@@ -1229,38 +1387,16 @@ function emitFacadeExtras(out, plan) {
     }
   }
 
-  // panelák balconies: the prefab type, or anything six storeys and up
-  if (use === 'flats' && !plan.nova && plan.storeys >= 2
-      && (plan.osmT === 'panel' || plan.storeys >= 6)) emitBalconies(out, plan);
-
-  // hash-picked trims for the generic housing stock: a cornice strip under the
-  // parapet and a darker plinth band at the ground — small, cheap, and enough
-  // that two identical footprints stop wearing an identical face. Novostavby
-  // always take the cornice (their flat-roof trim line).
-  if (use === 'house' || use === 'flats') {
-    const cornice = plan.nova || rnd(id, 81) < 0.45;
-    const plinth = !plan.nova && rnd(id, 82) < 0.5;
-    if (!cornice && !plinth) return;
-    for (let i = 0; i < ring.length; i++) {
-      const g = edgeFrame(ring, sgn, i);
-      if (g.L < 2) continue;
-      const n = Math.max(1, Math.ceil(g.L / 6));
-      const pw = g.L / n;
-      for (let k = 0; k < n; k++) {
-        const s = (k + 0.5) * pw;
-        const x = g.a[0] + g.ux * s, z = g.a[1] + g.uz * s;
-        if (cornice)
-          push(out, x + g.ox * 0.10, plan.top - 0.16, z + g.oz * 0.10,
-            pw / 2, 0.11, 0.09, g.yaw, wall, 'ext', false, 1.05, 1.12);
-        // the plinth may not bar the front door: an 0.8 m band across the
-        // opening would out-climb the walk controller's 0.55 m step-up
-        if (plinth && !(ent && i === ent.i
-            && Math.abs(s - g.L * ent.t) < ent.w / 2 + pw / 2))
-          push(out, x + g.ox * 0.045, fy + 0.42, z + g.oz * 0.045,
-            pw / 2, 0.40, 0.05, g.yaw, wall, 'ext', false, 0.7, 0.78);
-      }
-    }
-  }
+  // Panelák balconies, wherever the facade row says there are loggia bays. The
+  // old gate was the OSM type `panel` (which no tile ever carries) or six
+  // storeys; the typology knows a slab when it sees one.
+  const rows = rowsOf(plan);
+  if (use === 'flats' && !plan.nova && plan.storeys >= 2 && rows.balc)
+    emitBalconies(out, plan, rows);
+  // (The hash-picked cornice and plinth strips that used to follow here are
+  // gone: the plinth is painted into the ground-floor row and the cornice is
+  // the roof's frieze now, in BOTH tiers, where the strips existed only up
+  // close and so appeared out of nowhere as you walked toward a house.)
 }
 
 // ---- branding -------------------------------------------------------------
@@ -1318,9 +1454,12 @@ function brandSigns(out, plan) {
   }
 
   // ---- fascia band ----
-  const H = clamp((plan.top - plan.y0) * 0.22, 0.7, 1.6);
-  const bandY = plan.top - H / 2 - 0.4;
-  for (const e of edges.slice(0, 2)) {
+  // under the parapet of a shed, over the ground floor of a shop that is only
+  // the bottom of a taller building: typology.signBand, the far tier's rule too
+  const over = signOverGround(plan.use, plan.storeys);
+  const { H, yT: bandT } = signBand(plan.y0, plan.top, plan.sH, over);
+  const bandY = bandT - H / 2;
+  for (const e of edges.slice(0, over ? 1 : 2)) {
     if (e.L < 8) continue;
     const [ax, az] = ring[e.i], [bx, bz] = ring[(e.i + 1) % ring.length];
     const ux = (bx - ax) / e.L, uz = (bz - az) / e.L;
@@ -1343,7 +1482,9 @@ function brandSigns(out, plan) {
 
   // ---- totem by the entrance ----
   const ent = plan.entrance;
-  if (!ent) return;
+  // a pylon belongs to a chain or a supermarket, not to every named corner shop
+  // (the far tier's rule in meshes.js brandSignage, change one, change both)
+  if (!ent || over || !(plan.brand || plan.use === 'supermarket' || plan.use === 'mall')) return;
   const px = ent.x + ent.nx * 5.5, pz = ent.z + ent.nz * 5.5;
   if (Math.hypot(px - fr.cx, pz - fr.cz) < 2) return;
   const yaw = Math.atan2(-(-ent.nz), -ent.nx) + Math.PI / 2;  // face the street

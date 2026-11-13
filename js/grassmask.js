@@ -22,7 +22,7 @@
 // and an unmown meadow, which is most of what stops a field looking like a lawn.
 
 import { CHUNK, LAYER_Y } from './config.js';
-import { chunkKey, roadGradeY, polylineLength } from './geo.js';
+import { chunkKey, roadGradeY, polylineLength, streetOf } from './geo.js';
 import { sealedGrid, SEAL_RES } from './sealed.js';
 
 const RES = 1;                        // m per mask cell
@@ -135,7 +135,9 @@ export class GrassMask {
     for (const p of cell.paved) if (p.o?.length >= 3) fillPolygon(m, x0, z0, p.o, p.i, 0);
     for (const w of cell.water) if (w.o?.length >= 3) fillPolygon(m, x0, z0, w.o, w.i, 0);
     for (const b of cell.buildings) if (b.o?.length >= 3) fillPolygon(m, x0, z0, b.o, b.i, 0);
-    for (const r of cell.roads) stampLine(m, x0, z0, r.p, (r.w ?? 3) / 2 + 0.6);
+    // (a kerbed street's pavement reaches a couple of metres past its
+    // carriageway, js/streets.js: no tufts through the paving)
+    for (const r of cell.roads) stampLine(m, x0, z0, r.p, (r.w ?? 3) / 2 + (r.d && streetOf(r) ? 2.6 : 0.6));
     for (const r of cell.rails) stampLine(m, x0, z0, r.p, 2.6);
     // THE SHEAR ZONE. The chunk ground inside a road's corridor is benched to
     // the deck — flat over w/2 + 4.5 m, rising back at 55 % over a 5 m flare

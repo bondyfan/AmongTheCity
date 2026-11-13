@@ -45,22 +45,23 @@ export const SURF = {
   cobble: 9,       // setts, historic squares
   ballast: 10,     // railway crushed stone
   paint: 11,       // road markings: flat, bright, barely textured
+  pavers: 12,      // small concrete pavers in running bond: the Czech street pavement
 };
-export const SURF_COUNT = 12;
+export const SURF_COUNT = 13;
 
 // How many metres of world one repeat of the texture covers, per class. Small
 // enough that the detail reads at walking pace, large enough that the tiling
 // does not beat at driving speed — the macro noise in the shader breaks up what
 // is left.
 const SCALE = new Float32Array([
-  6, 8, 5, 12, 6, 3, 4, 5, 2.4, 1.6, 2.5, 4,
+  6, 8, 5, 12, 6, 3, 4, 5, 2.4, 1.6, 2.5, 4, 2.0,
 ]);
 
 // Base roughness per class. Wet asphalt is the one thing here that is allowed
 // to be shiny, and only just: 0.62 at its smoothest still scatters most of what
 // hits it, which is what a road does.
 const ROUGH = new Float32Array([
-  0.94, 0.96, 0.97, 0.95, 0.93, 0.95, 0.72, 0.86, 0.82, 0.80, 0.94, 0.68,
+  0.94, 0.96, 0.97, 0.95, 0.93, 0.95, 0.72, 0.86, 0.82, 0.80, 0.94, 0.68, 0.84,
 ]);
 
 const RES = 256;                 // px per layer — 3.1 MB per array at RGBA8
@@ -227,11 +228,39 @@ function px(layer, x, y) {
       return { r: c, g: c * 0.99, b: c * 0.95, h: joint * 0.85 + grain * 0.15 };
     }
     case SURF.cobble: {
-      const d = worley(x, y, 16, 191);
-      const dome = Math.min(1, Math.max(0, 1 - d * 1.9));
-      const stone = hash(Math.floor((x / RES) * 16), Math.floor((y / RES) * 16), 193);
-      const v = mix(0.26, 0.46, stone) * mix(0.55, 1, dome);
-      return { r: v * 1.03, g: v, b: v * 0.95, h: dome };
+      // Granite setts: ten-centimetre cubes laid in ROWS, each row half a stone
+      // off the last. They used to be worley cells, which is a riverbed, not a
+      // street: a sett is cut, and what the eye reads is the courses. Every
+      // stone its own grey, domed a little, sunk at the joints.
+      const N = 16, row = Math.floor((y / RES) * N);
+      const u = (x / RES) * N + (row & 1 ? 0.5 : 0);
+      const col = ((Math.floor(u) % N) + N) % N;
+      const fx = u - Math.floor(u), fy = (y / RES) * N - row;
+      // each stone a touch narrower or wider than its neighbour, as cut stone is
+      const edge = Math.min(Math.min(fx, 1 - fx), Math.min(fy, 1 - fy)) * 2;
+      const joint = Math.min(1, Math.max(0, edge / 0.24));
+      const dome = joint * (0.72 + 0.28 * (1 - ((fx - 0.5) ** 2 + (fy - 0.5) ** 2) * 2.4));
+      const stone = hash(col, row, 193);
+      const grain = fbm(x, y, 96, 2, 195);
+      const v = mix(0.27, 0.47, stone * 0.75 + grain * 0.25) * mix(0.42, 1, joint);
+      return { r: v * 1.03, g: v, b: v * 0.96, h: dome };
+    }
+    case SURF.pavers: {
+      // Zámková dlažba: 20 x 10 cm concrete pavers in running bond, the surface
+      // of nearly every Czech pavement laid since the nineties. Small, grey,
+      // tight-jointed; what tells it from a slab is the rhythm, so the joint is
+      // thin and the stones barely differ.
+      const NU = 10, NV = 20, row = Math.floor((y / RES) * NV);
+      const u = (x / RES) * NU + (row & 1 ? 0.5 : 0);
+      const col = ((Math.floor(u) % NU) + NU) % NU;
+      const fx = u - Math.floor(u), fy = (y / RES) * NV - row;
+      const e = Math.min(Math.min(fx, 1 - fx) * (RES / NU), Math.min(fy, 1 - fy) * (RES / NV));
+      const joint = Math.min(1, Math.max(0, (e - 0.25) / 1.1));
+      const stone = hash(col, row, 221);
+      const grain = fbm(x, y, 90, 2, 223);
+      const t = mix(0.50, 0.63, stone * 0.6 + grain * 0.4);
+      const c = mix(0.31, t, joint);
+      return { r: c, g: c * 0.995, b: c * 0.97, h: joint * 0.8 + grain * 0.2 };
     }
     case SURF.ballast: {
       const d = worley(x, y, 30, 197);
@@ -355,10 +384,13 @@ export function surfaceMaterial() {
       .replace('#include <common>', `#include <common>
         attribute float surf;
         varying float vSurf;
-        varying vec2 vWorldXZ;`)
+        varying vec2 vWorldXZ;
+        varying float vWorldY;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vSurf = surf;
-        vWorldXZ = (modelMatrix * vec4(position, 1.0)).xz;`);
+        vec4 atcWorld = modelMatrix * vec4(position, 1.0);
+        vWorldXZ = atcWorld.xz;
+        vWorldY = atcWorld.y;`);
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
@@ -367,39 +399,168 @@ export function surfaceMaterial() {
         uniform float uScale[${SURF_COUNT}];
         varying float vSurf;
         varying vec2 vWorldXZ;
+        varying float vWorldY;
 
+        // Lattice hash on coordinates WRAPPED to 4096 first. The world reaches
+        // 140 km from its origin, and a hash fed raw coordinates that size has
+        // spent most of a float's mantissa before the fraction it wants: the
+        // old sin() hash came out in bands in Prague. Wrapped, every lattice
+        // point is a small exact integer wherever it is; the pattern repeats
+        // every 4 km of lattice, which nobody will ever line up.
+        float atcHash(vec2 p) {
+          p = mod(p, 4096.0);
+          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }
+        float atcNoise(vec2 p) {
+          vec2 i = floor(p), f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(atcHash(i), atcHash(i + vec2(1.0, 0.0)), f.x),
+            mix(atcHash(i + vec2(0.0, 1.0)), atcHash(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
         // A second, very slow noise that multiplies the albedo. Without it a
         // texture repeating every few metres beats into a visible grid the
         // moment you get above the rooftops — this is 30 m across and costs
         // four texture-free instructions.
-        float macroNoise(vec2 p) {
+        float macroNoise(vec2 p) { return atcNoise(p); }
+        // Distance between the two nearest feature points of a jittered grid:
+        // zero along the borders between cells, which is where tarmac cracks.
+        float atcCrack(vec2 p) {
           vec2 i = floor(p), f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          vec4 h = fract(sin(vec4(
-            dot(i, vec2(127.1, 311.7)),
-            dot(i + vec2(1.0, 0.0), vec2(127.1, 311.7)),
-            dot(i + vec2(0.0, 1.0), vec2(127.1, 311.7)),
-            dot(i + vec2(1.0, 1.0), vec2(127.1, 311.7)))) * 43758.5453);
-          return mix(mix(h.x, h.y, f.x), mix(h.z, h.w, f.x), f.y);
+          float d1 = 8.0, d2 = 8.0;
+          for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+            vec2 g = vec2(float(x), float(y));
+            vec2 r = g + vec2(atcHash(i + g), atcHash(i + g + 57.0)) - f;
+            float d = dot(r, r);
+            if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
+          }
+          return sqrt(d2) - sqrt(d1);
         }
 `)
       .replace('#include <map_fragment>', `
+        // what the surface detail below hands on to the roughness and the
+        // normal: how much smoother than its class this point is, and how much
+        // of the class's bump it keeps
+        float atcSmooth = 0.0;
+        float atcBump = 1.0;
+        // Where the texture is looked up. The ground is mapped straight down,
+        // which is right for ground and a smear on anything that stands up: a
+        // kerb face has ONE world (x, z) all the way down it, so the map drew
+        // its top row of pixels as stripes, the barcode on every kerb and wall.
+        // A face that stands is mapped along its own run and up its height.
+        vec2 atcST = vWorldXZ;
+        {
+          vec3 wn = inverseTransformDirection(normalize(vNormal), viewMatrix);
+          if (abs(wn.y) < 0.55) {
+            vec2 along = normalize(vec2(-wn.z, wn.x));
+            atcST = vec2(dot(vWorldXZ, along), vWorldY);
+            atcBump = 0.0;
+          }
+        }
         {
           float layer = floor(vSurf + 0.5);
-          vec4 texel = texture(uAlbedo, vec3(vWorldXZ / uScale[int(layer)], layer));
+          vec4 texel = texture(uAlbedo, vec3(atcST / uScale[int(layer)], layer));
           float macro = 0.82 + 0.36 * macroNoise(vWorldXZ * 0.033);
-          diffuseColor.rgb *= texel.rgb * 2.0 * macro;
+          vec3 tone = texel.rgb * 2.0 * macro;
+          // The floor of a wood. Its colour comes down the vertices as the
+          // MAP's green for woodland (a dark leaf green, chosen to be told from
+          // a lawn from the air), and under a closed canopy, in shade all day,
+          // that left the ground a green so dark it read as a hole between the
+          // trunks at noon. What lies there is last year's leaves: paler than
+          // living leaf, and brown. So this one class is lifted and pulled
+          // toward litter; the canopy's shade still falls on it in full.
+          // ONLY that dark fill, though (told by the vertex tint itself:
+          // vColor, since three multiplies it in AFTER this chunk): the class
+          // is also what scrub, a wood drawn without its trees and the
+          // planted crown of a roundabout wear, in their own lighter greens,
+          // and lifted the same way those came out the yellow of straw.
+          if (layer > 1.5 && layer < 2.5) {
+            float floorK = 1.0 - smoothstep(0.07, 0.11, dot(vColor.rgb, vec3(0.2126, 0.7152, 0.0722)));
+            tone *= mix(vec3(1.0), vec3(2.2, 1.6, 1.4), floorK);
+          }
+          // metres of world one pixel covers here: everything fine fades out
+          // before it can alias
+          float px = max(fwidth(vWorldXZ.x), fwidth(vWorldXZ.y));
+          if (layer > 5.5 && layer < 6.5) {
+            // ---- asphalt that has been driven on -----------------------------
+            // A 4 m tile of chippings is right at walking distance and a visible
+            // grid from a car, and nothing about it says the road is USED. So:
+            vec2 w = vWorldXZ;
+            // the same chippings again, turned and at a scale that never lines
+            // up with the first: the product has no period the eye can find
+            vec2 w2 = vec2(w.x * 0.8 - w.y * 0.6, w.x * 0.6 + w.y * 0.8) / 1.37;
+            tone *= mix(1.0, texture(uAlbedo, vec3(w2 / uScale[6], layer)).g * 2.0, 0.42);
+            // patches: a newer, blacker lay here, an old bleached one there,
+            // with the hard edge a repair has (9 m blobs, ragged at 1.6 m)
+            float pn = atcNoise(w * 0.085 + 31.7) + 0.3 * atcNoise(w * 0.61 + 3.1);
+            float fresh = smoothstep(0.83, 0.86, pn);
+            float old = 1.0 - smoothstep(0.36, 0.40, pn);
+            tone *= 1.0 - 0.16 * fresh + 0.10 * old;
+            atcSmooth += 0.08 * fresh - 0.05 * old;
+            // cracks sealed with tar, in the stretches that have gone. A crack
+            // is two centimetres wide, so it is drawn only while a pixel is
+            // finer than that ACROSS it and fades out by 40 m: past there it
+            // could only shimmer.
+            vec2 fw = fwidth(w);
+            float pxMin = min(fw.x, fw.y);
+            if (px < 0.075) {
+              // (and only in runs: a crack starts and stops, where a closed
+              // net of them is dried mud)
+              float gone = smoothstep(0.60, 0.74, atcNoise(w * 0.021 + 9.3)) * (1.0 - fresh)
+                * smoothstep(0.50, 0.62, atcNoise(w * 0.37 + 21.0));
+              if (gone > 0.01) {
+                float e = atcCrack(w * 0.36 + vec2(atcNoise(w * 0.9), atcNoise(w * 0.9 + 7.7)) * 0.3);
+                float wd = 0.006 + pxMin * 0.5;
+                float line = (1.0 - smoothstep(wd * 0.4, wd, e)) * gone * (1.0 - px / 0.075);
+                tone *= 1.0 - 0.27 * line;
+                atcSmooth += 0.25 * line;
+              }
+            }
+            // ---- the lanes (see TriSink.ln in meshes.js) ----------------------
+            // uv.x counts lanes across the carriageway, uv.y is how worn the
+            // surface is (0 on everything that is not a road deck). Tyres run a
+            // quarter of a lane either side of its middle and polish what they
+            // run on: darker, and smoother, so the tracks catch a low sun. The
+            // middle of a lane is where engines drip while they wait, which is
+            // why it blackens toward every stop line.
+            float wear = vUv.y;
+            if (wear > 0.004) {
+              float l = fract((vUv.x - 0.25) * 16.0) - 0.5;
+              float tr = exp(-pow((abs(l) - 0.255) / 0.085, 2.0));
+              float oil = exp(-pow(l / 0.07, 2.0)) * smoothstep(0.62, 1.0, wear)
+                * (0.6 + 0.4 * atcNoise(w * vec2(0.5, 0.5) + 2.0));
+              tone *= 1.0 - 0.12 * wear * tr - 0.24 * oil;
+              atcSmooth += 0.24 * wear * tr + 0.28 * oil;
+            }
+            // chippings are a centimetre: the class bump is for standing over
+            // them, not for a road seen along its length
+            atcBump *= 0.6 * clamp(1.0 - px * 7.0, 0.15, 1.0);
+          } else if (layer > 10.5 && layer < 11.5) {
+            // paint wears through where tyres cross it: never one clean white
+            float worn = smoothstep(0.50, 0.80, atcNoise(vWorldXZ * 1.9 + 3.0))
+              * (0.5 + 0.5 * atcNoise(vWorldXZ * 11.0));
+            tone *= 1.0 - 0.36 * worn;
+          } else if (layer > 7.5) {
+            // paving, setts, pavers: a slab here and there is a newer or a
+            // dirtier one, on a scale no tile carries
+            tone *= 0.93 + 0.14 * atcNoise(vWorldXZ * 0.23 + 11.0);
+            atcBump *= clamp(1.0 - px * 5.0, 0.2, 1.0);
+          }
+          diffuseColor.rgb *= tone;
         }`)
       .replace('#include <roughnessmap_fragment>', `
         float roughnessFactor = roughness;
         {
           float layer = floor(vSurf + 0.5);
-          roughnessFactor *= texture(uNormalArr, vec3(vWorldXZ / uScale[int(layer)], layer)).a;
+          roughnessFactor *= texture(uNormalArr, vec3(atcST / uScale[int(layer)], layer)).a;
+          roughnessFactor = clamp(roughnessFactor * (1.0 - atcSmooth), 0.28, 1.0);
         }`)
       .replace('#include <normal_fragment_maps>', `
         {
           float layer = floor(vSurf + 0.5);
-          vec3 mapN = texture(uNormalArr, vec3(vWorldXZ / uScale[int(layer)], layer)).xyz * 2.0 - 1.0;
+          vec3 mapN = texture(uNormalArr, vec3(atcST / uScale[int(layer)], layer)).xyz * 2.0 - 1.0;
+          mapN.xy *= atcBump;
           // The ground is very nearly flat in world terms, so a tangent frame
           // derived from screen-space derivatives is stable here and saves
           // carrying tangents through every merge in meshes.js.
@@ -425,7 +586,7 @@ export function surfaceMaterial() {
   };
   // three keys its program cache on this, and two materials with different
   // injected code must not share one
-  mat.customProgramCacheKey = () => 'surfaces-v2';
+  mat.customProgramCacheKey = () => 'surfaces-v4';
   return mat;
 }
 

@@ -26,6 +26,9 @@
 // never has to think about it again.
 
 import { SERVER_URL } from '../server-config.js';
+import { browserStore, fmtPlayed } from './savegame.js';
+import { confirmPanel } from './panel.js';
+import { kc } from './prices.js';
 
 const el = (tag, cls, html) => {
   const e = document.createElement(tag);
@@ -148,6 +151,12 @@ const CSS = `
   display: block; font-size: 12.5px; font-weight: 400; letter-spacing: 0.3px;
   opacity: 0.8; margin-top: 4px;
 }
+.atc-menu-new {
+  appearance: none; background: none; border: 0; cursor: pointer; font: inherit;
+  font-size: 13.5px; color: #93a6c6; padding: 6px 10px; margin: -2px 0 6px;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.atc-menu-new:hover { color: #cfe0ff; }
 .atc-menu-hint { margin-top: 34px; font-size: 12.5px; opacity: 0.55; line-height: 1.7; }
 .atc-menu-hint b {
   background: #26304a; border-radius: 4px; padding: 1px 7px; margin: 0 2px;
@@ -217,15 +226,43 @@ export function showMenu() {
     nameRow.append(nameIn, note);
     inner.appendChild(nameRow);
 
-    const single = el('button', 'atc-menu-btn',
-      '▶ Hrát<small>sám ve městě</small>');
+    // A returning player CONTINUES by default: the save (js/savegame.js) is
+    // read here only to decide what the first button says, and career.js loads
+    // it for real after the pick. "Nová hra" sits under it as a quiet link and
+    // asks first, because it throws that save away. The save is the local
+    // player's in either mode, so the multiplayer button continues it too.
+    const store = browserStore();
+    const single = el('button', 'atc-menu-btn');
+    const fresh = el('button', 'atc-menu-new', 'Nová hra');
+    fresh.type = 'button';
+    const paintSingle = () => {
+      const sum = store.summary();
+      single.textContent = '';
+      // built from text nodes: the summary is numbers, but it came out of
+      // localStorage and nothing from there goes through innerHTML
+      single.append(sum ? '▶ Pokračovat' : '▶ Hrát');
+      single.appendChild(el('small', '', undefined)).textContent = sum
+        ? kc(sum.money) + ' · odehráno ' + fmtPlayed(sum.played)
+          + (sum.jobs ? ' · zakázek ' + sum.jobs : '')
+        : 'sám ve městě';
+      fresh.style.display = sum ? '' : 'none';
+    };
+    paintSingle();
+    fresh.addEventListener('click', async () => {
+      const yes = await confirmPanel({ title: 'NOVÁ HRA',
+        text: 'Začít znovu? Uložená hra (peníze, auto, statistiky i úspěchy) se smaže a nejde to vrátit.',
+        yes: 'Smazat a začít znovu', no: 'Zpět', danger: true });
+      if (!yes || closed) return;
+      store.clear();
+      paintSingle();
+    });
     const multi = el('button', 'atc-menu-btn',
       '🌐 Multiplayer (server)<small class="atc-mp-status">hledám server…</small>');
     multi.disabled = true;
-    inner.append(single, multi);
+    inner.append(single, fresh, multi);
 
     inner.appendChild(el('p', 'atc-menu-hint',
-      '<b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>C</b> pohled řidiče · '
+      '<b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>J</b> zakázky · <b>C</b> pohled řidiče · '
       + '<b>H</b> klakson · <b>M</b> mapa · <b>V</b> raketa (z vrtulníku)'
       + '<br>Nastavení najdete pod ⚙️ vpravo nahoře.'));
     overlay.appendChild(inner);

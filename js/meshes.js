@@ -32,14 +32,35 @@ import { CHUNK, LAYER_Y, COLORS, BUILDING_PALETTES, ROOF_DARKEN, WALL_AO,
   WATER_Y, BANK_DEPTH, BRIDGE_RAMP } from './config.js';
 import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKey,
   junctionsIn, distPointToSegment, roadProfile, roadGradeY, junctionDeckY, junctionHull,
-  clustersIn, clusterHull, clusterDeckY,
+  clustersIn, clusterHull, clusterDeckY, streetOf,
   GRADE_CUT } from './geo.js';
+import { JUNCTIONS, CLUSTERS, railGradeY } from './geo.js';
+import { KERB_H, KERB_W, FOOT_LIFT, vergeAt, vergeLift, inZone, bayAt, roadRank, cornerLift } from './streets.js';
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
 import { furnitureInto } from './furniture.js';
+import { lampGeoms } from './streetlamps.js';
+import { DecoSink, drum as kitDrum, post as kitPost, bar as kitBar } from './propkit.js';
+import { SIGN_M } from './signfaces.js';
+import { streetDecoMaterial } from './signatlas.js';
+import { plannedSigns, crossingSigns } from './streetsigns.js';
+import { terracesInto, terraceOpen } from './terraces.js';
+import { signalNight } from './signalmodel.js';
+import { tod } from './worldclock.js';
 import { sealedRects } from './sealed.js';
-import { entranceOf, brandOf, signBrandOf, classify } from './interiors.js';
+import { entranceOf, brandOf, signBrandOf, classify, storeyPlan } from './interiors.js';
 import { INTERIOR } from './config.js';
+import { ATLAS_N, BAYS, WIN_W, cellRect, PIN_U, PIN_V, typologyOf, roofOf, facadeRows,
+  edgeRoles, rowFor, trimRect, TYPO_WALLS, litOf, litRow, litStart, LIT_N, signBand,
+  signOverGround, roofPin, hasParapet, PARAPET_H } from './typology.js';
+import { roofInto, roofCap, parapetInto, linRGB } from './roofs.js';
+import { wallTone } from './roofdata.js';
+import { facadeAtlas, buildFacadeMaterial, facadeNight } from './facadeatlas.js';
+import { landmarkOf, LandmarkBatch, landmarkBarrier, landmarkClear, SWITCH as LANDMARK_SWITCH } from './landmarks.js';
+import { landmarkMaterial, landmarkNight } from './landmarksmat.js';
+import { farTemplates, treeSpec, treeMatrices, crownColor, barkColor, mappedTree } from './treeshapes.js';
+import { farTreeMaterials } from './treeshader.js';
+import { treePitsInto } from './treepits.js';
 
 // geometry dimensions (meters) — construction sizes, not art direction
 const CAP_SEGS = 8;                                  // endpoint disc fan
@@ -81,31 +102,12 @@ const EDGE_END = 2.2;
 const FOOT_CLASSES = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestrian', 'track']);
 const _fdrv = [];   // scratch: drivable roads near the footway being ribboned
 
-// facade rhythm: one window bay per 2.7 m of wall, one atlas row per storey.
-// The 2048×1024 atlas is an 8×4 grid of 256×256 cells; each cell holds a BAND
-// of 4 window bays, because an atlas cell cannot wrap-repeat — walls subdivide
-// into ≤4-bay pieces instead, each sampling a sub-range of one cell.
-const WIN_W = 2.7, STOREY_H = 3.1, BAYS = 4;
-// Where the window sits inside one atlas cell, as a fraction of the cell's
-// height, and how much of a bay's width it takes. SHARED with pieces.js (via
-// facadeCells) so the box shell can cut its opening in the same place the paint
-// draws one — see the note in facadeAtlas().
-const WIN_BAND = [0.29, 0.74], WIN_FRAC = 0.54;
-const ATLAS_W = 2048, ATLAS_H = 1024;                // v3 doubled u-resolution: sills/mullions survive
-const ATLAS_N = 8, ATLAS_M = 4;
-const cellRect = (ci, ri) => [ci / ATLAS_N, 1 - (ri + 1) / ATLAS_M, (ci + 1) / ATLAS_N, 1 - ri / ATLAS_M];
-const PIN_U = 0.5 / ATLAS_N, PIN_V = 1 - 0.5 / ATLAS_M; // plain-plaster cell centre — roofs pin here
-const STORE_CELL = cellRect(1, 0), PANEL_CELL = cellRect(2, 0);
-const GENERIC = [];                                  // every cell except the three reserved ones
-for (let ri = 0; ri < ATLAS_M; ri++) for (let ci = 0; ci < ATLAS_N; ci++)
-  if (!(ri === 0 && ci < 3)) GENERIC.push(cellRect(ci, ri));
-const STORE_TYPES = new Set(['retail', 'commercial', 'supermarket', 'kiosk', 'hotel']);
-// Four GENERIC cells the painter dresses in brick courses. They stay generic
-// (any building may roll one — brick apartments exist), but industrial types
-// are STEERED onto them so factory halls stop wearing plaster windows.
-const BRICK_CELLS = [[7, 2], [5, 3], [6, 3], [7, 3]];
-const BRICK_UV = BRICK_CELLS.map(([ci, ri]) => cellRect(ci, ri));
-const BRICK_TYPES = new Set(['industrial', 'warehouse']);
+// Facade rhythm: one window bay per 2.7 m of wall, one atlas row per storey.
+// The atlas grid, the cell families and where each family's window sits live in
+// typology.js (pure data, shared with pieces.js and with the painter in
+// facadeatlas.js). A cell holds a BAND of 4 window bays, because an atlas cell
+// cannot wrap-repeat: walls subdivide into runs of at most 4 bays instead.
+const LIT_PIN = 0.5 / LIT_N;                         // the night texture's always-dark texel
 
 // module-level scratch — build-time only, but the loops shouldn't churn
 const _c = new THREE.Color();
@@ -149,6 +151,12 @@ function makeWaterMaterial() {
         uSun: { value: new THREE.Vector3(-0.38, 0.82, -0.27) },
         uNight: { value: 0 },
         uSky: { value: new THREE.Color(0x9fb6cc) },
+        // The sky's prefiltered reflection map, the same texture every PBR
+        // material in the scene reflects (envmap.js, scene.environment). It
+        // arrives late: SkyEnv.bindWater() sets this and the three CUBEUV
+        // defines after the first bake, and until then the shader below
+        // compiles without ENVMAP_TYPE_CUBE_UV and reflects flat uSky.
+        envMap: { value: null },
       },
     ]),
     fog: true,
@@ -199,6 +207,10 @@ function makeWaterMaterial() {
       varying vec3 vWorld;
       varying vec3 vWaveNormal;
       #include <fog_pars_fragment>
+      #ifdef ENVMAP_TYPE_CUBE_UV
+        uniform sampler2D envMap;
+      #endif
+      #include <cube_uv_reflection_fragment>
 
       // The ripples, per PIXEL. Three crossing wavelets at roughly 7 m, 3.5 m
       // and 1.6 m — the scales a river actually has, and all of them far below
@@ -242,12 +254,24 @@ function makeWaterMaterial() {
         // of holding one hardcoded blue around the clock.
         float day = 1.0 - uNight;
         colour *= 0.055 + 0.945 * day;
-        // Held short of a true mirror on purpose. At a grazing angle real water
-        // is very nearly one, but what it would be reflecting here is a single
-        // flat fog colour rather than a scene, and taken to the physical limit
-        // a wide river reads as a sheet of pale concrete. Stopping around 55%
-        // leaves enough of the body colour showing to still look like water.
-        colour = mix(colour, uSky, clamp(0.08 + fresnel * 0.47, 0.0, 0.72));
+        // WHAT THE SURFACE MIRRORS. This used to be one flat colour (the fog's),
+        // and because a flat colour taken to the physical limit turns a wide
+        // river into a sheet of pale concrete, the reflection was held at 55 %.
+        // It now looks the mirrored ray up in the sky's own reflection map: pale
+        // at the far bank where the ray grazes the horizon, deep blue under
+        // your feet, the sunset band lying across it in the evening, the cloud
+        // deck broken up by the ripples. With something real to reflect, the
+        // Fresnel term can run close to what water actually does.
+        vec3 refl = reflect(-viewDir, n);
+        // a ripple can tip the mirrored ray below the horizon, where the map
+        // holds the ground tone; water facing itself shows sky, so fold it up
+        refl.y = abs(refl.y) + 0.02;
+        #ifdef ENVMAP_TYPE_CUBE_UV
+          vec3 skyRefl = textureCubeUV(envMap, normalize(refl), 0.16).rgb;
+        #else
+          vec3 skyRefl = uSky;
+        #endif
+        colour = mix(colour, skyRefl, clamp(0.03 + fresnel * 0.97, 0.0, 0.88));
 
         // the sun, and only while there is one above the horizon
         float above = clamp(uSun.y * 5.0, 0.0, 1.0);
@@ -275,10 +299,29 @@ function makeWaterMaterial() {
 }
 
 export function makeMaterials() {
+  // Street dressing. streetDeco: every textured thing on a street (sign faces,
+  // shelter glass and posters), one atlas, alpha to MSAA coverage. terrace:
+  // café tables, a material of their own only so that ONE switch puts every
+  // terrace in the city out in the morning and takes it in at night.
+  const streetDeco = streetDecoMaterial();
+  const terrace = new THREE.MeshLambertMaterial({ vertexColors: true });
   // callers may attach mats.ortho (manager from ortho.js) and mats.facades
   // (bool) after the fact — buildChunkMeshes reads both, and lazily caches a
   // textured wall material as mats._facadeMat so the atlas is built once
+  const tree = farTreeMaterials();
   return {
+    streetDeco, terrace,
+    // Not a material: once a frame from main.js updateNightLights. Shelter
+    // posters light up with the street lamps, signal lenses hold one
+    // brightness to the eye as the exposure opens, terraces follow the clock.
+    streetNight(nightK, exposure) {
+      let on = (nightK - 0.2) / 0.4;
+      on = on < 0 ? 0 : on > 1 ? 1 : on;
+      // 0.42 under the 2.5 night exposure is a lit poster, not a white slab
+      streetDeco.emissiveIntensity = 0.42 * on;
+      terrace.visible = terraceOpen(tod());
+      signalNight(exposure);
+    },
     // Every flat surface in the world — ground, lawns, car parks, carriageways,
     // kerbs, lane paint, riverbanks — is one mesh with one material, and now
     // that material is PBR with a synthesised albedo/normal/roughness per
@@ -287,14 +330,16 @@ export function makeMaterials() {
     flat: surfaceMaterial(),
     water: makeWaterMaterial(),
     building: new THREE.MeshLambertMaterial({ vertexColors: true }),
-    trunk: new THREE.MeshLambertMaterial({ color: COLORS.treeTrunk }),
+    // trees: js/treeshader.js owns both far materials (wind, the swap to the
+    // near models, leaf noise); the colours are per instance
+    trunk: tree.trunk,
     // far tier fallback when a chunk has no aerial tile yet: plain terrain
     // colour, no vertex colours (the far quad carries none)
     flatFar: new THREE.MeshLambertMaterial({ color: 0x8a9182 }),
-    lampPost: new THREE.MeshLambertMaterial({ color: 0x4a4d52 }),
+    lampPost: new THREE.MeshLambertMaterial({ color: 0x7e8388 }),   // galvanised steel
     // emissiveIntensity is driven from main at dusk (0 by day, ~2.6 at night)
     lampHead: new THREE.MeshLambertMaterial({ color: 0x2e3033, emissive: 0xffdc96, emissiveIntensity: 0, toneMapped: false }),
-    crown: new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+    crown: tree.crown,
     // door dressing: matte surround/canopy, and a sign board that is always a
     // touch overbright so the bloom pass finds every entrance in the city
     doorTrim: new THREE.MeshLambertMaterial({ vertexColors: true }),
@@ -302,6 +347,17 @@ export function makeMaterials() {
     // is exactly how a backlit retail fascia behaves, and lets the vertex colour
     // carry each chain's own red/blue/yellow straight past the lighting.
     doorSign: new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false }),
+    // the hand-made landmarks (js/landmarks.js): one mesh in a chunk that has one
+    landmark: landmarkMaterial(),
+    // Not a material: the dev switch that turns every landmark back into its
+    // generic building (the "before" of a before and after measurement).
+    landmarkSwitch: LANDMARK_SWITCH,
+    // Not a material: the one switch for every lit window in the city (the far
+    // facades and the near shells' glass share one uniform, facadeatlas.js).
+    // main.js calls it once a frame with sky.nightK, beside the lamp heads.
+    // (The landmarks ride on the same call: how far their own fog wall stands
+    // depends on the hour, js/landmarksmat.js.)
+    facadeNight(k) { facadeNight(k); landmarkNight(k); },
   };
 }
 
@@ -321,6 +377,12 @@ class TriSink {
     // the thing it is trying to say.
     this.sf = surf ? [] : null;
     this.layer = SURF.concrete;
+    // The ground sink also carries a LANE coordinate per vertex, in the uv slot
+    // (js/surfaces.js reads it): where across the lanes of a carriageway this
+    // point lies, and how worn the surface is there. Zero everywhere except on
+    // a road deck, which patches the six values of its own quad after emitting
+    // it (see roadRibbon), so no other emitter has to know this exists.
+    this.ln = surf ? [] : null;
     // Ranges of this.pos that are ALREADY at their absolute height and must not
     // be draped again. Two things need it: a bridge deck, which spans a valley
     // and has to stay level rather than dive into the river, and a riverbank
@@ -341,6 +403,7 @@ class TriSink {
     this.nrm.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
     this.col.push(r, g, b, r, g, b, r, g, b);
     if (this.sf) this.sf.push(this.layer, this.layer, this.layer);
+    if (this.ln) this.ln.push(0, 0, 0, 0, 0, 0);
     if (this.uv) this.uv.push(PIN_U, PIN_V, PIN_U, PIN_V, PIN_U, PIN_V);
   }
   quad(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b) {
@@ -379,6 +442,7 @@ class TriSink {
     g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(this.col), 3));
     if (this.sf) g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(this.sf), 1));
     if (this.uv) g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(this.uv), 2));
+    else if (this.ln) g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(this.ln), 2));
     return g;
   }
 }
@@ -412,12 +476,16 @@ const TAGGED = {
 const surfOfPaved = (f) => TAGGED[f.s]
   ?? (f.t === 'plaza' || f.t === 'pedestrian' || f.t === 'platform' ? SURF.paving
     : f.t === 'yard' ? SURF.gravel : SURF.concrete);
+// A way that is WALKED on is laid in small pavers (the 20 x 10 cm concrete block
+// of every Czech pavement), where a square is laid in slabs: the same tag in
+// OSM, two different floors underfoot.
+const ROAD_TAGGED = { ...TAGGED, paving: SURF.pavers };
 const ROAD_SURF = {
-  pedestrian: SURF.paving, footway: SURF.paving, steps: SURF.concrete,
+  pedestrian: SURF.paving, footway: SURF.pavers, cycleway: SURF.asphalt, steps: SURF.concrete,
   path: SURF.gravel, track: SURF.dirt, bridleway: SURF.dirt,
   runway: SURF.concrete, taxiway: SURF.concrete, taxilane: SURF.concrete, airstrip: SURF.gravel,
 };
-const surfOfRoad = (f) => TAGGED[f.s] ?? ROAD_SURF[f.t] ?? SURF.asphalt;
+const surfOfRoad = (f) => (f.d ? TAGGED[f.s] : ROAD_TAGGED[f.s]) ?? ROAD_SURF[f.t] ?? SURF.asphalt;
 
 // ---- shared small helpers ----
 
@@ -896,6 +964,34 @@ function clipSeg(ax, az, bx, bz, x0, z0, x1, z1) {
 // already, and under a bridge the deck is metres up, where min() changes
 // nothing.
 const _cl = { x: 0, z: 0, t: 0 };      // distPointToSegment's reusable answer
+// A road's centreline as flat numbers, ten per segment: ax, az, dx, dz, length,
+// distance along the way to its start, then its own box (x0, x1, z0, z1).
+// Measured in wave 3 over 169 real cells: clampUnderRoadsGen was 45 percent of
+// a full chunk build, nearly all of it walking EVERY segment of a road for a
+// vertex that its box had only said was somewhere near the road, with a
+// Math.hypot and two array reads apiece. The numbers are the same ones the
+// loop used to work out in place, in the same order, so the result is the same
+// to the last bit; the box test only skips segments that could not have been
+// within reach. Keyed on the road and checked against its point list, because
+// indexing may still splice a node into a way after the first chunk was built.
+const _segCache = new WeakMap();
+function roadSegs(r) {
+  const p = r.p, n = p.length;
+  let c = _segCache.get(r);
+  if (c && c.p === p && c.n === n && c.x0 === p[0][0] && c.z1 === p[n - 1][1]) return c.a;
+  const a = new Float64Array(Math.max(0, n - 1) * 10);
+  let along = 0;
+  for (let k = 0, o = 0; k < n - 1; k++, o += 10) {
+    const ax = p[k][0], az = p[k][1], bx = p[k + 1][0], bz = p[k + 1][1];
+    const dx = bx - ax, dz = bz - az, L = Math.hypot(dx, dz);
+    a[o] = ax; a[o + 1] = az; a[o + 2] = dx; a[o + 3] = dz; a[o + 4] = L; a[o + 5] = along;
+    a[o + 6] = Math.min(ax, bx); a[o + 7] = Math.max(ax, bx);
+    a[o + 8] = Math.min(az, bz); a[o + 9] = Math.max(az, bz);
+    along += L;
+  }
+  _segCache.set(r, c = { p, n, x0: p[0][0], z1: p[n - 1][1], a });
+  return a;
+}
 // A GENERATOR, because this is the single most expensive loop of a chunk
 // build: every vertex tests every corridor's every segment, and one big park
 // fill against a downtown 3×3's roads was 96 ms in a single call — the
@@ -922,6 +1018,7 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
     return !(gx1 < bb[0] - rc || gx0 > bb[2] + rc || gz1 < bb[1] - rc || gz0 > bb[3] + rc);
   });
   if (!use.length) return geo;
+  const segs = use.map((u) => roadSegs(u.r));     // once per call, not per vertex
   let sinceYield = 0;
   for (let i = 0; i < a.length; i += 3) {
     if (++sinceYield >= 200) { sinceYield = 0; yield; }
@@ -934,15 +1031,18 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
     // photograph 3 m above a primary's lanes, and every dual carriageway on
     // a cross-slope grew the reported green tongue out of its median.
     let minCap = Infinity, maxFloor = -Infinity;
-    for (const { r, bb, hw, lay, flare } of use) {
+    for (let ui = 0; ui < use.length; ui++) {
+      const { r, bb, hw, lay, flare } = use[ui];
       const reach = hw + (flare ?? 0);
       if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
       const rc2 = reach * reach;
-      let along = 0;
-      for (let k = 0; k < r.p.length - 1; k++) {
-        const [ax, az] = r.p[k], [bx, bz] = r.p[k + 1];
-        const dx = bx - ax, dz = bz - az;
-        const L = Math.hypot(dx, dz);
+      const sg = segs[ui];
+      for (let o = 0; o < sg.length; o += 10) {
+        // the nearest point of a segment lies inside the segment's own box, so
+        // a vertex further than `reach` from the box is further from the line
+        if (x < sg[o + 6] - reach || x > sg[o + 7] + reach
+          || z < sg[o + 8] - reach || z > sg[o + 9] + reach) continue;
+        const ax = sg[o], az = sg[o + 1], dx = sg[o + 2], dz = sg[o + 3], L = sg[o + 4];
         const L2 = L * L || 1e-9;
         let t = ((x - ax) * dx + (z - az) * dz) / L2;
         if (t < 0) t = 0; else if (t > 1) t = 1;
@@ -950,7 +1050,7 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
         const ex = x - px, ez = z - pz;
         const d2 = ex * ex + ez * ez;
         if (d2 < rc2) {
-          const s2 = along + L * t;
+          const s2 = sg[o + 5] + L * t;
           const gy = r.br ? bridgeDeckHeight(r, s2, terrain) : roadGradeY(r, s2, terrain);
           if (gy !== null && gy !== undefined) {
             // flat within the corridor; beyond it the cap RISES at 55 % so
@@ -973,7 +1073,6 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
             }
           }
         }
-        along += L;
       }
     }
     // apply: ceiling first, and the embankment floor is itself CEILINGED by
@@ -1336,7 +1435,627 @@ function onCarriageway(cell, self, x, z, grow = 0) {
   return false;
 }
 
-function roadRibbon(sink, f, terrain, cell, key) {
+// ---- streets: the things beside and on a carriageway ------------------------
+// Tints are sRGB hex like every other colour here. The kerb stone is a shade
+// lighter than the old concrete road edge so the kerb LINE reads from a car;
+// the pavement is the small grey concrete paver most Czech towns are laid in.
+const KERBTOP_HEX = 0xa9a69f, WALK_HEX = 0x9c9992, VERGE_HEX = 0x52683f;
+const IRON_HEX = 0x33353a, COLLAR_HEX = 0x5b5c5e;
+// A higher road class lies a few millimetres OVER a lower one. Ways overlap
+// all over the data (a service road along a kerb, a slip road over its own
+// main road), and since they stopped being one grey an overlap at one height
+// is two tints fighting for the same pixels. Three millimetres a rank settles
+// who is on top, and it is the road that carries on.
+const RANK_LIFT = 0.003;
+// paint above its own deck: what LAYER_Y gives it, measured from the asphalt
+const MARK = LAYER_Y.marking - LAYER_Y.road;
+// How worn a carriageway looks, by class: the lane coordinate's second half.
+const WEAR = {
+  motorway: 0.72, trunk: 0.7, primary: 0.68, secondary: 0.62, tertiary: 0.56,
+  motorway_link: 0.6, trunk_link: 0.6, primary_link: 0.58, secondary_link: 0.55,
+  tertiary_link: 0.5, unclassified: 0.42, residential: 0.4, living_street: 0.26, service: 0.22,
+};
+
+/** The junction or cluster whose pad (x, z) lies on, from a way's nearby list. */
+function inPads(js, x, z) {
+  for (const j of js) {
+    // a member answers through its cluster, a roundabout node has no pad.
+    // (`_ring` is that flag on a NODE and the outline itself on a CLUSTER:
+    // tested bare, it threw every cluster out of this list, and lane lines
+    // ran on past the mouth of every big crossing.)
+    if (j._cluster || (!j.members && j._ring)) continue;
+    const R = j.padR ?? j.pad;
+    if ((x - j.x) ** 2 + (z - j.z) ** 2 > R * R) continue;
+    const ring = j.members ? clusterHull(j) : junctionHull(j);
+    if (ring && pointInPolygon(x, z, ring)) return j;
+  }
+  return null;
+}
+
+// a wall between two posts with its own top and bottom at each, facing (fx, fz)
+function wallQuad4(sink, ax, az, bx, bz, yTa, yTb, yBa, yBb, fx, fz, r, g, b) {
+  const dx = bx - ax, dz = bz - az;
+  if (dz * fx - dx * fz >= 0) sink.quad(ax, yTa, az, bx, yTb, bz, bx, yBb, bz, ax, yBa, az, r, g, b);
+  else sink.quad(bx, yTb, bz, ax, yTa, az, ax, yBa, az, bx, yBb, bz, r, g, b);
+}
+
+/**
+ * One stretch of kerb and pavement between two cross-sections.
+ * A and B: { x, z (the kerb line), nx, nz (unit-ish, out from the road),
+ *            y (the carriageway deck there), w, drop }.
+ * `t` is the surface behind the kerb: 1 paving, 2 lawn.
+ */
+function kerbRun(sink, A, B, t, terrain, c) {
+  const wa = A.w, wb = B.w;
+  if (wa < 0.05 && wb < 0.05) return;
+  // a band that ends tapers to nothing at that end: every offset collapses
+  // onto the kerb line there
+  const ka = wa < 0.05 ? 0 : Math.min(KERB_W, wa), kb = wb < 0.05 ? 0 : Math.min(KERB_W, wb);
+  const IN = 0.03;                               // the face stands this far IN from the line
+  const a0x = A.x - A.nx * IN * (wa < 0.05 ? 0 : 1), a0z = A.z - A.nz * IN * (wa < 0.05 ? 0 : 1);
+  const b0x = B.x - B.nx * IN * (wb < 0.05 ? 0 : 1), b0z = B.z - B.nz * IN * (wb < 0.05 ? 0 : 1);
+  const a1x = A.x + A.nx * ka, a1z = A.z + A.nz * ka, b1x = B.x + B.nx * kb, b1z = B.z + B.nz * kb;
+  const a2x = A.x + A.nx * wa, a2z = A.z + A.nz * wa, b2x = B.x + B.nx * wb, b2z = B.z + B.nz * wb;
+  const la = wa < 0.05 ? 0 : 1, lb = wb < 0.05 ? 0 : 1;
+  const ya0 = A.y + vergeLift(wa, A.drop, 0) * la, yb0 = B.y + vergeLift(wb, B.drop, 0) * lb;
+  const ya1 = A.y + vergeLift(wa, A.drop, ka) * la, yb1 = B.y + vergeLift(wb, B.drop, kb) * lb;
+  const ya2 = A.y + vergeLift(wa, A.drop, wa) * la, yb2 = B.y + vergeLift(wb, B.drop, wb) * lb;
+  const fx = -(A.nx + B.nx), fz = -(A.nz + B.nz);
+  sink.at(SURF.concrete);
+  // the face, down past the deck so no chord of the ribbon can show under it
+  wallQuad4(sink, a0x, a0z, b0x, b0z, ya0, yb0, A.y - 0.06, B.y - 0.06, fx, fz, c.fr, c.fg, c.fb);
+  // the stone
+  paintQuad(sink, a0x, ya0, a0z, b0x, yb0, b0z, b1x, yb1, b1z, a1x, ya1, a1z, c.kr, c.kg, c.kb);
+  // what lies behind it
+  if (t === 2) { sink.at(SURF.grass); paintQuad(sink, a1x, ya1, a1z, b1x, yb1, b1z, b2x, yb2, b2z, a2x, ya2, a2z, c.gr, c.gg, c.gb); }
+  else { sink.at(SURF.pavers); paintQuad(sink, a1x, ya1, a1z, b1x, yb1, b1z, b2x, yb2, b2z, a2x, ya2, a2z, c.wr, c.wg, c.wb); }
+  // …and the back edge. The band stands a foot over the ground it was laid on
+  // (the deck's 20 cm of build-up plus the kerb), and closing it with a
+  // vertical edge left a 30 cm cliff along the back of every pavement in town.
+  // So it is GRADED instead: a strip that falls from the band's level to the
+  // ground's, in the band's own surface, with a short toe into the ground so
+  // no chord of the terrain can show under its outer edge. Where the ground is
+  // drawn follows clampUnderRoads: the terrain, capped by a bank rising at
+  // 55 % from just under the deck edge.
+  if (terrain) {
+    const BW = t === 2 ? 0.85 : 0.55;
+    const a3x = a2x + A.nx * BW * la, a3z = a2z + A.nz * BW * la;
+    const b3x = b2x + B.nx * BW * lb, b3z = b2z + B.nz * BW * lb;
+    const ya3 = Math.min(Math.min(terrain.heightAt(a3x, a3z), A.y - 0.05 + 0.55 * (wa + BW)) + 0.035, ya2);
+    const yb3 = Math.min(Math.min(terrain.heightAt(b3x, b3z), B.y - 0.05 + 0.55 * (wb + BW)) + 0.035, yb2);
+    const k = t === 2 ? 0.92 : 0.9;
+    const r3 = (t === 2 ? c.gr : c.wr) * k, g3 = (t === 2 ? c.gg : c.wg) * k, b3 = (t === 2 ? c.gb : c.wb) * k;
+    sink.at(t === 2 ? SURF.grass : SURF.pavers);
+    paintQuad(sink, a2x, ya2, a2z, b2x, yb2, b2z, b3x, yb3, b3z, a3x, ya3, a3z, r3, g3, b3);
+    sink.at(SURF.concrete);
+    wallQuad4(sink, a3x, a3z, b3x, b3z, ya3, yb3, ya3 - 0.14, yb3 - 0.14, -fx, -fz, r3 * 0.8, g3 * 0.8, b3 * 0.8);
+  }
+}
+
+let _kerbCols = null;
+function kerbCols() {
+  if (_kerbCols) return _kerbCols;
+  const c = {};
+  _c.setHex(KERB_HEX); c.fr = _c.r; c.fg = _c.g; c.fb = _c.b;
+  _c.setHex(KERBTOP_HEX); c.kr = _c.r; c.kg = _c.g; c.kb = _c.b;
+  _c.setHex(WALK_HEX); c.wr = _c.r; c.wg = _c.g; c.wb = _c.b;
+  _c.setHex(VERGE_HEX); c.gr = _c.r; c.gg = _c.g; c.gb = _c.b;
+  return (_kerbCols = c);
+}
+
+/**
+ * The kerb and pavement along both sides of a kerbed way, from its verge
+ * arrays. Its own stations (the way's vertices, one every couple of metres
+ * between them, and exactly on every junction-mouth boundary), so a dropped
+ * kerb gets the vertices it needs and the band stops precisely where the
+ * junction's own kerb takes over. `deckAt(s)` is the carriageway deck there.
+ */
+function vergeInto(sink, f, vg, terrain, deckAt) {
+  const p = f.p, len = f._len ?? 0;
+  if (!(len > 0)) return;
+  // arclengths wanted: every vertex, a station every vg.ds, every zone edge
+  const want = [];
+  let run = 0;
+  for (let i = 0; i < p.length - 1; i++) {
+    const L = Math.hypot(p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1]);
+    const n = Math.max(1, Math.ceil(L / vg.ds));
+    for (let k = 0; k < n; k++) want.push(run + L * (k / n));
+    run += L;
+  }
+  want.push(run);
+  for (const z of f._jz ?? []) if (z > 0.05 && z < run - 0.05) want.push(z);
+  want.sort((a, b) => a - b);
+  const pts = [], at = [];
+  let seg = 0, acc = 0, L = Math.hypot(p[1][0] - p[0][0], p[1][1] - p[0][1]) || 1e-6, lastS = -1;
+  for (const s of want) {
+    if (s - lastS < 0.04) continue;
+    while (s > acc + L + 1e-6 && seg < p.length - 2) {
+      acc += L; seg++;
+      L = Math.hypot(p[seg + 1][0] - p[seg][0], p[seg + 1][1] - p[seg][1]) || 1e-6;
+    }
+    const t = Math.max(0, Math.min(1, (s - acc) / L));
+    pts.push([p[seg][0] + (p[seg + 1][0] - p[seg][0]) * t, p[seg][1] + (p[seg + 1][1] - p[seg][1]) * t]);
+    at.push(s);
+    lastS = s;
+  }
+  if (pts.length < 2) return;
+  // the mitred frame of the ribbon itself, so the kerb line runs parallel to
+  // the asphalt edge through every bend
+  const n = pts.length, per = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[i], c2 = pts[Math.min(n - 1, i + 1)];
+    let p1x = b[0] - a[0], p1z = b[1] - a[1], p2x = c2[0] - b[0], p2z = c2[1] - b[1];
+    if (i === 0) { p1x = p2x; p1z = p2z; }
+    if (i === n - 1) { p2x = p1x; p2z = p1z; }
+    const l1 = Math.hypot(p1x, p1z) || 1, l2 = Math.hypot(p2x, p2z) || 1;
+    p1x /= l1; p1z /= l1; p2x /= l2; p2z /= l2;
+    let mx = p1x + p2x, mz = p1z + p2z;
+    const ml = Math.hypot(mx, mz);
+    if (ml < 1e-4) { mx = p2x; mz = p2z; } else { mx /= ml; mz /= ml; }
+    const sc = 1 / Math.max(0.5, mx * p2x + mz * p2z);
+    per[i] = [mz * sc, -mx * sc];
+  }
+  const hw = (f.w ?? 3) / 2, cols = kerbCols();
+  const A = { x: 0, z: 0, nx: 0, nz: 0, y: 0, w: 0, drop: 0 }, B = { x: 0, z: 0, nx: 0, nz: 0, y: 0, w: 0, drop: 0 };
+  const fill = (o, i, e, side) => {
+    const s = at[i], v = vergeAt(f, s, side), off = hw + bayAt(f, s, e);
+    o.nx = per[i][0] * e; o.nz = per[i][1] * e;
+    o.x = pts[i][0] + o.nx * off; o.z = pts[i][1] + o.nz * off;
+    o.w = v.w; o.drop = v.drop; o.y = deckAt(s);
+    return v.t;
+  };
+  for (let side = 0; side < 2; side++) {
+    const e = side ? 1 : -1;
+    for (let i = 0; i < n - 1; i++) {
+      if (inZone(f, (at[i] + at[i + 1]) / 2)) continue;
+      const ta = fill(A, i, e, side), tb = fill(B, i + 1, e, side);
+      if (A.w < 0.05 && B.w < 0.05) continue;
+      kerbRun(sink, A, B, ta || tb, terrain, cols);
+    }
+  }
+}
+
+/** The kerb round a junction outline: the same band, along the corner radii. */
+function ringKerbInto(sink, o, deckY, terrain) {
+  const cols = kerbCols();
+  const A = { x: 0, z: 0, nx: 0, nz: 0, y: 0, w: 0, drop: 0 }, B = { x: 0, z: 0, nx: 0, nz: 0, y: 0, w: 0, drop: 0 };
+  for (const pc of o._edge ?? []) {
+    if (!pc.any || !pc.w) continue;
+    const p = pc.p, m = p.length / 8;
+    const fill = (q, i) => {
+      q.x = p[i * 8]; q.z = p[i * 8 + 1]; q.nx = p[i * 8 + 2]; q.nz = p[i * 8 + 3];
+      q.w = pc.w[i]; q.drop = pc.d[i]; q.y = deckY(q.x, q.z);
+    };
+    for (let i = 0; i < m - 1; i++) {
+      fill(A, i); fill(B, i + 1);
+      if (A.w < 0.05 && B.w < 0.05) continue;
+      kerbRun(sink, A, B, pc.t[i] || pc.t[i + 1], terrain, cols);
+    }
+  }
+}
+
+// a cast-iron cover in its concrete collar, flat on the deck
+function lidInto(sink, x, y, z, r) {
+  sink.at(SURF.concrete);
+  _c.setHex(COLLAR_HEX);
+  const cr = _c.r, cg = _c.g, cb = _c.b;
+  _c.setHex(IRON_HEX);
+  const ir = _c.r, ig = _c.g, ib = _c.b;
+  const N = 10;
+  for (let k = 0; k < N; k++) {
+    const a0 = (k / N) * Math.PI * 2, a1 = ((k + 1) / N) * Math.PI * 2;
+    const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+    sink.tri(x, y, z, x + c1 * (r + 0.07), y, z + s1 * (r + 0.07), x + c0 * (r + 0.07), y, z + s0 * (r + 0.07), cr, cg, cb);
+    sink.tri(x, y + 0.008, z, x + c1 * r, y + 0.008, z + s1 * r, x + c0 * r, y + 0.008, z + s0 * r, ir, ig, ib);
+  }
+}
+
+// a gully grate at the kerb: a dark frame with its slots across the flow
+function grateInto(sink, x, y, z, ux, uz) {
+  sink.at(SURF.concrete);
+  _c.setHex(IRON_HEX);
+  const ir = _c.r, ig = _c.g, ib = _c.b;
+  _c.setHex(0x17181a);
+  const sr = _c.r, sg = _c.g, sb = _c.b;
+  const px = -uz, pz = ux;
+  const P = (a, c) => [x + ux * a + px * c, z + uz * a + pz * c];
+  const q = (a0, a1, c0, c1, yy, r, g, b) => {
+    const p0 = P(a0, c0), p1 = P(a1, c0), p2 = P(a1, c1), p3 = P(a0, c1);
+    paintQuad(sink, p0[0], yy, p0[1], p1[0], yy, p1[1], p2[0], yy, p2[1], p3[0], yy, p3[1], r, g, b);
+  };
+  q(-0.27, 0.27, -0.18, 0.18, y, ir, ig, ib);
+  for (const a of [-0.16, 0, 0.16]) q(a - 0.04, a + 0.04, -0.13, 0.13, y + 0.008, sr, sg, sb);
+}
+
+// ---- the middle of a roundabout (geo.indexRoundabouts) ------------------------
+// What a Czech roundabout has in it: a kerb, a ring of granite setts a lorry's
+// trailer may run over, and a planted mound that stops you seeing straight
+// across. A mini-roundabout too small to plant is a low dome of setts.
+function roundIslandInto(sink, x, z, R, deck, terrain) {
+  if (!(R > 0.8)) return;
+  const N = Math.max(12, Math.min(28, Math.round(R * 2.2)));
+  const cols = kerbCols();
+  _c.setHex(0x8a8781);
+  const ar = _c.r, ag = _c.g, ab = _c.b;
+  _c.setHex(VERGE_HEX);
+  const gr = _c.r, gg = _c.g, gb = _c.b;
+  _c.setHex(COLORS.green.bush);
+  const br = _c.r, bg = _c.g, bb = _c.b;
+  const small = R < 2.6;
+  const apron = small ? R : Math.min(1.4, R * 0.3);
+  const top = deck + (small ? 0.04 : KERB_H);
+  const mound = small ? 0.05 : Math.min(0.7, 0.12 * R);
+  const P = (k, r) => { const a = (k / N) * Math.PI * 2; return [x + Math.cos(a) * r, z + Math.sin(a) * r]; };
+  // (No fixFrom of its own: this is emitted INSIDE the owner ribbon's range,
+  // which the ribbon marks fixed when it ends. The drape walks the gaps between
+  // ranges in the order they were recorded, so a range nested in a later one
+  // made it drape the ribbon's deck a second time: 220 m into the sky.)
+  for (let k = 0; k < N; k++) {
+    const a0 = P(k, R), a1 = P(k + 1, R), b0 = P(k, R - KERB_W), b1 = P(k + 1, R - KERB_W);
+    const c0 = P(k, R - apron), c1 = P(k + 1, R - apron);
+    // kerb face (out toward the carriageway) and stone
+    sink.at(SURF.concrete);
+    wallQuad4(sink, a0[0], a0[1], a1[0], a1[1], top, top, deck - 0.06, deck - 0.06,
+      a0[0] + a1[0] - 2 * x, a0[1] + a1[1] - 2 * z, cols.fr, cols.fg, cols.fb);
+    paintQuad(sink, a0[0], top, a0[1], a1[0], top, a1[1], b1[0], top, b1[1], b0[0], top, b0[1], cols.kr, cols.kg, cols.kb);
+    if (small) {
+      sink.at(SURF.cobble);
+      sink.triFacing(b0[0], top, b0[1], b1[0], top, b1[1], x, top + mound, z, 0, 1, 0, ar, ag, ab);
+      continue;
+    }
+    // the sett apron, rising a little to the planting
+    sink.at(SURF.cobble);
+    paintQuad(sink, b0[0], top, b0[1], b1[0], top, b1[1], c1[0], top + 0.05, c1[1], c0[0], top + 0.05, c0[1], ar, ag, ab);
+    // lawn up the mound, and the shrubbery on its crown
+    const d0 = P(k, (R - apron) * 0.55), d1 = P(k + 1, (R - apron) * 0.55);
+    sink.at(SURF.grass);
+    paintQuad(sink, c0[0], top + 0.05, c0[1], c1[0], top + 0.05, c1[1], d1[0], top + mound, d1[1], d0[0], top + mound, d0[1], gr, gg, gb);
+    sink.at(SURF.forest);
+    const e0 = P(k, (R - apron) * 0.5), e1 = P(k + 1, (R - apron) * 0.5);
+    wallQuad4(sink, d0[0], d0[1], d1[0], d1[1], top + mound + 0.55, top + mound + 0.55, top + mound, top + mound,
+      d0[0] + d1[0] - 2 * x, d0[1] + d1[1] - 2 * z, br * 0.8, bg * 0.8, bb * 0.8);
+    paintQuad(sink, d0[0], top + mound + 0.55, d0[1], d1[0], top + mound + 0.55, d1[1],
+      e1[0], top + mound + 0.7, e1[1], e0[0], top + mound + 0.7, e0[1], br, bg, bb);
+    sink.triFacing(e0[0], top + mound + 0.7, e0[1], e1[0], top + mound + 0.7, e1[1], x, top + mound + 0.8, z, 0, 1, 0, br, bg, bb);
+  }
+}
+
+// ---- what a bench stands on ---------------------------------------------------
+// Street furniture is placed at "the ground", and beside a kerbed street the
+// ground a bin stands on is the pavement, 12 cm over the carriageway and a
+// hand more over the grass behind it. This answers heightAt() the way
+// js/furniture.js asks it, with the pavement where there is one: the generated
+// band, a mapped footway lifted to the street's level, the corner round a
+// junction. The same numbers city.js heightAt gives the player's feet.
+function standingOn(cell, key, terrain) {
+  if (!terrain || !cell) return terrain;
+  const pads = [...(junctionsIn(key) ?? []), ...(clustersIn(key) ?? [])];
+  return {
+    heightAt(x, z) {
+      const ground = terrain.heightAt(x, z);
+      let best = ground, footOwn = -Infinity, upW = 0, upT = 0, upX = 0, upB = 0, onRoad = false;
+      for (const r of cell.roads) {
+        if (r.br || !r.p || r.p.length < 2) continue;
+        const half = (r.w ?? 3) / 2, vg = r.d ? streetOf(r) : null;
+        const reach = half + (vg ? 10.5 : r.d ? 0 : 0.35);
+        if (!vg && r.d) continue;
+        const bb = bboxOfLine(r);
+        if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+        // the NEAREST segment speaks for the way (see city.js surfaceY on why)
+        let run = 0, bd = Infinity, bs = 0, be = 1;
+        for (let i = 0; i < r.p.length - 1; i++) {
+          const ax = r.p[i][0], az = r.p[i][1], bx = r.p[i + 1][0], bz = r.p[i + 1][1];
+          const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9, L = Math.sqrt(L2);
+          let t = ((x - ax) * ex + (z - az) * ez) / L2;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const d = Math.hypot(x - (ax + ex * t), z - (az + ez * t));
+          if (d < bd) { bd = d; bs = run + L * t; be = (x - ax) * ez - (z - az) * ex >= 0 ? 1 : -1; }
+          run += L;
+        }
+        if (bd >= reach) continue;
+        const gy = roadGradeY(r, bs, terrain);
+        if (gy === null || gy === undefined) continue;
+        if (!r.d) { footOwn = Math.max(footOwn, gy + LAYER_Y.footway); continue; }
+        const xo = bd - half - bayAt(r, bs, be), v = vergeAt(r, bs, be > 0 ? 1 : 0);
+        if (xo < 0.3) onRoad = true;
+        if (v.u) {
+          if (xo > 0 && v.w > 0.05 && xo <= v.w && !inZone(r, bs)) best = Math.max(best, gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo));
+          const w = xo <= 6 ? 1 : xo >= 10 ? 0 : 1 - (xo - 6) / 4;
+          if (w > upW) { upW = w; upT = gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo) + FOOT_LIFT; upX = xo; upB = v.w; }
+        }
+      }
+      // (capped as the slab itself is: a bench on a path at the foot of an
+      // embankment stands on the path, not at the street's level over it)
+      if (footOwn > -Infinity && !onRoad) best = Math.max(best, footOwn + (upT - footOwn) * footPullW(upW, upT - footOwn, upX, upB));
+      for (const o of pads) {
+        if (o._cluster || (!o.members && o._ring) || !o._edge) continue;
+        if ((x - o.x) ** 2 + (z - o.z) ** 2 > ((o.padR ?? 6) + 7) ** 2) continue;
+        const up = cornerLift(o, x, z);
+        if (up >= 0) best = Math.max(best, (o.members ? clusterDeckY(o, x, z, terrain) : junctionDeckY(o, x, z, terrain)) + LAYER_Y.road + up);
+      }
+      return best;
+    },
+  };
+}
+
+// ---- what holds a bridge up ----------------------------------------------------
+// A deck used to be a strip with a fascia, hanging in the air from bank to
+// bank. Two things carry a real one, and both are derived from the deck's own
+// height over the ground beneath it: where it is still LOW (the ramps at each
+// end) it stands on solid abutment walls, and where it is high it stands on
+// piers, spaced like a girder bridge's, set clear of whatever road or railway
+// the bridge is there to cross (geo.indexBridgeCrossings found those).
+const PIER_STEP = 22, PIER_OPEN = 2.4;
+function bridgeSupports(sink, f, fr, ys, hw, cell, terrain, slim) {
+  if (!terrain) return;
+  const { q, per, along, len } = fr;
+  const n = q.length;
+  _c.setHex(0x8f8c86);
+  const cr = _c.r, cg = _c.g, cb = _c.b;
+  const drop = slim ? 0.25 : FASCIA;
+  const clear = new Float32Array(n), gnd = new Float32Array(n);
+  for (let i = 0; i < n; i++) { gnd[i] = terrain.heightAt(q[i][0], q[i][1]); clear[i] = ys[i] - drop - gnd[i]; }
+  sink.at(SURF.concrete);
+  // abutments: the low ends are walled in, both faces, and closed off across
+  // the deck where the open span begins
+  for (let i = 0; i < n - 1; i++) {
+    const lowA = clear[i] < PIER_OPEN, lowB = clear[i + 1] < PIER_OPEN;
+    if (lowA && lowB && (clear[i] > 0.15 || clear[i + 1] > 0.15)) {
+      for (const e of [-1, 1]) {
+        const o = (hw - 0.05) * e;
+        const X0 = q[i][0] + per[i][0] * o, Z0 = q[i][1] + per[i][1] * o;
+        const X1 = q[i + 1][0] + per[i + 1][0] * o, Z1 = q[i + 1][1] + per[i + 1][1] * o;
+        wallQuad4(sink, X0, Z0, X1, Z1, ys[i] - drop + 0.02, ys[i + 1] - drop + 0.02,
+          Math.min(terrain.heightAt(X0, Z0), gnd[i]) - 0.3, Math.min(terrain.heightAt(X1, Z1), gnd[i + 1]) - 0.3,
+          per[i][0] * e, per[i][1] * e, cr, cg, cb);
+      }
+    }
+    if (lowA !== lowB) {
+      const k = lowA ? i : i + 1;                 // the last low station: the wall stands here
+      const o = hw - 0.05;
+      const X0 = q[k][0] - per[k][0] * o, Z0 = q[k][1] - per[k][1] * o;
+      const X1 = q[k][0] + per[k][0] * o, Z1 = q[k][1] + per[k][1] * o;
+      const dx = q[i + 1][0] - q[i][0], dz = q[i + 1][1] - q[i][1];
+      const sgn = lowA ? 1 : -1;                  // facing out into the span
+      wallQuad4(sink, X0, Z0, X1, Z1, ys[k] - drop + 0.02, ys[k] - drop + 0.02,
+        gnd[k] - 0.3, gnd[k] - 0.3, dx * sgn, dz * sgn, cr * 0.9, cg * 0.9, cb * 0.9);
+    }
+  }
+  // piers under the open span
+  const pw = slim ? 0.35 : Math.min(hw * 0.62, 3.2), pt = slim ? 0.22 : 0.5;
+  let i0 = -1;
+  for (let i = 0; i <= n; i++) {
+    const open = i < n && clear[i] >= PIER_OPEN;
+    if (open && i0 < 0) i0 = i;
+    if (!open && i0 >= 0) {
+      const sA = along[i0], sB = along[i - 1], span = sB - sA;
+      if (span > PIER_STEP * 0.8) {
+        const cnt = Math.max(1, Math.round(span / PIER_STEP) - 1);
+        for (let k = 1; k <= cnt; k++) {
+          let s = sA + (span * k) / (cnt + 1);
+          // not in the lane or on the track it is there to cross: try a few
+          // metres either way, and leave it out rather than stand it in traffic
+          let ok = false;
+          for (const shift of [0, 5, -5, 9, -9]) {
+            walkAt(fr, Math.max(sA, Math.min(sB, s + shift)), _WA);
+            let hit = cell ? onCarriageway(cell, f, _WA.x, _WA.z, pw + 0.8) : false;
+            if (!hit && cell) for (const rl of cell.rails ?? []) {
+              if (rl.br || !rl.p) continue;
+              for (let m = 0; m < rl.p.length - 1 && !hit; m++) {
+                if (distPointToSegment(_WA.x, _WA.z, rl.p[m][0], rl.p[m][1], rl.p[m + 1][0], rl.p[m + 1][1], null) < pw + 2.6) hit = true;
+              }
+              if (hit) break;
+            }
+            if (!hit) { ok = true; s = Math.max(sA, Math.min(sB, s + shift)); break; }
+          }
+          if (!ok) continue;
+          walkAt(fr, s, _WA);
+          let j = 0;
+          while (j < n - 2 && along[j + 1] < s) j++;
+          const t = (s - along[j]) / ((along[j + 1] - along[j]) || 1);
+          const top = ys[j] + (ys[j + 1] - ys[j]) * t - drop + 0.02;
+          const base = terrain.heightAt(_WA.x, _WA.z) - 1.2;
+          const ux = _WA.dx * pt, uz = _WA.dz * pt, px = _WA.dz * pw, pz = -_WA.dx * pw;
+          const c0 = [_WA.x - ux - px, _WA.z - uz - pz], c1 = [_WA.x + ux - px, _WA.z + uz - pz];
+          const c2 = [_WA.x + ux + px, _WA.z + uz + pz], c3 = [_WA.x - ux + px, _WA.z - uz + pz];
+          const ring = [c0, c1, c2, c3];
+          for (let m = 0; m < 4; m++) {
+            const a = ring[m], b = ring[(m + 1) % 4];
+            wallQuad4(sink, a[0], a[1], b[0], b[1], top, top, base, base,
+              (a[0] + b[0]) / 2 - _WA.x, (a[1] + b[1]) / 2 - _WA.z, cr, cg, cb);
+          }
+        }
+      }
+      i0 = -1;
+    }
+  }
+}
+
+// ---- what a footway is levelled against, and cut at ---------------------------
+// A footway is drawn whole from the chunk its first point lies in, but it is
+// WALKED cell by cell: city.heightAt asks the cell under the feet which streets
+// are near. Levelling and cutting it against its home cell's roads alone left
+// every stretch past the first chunk border at ground level beside a kerbed
+// street the home cell had never heard of (feet 18 cm over the paving), or
+// laid as a slab straight across that street's asphalt. So the candidates come
+// from every cell the way passes through, plus FOOT_REACH either side, which
+// is how far a kerbed street pulls a footway (half a carriageway, a lay-by,
+// and the 10 m of flat and blend). The cut reads all of them; each station's
+// level reads the ones its own cell lists (stationRoads, below).
+const FOOT_REACH = 20;
+/**
+ * The chunk cells a ground footway reads its streets from, into `out` (a Set of
+ * keys). Pure in f.p, because js/chunkspec.js has to ship exactly these cells
+ * to the mesh worker or the two builds of one chunk would differ.
+ */
+export function footCellKeys(f, out) {
+  const p = f.p, m = FOOT_REACH;
+  const add = (x, z) => {
+    const i0 = Math.floor((x - m) / CHUNK), i1 = Math.floor((x + m) / CHUNK);
+    const j0 = Math.floor((z - m) / CHUNK), j1 = Math.floor((z + m) / CHUNK);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) out.add(i + ',' + j);
+  };
+  add(p[0][0], p[0][1]);
+  for (let i = 0; i < p.length - 1; i++) {
+    const ax = p[i][0], az = p[i][1], bx = p[i + 1][0], bz = p[i + 1][1];
+    // a sample every half FOOT_REACH at most: no point of the way is then
+    // more than 5 m from one, so its own cell is among those just added, and
+    // so is the cell of any centreline within 15 m of it (a street is listed
+    // where its centreline runs, and the widest in the data, 22 m, with a
+    // lay-by on it reaches 14 m from that)
+    const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (m / 2)));
+    for (let k = 1; k <= n; k++) add(ax + (bx - ax) * (k / n), az + (bz - az) * (k / n));
+  }
+  return out;
+}
+/** Is footway `f` one whose streets come from footCellKeys (not a bridge)? */
+export const footReaches = (f) => FOOT_CLASSES.has(f.t) && !f.br && !!f.p && f.p.length >= 2;
+const _fkeys = new Set(), _fseen = new Set();
+/** The drivable ways near footway f, as the { roads } the tests below read. */
+function footRoads(city, f, cell) {
+  if (!city?.chunkIndex || !footReaches(f)) return cell;
+  _fkeys.clear(); _fseen.clear();
+  footCellKeys(f, _fkeys);
+  const roads = [], fb = bboxOfLine(f);
+  for (const k of _fkeys) {
+    const c = city.chunkIndex.get(k);
+    if (!c) continue;
+    for (const r of c.roads) {
+      if (!r.d || !r.p || r.p.length < 2) continue;
+      // only what can reach the footway at all: every test below runs per
+      // sample over this list, and a cell holds a few hundred ways
+      const rb = bboxOfLine(r), m = (r.w ?? 6) / 2 + FOOT_REACH;
+      if (rb[2] < fb[0] - m || rb[0] > fb[2] + m || rb[3] < fb[1] - m || rb[1] > fb[3] + m) continue;
+      if (_fseen.has(r)) continue;       // a way is listed in every cell it touches
+      _fseen.add(r);
+      roads.push(r);
+    }
+  }
+  _fseen.clear();
+  return { roads };
+}
+// The CUT wants every street that can reach the way (no paving on asphalt,
+// whichever cell lists it). The LEVEL is a different question: feet are put on
+// a footway by city.heightAt, which asks only the cell UNDER them which
+// streets pull it up to a pavement. A station levelled against a street its own
+// cell does not list is paving the walker is not on (measured: a slab 38 cm
+// under the feet, 6 m from a street in the next cell), so each station is
+// levelled against the streets of the cell it lies in, and no others.
+const _fhere = new Map();   // cell key -> Set of the candidates that cell lists
+function stationRoads(city, drv, x, z) {
+  const k = chunkKey(x, z);
+  let s = _fhere.get(k);
+  if (s === undefined) {
+    const c = city.chunkIndex.get(k);
+    s = new Set();
+    if (c) for (const r of drv) if (c.roads.includes(r)) s.add(r);
+    _fhere.set(k, s);
+  }
+  return s;
+}
+/**
+ * onCarriageway for a footway: a bus lay-by is carriageway too. The bay is
+ * generated, the footway beside the street is mapped, and where the bay was
+ * dug the mapped footway still ran straight through it, a paving slab 14 cm
+ * over the bay's asphalt with the bus standing in it. city.heightAt already
+ * counts the bay as road (xo = d - half - bayAt); this is the same test.
+ */
+function onDeck(fc, self, x, z, grow = 0) {
+  for (const o of fc.roads) {
+    if (o === self || !o.d) continue;
+    const half = (o.w ?? 3) / 2 + grow;
+    if (half <= 0) continue;
+    const bays = o._bays, reach = bays ? half + BAY_W : half;
+    const bb = bboxOfLine(o);
+    if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+    let al = 0;
+    for (let k = 0; k < o.p.length - 1; k++) {
+      const ax = o.p[k][0], az = o.p[k][1], ex = o.p[k + 1][0] - ax, ez = o.p[k + 1][1] - az;
+      const L2 = ex * ex + ez * ez || 1e-9;
+      let t = ((x - ax) * ex + (z - az) * ez) / L2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const d = Math.hypot(x - (ax + ex * t), z - (az + ez * t));
+      if (d < half) return true;
+      if (bays) {
+        const L = Math.sqrt(L2);
+        if (d < reach && d < half + bayAt(o, al + L * t, (x - ax) * ez - (z - az) * ex >= 0 ? 1 : -1)) return true;
+        al += L;
+      }
+    }
+  }
+  return false;
+}
+
+// ---- how hard a street may pull a footway off its own level ---------------------
+// The pull below (roadRibbon, and city._footPull for the feet) takes a footway
+// to the level of the street it runs beside, and it asked only how FAR the
+// street was, never how much higher or lower. Beside a street on an embankment
+// that dragged the path up the full height of the fill, six metres out from
+// the kerb: the cycleway under the flyover by Kaufland was drawn on a ramp
+// 4.8 m over the ground it lies on, and 1.6 km of footway within 2.4 km of the
+// spawn stood more than a metre off its own level.
+//
+// How much higher or lower can a path beside a street really be? A few steps
+// from the kerb, hardly at all: no bank is steep enough, and what the path's
+// own profile says there (PULL_SMEAR) is the survey's 20 m grid smearing the
+// street's embankment across it. On the street's own band (the pavement, or
+// the lawn it draws out to a mapped footway, `band` wide) the path is part of
+// that surface by construction. Only a WALL puts a path right beside a kerb on
+// another level: the abutment of a bridge, with the path passing under the
+// deck, and that is more than PULL_WALL. Further out the path may just as
+// well be at the foot of the bank, and its own levelled profile, which has the
+// real earthworks in it, is what says which: PULL_FADE past the band the pull
+// is whole only while street and path are within PULL_LEVEL of each other, and
+// gone by PULL_OFF. Between the two distances the two answers are blended.
+// (The lawn itself stops reaching for a footway more than a metre off the
+// street's level: geo.levelVerge.) One function, because the paving and the
+// feet on it have to get the same number.
+const PULL_NEAR = 2.5, PULL_FADE = 2;        // m past the kerb line (or the asphalt edge)
+const PULL_LEVEL = 0.5, PULL_OFF = 1.5;      // m between the street's level and the path's own
+const PULL_SMEAR = 2, PULL_WALL = 3;         // …and the same right beside the kerb
+/**
+ * The weight `w` of a street's pull on a footway, capped: `dy` is the level it
+ * pulls toward less the footway's own, `xo` the metres past its kerb line,
+ * `band` the width of the street's own band there (0: no kerb).
+ */
+export function footPullW(w, dy, xo, band = 0) {
+  const a = dy < 0 ? -dy : dy;
+  if (a <= PULL_LEVEL) return w;
+  const near = band + 0.3 > PULL_NEAR ? band + 0.3 : PULL_NEAR;
+  const kn = a <= PULL_SMEAR ? 1 : a >= PULL_WALL ? 0 : (PULL_WALL - a) / (PULL_WALL - PULL_SMEAR);
+  if (xo <= near) return w * kn;
+  const kf = a >= PULL_OFF ? 0 : (PULL_OFF - a) / (PULL_OFF - PULL_LEVEL);
+  const kx = xo >= near + PULL_FADE ? 0 : (near + PULL_FADE - xo) / PULL_FADE;
+  return w * (kf + (kn - kf) * kx);
+}
+
+/**
+ * One edge of a slab that stands over the ground (a footway lifted to its
+ * street's pavement level): from (X0, Z0, y0) to (X1, Z1, y1), with the outward
+ * normal at each end. It used to be closed with a vertical face down to the
+ * terrain, a 30 cm cliff in kerb grey along every such path. Now the edge is
+ * GRADED: a strip in the slab's own surface falling to the ground over half a
+ * metre, with a toe into it. Where that strip would land on a carriageway the
+ * edge IS a kerb, and stays a vertical face.
+ */
+const SLAB_GRADE = 0.55;
+function slabEdge(sink, cell, f, X0, Z0, X1, Z1, y0, y1, n0x, n0z, n1x, n1z, terrain, surf, r, g, b) {
+  const O0x = X0 + n0x * SLAB_GRADE, O0z = Z0 + n0z * SLAB_GRADE;
+  const O1x = X1 + n1x * SLAB_GRADE, O1z = Z1 + n1z * SLAB_GRADE;
+  if (onDeck(cell, f, O0x, O0z, 0.1) || onDeck(cell, f, O1x, O1z, 0.1)) {
+    sink.at(SURF.concrete);
+    wallQuad4(sink, X0, Z0, X1, Z1, y0, y1, Math.min(terrain.heightAt(X0, Z0) - 0.05, y0 - 0.02),
+      Math.min(terrain.heightAt(X1, Z1) - 0.05, y1 - 0.02), n0x, n0z, KERB_R, KERB_G, KERB_B);
+    return;
+  }
+  const g0 = Math.min(terrain.heightAt(O0x, O0z) + 0.035, y0), g1 = Math.min(terrain.heightAt(O1x, O1z) + 0.035, y1);
+  sink.at(surf);
+  paintQuad(sink, X0, y0, Z0, X1, y1, Z1, O1x, g1, O1z, O0x, g0, O0z, r * 0.9, g * 0.9, b * 0.9);
+  sink.at(SURF.concrete);
+  wallQuad4(sink, O0x, O0z, O1x, O1z, g0, g1, g0 - 0.14, g1 - 0.14, n0x, n0z, r * 0.72, g * 0.72, b * 0.72);
+}
+
+function roadRibbon(sink, f, terrain, cell, key, city) {
   // a bridge is straight by definition and its deck is level, so it
   // gains nothing from following ground it is not touching
   const pts = trimEnds(f.p, f._j0, f._j1);
@@ -1345,7 +2064,9 @@ function roadRibbon(sink, f, terrain, cell, key) {
   if (!fr) return;
   const { q, per, along, len } = fr;
   const hw = Math.max(0.8, (f.w ?? 3) / 2);
-  const baseY = FOOT_CLASSES.has(f.t) ? LAYER_Y.footway : LAYER_Y.road;
+  const isFoot = FOOT_CLASSES.has(f.t);
+  // a drivable deck rides a hair higher the more important it is (RANK_LIFT)
+  const baseY = isFoot ? LAYER_Y.footway : LAYER_Y.road + (f.d ? roadRank(f) * RANK_LIFT : 0);
   // A bridge is the one road that does NOT follow the ground: it leaves one
   // bank and arrives at the other, straight and level. Its absolute deck
   // height is resolved from the two approaches right here, and the range is
@@ -1388,7 +2109,8 @@ function roadRibbon(sink, f, terrain, cell, key) {
     const gy = roadGradeY(f, d + s0, terrain);
     return gy === null ? terrain.heightAt(x, z) : gy;
   };
-  sink.at(surfOfRoad(f));
+  const surf = surfOfRoad(f);
+  sink.at(surf);
   _c.setHex(COLORS.road[f.t] ?? COLORS.road.residential);
   const cr = _c.r, cg = _c.g, cb = _c.b;
   _c.setHex(RAILING_COL);
@@ -1399,7 +2121,10 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // terrain sampled every 10 m — the ground moves more than 4 cm between two
   // samples, so the path pokes through the asphalt in pale diagonal bands.
   // Epsilon cannot fix that; not drawing it there can.
-  const foot = FOOT_CLASSES.has(f.t) && cell;
+  const foot = isFoot && cell;
+  // …and what it is cut at is every street along its whole length (footRoads),
+  // each station levelled against its own cell's, not the home cell's alone
+  const fcell = foot ? footRoads(city, f, cell) : cell;
   // Sampling the segment's MIDPOINT alone is not enough and the arithmetic says
   // why: a path segment is up to 10 m long after terrainResample and a
   // residential road is 5.5 m wide, so a segment can cross the carriageway with
@@ -1408,7 +2133,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
   const crossesRoad = (ax, az, bx, bz) => {
     for (let k = 0; k <= 4; k++) {
       const t = k / 4;
-      if (onCarriageway(cell, f, ax + (bx - ax) * t, az + (bz - az) * t, 0.3)) return true;
+      if (onDeck(fcell, f, ax + (bx - ax) * t, az + (bz - az) * t, 0.3)) return true;
     }
     return false;
   };
@@ -1416,77 +2141,197 @@ function roadRibbon(sink, f, terrain, cell, key) {
   // own idea of the ground, so at the join the path ended a hand above or
   // below the asphalt lip — the "cesta jde prostě před tu vozovku" report.
   // Near a drivable carriageway every path vertex is blended toward that
-  // road's own deck (a touch below it), which turns the last few metres of
-  // the path into a ramp that lands exactly on the kerb line — on flats a
-  // no-op, on an embanked road the path climbs to meet it. Bridges keep
-  // their absolute decks.
-  let footY = null;
+  // road's own deck, which turns the last few metres of the path into a ramp
+  // that lands exactly on the kerb line: on flats a no-op, on an embanked
+  // road the path climbs to meet it. Bridges keep their absolute decks.
+  //
+  // Beside a KERBED street the target is not the asphalt but the pavement: the
+  // path rides the street's own verge surface (kerb height, tilting down to
+  // the lip where the kerb is dropped), so a mapped footway and the generated
+  // band beside it are one walking surface, and a path arriving at a crossing
+  // comes down the dropped kerb instead of ending in a 12 cm step.
+  let footY = null, footUp = null;
   if (foot && !f.br && terrain) {
-    const BLEND = 3.5;
+    // FLAT: how far out from a kerb everything walked on keeps the pavement's
+    // level (a footway and the cycle path beside it are one surface, not a
+    // step); BLEND: the run it then takes to come down to its own.
+    const BLEND = 3.5, FLAT = 6, KBLEND = 4;
     const fb = bboxOfLine(f);
     _fdrv.length = 0;
-    for (const r of cell.roads) {
+    for (const r of fcell.roads) {
       if (!r.d || !r.p || r === f) continue;
-      const rb2 = bboxOfLine(r), m = (r.w ?? 6) / 2 + BLEND;
+      const rb2 = bboxOfLine(r), m = (r.w ?? 6) / 2 + KBLEND + FLAT + 3;
       if (rb2[2] < fb[0] - m || rb2[0] > fb[2] + m || rb2[3] < fb[1] - m || rb2[1] > fb[3] + m) continue;
       _fdrv.push(r);
     }
     if (_fdrv.length) {
       footY = new Array(q.length);
+      const perCell = fcell !== cell;
+      if (perCell) _fhere.clear();
       for (let i = 0; i < q.length; i++) {
         const X = q[i][0], Z = q[i][1];
         let y = baseY + elev(along[i], X, Z);
-        let bestW = 0, bestT = 0;
+        let bestW = 0, bestT = 0, up = false;
+        const here = perCell ? stationRoads(city, _fdrv, X, Z) : null;
         for (const r of _fdrv) {
+          if (here && !here.has(r)) continue;
           const hwr = (r.w ?? 6) / 2;
-          let al = 0;
+          const vg = r.br ? null : streetOf(r);
+          // the NEAREST segment speaks for the way: round a bend the next one
+          // along, measured to its end, would answer for a kerb it is not at
+          let al = 0, d = Infinity, s2 = 0, side = 0;
           for (let k2 = 0; k2 < r.p.length - 1; k2++) {
             const [ax2, az2] = r.p[k2], [bx2, bz2] = r.p[k2 + 1];
             const ex = bx2 - ax2, ez = bz2 - az2, L2 = ex * ex + ez * ez || 1e-9;
             let t = ((X - ax2) * ex + (Z - az2) * ez) / L2;
             t = t < 0 ? 0 : t > 1 ? 1 : t;
-            const d = Math.hypot(X - (ax2 + ex * t), Z - (az2 + ez * t));
+            const dk = Math.hypot(X - (ax2 + ex * t), Z - (az2 + ez * t));
             const L = Math.sqrt(L2);
-            if (d < hwr + BLEND) {
-              const w = d <= hwr ? 1 : 1 - (d - hwr) / BLEND;
-              if (w > bestW) {
-                const gy2 = r.br ? bridgeDeckHeight(r, al + L * t, terrain) : roadGradeY(r, al + L * t, terrain);
-                if (gy2 !== null && gy2 !== undefined) {
-                  // The target must live in the same space as the ribbon it is
-                  // blended into. A graded ribbon is ABSOLUTE, so the road's
-                  // deck height is the right target — but a way shorter than
-                  // two profile samples has no profile (levelWay returns null)
-                  // and its ribbon is RELATIVE, draped onto the ground later.
-                  // Blending the absolute deck into that mixed 221 m of
-                  // elevation into a 20 cm layer offset, and the chunk drape
-                  // then added the ground ON TOP: every short footway stub
-                  // beside a carriageway became a striped tower two hundred
-                  // metres tall ("ty věci vysoké ve vzduchu"). Visible only
-                  // since the carriageways widened — the stubs used to sit
-                  // outside the blend's reach.
-                  bestW = w;
-                  bestT = gy2 + LAYER_Y.road - 0.04
-                    - (graded ? 0 : terrain.heightAt(X, Z));
-                }
-              }
-            }
+            if (dk < d) { d = dk; s2 = al + L * t; side = (X - ax2) * ez - (Z - az2) * ex >= 0 ? 1 : 0; }
             al += L;
           }
+          if (d >= hwr + (vg ? KBLEND + FLAT + BAY_W : BLEND)) continue;
+          // is it a kerbed street just here?
+          let lift = -0.04, w = d <= hwr ? 1 : 1 - (d - hwr) / BLEND, kerbed = false;
+          let xo = d - hwr, band = 0;      // metres past the kerb line, and its band (footPullW)
+          if (vg) {
+            const v = vergeAt(r, s2, side);
+            if (v.u) {
+              const x = d - hwr - bayAt(r, s2, side ? 1 : -1);
+              lift = vergeLift(v.w, v.drop, x) + FOOT_LIFT;
+              w = x <= FLAT ? 1 : x >= FLAT + KBLEND ? 0 : 1 - (x - FLAT) / KBLEND;
+              kerbed = true; xo = x; band = v.w;
+            }
+          }
+          if (w <= bestW) continue;
+          const gy2 = r.br ? bridgeDeckHeight(r, s2, terrain) : roadGradeY(r, s2, terrain);
+          if (gy2 === null || gy2 === undefined) continue;
+          // …and no further off the footway's own level than a street beside
+          // it can be (both sides of the difference are in the ribbon's space,
+          // see below)
+          w = footPullW(w, gy2 + LAYER_Y.road + lift - (graded ? 0 : terrain.heightAt(X, Z)) - y, xo, band);
+          if (w <= bestW) continue;
+          // The target must live in the same space as the ribbon it is
+          // blended into. A graded ribbon is ABSOLUTE, so the road's
+          // deck height is the right target, but a way shorter than
+          // two profile samples has no profile (levelWay returns null)
+          // and its ribbon is RELATIVE, draped onto the ground later.
+          // Blending the absolute deck into that mixed 221 m of
+          // elevation into a 20 cm layer offset, and the chunk drape
+          // then added the ground ON TOP: every short footway stub
+          // beside a carriageway became a striped tower two hundred
+          // metres tall ("ty věci vysoké ve vzduchu"). Visible only
+          // since the carriageways widened (the stubs used to sit
+          // outside the blend's reach).
+          bestW = w; up = kerbed;
+          bestT = gy2 + LAYER_Y.road + lift - (graded ? 0 : terrain.heightAt(X, Z));
         }
         if (bestW > 0) y += (bestT - y) * bestW;
+        if (up && bestW > 0.5) (footUp ??= new Uint8Array(q.length))[i] = 1;
         footY[i] = y;
       }
     }
   }
+  // ---- the lane coordinate (see TriSink.ln and js/surfaces.js) ---------------
+  // Across: 0 at the left lane boundary, 1 per lane, so the shader finds the
+  // wheel tracks at a quarter and three quarters of every lane and the drip
+  // line down its middle. Along: how worn, by class, rising toward a junction
+  // mouth where everything brakes and waits.
+  const lanesN = !f.d ? 0 : f.ow ? Math.max(1, f.ln ?? Math.round((f.w ?? 6) / 3.4))
+    : (f.lf && f.lb) ? f.lf + f.lb : Math.max((f.w ?? 6) < 5.5 ? 1 : 2, f.ln ?? 0);
+  const usable = Math.max(2.4, (f.w ?? 6) - 1.2);
+  const laneW = usable / (lanesN || 1);
+  const uL = 0.25 + ((-hw + usable / 2) / laneW) / 16, uR = 0.25 + ((hw + usable / 2) / laneW) / 16;
+  const wear0 = WEAR[f.t] ?? 0;
+  const zones = f._jz;
+  const wearAt = (d) => {
+    if (!lanesN || !wear0) return 0;
+    let w = wear0;
+    if (zones) {
+      const s = d + s0;
+      let near = 1e9;
+      for (let k = 0; k < zones.length; k++) near = Math.min(near, Math.abs(s - zones[k]));
+      if (near < 18) w += 0.34 * (1 - near / 18);
+    }
+    return Math.min(1, w);
+  };
+  const ys = new Float32Array(q.length);      // the deck at every station, for what lies on it
+  for (let i = 0; i < q.length; i++) ys[i] = footY ? footY[i] : baseY + elev(along[i], q[i][0], q[i][1]);
+  const ln = sink.ln;
+  // The stretches of footway piece i that are NOT on a carriageway: found on
+  // eight samples, each boundary then bisected to a centimetre, and drawn as
+  // the slab the whole piece would have been (deck, two edges, and a face
+  // across the cut end, toward the road).
+  const footPieces = (i) => {
+    const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
+    const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
+    const sl = Math.hypot(bx - ax, bz - az) || 1e-6, ux = (bx - ax) / sl, uz = (bz - az) / sl;
+    const on = (t) => onDeck(fcell, f, ax + (bx - ax) * t, az + (bz - az) * t, 0.02);
+    const edge = (off, onT) => {
+      for (let k = 0; k < 6; k++) { const m = (off + onT) / 2; if (on(m)) onT = m; else off = m; }
+      return off;
+    };
+    const piece = (t0, t1) => {
+      if ((t1 - t0) * sl < 0.08) return;
+      const x0 = ax + (bx - ax) * t0, z0 = az + (bz - az) * t0, x1 = ax + (bx - ax) * t1, z1 = az + (bz - az) * t1;
+      const y0 = ys[i] + (ys[i + 1] - ys[i]) * t0, y1 = ys[i] + (ys[i + 1] - ys[i]) * t1;
+      const p0x = (pax + (pbx - pax) * t0) * hw, p0z = (paz + (pbz - paz) * t0) * hw;
+      const p1x = (pax + (pbx - pax) * t1) * hw, p1z = (paz + (pbz - paz) * t1) * hw;
+      sink.at(surf);
+      sink.quad(x0 - p0x, y0, z0 - p0z, x1 - p1x, y1, z1 - p1z, x1 + p1x, y1, z1 + p1z, x0 + p0x, y0, z0 + p0z, cr, cg, cb);
+      const low = (x, z, y) => Math.min(terrain.heightAt(x, z) - 0.05, y - 0.02);
+      for (const e of [-1, 1]) {
+        const X0 = x0 + p0x * e, Z0 = z0 + p0z * e, X1 = x1 + p1x * e, Z1 = z1 + p1z * e;
+        slabEdge(sink, fcell, f, X0, Z0, X1, Z1, y0, y1, pax * e, paz * e, pbx * e, pbz * e, terrain, surf, cr, cg, cb);
+      }
+      sink.at(SURF.concrete);
+      if (t0 > 0) wallQuad4(sink, x0 - p0x, z0 - p0z, x0 + p0x, z0 + p0z, y0, y0,
+        low(x0 - p0x, z0 - p0z, y0), low(x0 + p0x, z0 + p0z, y0), -ux, -uz, KERB_R, KERB_G, KERB_B);
+      if (t1 < 1) wallQuad4(sink, x1 - p1x, z1 - p1z, x1 + p1x, z1 + p1z, y1, y1,
+        low(x1 - p1x, z1 - p1z, y1), low(x1 + p1x, z1 + p1z, y1), ux, uz, KERB_R, KERB_G, KERB_B);
+      sink.at(surf);
+    };
+    const N = 8;
+    let start = on(0) ? -1 : 0;                  // where the stretch off the road began
+    for (let k = 1; k <= N; k++) {
+      const t = k / N, o = on(t);
+      if (start < 0 && !o) start = edge(t, (k - 1) / N);
+      else if (start >= 0 && o) { piece(start, edge((k - 1) / N, t)); start = -1; }
+    }
+    if (start >= 0) piece(start, 1);
+  };
   for (let i = 0; i < q.length - 1; i++) {
-    const y0 = footY ? footY[i] : baseY + elev(along[i], q[i][0], q[i][1]);
-    const y1 = footY ? footY[i + 1] : baseY + elev(along[i + 1], q[i + 1][0], q[i + 1][1]);
+    const y0 = ys[i], y1 = ys[i + 1];
     const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
     const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
-    if (foot && crossesRoad(ax, az, bx, bz)) continue;
+    if (foot && crossesRoad(ax, az, bx, bz)) {
+      // A LIFTED footway is a slab a hand over the ground, and dropping the
+      // whole 4 m piece that touches a carriageway left the slab ending two
+      // metres short of every crossing, with a step down into a hole and the
+      // walker's feet on nothing. Only the part that is ON the asphalt goes.
+      if (footUp && graded && !f.br && (footUp[i] || footUp[i + 1])) footPieces(i);
+      continue;
+    }
     sink.quad(
       ax - pax * hw, y0, az - paz * hw, bx - pbx * hw, y1, bz - pbz * hw,
       bx + pbx * hw, y1, bz + pbz * hw, ax + pax * hw, y0, az + paz * hw, cr, cg, cb);
+    if (lanesN && ln) {
+      // quad(a, b, c, d) is the triangles (a, b, c) and (a, c, d)
+      const v0 = wearAt(along[i]), v1 = wearAt(along[i + 1]), o = ln.length - 12;
+      ln[o] = uL; ln[o + 1] = v0; ln[o + 2] = uL; ln[o + 3] = v1; ln[o + 4] = uR; ln[o + 5] = v1;
+      ln[o + 6] = uL; ln[o + 7] = v0; ln[o + 8] = uR; ln[o + 9] = v1; ln[o + 10] = uR; ln[o + 11] = v0;
+    }
+    // A footway lifted onto a kerbed street's level is a slab standing over
+    // the ground beside it: give it its two edges, or it is a sheet of paving
+    // hovering a hand above the grass.
+    if (footUp && graded && (footUp[i] || footUp[i + 1])) {
+      for (const e of [-1, 1]) {
+        const X0 = ax + pax * hw * e, Z0 = az + paz * hw * e;
+        const X1 = bx + pbx * hw * e, Z1 = bz + pbz * hw * e;
+        slabEdge(sink, fcell, f, X0, Z0, X1, Z1, y0, y1, pax * e, paz * e, pbx * e, pbz * e, terrain, surf, cr, cg, cb);
+      }
+      sink.at(surf);
+    }
     // ---- the kerb: a road has a BODY -------------------------------------
     // Until this existed a road was a floating sheet — a deck 6 to 180 cm
     // above the ground with daylight under its edges, so every gap between the
@@ -1508,7 +2353,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
         sink.quad(X0, y0, Z0, X1, y1, Z1, X1, g1, Z1, X0, g0, Z0, KERB_R, KERB_G, KERB_B);
         sink.quad(X0, g0, Z0, X1, g1, Z1, X1, y1, Z1, X0, y0, Z0, KERB_R, KERB_G, KERB_B);
       }
-      sink.at(surfOfRoad(f));
+      sink.at(surf);
     }
     // Bridge edges: decks run FLAT at BRIDGE_Y now — what sells the bridge is
     // the river sunk below it, so v1's deep girder curtains are gone. A short
@@ -1519,13 +2364,12 @@ function roadRibbon(sink, f, terrain, cell, key) {
       // of a road bridge's, and its parapet is CONCRETE, not near-black steel
       // — the black was what turned the spiral ramp by the Pardubice flyover
       // into a charcoal wall you could see from the station.
-      const foot = FOOT_CLASSES.has(f.t);
-      const b0 = Math.max(0.02, y0 - (foot ? 0.25 : FASCIA));
-      const b1 = Math.max(0.02, y1 - (foot ? 0.25 : FASCIA));
-      const t0 = y0 + (foot ? 1.05 : RAILING_H), t1 = y1 + (foot ? 1.05 : RAILING_H);
+      const b0 = Math.max(0.02, y0 - (isFoot ? 0.25 : FASCIA));
+      const b1 = Math.max(0.02, y1 - (isFoot ? 0.25 : FASCIA));
+      const t0 = y0 + (isFoot ? 1.05 : RAILING_H), t1 = y1 + (isFoot ? 1.05 : RAILING_H);
       const sr = cr * 0.72, sg = cg * 0.72, sb = cb * 0.72;
       let pr = lr, pg = lg, pb = lb;
-      if (foot) { _c.setHex(0x93908a); pr = _c.r; pg = _c.g; pb = _c.b; }
+      if (isFoot) { _c.setHex(0x93908a); pr = _c.r; pg = _c.g; pb = _c.b; }
       for (const e of [-1, 1]) {
         const X0 = ax + pax * hw * e, Z0 = az + paz * hw * e;
         const X1 = bx + pbx * hw * e, Z1 = bz + pbz * hw * e;
@@ -1536,9 +2380,101 @@ function roadRibbon(sink, f, terrain, cell, key) {
       }
     }
   }
-  capDisc(sink, q[0][0], baseY + elev(0, q[0][0], q[0][1]), q[0][1], hw, cr, cg, cb);
-  capDisc(sink, q[q.length - 1][0], baseY + elev(len, q[q.length - 1][0], q[q.length - 1][1]),
-    q[q.length - 1][1], hw, cr, cg, cb);
+  // (a footway that ENDS on a carriageway, as most mapped crossings do, at the
+  // street's centreline: its round end is cut away with the rest of it there,
+  // or a disc of paving lies in the middle of the road at pavement height)
+  const capOff = (i) => foot && !f.br && onDeck(fcell, f, q[i][0], q[i][1], 0.3);
+  if (!capOff(0)) capDisc(sink, q[0][0], ys[0], q[0][1], hw, cr, cg, cb);
+  if (!capOff(q.length - 1)) capDisc(sink, q[q.length - 1][0], ys[q.length - 1], q[q.length - 1][1], hw, cr, cg, cb);
+  if (bridge) bridgeSupports(sink, f, fr, ys, hw, cell, terrain, isFoot);
+  if (f._isl && graded) roundIslandInto(sink, f._isl[0], f._isl[1], f._isl[2], ys[0], terrain);
+  // The deck at a distance along the frame, read off the ribbon's OWN stations.
+  // The levelled profile is a curve and the ribbon is its chords: in a sag the
+  // curve lies under the chord, so anything placed by the profile (a dash, a
+  // manhole) sank into the asphalt by up to a centimetre there. Reading the
+  // chord puts it on the surface that was actually drawn, which is what lets
+  // paint lie 3.5 cm over its deck instead of 6.
+  let yi = 0;
+  const yAt = (d) => {
+    if (d <= 0) return ys[0];
+    if (d >= len) return ys[q.length - 1];
+    if (along[yi] > d) yi = 0;
+    while (yi < q.length - 2 && along[yi + 1] < d) yi++;
+    const t = (d - along[yi]) / ((along[yi + 1] - along[yi]) || 1);
+    return ys[yi] + (ys[yi + 1] - ys[yi]) * t;
+  };
+  const vg = f.d && !f.br && graded ? streetOf(f) : null;
+  // ---- the street beside it: kerb, pavement, covers ---------------------------
+  if (vg) {
+    // (on the NOMINAL deck, without the class's hair of lift: a pavement is one
+    // level round a corner whatever the two streets are)
+    const rl = baseY - LAYER_Y.road;
+    vergeInto(sink, f, vg, terrain, (s) => {
+      const d = s - s0;
+      // inside the trimmed mouth the ribbon has no stations: the profile itself
+      return (d >= 0 && d <= len ? yAt(d) : baseY + (roadGradeY(f, s, terrain) ?? ys[0] - baseY)) - rl;
+    });
+    // …closed round a dead end: the asphalt ends in a half disc, and a street
+    // that stops has its kerb carried round the end of it
+    for (const end of [0, 1]) {
+      if (!(end ? f._de1 : f._de0)) continue;
+      const i = end ? q.length - 1 : 0, sEnd = end ? f._len : 0;
+      const v0 = vergeAt(f, sEnd, 0), w0 = v0.w, t0 = v0.t;
+      const v1 = vergeAt(f, sEnd, 1), w1 = v1.w, t1 = v1.t;
+      if (w0 < 0.3 || w1 < 0.3) continue;
+      const cx = q[i][0], cz = q[i][1], y = ys[i] - rl;
+      // from the side-0 kerb (-per) round the far end to the side-1 kerb (+per)
+      const a0 = Math.atan2(-per[i][1], -per[i][0]);
+      const k2 = i === 0 ? 1 : i - 1;
+      const fx = (q[i][0] - q[k2][0]), fz = (q[i][1] - q[k2][1]);   // outward along the way
+      // sweep the half that faces outward
+      const mid = Math.atan2(fz, fx);
+      let da = mid - a0;
+      while (da > Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      const sweep = da > 0 ? Math.PI : -Math.PI;
+      const N = 8, cols = kerbCols();
+      const A = { x: 0, z: 0, nx: 0, nz: 0, y, w: 0, drop: 0 }, B = { x: 0, z: 0, nx: 0, nz: 0, y, w: 0, drop: 0 };
+      const at = (o, k) => {
+        const a = a0 + sweep * (k / N);
+        o.nx = Math.cos(a); o.nz = Math.sin(a);
+        o.x = cx + o.nx * hw; o.z = cz + o.nz * hw;
+        o.w = w0 + (w1 - w0) * (k / N);
+      };
+      for (let k = 0; k < N; k++) {
+        at(A, k); at(B, k + 1);
+        // the asphalt out to the kerb line itself: the stock end cap is an
+        // octagon, and its flats fall a hand short of a round kerb
+        sink.at(surf);
+        sink.triFacing(cx, ys[i], cz, A.x, ys[i], A.z, B.x, ys[i], B.z, 0, 1, 0, cr, cg, cb);
+        kerbRun(sink, A, B, t0 === 2 && t1 === 2 ? 2 : 1, terrain, cols);
+      }
+    }
+    // Manhole covers down the lane and gully grates at the kerb, where a town
+    // has them: positions from the way's own id, so the same cover is in the
+    // same place on every machine and every rebuild.
+    if (surf === SURF.asphalt || surf === SURF.cobble || surf === SURF.paving) {
+      const seed = f._id ?? 0;
+      for (let s = 9 + rnd(seed, 71) * 30, k = 0; s < len - 6; s += 34 + rnd(seed, 80 + k) * 26, k++) {
+        const sFull = s + s0;
+        if (inZone(f, sFull) || !vergeAt(f, sFull, 0).u) continue;
+        walkAt(fr, s, _WA);
+        const off = (rnd(seed, 300 + k) < 0.5 ? -1 : 1) * Math.min(hw - 1.2, laneW * (0.5 + (rnd(seed, 500 + k) - 0.5) * 0.3));
+        const x = _WA.x + _WA.dz * off, z = _WA.z - _WA.dx * off;
+        if (onCarriageway(cell, f, x, z, 0.4)) continue;       // somebody else's asphalt lies over it
+        lidInto(sink, x, yAt(s) + 0.006, z, 0.3);
+      }
+      for (let s = 5 + rnd(seed, 73) * 20, k = 0; s < len - 4; s += 24 + rnd(seed, 90 + k) * 12, k++) {
+        const sFull = s + s0, side = (k + (seed & 1)) & 1, e = side ? 1 : -1;
+        const v = vergeAt(f, sFull, side);
+        if (inZone(f, sFull) || !v.u || v.w < 0.3 || v.drop > 0.3 || bayAt(f, sFull, e) > 0.05) continue;
+        walkAt(fr, s, _WA);
+        const off = (hw - 0.26) * e;
+        grateInto(sink, _WA.x + _WA.dz * off, yAt(s) + 0.006, _WA.z - _WA.dx * off, _WA.dx, _WA.dz);
+      }
+    }
+    sink.at(surf);
+  }
   // ---- edge lines ----
   // Emitted from the SAME mitred frame as the deck, so they follow every bend
   // and every terrain split the ribbon does, and they sit at LAYER_Y.marking —
@@ -1561,24 +2497,27 @@ function roadRibbon(sink, f, terrain, cell, key) {
     const covered = (x, z, dx2, dz2) => crossedBy(cell, f, x, z, dx2, dz2, -0.4)
       // …and a road running THROUGH a junction stops its lines there, the way a
       // real one stops at the give-way line rather than painting over the box.
-      // The reach is the pad's HULL radius — the old node-centre radius let a
-      // line clip the pad's corners, which is half the lattice at any big
-      // crossing.
-      || js.some((j) => (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 0.6) ** 2);
+      // The test is the pad's own OUTLINE now that it has one worth the name:
+      // the line stops exactly at the mouth, where the kerb radius begins.
+      || !!inPads(js, x, z);
     for (const side of [-1, 1]) {
+      // a kerbed street has no edge line: the kerb IS the edge. The white line
+      // is what a road has where its edge is a verge.
+      const sideIdx = side > 0 ? 1 : 0;
       for (let i = 0; i < q.length - 1; i++) {
         // Break the line short of each end. OSM splits a way at every junction,
         // so a stripe run right to the last vertex would meet the cross street's
         // stripe head-on and paint a white lattice over the intersection. Real
         // edge lines stop at the give-way line for the same reason.
         if (along[i] < EDGE_END || along[i + 1] > len - EDGE_END) continue;
-        const ya = LAYER_Y.marking + elev(along[i], q[i][0], q[i][1]);
-        const yb = LAYER_Y.marking + elev(along[i + 1], q[i + 1][0], q[i + 1][1]);
+        if (vg && vergeAt(f, (along[i] + along[i + 1]) / 2 + s0, sideIdx).w > 0.3) continue;
+        const ya = ys[i] + MARK, yb = ys[i + 1] + MARK;
         const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
         const ax = q[i][0] + pax * off * side, az = q[i][1] + paz * off * side;
         const bx = q[i + 1][0] + pbx * off * side, bz = q[i + 1][1] + pbz * off * side;
         const sL = Math.hypot(bx - ax, bz - az) || 1e-9;
-        if (covered((ax + bx) / 2, (az + bz) / 2, (bx - ax) / sL, (bz - az) / sL)) continue;
+        if (covered((ax + bx) / 2, (az + bz) / 2, (bx - ax) / sL, (bz - az) / sL)
+          || inPads(js, ax, az) || inPads(js, bx, bz)) continue;
         // the stripe's own width runs along the same perpendicular as the inset
         sink.quad(
           ax - pax * EDGE_HW, ya, az - paz * EDGE_HW,
@@ -1589,6 +2528,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
     }
   }
   if (f.d && (f.w ?? 0) >= 5.5 && DASH_CLASSES.has(f.t)) {
+    sink.at(SURF.paint);
     _c.setHex(COLORS.marking);
     const mr = _c.r, mg = _c.g, mb = _c.b;
     const js2 = junctionsNear(f);
@@ -1599,7 +2539,6 @@ function roadRibbon(sink, f, terrain, cell, key) {
     // single centre line (per-direction splits need lanes:forward, later).
     const lanes = f.ln ?? (f.ow ? Math.max(1, Math.round((f.w ?? 6) / 3.4)) : 2);
     const seps = [];
-    const usable = (f.w ?? 6) - 1.2;
     if (f.ow && lanes >= 2) {
       for (let k2 = 1; k2 < lanes; k2++) seps.push((k2 / lanes - 0.5) * usable);
     } else if (!f.ow && f.lf && f.lb && f.lf + f.lb >= 3) {
@@ -1611,7 +2550,7 @@ function roadRibbon(sink, f, terrain, cell, key) {
       for (let k2 = 1; k2 < n; k2++) {
         seps.push({ off: (k2 / n - 0.5) * usable, solid: k2 === f.lb });
       }
-    } else seps.push(0);
+    } else if (!f.ow) seps.push(0);
     for (const sep of seps) {
       const lo = typeof sep === 'object' ? sep.off : sep;
       const solid = typeof sep === 'object' && sep.solid;
@@ -1625,10 +2564,10 @@ function roadRibbon(sink, f, terrain, cell, key) {
       walkAt(fr, s, _WA); walkAt(fr, s + dl, _WB);
       const ox = _WA.dz * lo, oz = -_WA.dx * lo;    // this separator's offset
       // a centre line does not run through a junction either — tested at BOTH
-      // ends against the pad's hull radius (a dash starting outside the old
-      // node radius still landed across the pad), and never painted onto
-      // another carriageway lying over this one: the diagonal white chaos at
-      // every dual-carriageway crossing was exactly these two leaks.
+      // ends against the pad's outline (and a little beyond it, along the
+      // dash), and never painted onto another carriageway lying over this one:
+      // the diagonal white chaos at every dual-carriageway crossing was exactly
+      // these two leaks.
       // a junction only silences the dashes of roads that END there or pass
       // as strangers — a THROUGH arm keeps its line as the sparse guide
       // dashes every real signalised box paints across the middle
@@ -1644,13 +2583,15 @@ function roadRibbon(sink, f, terrain, cell, key) {
       // the ring's short segments fell entirely inside the blank radius —
       // the gaps in the circle), and nothing "crosses" a ring but its own
       // tangential exits
-      const rj = (x, z) => !f.rb && js2.some((j) =>
-        (x - j.x) ** 2 + (z - j.z) ** 2 < ((j.padR ?? j.pad) + 1.5) ** 2 && !through(j));
-      if (rj(_WA.x + ox, _WA.z + oz) || rj(_WB.x + ox, _WB.z + oz)) continue;
+      const rj = (x, z, sgn) => {
+        if (f.rb) return false;
+        const j = inPads(js2, x, z) ?? inPads(js2, x + _WA.dx * 1.5 * sgn, z + _WA.dz * 1.5 * sgn);
+        return !!j && !through(j);
+      };
+      if (rj(_WA.x + ox, _WA.z + oz, -1) || rj(_WB.x + ox, _WB.z + oz, 1)) continue;
       if (!f.rb && crossedBy(cell, f, (_WA.x + _WB.x) / 2 + ox, (_WA.z + _WB.z) / 2 + oz,
         _WA.dx, _WA.dz, -0.4)) continue;
-      const ya = LAYER_Y.marking + elev(s, _WA.x + ox, _WA.z + oz);
-      const yb = LAYER_Y.marking + elev(s + dl, _WB.x + ox, _WB.z + oz);
+      const ya = yAt(s) + MARK, yb = yAt(s + dl) + MARK;
       const px = _WA.dz * DASH_HW, pz = -_WA.dx * DASH_HW;
       sink.quad(
         _WA.x + ox - px, ya, _WA.z + oz - pz, _WB.x + ox - px, yb, _WB.z + oz - pz,
@@ -1658,8 +2599,8 @@ function roadRibbon(sink, f, terrain, cell, key) {
         mr, mg, mb);
       }
     }
-  } else if (f.t === 'runway') runwayPaint(sink, fr, hw);
-  else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr);
+  } else if (f.t === 'runway') runwayPaint(sink, fr, hw, yAt);
+  else if (f.t === 'taxiway' || f.t === 'taxilane') taxiPaint(sink, fr, yAt);
   // everything this ribbon emitted — deck, kerbs, fascia, parapets, lane
   // paint — is already at its absolute height
   if (mark >= 0) sink.fixFrom(mark);
@@ -1735,123 +2676,142 @@ function paintQuad(sink, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b
   else sink.quad(dx, dy, dz, cx, cy, cz, bx, by, bz, ax, ay, az, r, g, b);
 }
 
-// One white transverse bar per drivable arm mouth — the stop line that makes
-// an empty junction box read as a JUNCTION instead of a hole in the paint.
-function stopBars(sink, node, deckAt, terrain, ring) {
-  if (!terrain) return;
+// ---- what is painted across a mouth ----------------------------------------
+// A stop line where the approach is CONTROLLED (a stop sign or a signal), a row
+// of give-way triangles where it yields, and nothing at all where nothing in
+// the data says either: a bar on every arm of every junction said the whole
+// town was signalised. The control of each leg is worked out in js/streets.js
+// from the tiles' own sign and signal nodes.
+//
+// Both sit just OUTSIDE the mouth, on the approach side of the carriageway
+// only: Czech V5 and V2 lines span the lanes that arrive, not the ones leaving.
+function mouthMarks(sink, o, deckAt, cell) {
+  const legs = o._legs;
+  if (!legs) return;
   sink.at(SURF.paint);
   _c.setHex(COLORS.marking);
   const mr = _c.r, mg = _c.g, mb = _c.b;
-  for (const a of node.arms) {
-    if (!a.r.d || (a.r.w ?? 0) < 4.5 || a.r.rb) continue;
-    const p = a.r.p;
-    const i = a.i;
-    const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
-    let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
-    if (!a.end) {
-      const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
-      dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
+  for (const lg of legs) {
+    const r = lg.r;
+    if (!lg.ctl || !r.d || r.rb || lg.hw < 2.2) continue;
+    // a oneway flows p[0] to p[last]; dir > 0 means this leg LEAVES along it
+    if (r.ow && lg.dir > 0) continue;
+    const ux = lg.ux, uz = lg.uz;                 // away from the node
+    const rx = uz, rz = -ux;                      // right of a driver coming in
+    const c0 = r.ow ? -(lg.hw - 0.4) : 0.12, c1 = lg.hw - 0.4;
+    if (c1 - c0 < 1.2) continue;
+    const at = lg.m + 0.55;                       // metres out from the node
+    const bx = lg.nx + ux * at, bz = lg.nz + uz * at;
+    // A zebra often lies right at a side street's mouth, and the teeth were
+    // painted over its stripes. The crossing already says who waits.
+    let zebra = false;
+    for (const c of cell?.crossings ?? []) {
+      if ((c.p[0][0] - bx) ** 2 + (c.p[0][1] - bz) ** 2 < 12) { zebra = true; break; }
     }
-    const L = Math.hypot(dx, dz) || 1;
-    const ux = dx / L, uz = dz / L;
-    for (const dir of a.end ? [1] : [1, -1]) {
-      const bx = node.x + ux * dir * (node.pad + 1.1);
-      const bz = node.z + uz * dir * (node.pad + 1.1);
-      // a through arm gets a candidate bar on BOTH sides of its node, and at
-      // a cluster member one of them lands INSIDE the box — those were the
-      // torn white shards in the middle of Jana Pernera
-      if (ring && pointInPolygon(bx, bz, ring)) continue;
-      const hw = (a.r.w ?? 3) / 2 - 0.45;
-      if (hw < 1) continue;
-      const y = deckAt(bx, bz) + 0.045;
-      const px2 = -uz, pz2 = ux;
-      const t = 0.25;                         // half thickness along the arm
-      paintQuad(sink,
-        bx - px2 * hw - ux * dir * t, y, bz - pz2 * hw - uz * dir * t,
-        bx + px2 * hw - ux * dir * t, y, bz + pz2 * hw - uz * dir * t,
-        bx + px2 * hw + ux * dir * t, y, bz + pz2 * hw + uz * dir * t,
-        bx - px2 * hw + ux * dir * t, y, bz - pz2 * hw + uz * dir * t,
-        mr, mg, mb);
+    if (zebra) continue;
+    const P = (a, c) => [bx + ux * a + rx * c, bz + uz * a + rz * c];
+    if (lg.ctl === 'give') {
+      // triangles pointing at whoever is arriving
+      for (let c = c0 + 0.1; c + 0.5 <= c1; c += 0.75) {
+        const p0 = P(0, c), p1 = P(0, c + 0.5), p2 = P(0.62, c + 0.25);
+        const y = deckAt((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2) + MARK;
+        sink.triFacing(p0[0], y, p0[1], p1[0], y, p1[1], p2[0], y, p2[1], 0, 1, 0, mr, mg, mb);
+      }
+    } else {
+      const p0 = P(0, c0), p1 = P(0, c1), p2 = P(0.5, c1), p3 = P(0.5, c0);
+      const y = deckAt(bx + rx * (c0 + c1) / 2, bz + rz * (c0 + c1) / 2) + MARK;
+      paintQuad(sink, p0[0], y, p0[1], p1[0], y, p1[1], p2[0], y, p2[1], p3[0], y, p3[1], mr, mg, mb);
     }
   }
   sink.at(SURF.asphalt);
 }
 
-// The pad of a whole CLUSTER — several nodes, one surface. Same recipe as a
-// single pad (hull fan, pointwise deck, widest arm's colour) over the union;
-// what it buys is everything BETWEEN the member nodes: no slivers of ground,
-// no mismatched shades, no orphaned paint inside the crossing.
-function clusterPad(sink, cl, terrain) {
+// ---- one pad, single node or cluster ------------------------------------------
+// The outline is no longer convex (it has a kerb radius in every corner), so
+// it is triangulated by ear clipping instead of fanned from its first corner,
+// then subdivided so the pointwise deck has vertices to live on. Everything a
+// junction is made of goes in here: the surface, the kerb round it, the paint.
+function padInto(sink, o, ring, deckOf, terrain, big, cell) {
+  if (!ring || ring.length < 3) return;
   sink.at(SURF.asphalt);
-  const ring = clusterHull(cl);
-  if (!ring) return;
-  let padT = 'residential', padW = 0;
-  for (const m of cl.members) {
+  // the widest drivable arm names the surface: a pad in residential grey in
+  // the middle of a primary read as a patch of different tarmac at every
+  // big crossing
+  let padT = 'residential', padW = 0, rank = 0;
+  for (const m of o.members ?? [o]) {
     for (const a of m.arms) {
-      if (a.r.d && (a.r.w ?? 0) > padW && COLORS.road[a.r.t]) { padW = a.r.w; padT = a.r.t; }
+      if (!a.r.d) continue;
+      rank = Math.max(rank, roadRank(a.r));
+      if ((a.r.w ?? 0) > padW && COLORS.road[a.r.t]) { padW = a.r.w; padT = a.r.t; }
     }
   }
   _c.setHex(COLORS.road[padT] ?? COLORS.road.residential);
-  const lift = LAYER_Y.road + 0.012;
+  const pr = _c.r, pg = _c.g, pb = _c.b;
+  // a hair above the ribbons, never fighting: over the highest-ranked arm's own lift
+  const lift = LAYER_Y.road + 0.012 + rank * RANK_LIFT;
+  const faces = THREE.ShapeUtils.triangulateShape(ring.map(([x, z]) => new THREE.Vector2(x, z)), []);
   const fan = [];
-  for (let i = 1; i < ring.length - 1; i++) {
-    fan.push(ring[0][0], 0, ring[0][1],
-      ring[i][0], 0, ring[i][1],
-      ring[i + 1][0], 0, ring[i + 1][1]);
+  for (const [a, b, c] of faces) {
+    fan.push(ring[a][0], 0, ring[a][1], ring[b][0], 0, ring[b][1], ring[c][0], 0, ring[c][1]);
   }
-  const tp2 = tessTriangles(fan, fan.length / 9, 4);
-  const deckAt = (x, z) => (terrain ? clusterDeckY(cl, x, z, terrain) : 0) + lift;
+  if (!fan.length) return;
+  const tp = tessTriangles(fan, fan.length / 9, 4);
+  // ---- the pad is the CONTINUATION of its arms, pointwise ------------------
+  // One flat height was tried and looked like torn paper: the arms climb to
+  // the node along their own levelled grades, so a pad at any single height
+  // meets every one of them at a different step. What a junction's surface
+  // actually is: at every point, the deck of the NEAREST arm. That lives
+  // in geo.junctionDeckY, because the physics has to stand on the same numbers
+  // this is drawn from.
+  const deckAt = (x, z) => (terrain ? deckOf(x, z) : 0) + lift;
   const mark = sink.mark();
-  for (let k = 0; k < tp2.length; k += 9) {
+  for (let k = 0; k < tp.length; k += 9) {
     sink.triFacing(
-      tp2[k], deckAt(tp2[k], tp2[k + 2]), tp2[k + 2],
-      tp2[k + 3], deckAt(tp2[k + 3], tp2[k + 5]), tp2[k + 5],
-      tp2[k + 6], deckAt(tp2[k + 6], tp2[k + 8]), tp2[k + 8],
-      0, 1, 0, _c.r, _c.g, _c.b);
+      tp[k], deckAt(tp[k], tp[k + 2]), tp[k + 2],
+      tp[k + 3], deckAt(tp[k + 3], tp[k + 5]), tp[k + 5],
+      tp[k + 6], deckAt(tp[k + 6], tp[k + 8]), tp[k + 8],
+      0, 1, 0, pr, pg, pb);
   }
-  for (const m of cl.members) stopBars(sink, m, deckAt, terrain, ring);
-  if (terrain) boxFurniture(sink, cl, ring, deckAt);
-  if (terrain) sink.fixFrom(mark);
+  if (terrain) {
+    // the kerb stands on the ARMS' level (what the ribbon bands either side of
+    // each mouth stand on), not on the pad's hair of lift
+    ringKerbInto(sink, o, (x, z) => deckOf(x, z) + LAYER_Y.road, terrain);
+    mouthMarks(sink, o, deckAt, cell);
+    if (big) boxFurniture(sink, o, ring, deckAt);
+    sink.fixFrom(mark);
+  }
+}
+
+// The pad of a whole CLUSTER: several nodes, one surface. What it buys is
+// everything BETWEEN the member nodes: no slivers of ground, no mismatched
+// shades, no orphaned paint inside the crossing.
+function clusterPad(sink, cl, terrain, cell) {
+  padInto(sink, cl, clusterHull(cl), (x, z) => clusterDeckY(cl, x, z, terrain), terrain, true, cell);
 }
 
 // ---- the paint INSIDE a big crossing --------------------------------------
 // What the aerial photo of náměstí Jana Pernera actually shows on the box:
-// thin GUIDE DASHES connecting each entry to its continuation across, and a
-// straight-ahead ARROW on each approach lane before the stop line. Both are
-// derived from the cluster's own arms — one generator, not per-road patches.
+// thin GUIDE DASHES connecting each entry to its continuation across, and an
+// ARROW on each approach lane before the stop line. Both are derived from the
+// cluster's own legs: one generator, not per-road patches.
 function boxFurniture(sink, cl, ring, deckAt) {
   sink.at(SURF.paint);
   _c.setHex(COLORS.marking);
   const mr = _c.r, mg = _c.g, mb = _c.b;
-  // gather every drivable mouth: position on the hull edge + direction INTO the box
+  // every drivable mouth: position on the outline + direction INTO the box
   const mouths = [];
-  for (const m of cl.members) {
-    for (const a of m.arms) {
-      if (!a.r.d || (a.r.w ?? 0) < 5 || a.r.rb) continue;
-      const p = a.r.p;
-      const i = a.i;
-      const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
-      let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
-      if (!a.end) {
-        const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
-        dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
-      }
-      const L = Math.hypot(dx, dz) || 1;
-      const ux = dx / L, uz = dz / L;             // away from the node
-      // travel direction at the node (a oneway flows p[0] → p[last])
-      const tvx = a.end && a.i !== 0 ? -ux : ux;
-      const tvz = a.end && a.i !== 0 ? -uz : uz;
-      for (const dir of a.end ? [1] : [1, -1]) {
-        const ix = -ux * dir, iz = -uz * dir;     // INTO the box
-        const fwdIn = (ix * tvx + iz * tvz) > 0;
-        mouths.push({
-          x: m.x + ux * dir * m.pad, z: m.z + uz * dir * m.pad,
-          ix, iz, w: a.r.w ?? 6, a, node: m, dir, used: false, fwdIn,
-          // a oneway ENTERS the box at this mouth when its travel points in
-          entering: !a.r.ow || fwdIn,
-        });
-      }
-    }
+  for (const lg of cl._legs ?? []) {
+    const r = lg.r;
+    if (!r.d || (r.w ?? 0) < 5 || r.rb) continue;
+    const ix = -lg.ux, iz = -lg.uz;               // INTO the box
+    // forward (p[0] to p[last]) traffic comes IN along a leg that runs against it
+    const fwdIn = lg.dir < 0;
+    mouths.push({
+      x: lg.nx + lg.ux * lg.m, z: lg.nz + lg.uz * lg.m,
+      ix, iz, w: r.w ?? 6, lg, used: false, fwdIn,
+      // a oneway ENTERS the box at this mouth when its travel points in
+      entering: !r.ow || fwdIn,
+    });
   }
   // ---- guide dashes: LONGEST spans first --------------------------------
   // Greedy nearest-pairing ate the mouths on 7 m hops between neighbouring
@@ -1882,7 +2842,7 @@ function boxFurniture(sink, cl, ring, deckAt) {
     const HW = 0.09;
     // one guide line per lane of the ENTERING side — the aerial photo shows
     // the lane separators continuing across the box, not one lone line
-    const r2 = mo.a.r;
+    const r2 = mo.lg.r;
     const lo2 = [];
     if (r2.ow && mo.entering) {
       const n = r2.ln ?? Math.max(1, Math.round((r2.w ?? 6) / 3.4));
@@ -1894,8 +2854,8 @@ function boxFurniture(sink, cl, ring, deckAt) {
       const bx2 = mo.x + px2 * off, bz2 = mo.z + pz2 * off;
       const midx = bx2 + ux * (d + 0.7), midz = bz2 + uz * (d + 0.7);
       if (!pointInPolygon(midx, midz, ring)) continue;   // stay ON the box
-      const y0 = deckAt(bx2 + ux * d, bz2 + uz * d) + 0.05;
-      const y1 = deckAt(bx2 + ux * (d + 1.4), bz2 + uz * (d + 1.4)) + 0.05;
+      const y0 = deckAt(bx2 + ux * d, bz2 + uz * d) + MARK;
+      const y1 = deckAt(bx2 + ux * (d + 1.4), bz2 + uz * (d + 1.4)) + MARK;
       paintQuad(sink,
         bx2 + ux * d - px2 * HW, y0, bz2 + uz * d - pz2 * HW,
         bx2 + ux * (d + 1.4) - px2 * HW, y1, bz2 + uz * (d + 1.4) - pz2 * HW,
@@ -1904,12 +2864,16 @@ function boxFurniture(sink, cl, ring, deckAt) {
         mr, mg, mb);
     }
   }
-  // ---- arrows: one PER APPROACH LANE, Czech length ------------------------
-  // "jen takový trojúhelníček a jen jeden na vozovku" — a real V9a arrow is
-  // ~5 m long and every approach lane wears its own. Exits get none.
+  // ---- arrows: where the DATA has them ------------------------------------
+  // A real V9a arrow is ~5 m long and each approach lane wears its own. They
+  // used to be painted on every approach of every big crossing, straight-ahead
+  // by default, which is not what a street has: an arrow is there because the
+  // lane is reserved for a movement. So they are drawn where OSM carries
+  // turn:lanes, and on the multi-lane approaches of a signalled box (where the
+  // lanes ARE sorted, tagged or not). Exits get none.
   for (const mo of mouths) {
     if (!mo.entering) continue;
-    const r = mo.a.r;
+    const r = mo.lg.r;
     const rx = -mo.iz, rz = mo.ix;                // right of travel-in
     const usable = (r.w ?? 6) - 1.2;
     // how many lanes ARRIVE at this mouth, where they sit, and their turns
@@ -1930,13 +2894,14 @@ function boxFurniture(sink, cl, ring, deckAt) {
       offAt = (k) => (0.5 - (k + 0.5) / N) * usable;   // from the right edge in
       turnsSpec = (mo.fwdIn ? r.tf : r.tb) ?? null;
     }
+    if (!turnsSpec && !(mo.lg.ctl === 'signal' && nIn >= 2)) continue;
     const laneTurns = turnsSpec ? turnsSpec.split('|') : null;
     for (let k = 0; k < nIn; k++) {
       const off = offAt(k);
-      const ax2 = mo.x - mo.ix * 5.6 + rx * off;  // stand clear of the stop line
-      const az2 = mo.z - mo.iz * 5.6 + rz * off;
+      const ax2 = mo.x - mo.ix * 6.4 + rx * off;  // stand clear of the stop line
+      const az2 = mo.z - mo.iz * 6.4 + rz * off;
       if (pointInPolygon(ax2, az2, ring)) continue;  // clustered mouths overlap
-      const y = deckAt(ax2, az2) + 0.055;
+      const y = deckAt(ax2, az2) + MARK;
       const S = (u, v) => [ax2 + mo.ix * u + rx * v, az2 + mo.iz * u + rz * v];
       const q5 = (a2, b2, c2, d2) => paintQuad(sink, a2[0], y, a2[1], b2[0], y, b2[1],
         c2[0], y, c2[1], d2[0], y, d2[1], mr, mg, mb);
@@ -1947,7 +2912,6 @@ function boxFurniture(sink, cl, ring, deckAt) {
       if (g.includes('t') || g === '') {
         const t0 = S(0.9, -0.48), t1 = S(0.9, 0.48), tip = S(2.5, 0);
         sink.triFacing(t0[0], y, t0[1], t1[0], y, t1[1], tip[0], y, tip[1], 0, 1, 0, mr, mg, mb);
-        sink.triFacing(t1[0], y, t1[1], t0[0], y, t0[1], tip[0], y, tip[1], 0, 1, 0, mr, mg, mb);
       }
       // a turn head sits at the shaft top, pointing sideways off an elbow
       for (const [flag, side] of [['l', -1], ['r', 1]]) {
@@ -1955,27 +2919,15 @@ function boxFurniture(sink, cl, ring, deckAt) {
         q5(S(0.7, -0.14), S(1.0, -0.14), S(1.0, 0.6 * side), S(0.7, 0.6 * side)); // elbow
         const h0 = S(0.4, 0.62 * side), h1 = S(1.3, 0.62 * side), hp = S(0.85, 1.35 * side);
         sink.triFacing(h0[0], y, h0[1], h1[0], y, h1[1], hp[0], y, hp[1], 0, 1, 0, mr, mg, mb);
-        sink.triFacing(h1[0], y, h1[1], h0[0], y, h0[1], hp[0], y, hp[1], 0, 1, 0, mr, mg, mb);
       }
     }
   }
   sink.at(SURF.asphalt);
 }
 
-function junctionPad(sink, j, terrain) {
+function junctionPad(sink, j, terrain, cell) {
   if (j._cluster) return;                   // drawn as one surface by clusterPad
   if (j._ring) return;                      // a roundabout node needs no pad
-  sink.at(SURF.asphalt);
-  const ring = junctionHull(j);
-  if (!ring) return;
-  // the widest drivable arm names the surface — a pad in residential grey in
-  // the middle of a primary read as a patch of different tarmac at every
-  // big crossing
-  let padT = 'residential', padW = 0;
-  for (const a of j.arms) {
-    if (a.r.d && (a.r.w ?? 0) > padW && COLORS.road[a.r.t]) { padW = a.r.w; padT = a.r.t; }
-  }
-  _c.setHex(COLORS.road[padT] ?? COLORS.road.residential);
   // ---- the pad rides the JUNCTION'S grade, not the terrain -----------------
   // The roads arriving here are levelled: every arm is pinned to one agreed
   // height (junctionY) and may sit up to GRADE_CUT below the terrain. The pad
@@ -1988,33 +2940,9 @@ function junctionPad(sink, j, terrain) {
   // So the pad now lives at the same height the arms were pinned to, rising
   // only where the terrain forces it up by more than the cut budget — exactly
   // the bound the roads themselves obey. Absolute heights, marked fixed so the
-  // final drape leaves them alone; tessellated so a bump between hull corners
-  // cannot lift the ground through it.
-  const lift = LAYER_Y.road + 0.012;   // a hair above the ribbons, never fighting
-  const fan = [];
-  for (let i = 1; i < ring.length - 1; i++) {
-    fan.push(ring[0][0], 0, ring[0][1],
-      ring[i][0], 0, ring[i][1],
-      ring[i + 1][0], 0, ring[i + 1][1]);
-  }
-  const tp = tessTriangles(fan, fan.length / 9, 4);
-  // ---- the pad is the CONTINUATION of its arms, pointwise ------------------
-  // One flat height was tried and looked like torn paper: the arms climb to
-  // the node along their own levelled grades, so a pad at any single height
-  // meets every one of them at a different step. What a junction's surface
-  // actually is: at every point, the deck of the NEAREST arm — and that lives
-  // in geo.junctionDeckY, because the physics has to stand on the same numbers
-  // this fan is drawn from.
-  const deckAt = (x, z) => (terrain ? junctionDeckY(j, x, z, terrain) : 0) + lift;
-  const mark = sink.mark();
-  for (let k = 0; k < tp.length; k += 9) {
-    sink.triFacing(
-      tp[k], deckAt(tp[k], tp[k + 2]), tp[k + 2],
-      tp[k + 3], deckAt(tp[k + 3], tp[k + 5]), tp[k + 5],
-      tp[k + 6], deckAt(tp[k + 6], tp[k + 8]), tp[k + 8],
-      0, 1, 0, _c.r, _c.g, _c.b);
-  }
-  if (terrain) sink.fixFrom(mark);
+  // final drape leaves them alone; tessellated so a bump between outline
+  // corners cannot lift the ground through it.
+  padInto(sink, j, junctionHull(j), (x, z) => junctionDeckY(j, x, z, terrain), terrain, false, cell);
 }
 
 // ---- runway paint ---------------------------------------------------------
@@ -2031,18 +2959,21 @@ const RW_EDGE_HW = 0.45, RW_EDGE_IN = 3;
 
 // one flat stripe along the ribbon between arc lengths s0..s1, offset `off`
 // metres to the right of the centreline and `hwid` half-width
-function stripe(sink, fr, s0, s1, off, hwid, r, g, b) {
+// `yAt(d)` is the ribbon's own deck along the frame: a levelled runway is at
+// its ABSOLUTE height like any graded way, and paint authored at a bare layer
+// offset beside it was two hundred metres underground.
+function stripe(sink, fr, s0, s1, off, hwid, r, g, b, yAt) {
   walkAt(fr, s0, _WA); walkAt(fr, s1, _WB);
-  const y = LAYER_Y.marking;
+  const y0 = yAt ? yAt(s0) + MARK : LAYER_Y.marking, y1 = yAt ? yAt(s1) + MARK : LAYER_Y.marking;
   const ax = _WA.x + _WA.dz * off, az = _WA.z - _WA.dx * off;
   const bx = _WB.x + _WB.dz * off, bz = _WB.z - _WB.dx * off;
   const p0x = _WA.dz * hwid, p0z = -_WA.dx * hwid;
   const p1x = _WB.dz * hwid, p1z = -_WB.dx * hwid;
-  sink.quad(ax - p0x, y, az - p0z, bx - p1x, y, bz - p1z,
-    bx + p1x, y, bz + p1z, ax + p0x, y, az + p0z, r, g, b);
+  sink.quad(ax - p0x, y0, az - p0z, bx - p1x, y1, bz - p1z,
+    bx + p1x, y1, bz + p1z, ax + p0x, y0, az + p0z, r, g, b);
 }
 
-function runwayPaint(sink, fr, hw) {
+function runwayPaint(sink, fr, hw, yAt) {
   sink.at(SURF.paint);
   const len = fr.len;
   if (len < 120) return;                       // a stub, not a strip
@@ -2050,7 +2981,7 @@ function runwayPaint(sink, fr, hw) {
   const r = _c.r, g = _c.g, b = _c.b;
   // centreline
   for (let s = RW_KEY_START + RW_KEY_LEN + 12; s + RW_DASH < len - (RW_KEY_START + RW_KEY_LEN + 12);
-    s += RW_DASH + RW_GAP) stripe(sink, fr, s, s + RW_DASH, 0, RW_HW, r, g, b);
+    s += RW_DASH + RW_GAP) stripe(sink, fr, s, s + RW_DASH, 0, RW_HW, r, g, b, yAt);
   // threshold keys at both ends, symmetric about the centreline. The count is
   // the real rule of thumb — a 45 m runway wears eight, a 60 m twelve.
   const keys = Math.max(4, Math.min(12, Math.round(hw * 2 / 7.5)) & ~1);
@@ -2061,33 +2992,46 @@ function runwayPaint(sink, fr, hw) {
       const k = i - (keys - 1) / 2;
       const off = k * (RW_KEY_HW * 2 + RW_KEY_GAP) + Math.sign(k) * RW_KEY_GAP * 0.5;
       if (Math.abs(off) + RW_KEY_HW > hw - 1) continue;
-      stripe(sink, fr, s0, s0 + RW_KEY_LEN, off, RW_KEY_HW, r, g, b);
+      stripe(sink, fr, s0, s0 + RW_KEY_LEN, off, RW_KEY_HW, r, g, b, yAt);
     }
   }
   // edge stripes down both lips
   for (const side of [-1, 1])
-    stripe(sink, fr, 2, len - 2, side * (hw - RW_EDGE_IN), RW_EDGE_HW, r, g, b);
+    stripe(sink, fr, 2, len - 2, side * (hw - RW_EDGE_IN), RW_EDGE_HW, r, g, b, yAt);
 }
 
 // Taxiways get the one mark that matters: a continuous yellow centreline. It
 // is the thread that visibly ties the apron to the runway threshold.
-function taxiPaint(sink, fr) {
+function taxiPaint(sink, fr, yAt) {
   sink.at(SURF.paint);
   if (fr.len < 20) return;
   _c.setHex(COLORS.taxiPaint);
-  stripe(sink, fr, 1, fr.len - 1, 0, 0.3, _c.r, _c.g, _c.b);
+  stripe(sink, fr, 1, fr.len - 1, 0, 0.3, _c.r, _c.g, _c.b, yAt);
 }
 
-// ---- rails: two steel ribbons on the shared frame + sleeper quads ----
-function railWay(sink, f, terrain) {
+// ---- rails: a bed, sleepers on it, steel standing on them ------------------
+// The steel used to be two flat strips over whatever ground the map gave:
+// rails floating on grass, and tram rails standing 6 cm proud of the asphalt
+// they are supposed to be set into. A track is built from the bottom up, so:
+//
+//   heavy rail   a crowned BALLAST bed 2.7 m wide on top with shoulders falling
+//                into the ground, sleepers lying on it, and the rails as steel
+//                with a HEIGHT (a head and two webs) standing on the sleepers.
+//                Parallel tracks pour their beds into one another, which is
+//                what a station throat looks like.
+//   tram         a concrete track panel set in the street, a couple of
+//                centimetres over the carriageway with chamfered edges, and
+//                the rails as steel let flush into it.
+//
+// The rail HEAD stays at LAYER_Y.rail + 0.04: trains.js stands its wheels there.
+const BED_HW = 1.35, BED_FOOT = 2.25;          // ballast: half width of the top, of the foot
+const TRAM_HW = 1.2, TRAM_UP = 0.03;           // tram panel: half width, lift over the road deck
+function railWay(sink, f, terrain, cell) {
   const railBridge = !!f.br && !!terrain;
   const fr = ribbonFrame(f.br ? bridgeResample(f.p) : terrainResample(f.p, terrain));
   if (!fr) return;
   const { q, per, along, len } = fr;
   const tram = f.t === 'tram';
-  // trams lie flush IN the street (marking height, no sleepers); proper rail
-  // sits on its own layer, steel nudged above the sleepers against z-fights
-  const steelY = tram ? LAYER_Y.marking : LAYER_Y.rail + 0.04;
   // A railway is LEVELLED like a road — flatter, in fact: real rail holds
   // 1–2 %. Draped raw it kinked at every terrain crease, and the sleepers
   // showed each fold as a visible corner. The earthworks pull the ground to
@@ -2104,28 +3048,74 @@ function railWay(sink, f, terrain) {
     // sleeper — sleepers metres below their own rails over the Labe.
     if (f.br) return railBridge ? bridgeDeckHeight(f, d, terrain) : bridgeElevation(d, len);
     if (!railGraded) return 0;
-    const gy = roadGradeY(f, d, terrain);
+    // (a tram: the deck of the street it is set into, see geo.railGradeY)
+    const gy = railGradeY(f, d, terrain);
     return gy === null ? terrain.heightAt(x2, z2) : gy;
   };
-  // Crushed stone under the whole of it. The steel and the sleepers are a few
-  // centimetres wide and share the class: at any distance where you could tell
-  // them apart you are looking at the rail head, which is its own colour.
-  sink.at(tram ? SURF.asphalt : SURF.ballast);
-  _c.setHex(COLORS.rail);
-  const cr = _c.r, cg = _c.g, cb = _c.b;
-  for (const side of [-1, 1]) {
-    const o1 = side * GAUGE_H - RAIL_HW, o2 = side * GAUGE_H + RAIL_HW;
-    for (let i = 0; i < q.length - 1; i++) {
-      const y0 = steelY + elev(along[i], q[i][0], q[i][1]);
-      const y1 = steelY + elev(along[i + 1], q[i + 1][0], q[i + 1][1]);
+  const n = q.length;
+  const g = new Float32Array(n);
+  for (let i = 0; i < n; i++) g[i] = elev(along[i], q[i][0], q[i][1]);
+  // the level everything stands on: the sleeper tops, or the tram panel
+  const base = tram ? LAYER_Y.road + TRAM_UP : LAYER_Y.rail;
+  const headY = tram ? base + 0.004 : LAYER_Y.rail + 0.04;
+  const strip = (o1, y1o, o2, y2o, r, gg, b, foot) => {
+    for (let i = 0; i < n - 1; i++) {
       const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
       const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
-      sink.quad(
-        ax + pax * o1, y0, az + paz * o1, bx + pbx * o1, y1, bz + pbz * o1,
-        bx + pbx * o2, y1, bz + pbz * o2, ax + pax * o2, y0, az + paz * o2, cr, cg, cb);
+      let ya2 = g[i] + y2o, yb2 = g[i + 1] + y2o;
+      if (foot && railGraded) {
+        // a shoulder's foot goes INTO the ground it meets, wherever that is
+        ya2 = Math.min(terrain.heightAt(ax + pax * o2, az + paz * o2) - 0.04, g[i] + y1o - 0.08);
+        yb2 = Math.min(terrain.heightAt(bx + pbx * o2, bz + pbz * o2) - 0.04, g[i + 1] + y1o - 0.08);
+      }
+      paintQuad(sink,
+        ax + pax * o1, g[i] + y1o, az + paz * o1, bx + pbx * o1, g[i + 1] + y1o, bz + pbz * o1,
+        bx + pbx * o2, yb2, bz + pbz * o2, ax + pax * o2, ya2, az + paz * o2, r, gg, b);
     }
+  };
+  if (tram) {
+    sink.at(SURF.concrete);
+    _c.setHex(0x7d7c78);
+    const br2 = _c.r, bg2 = _c.g, bb2 = _c.b;
+    strip(-TRAM_HW, base, TRAM_HW, base, br2, bg2, bb2, false);
+    // chamfered edges down under the asphalt either side
+    strip(-TRAM_HW - 0.22, LAYER_Y.road - 0.03, -TRAM_HW, base, br2 * 0.8, bg2 * 0.8, bb2 * 0.8, false);
+    strip(TRAM_HW, base, TRAM_HW + 0.22, LAYER_Y.road - 0.03, br2 * 0.8, bg2 * 0.8, bb2 * 0.8, false);
+  } else if (f.br) {
+    // A rail bridge had no deck at all: sleepers and steel crossing the Labe
+    // on nothing. A concrete trough under the track, a girder face down each
+    // side, and the same abutments and piers a road bridge stands on.
+    sink.at(SURF.concrete);
+    _c.setHex(0x8f8c86);
+    const dr = _c.r, dg = _c.g, db = _c.b;
+    const DHW = 2.3;
+    strip(-DHW, base - 0.03, DHW, base - 0.03, dr, dg, db, false);
+    for (let i = 0; i < n - 1; i++) {
+      for (const e of [-1, 1]) {
+        const X0 = q[i][0] + per[i][0] * DHW * e, Z0 = q[i][1] + per[i][1] * DHW * e;
+        const X1 = q[i + 1][0] + per[i + 1][0] * DHW * e, Z1 = q[i + 1][1] + per[i + 1][1] * DHW * e;
+        wallQuad4(sink, X0, Z0, X1, Z1, g[i] + base + 0.25, g[i + 1] + base + 0.25,
+          g[i] + base - FASCIA, g[i + 1] + base - FASCIA, per[i][0] * e, per[i][1] * e, dr * 0.72, dg * 0.72, db * 0.72);
+        wallQuad4(sink, X0, Z0, X1, Z1, g[i] + base + 0.25, g[i + 1] + base + 0.25,
+          g[i] + base - 0.03, g[i + 1] + base - 0.03, -per[i][0] * e, -per[i][1] * e, dr * 0.72, dg * 0.72, db * 0.72);
+      }
+    }
+    if (railBridge) {
+      const ysB = new Float32Array(n);
+      for (let i = 0; i < n; i++) ysB[i] = g[i] + base;
+      bridgeSupports(sink, f, fr, ysB, DHW, cell, terrain, false);
+    }
+  } else {
+    // Crushed stone under the whole of it.
+    sink.at(SURF.ballast);
+    _c.setHex(COLORS.railBed);
+    const br2 = _c.r, bg2 = _c.g, bb2 = _c.b;
+    strip(-BED_HW, base - 0.025, BED_HW, base - 0.025, br2, bg2, bb2, false);
+    strip(-BED_HW, base - 0.025, -BED_FOOT, 0, br2 * 0.86, bg2 * 0.86, bb2 * 0.86, true);
+    strip(BED_HW, base - 0.025, BED_FOOT, 0, br2 * 0.86, bg2 * 0.86, bb2 * 0.86, true);
   }
   if (!tram) {
+    sink.at(SURF.concrete);
     _c.setHex(COLORS.sleeper);
     const sr = _c.r, sg = _c.g, sb = _c.b;
     for (let s = SLEEPER_STEP / 2; s < len; s += SLEEPER_STEP) {
@@ -2138,171 +3128,74 @@ function railWay(sink, f, terrain) {
         _WA.x + ux + px, y, _WA.z + uz + pz, _WA.x - ux + px, y, _WA.z - uz + pz, sr, sg, sb);
     }
   }
-  if (railMark >= 0) sink.fixFrom(railMark);
-}
-
-// ---- facades: one shared 2048×1024 window atlas, built lazily on first use ----
-// Drawn LIGHT (near-white plaster, dark glass) so per-building vertex tints
-// multiply through legibly. Every cell keeps plaster near its borders, so
-// mipmap bleed between cells blends plaster with plaster and stays invisible.
-// Cell (0,0) is PLAIN plaster — roofs, prisms and any accidental uv land
-// there and read as flat color. (1,0) is a glass storefront ground module,
-// (2,0) a prefab-panel module with a concrete joint grid; the remaining 29
-// cells are generic storey variants — seeded window rhythm, sills + lintels,
-// sky-gradient glass, curtains, the odd warm lit room, French-balcony rails,
-// and the four BRICK_CELLS in industrial brick courses. All randomness is
-// rnd(cellSeed, salt): the identical canvas on every rebuild, every machine.
-let _atlas = null;
-function facadeAtlas() {
-  if (_atlas) return _atlas;
-  const cv = document.createElement('canvas');
-  cv.width = ATLAS_W; cv.height = ATLAS_H;
-  const g = cv.getContext('2d');
-  const CW = ATLAS_W / ATLAS_N, CH = ATLAS_H / ATLAS_M, BAY = CW / BAYS;
-  g.fillStyle = '#edebe4';
-  g.fillRect(0, 0, ATLAS_W, ATLAS_H);
-  for (let ci = 0; ci < ATLAS_N; ci++) for (let ri = 0; ri < ATLAS_M; ri++) {
-    const X = ci * CW, Y = ri * CH, R = (n) => rnd(1 + ci + ri * ATLAS_N, n);
-    // faint per-cell plaster shift — variants differ even before tinting
-    g.fillStyle = `rgba(${205 + R(0) * 30 | 0},${200 + R(1) * 28 | 0},${188 + R(2) * 26 | 0},0.5)`;
-    g.fillRect(X, Y, CW, CH);
-    if (ci === 0 && ri === 0) continue;               // the PIN cell stays untouched plaster
-
-    // aged plaster: faint vertical weather streaks under everything else.
-    // Rain runs DOWN, so all grime here is vertical; alpha stays whisper-low
-    // because the vertex-tint multiply would double a bold stain into soot.
-    const nStreak = 8 + (R(50) * 10 | 0);
-    for (let k = 0; k < nStreak; k++) {
-      const w = 3 + R(300 + k) * 10;
-      g.fillStyle = `rgba(98,92,80,${(0.02 + R(340 + k) * 0.035).toFixed(3)})`;
-      g.fillRect(X + 5 + R(320 + k) * (CW - 12 - w), Y + 3, w, CH - 6);
-    }
-
-    if (ci === 1 && ri === 0) {
-      // storefront: a dark fascia strip up top (where the shop sign hangs),
-      // then a full-width glazing run down to near the pavement. The glass
-      // carries a real vertical sky gradient — bright horizon light up high,
-      // street-shadow murk at knee height — with a heavy mullion post at
-      // every bay seam and a lighter meeting stile mid-bay. One bay becomes
-      // the door: darker inset glass and a brass push bar.
-      const gz0 = Y + 78, gz1 = Y + CH - 26;          // glazing run; plaster kept at cell borders
-      g.fillStyle = `rgb(${64 + R(4) * 26 | 0},${58 + R(5) * 22 | 0},${52 + R(6) * 18 | 0})`;
-      g.fillRect(X + 10, Y + 36, CW - 20, 34);
-      const sky = g.createLinearGradient(0, gz0, 0, gz1);
-      sky.addColorStop(0, '#8298ab'); sky.addColorStop(0.5, '#4c5663'); sky.addColorStop(1, '#2c323b');
-      g.fillStyle = sky;
-      g.fillRect(X + 10, gz0, CW - 20, gz1 - gz0);
-      const db = Math.min(BAYS - 1, R(7) * BAYS | 0);
-      g.fillStyle = 'rgba(24,27,32,0.8)';
-      g.fillRect(X + db * BAY + 10, gz0 + 24, BAY - 20, gz1 - gz0 - 24);
-      g.fillStyle = '#b09a6a';
-      g.fillRect(X + db * BAY + 14, gz0 + (gz1 - gz0) * 0.55 | 0, BAY - 28, 4);
-      g.fillStyle = '#8a857c';
-      for (let b = 1; b < BAYS; b++) g.fillRect(X + b * BAY - 2, gz0, 4, gz1 - gz0);
-      g.fillStyle = 'rgba(138,133,124,0.55)';
-      for (let b = 0; b < BAYS; b++) g.fillRect(X + b * BAY + BAY / 2 - 1, gz0, 2, gz1 - gz0);
-      continue;
-    }
-
-    const brick = BRICK_CELLS.some(([a, b]) => a === ci && b === ri);
-    if (brick) {
-      // brick courses for the industrial cells. Painted WASHED-OUT light
-      // terracotta on purpose: the grayish industrial palette multiplies on
-      // top and lands on believable sooty brick — true brick red here would
-      // double-darken into mud. Joints are drawn LIGHT (mortar over brick).
-      g.fillStyle = `rgb(${198 + R(60) * 18 | 0},${152 + R(61) * 16 | 0},${130 + R(62) * 14 | 0})`;
-      g.fillRect(X + 5, Y + 4, CW - 10, CH - 8);
-      const course = 6;                               // ~75 mm at ~82 px/m — real CZ brick format
-      g.fillStyle = 'rgba(228,221,208,0.5)';
-      for (let y = Y + 4 + course; y < Y + CH - 4; y += course)
-        g.fillRect(X + 5, y, CW - 10, 1);             // bed joints
-      g.fillStyle = 'rgba(228,221,208,0.3)';
-      let row = 0;
-      for (let y = Y + 4; y < Y + CH - 4 - course; y += course, row++)
-        for (let x = X + 5 + (row % 2) * 3; x < X + CW - 5; x += 7)
-          g.fillRect(x, y, 1, course);                // head joints, stretcher-bond staggered
-    }
-    if (ci === 2 && ri === 0) {
-      // prefab panel joints: a concrete seam at every bay edge plus along the
-      // storey top and bottom — wallUV tiles this cell per storey, so the
-      // edge seams chain into the continuous joint grid of a real panelák
-      g.fillStyle = '#b3b3ac';
-      for (let b = 0; b <= BAYS; b++) g.fillRect(X + Math.min(b * BAY, CW - 3), Y, 3, CH);
-      g.fillRect(X, Y, CW, 3);
-      g.fillRect(X, Y + CH - 3, CW, 3);
-    }
-
-    // a band of BAYS windows; texel density is anisotropic (~24 px/m across,
-    // ~82 px/m up) but the wall quads stretch it back to true aspect. wh is
-    // clamped so window + sill + streaks never cross into the cell below.
-    // FIXED window band and bay width. They used to jitter per cell, which was
-    // prettier — but the destructible shell has to cut a REAL opening exactly
-    // where the paint puts one (that is how you see into a building through its
-    // windows), and it can only do that if every cell agrees on where the
-    // window is. WIN_BAND / WIN_FRAC below are that agreement.
-    const ww = (BAY * WIN_FRAC) | 0;
-    const wy = (Y + CH * WIN_BAND[0]) | 0;
-    const wh = (CH * (WIN_BAND[1] - WIN_BAND[0])) | 0;
-    const lintel = R(7) < 0.72, mull = R(8) < 0.55;
-    const balc = ri > 0 && !brick && R(9) < 0.22;     // rails only on some plaster variants
-    for (let b = 0; b < BAYS; b++) {
-      const sb = 100 + b * 10;                        // per-bay salt block — no collisions
-      const wx = (X + b * BAY + (BAY - ww) / 2) | 0, s = R(sb);
-      if (lintel) {                                   // concrete lintel shadow over the opening
-        g.fillStyle = 'rgba(118,110,98,0.35)';
-        g.fillRect(wx - 4, wy - 9, ww + 8, 6);
-      }
-      g.fillStyle = '#dad5c8';                        // painted frame proud of the reveal
-      g.fillRect(wx - 2, wy - 2, ww + 4, wh + 4);
-      if (s < 0.11) {                                 // warm lit interior — the evening rooms
-        const gl = g.createLinearGradient(0, wy, 0, wy + wh);
-        gl.addColorStop(0, '#e6c88f'); gl.addColorStop(1, '#b28c50');
-        g.fillStyle = gl;
-      } else if (s < 0.24) {                          // net-curtained pale window
-        g.fillStyle = `rgb(${196 + R(sb + 1) * 18 | 0},${190 + R(sb + 2) * 16 | 0},${178 + R(sb + 3) * 16 | 0})`;
-      } else {                                        // glass mirrors the sky: bright up, murky down
-        const t = R(sb + 4) * 20 | 0;
-        const gl = g.createLinearGradient(0, wy, 0, wy + wh);
-        gl.addColorStop(0, `rgb(${116 + t},${134 + t},${150 + t})`);
-        gl.addColorStop(0.55, `rgb(${70 + t},${80 + t},${92 + t})`);
-        gl.addColorStop(1, `rgb(${42 + t},${48 + t},${58 + t})`);
-        g.fillStyle = gl;
-      }
-      g.fillRect(wx, wy, ww, wh);
-      if (s >= 0.24 && s < 0.36) {                    // half-drawn curtain over sky glass
-        g.fillStyle = 'rgba(214,209,199,0.5)';
-        g.fillRect(wx, wy, ww, wh * 0.45 | 0);
-      }
-      if (mull) {                                     // T-profile: meeting stile + transom bar
-        g.fillStyle = 'rgba(224,220,210,0.9)';
-        g.fillRect(wx + (ww / 2 | 0) - 1, wy, 2, wh);
-        g.fillRect(wx, wy + (wh * 0.3 | 0), ww, 2);
-      }
-      g.fillStyle = '#cfcabf';                        // sill…
-      g.fillRect(wx - 4, wy + wh + 3, ww + 8, 5);
-      g.fillStyle = 'rgba(105,98,86,0.8)';
-      g.fillRect(wx - 4, wy + wh + 8, ww + 8, 1);     // …and its cast shadow line
-      const sy = wy + wh + 9, sl = Math.min(28, Y + CH - 4 - sy);
-      if (sl > 4) {                                   // rain-wash streaks off the sill ends
-        g.fillStyle = 'rgba(105,98,86,0.14)';
-        g.fillRect(wx - 3, sy, 2, sl);
-        g.fillRect(wx + ww + 1, sy, 2, sl);
-      }
-      if (balc) {                                     // French balcony: rail bars over lower glass
-        g.fillStyle = 'rgba(56,56,54,0.55)';
-        const by = wy + (wh * 0.52 | 0);
-        for (let rx = wx - 4; rx <= wx + ww + 2; rx += 6) g.fillRect(rx, by, 2, wy + wh - by + 6);
-        g.fillRect(wx - 6, by, ww + 12, 2);
+  // the steel: a polished head, and on heavy rail a web either side so it has
+  // a height from the platform edge
+  sink.at(SURF.paint);
+  _c.setHex(tram ? 0x55575b : 0x6a6d72);
+  const hr = _c.r, hg = _c.g, hb = _c.b;
+  _c.setHex(COLORS.rail);
+  const wr = _c.r, wg = _c.g, wb = _c.b;
+  const HEAD = tram ? 0.035 : 0.045;
+  for (const side of [-1, 1]) {
+    const o1 = side * GAUGE_H - HEAD, o2 = side * GAUGE_H + HEAD;
+    strip(o1, headY, o2, headY, hr, hg, hb, false);
+    if (!tram) {
+      for (let i = 0; i < n - 1; i++) {
+        const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
+        const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
+        for (const [o, fs] of [[o1, -1], [o2, 1]]) {
+          wallQuad4(sink, ax + pax * o, az + paz * o, bx + pbx * o, bz + pbz * o,
+            g[i] + headY, g[i + 1] + headY, g[i] + base - 0.03, g[i + 1] + base - 0.03,
+            pax * fs, paz * fs, wr, wg, wb);
+        }
       }
     }
   }
-  _atlas = new THREE.CanvasTexture(cv);
-  _atlas.colorSpace = THREE.SRGBColorSpace;
-  _atlas.anisotropy = 4;
-  return _atlas;
+  if (railMark >= 0) sink.fixFrom(railMark);
 }
 
 // ---- buildings ----
+
+// ---- buildings ----
+
+// The building batch's sink: a TriSink with two extra jobs.
+//  · uv1, a second uv set that addresses the NIGHT texture (one texel per window
+//    bay, facadeatlas.js). Every wall run names four neighbouring texels, so
+//    which windows are lit is decided here, per run, by typology's hash, and
+//    the near shell can ask the same hash and light the same panes.
+//  · pinTo(u, v): the atlas texel every plain triangle samples from now on. A
+//    roof pins to its ROOF cell (the wall shader tiles that in metres), plain
+//    plaster pins to the PIN cell.
+// It subclasses rather than edits TriSink because every other mesh in the
+// chunk shares that class, and none of them wants either job.
+class BuildingSink extends TriSink {
+  constructor() {
+    super(true, false);
+    this.uv1 = [];
+    this.pu = PIN_U; this.pv = PIN_V;
+  }
+  pinTo(u, v) { this.pu = u; this.pv = v; }
+  tri(ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b) {
+    super.tri(ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b);
+    if (this.pu !== PIN_U) {
+      const uv = this.uv, n = uv.length, u = this.pu, v = this.pv;
+      uv[n - 6] = uv[n - 4] = uv[n - 2] = u; uv[n - 5] = uv[n - 3] = uv[n - 1] = v;
+    }
+    this.uv1.push(LIT_PIN, LIT_PIN, LIT_PIN, LIT_PIN, LIT_PIN, LIT_PIN);
+  }
+  // wallUV plus the run's lit texels: l0..l1 along the run, on texture row lv
+  wallLit(ax, az, bx, bz, yB, yT, fx, fz, u0, v0, u1, v1, rB, gB, bB, rT, gT, bT, l0, l1, lv) {
+    this.wallUV(ax, az, bx, bz, yB, yT, fx, fz, u0, v0, u1, v1, rB, gB, bB, rT, gT, bT);
+    let la = l0, lb = l1;
+    if ((bz - az) * fx - (bx - ax) * fz < 0) { la = l1; lb = l0; }   // wallUV's own flip
+    this.uv1.push(la, lv, lb, lv, lb, lv, la, lv, lb, lv, la, lv);
+  }
+  geo() {
+    const g = super.geo();
+    if (g) g.setAttribute('uv1', new THREE.BufferAttribute(new Float32Array(this.uv1), 2));
+    return g;
+  }
+}
 
 // Facade walls are hand-built per ring edge instead of ExtrudeGeometry: an
 // atlas cell cannot wrap-repeat, so each wall splits into ≤4-bay pieces per
@@ -2311,53 +3204,90 @@ function facadeAtlas() {
 // run), v maps one cell height per storey. This is also why no UVGenerator
 // post-pass on extrude uvs would do — no shader-free way to fold u back into
 // a cell across a 30 m wall.
-function ringFacade(sink, ring, isHole, P) {
+//
+// Everything here is counted in BAYS from the start of the edge, and a piece's
+// u is its bay PHASE inside the cell. That is the same arithmetic the near
+// shell does (bay i of an edge samples column i % 4), so a window, a blank bay
+// or a balcony sits on the same bay in both tiers, and so does its light.
+const PLAIN_UV = [PIN_U, PIN_V, PIN_U, PIN_V];
+function ringFacade(sink, ring, isHole, P, edgeBase = 0) {
   // outer walls face away from the ring interior, courtyard walls into it;
   // positive-area rings keep their interior on (−dz,dx) (see wallQuad)
   const S = (polygonArea(ring) > 0 ? 1 : -1) * (isHole ? -1 : 1);
   const aoH = Math.min(4, P.top - P.y0);
+  const ao = (y) => WALL_AO + (1 - WALL_AO) * Math.min(1, Math.max(0, (y - P.y0) / aoH));
   for (let i = 0; i < ring.length; i++) {
     const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
     const ex = bx - ax, ez = bz - az, L = Math.hypot(ex, ez);
     if (L < 0.02) continue;
     const fx = S * ez, fz = -S * ex;
-    const cols = Math.max(1, Math.round(L / WIN_W)), bayW = L / cols;
+    const cols = Math.max(1, Math.round(L / WIN_W)), bayT = 1 / cols;
+    const role = isHole ? 0 : P.roles[i];
+    const edge = edgeBase + i;
     // v5: the street door. Its span is skipped on the ground storey and a
     // header emitted over it, so the facade grows a REAL opening at exactly
     // the place interiors.js told pieces.js to leave a gap in the lining.
     const door = (!isHole && P.door && P.door.i === i) ? P.door : null;
 
-    // Emit [t0,t1] of the edge, chunked into ≤BAYS bays so each piece samples a
-    // sub-range of one atlas cell (a cell cannot wrap-repeat). v0/v1 pick how
-    // much of the cell's height this band covers — a header takes the top slice.
-    const run = (t0, t1, yB, yT, cell, v0, v1, kB, kT) => {
-      const bayT = bayW / L;
-      let s = t0;
-      while (s < t1 - 1e-6) {
-        const e = Math.min(t1, s + bayT * BAYS);
-        sink.wallUV(ax + ex * s, az + ez * s, ax + ex * e, az + ez * e, yB, yT, fx, fz,
-          cell[0], v0, cell[0] + ((e - s) / bayT) / BAYS / ATLAS_N, v1,
-          P.wr * kB, P.wg * kB, P.wb * kB, P.wr * kT, P.wg * kT, P.wb * kT);
-        s = e;
+    // Bays [p0,p1] of the edge on storey row `s`, chunked at every fourth bay
+    // so each piece samples a sub-range of one atlas cell. v0f/v1f pick how much
+    // of the cell's height the band covers (a door header takes the top slice).
+    // `dark` pins the night lookup to the unlit texel: trims, headers and the
+    // bays the near shell builds solid have no pane to light.
+    const run = (p0, p1, yB, yT, uv, v0f, v1f, s, store, dark) => {
+      if (p1 - p0 < 1e-4) return;
+      const v0 = uv[1] + (uv[3] - uv[1]) * v0f, v1 = uv[1] + (uv[3] - uv[1]) * v1f;
+      const kB = ao(yB), kT = ao(yT);
+      const lv = dark ? LIT_PIN : (litRow(P.lit, P.id, s, store) + 0.5) / LIT_N;
+      // One bay of u, taken from the rect itself: a cell or a trim band is one
+      // atlas column wide (1/32 a bay), but PLAIN_UV is a single pinned texel
+      // with no width. A constant step walked that pin out of the plaster cell
+      // into the roof tile column next door, and the shader tiled the wall.
+      const du = (uv[2] - uv[0]) / BAYS;
+      let a = p0;
+      while (a < p1 - 1e-6) {
+        const k = Math.floor(a / BAYS + 1e-9), b = Math.min(p1, (k + 1) * BAYS);
+        const ph = a - k * BAYS;
+        const l0 = dark ? LIT_PIN : (litStart(P.id, s, edge, k) + ph) / LIT_N;
+        sink.wallLit(ax + ex * a * bayT, az + ez * a * bayT, ax + ex * b * bayT, az + ez * b * bayT,
+          yB, yT, fx, fz, uv[0] + ph * du, v0, uv[0] + (ph + b - a) * du, v1,
+          P.wr * kB, P.wg * kB, P.wb * kB, P.wr * kT, P.wg * kT, P.wb * kT,
+          l0, dark ? LIT_PIN : l0 + (b - a) / LIT_N, lv);
+        a = b;
       }
     };
 
     for (let s = 0; s < P.storeys; s++) {
-      const yB = P.y0 + s * P.sH, yT = P.y0 + (s + 1) * P.sH;
-      const kB = WALL_AO + (1 - WALL_AO) * Math.min(1, (yB - P.y0) / aoH);
-      const kT = WALL_AO + (1 - WALL_AO) * Math.min(1, (yT - P.y0) / aoH);
-      const cell = s === 0 && P.storeC ? P.storeC : P.cellA;
-      const cutDoor = door && s === 0 && P.sH > INTERIOR.entryH + 0.35;
-      if (!cutDoor) { run(0, 1, yB, yT, cell, cell[1], cell[3], kB, kT); continue; }
-      const hw = door.w / 2 / L, c = door.t;
-      const d0 = Math.max(0, c - hw), d1 = Math.min(1, c + hw);
-      if (d0 > 1e-4) run(0, d0, yB, yT, cell, cell[1], cell[3], kB, kT);
-      if (d1 < 1 - 1e-4) run(d1, 1, yB, yT, cell, cell[1], cell[3], kB, kT);
-      const hy = yB + INTERIOR.entryH;
-      const vMid = cell[1] + (cell[3] - cell[1]) * (INTERIOR.entryH / P.sH);
-      const kH = WALL_AO + (1 - WALL_AO) * Math.min(1, (hy - P.y0) / aoH);
-      run(d0, d1, hy, yT, cell, vMid, cell[3], kH, kT);
+      const yB = P.y0 + s * P.sH, yT = yB + P.sH;
+      const row = rowFor(P.rows, s, P.storeys, role);
+      const dk = !!row.plain;                     // a stub wall has no window to light
+      const ent = s === 0 && !isHole && P.ent && P.ent.i === i ? P.ent : null;
+      if (!ent) { run(0, cols, yB, yT, row.uv, 0, 1, s, row.store, dk); continue; }
+      // the doorway, in bays. The near shell turns every bay the opening touches
+      // into a solid lintel with no pane, so those bays carry no light here.
+      const c = ent.t * cols, hw = ent.w / 2 / L * cols;
+      const d0 = Math.max(0, c - hw), d1 = Math.min(cols, c + hw);
+      const z0 = Math.min(d0, Math.max(0, Math.floor(c - hw - 1 + 1e-9) + 1));
+      const z1 = Math.max(d1, Math.min(cols, Math.ceil(c + hw - 1e-9)));
+      const cutDoor = door && P.sH > INTERIOR.entryH + 0.35;
+      if (!cutDoor) {
+        run(0, z0, yB, yT, row.uv, 0, 1, s, row.store, dk);
+        run(z0, z1, yB, yT, row.uv, 0, 1, s, row.store, true);
+        run(z1, cols, yB, yT, row.uv, 0, 1, s, row.store, dk);
+        continue;
+      }
+      run(0, z0, yB, yT, row.uv, 0, 1, s, row.store, dk);
+      run(z0, d0, yB, yT, row.uv, 0, 1, s, row.store, true);
+      run(d0, d1, yB + INTERIOR.entryH, yT, row.uv, INTERIOR.entryH / P.sH, 1, s, row.store, true);
+      run(d1, z1, yB, yT, row.uv, 0, 1, s, row.store, true);
+      run(z1, cols, yB, yT, row.uv, 0, 1, s, row.store, dk);
     }
+    // Above the storey grid: plain wall up to the roof build-up, then the trim
+    // band (cornice, coping or eave shadow), carried on up as the outer face of
+    // the parapet where the roof has one.
+    const fB = Math.max(P.gridTop, P.top - 0.5), fT = P.top + P.parapet;
+    if (fB - P.gridTop > 0.04) run(0, cols, P.gridTop, fB, PLAIN_UV, 0, 1, 0, false, true);
+    if (fT - fB > 0.04) run(0, cols, fB, fT, P.trimUV, 0, 1, 0, false, true);
   }
 }
 
@@ -2484,8 +3414,16 @@ export function buildingWallHex(f) {
   // a chain paints its own boxes: a Kaufland is not "commercial beige"
   const brand = brandOf(f);
   if (brand?.wall !== undefined) return (f._wallHex = brand.wall);
-  const pal = BUILDING_PALETTES[f.t] ?? BUILDING_PALETTES.default;
-  const hex = f.c ? parseInt(f.c.slice(1), 16) : pal[Math.floor(rnd(f._id, 0) * pal.length)];
+  // The plaster comes from what the building is BUILT like (a pastel panelak,
+  // an ochre tenement, a silver hall), not from its OSM tag, which for a third
+  // of the country is just "residential". classify() runs first on purpose: it
+  // may stamp f.c (novostavby, offices), and an explicit colour always wins.
+  const typ = typologyOf(f, classify(f));
+  const pal = TYPO_WALLS[typ] ?? BUILDING_PALETTES[f.t] ?? BUILDING_PALETTES.default;
+  // ...then what the wall is MADE of where a mapper wrote it down (the tile's
+  // `bm`: brick, concrete, glass, wood, stone, metal), and only then the palette.
+  const hex = f.c ? parseInt(f.c.slice(1), 16)
+    : wallTone(f, rnd(f._id, 0)) ?? pal[Math.floor(rnd(f._id, 0) * pal.length)];
   _c.setHex(hex);
   if (!f.n) _c.offsetHSL((rnd(f._id, 1) - 0.5) * 0.02, -0.06 * rnd(f._id, 2), (rnd(f._id, 3) - 0.5) * 0.07);
   return (f._wallHex = _c.getHex());
@@ -2495,16 +3433,35 @@ export function buildingWallHex(f) {
 // EXPORTED because the destructible shell has to sample the SAME cells: that is
 // the only way a building can stop being a textured quad and start being a pile
 // of boxes without visibly changing. See pieces.js emitPerimeter('ext').
+//
+// The rule itself is typology.facadeRows: one full hash of the id into the
+// typology's own family of cells, with separate ground, top, gable and
+// shopfront rows. This function only turns its cell indices into uv rectangles
+// and hangs the textures on. `mats` false skips the textures (a mesh worker
+// has no canvas to paint them on and never reads them).
+const _rowUV = (r) => { if (r) r.uv = cellRect(r.cell[0], r.cell[1]); return r; };
+export function facadeRows_(f, use) {
+  const office = use === 'office' ? (rnd(f._id, 80) < 0.5 ? 'bands' : 'grid') : null;
+  const rows = facadeRows(f, use, office);
+  for (const k of ['mid', 'ground', 'top', 'gable', 'door', 'store']) _rowUV(rows[k]);
+  return rows;
+}
 export function facadeCells(f) {
+  const use = classify(f);
+  const rows = facadeRows_(f, use);
   return {
-    cellA: f.t === 'panel' ? PANEL_CELL
-      : BRICK_TYPES.has(f.t) ? BRICK_UV[f._id % BRICK_UV.length]
-      : GENERIC[(hashStr(f.t ?? '') + f._id % 5) % GENERIC.length],
-    storeC: STORE_TYPES.has(f.t) ? STORE_CELL : null,
+    rows,
+    lit: litOf(f, rows.typ),
+    trimUV: trimRect(rows.trim),
+    // the old two-cell contract, kept for anything that still reads it
+    cellA: rows.mid.uv, storeC: rows.store?.uv ?? null,
     bayW: WIN_W, bays: BAYS, atlasN: ATLAS_N,
-    band: WIN_BAND, frac: WIN_FRAC,
+    band: rows.mid.band ?? [0.29, 0.74], frac: rows.mid.frac || 0.54,
     pin: [PIN_U, PIN_V],
     atlas: facadeAtlas(),
+    // the shared wall material: a shell's pitched roof wears it, so the tiles
+    // the far mesh showed are still there when the building turns to boxes
+    roofMat: buildFacadeMaterial(),
   };
 }
 
@@ -2580,6 +3537,27 @@ export function brandMarkMat(brand) {
   return m;
 }
 
+/**
+ * Give back the brand wordmarks no built chunk draws any more: the far-tier
+ * twin of destructible.sweepWordmarks, same two-sweep rule. Returns the
+ * materials it freed, so the streamer can forget them in `mats.codecMats`
+ * (a worker chunk names its brands and the name is resolved again on arrival).
+ */
+export function sweepBrandMats(inUse) {
+  let gone = null;
+  for (const [label, m] of _brandMats) {
+    if (inUse.has(m)) { m.userData.idle = 0; continue; }
+    if ((m.userData.idle = (m.userData.idle ?? 0) + 1) < 2) continue;
+    m.map?.dispose();
+    m.dispose();
+    _brandMats.delete(label);
+    (gone ??= []).push(m);
+  }
+  return gone;
+}
+/** How many brand wordmarks are cached (diagnostics). */
+export const brandMatCount = () => _brandMats.size;
+
 // per-chunk wordmark quad stream, one per brand so the chunk batches per label
 function markStream(marks, brand) {
   const label = brand.label ?? 'Obchod';
@@ -2623,7 +3601,7 @@ function obbCentre(ring, out) {
   out.z = uz * (u0 + u1) / 2 + vz * (v0 + v1) / 2;
 }
 
-function brandSignage(f, y0, top, brand, cell, trim, sign, marks) {
+function brandSignage(f, y0, top, brand, cell, trim, sign, marks, sH = 0, over = false, totem = true) {
   const ring = f.o;
   _c.setHex(brand.sign);
   const sr = _c.r, sg = _c.g, sb = _c.b;
@@ -2649,9 +3627,10 @@ function brandSignage(f, y0, top, brand, cell, trim, sign, marks) {
     const k = edges.findIndex((e) => e.i === entI);
     if (k > 0 && edges[k].L >= 8) edges.unshift(edges.splice(k, 1)[0]);
   }
-  const H = Math.min(1.6, Math.max(0.7, (top - y0) * 0.22));
-  const yT = top - 0.4, yB = yT - H;
-  for (const e of edges.slice(0, 2)) {
+  // Under the parapet on a shed; over the ground floor when the shop is only
+  // the bottom of a taller building (typology.signBand, shared with pieces.js).
+  const { H, yT, yB } = signBand(y0, top, sH, over);
+  for (const e of edges.slice(0, over ? 1 : 2)) {
     if (e.L < 8) continue;
     const [ax, az] = ring[e.i], [bx, bz] = ring[(e.i + 1) % ring.length];
     const ux = (bx - ax) / e.L, uz = (bz - az) / e.L;
@@ -2676,7 +3655,10 @@ function brandSignage(f, y0, top, brand, cell, trim, sign, marks) {
   }
 
   // ---- the totem by the entrance ----
-  if (!ent) return;
+  // A pylon is what a chain or a supermarket plants by its car park. A corner
+  // shop has a fascia and nothing else: giving every named boutique one stood a
+  // row of 5 m poles down the middle of Pernštýnská.
+  if (!ent || over || !totem) return;
   const px = ent.x + ent.nx * 5.5, pz = ent.z + ent.nz * 5.5;
   obbCentre(ring, _ct);
   if (Math.hypot(px - _ct.x, pz - _ct.z) < 2) return;   // stands inside the shed
@@ -2712,7 +3694,7 @@ function brandSignage(f, y0, top, brand, cell, trim, sign, marks) {
   markWall(mk, W0[0], W0[1], W1[0], W1[1], panelY - hm / 2, panelY + hm / 2, fx, fz);
 }
 
-function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) {
+function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain, lite = false) {
   if (!f.o || f.o.length < 3) return;
   // WHERE THE BUILDING STANDS. On flat ground this was zero and there was
   // nothing to decide. On a slope there is: found it at the LOWEST ground under
@@ -2739,30 +3721,47 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) 
   // Czech fascia (OBCHOD / POTRAVINY, or the shop's own OSM name) so that
   // retail OSM genuinely left unnamed is not the only thing on the street with
   // nothing written on it.
-  const brand = signBrandOf(f, classify(f));
+  const use = classify(f);
+  const brand = signBrandOf(f, use);
   _c.setHex(buildingWallHex(f));
   const wr = _c.r, wg = _c.g, wb = _c.b;
-  const rr = wr * ROOF_DARKEN, rg = wg * ROOF_DARKEN, rb = wb * ROOF_DARKEN;
+  // What it is BUILT like decides the roof: clay or concrete tile on a pitched
+  // house, felt or gravel on a flat block, each in its own colour off a Czech
+  // palette (typology.roofOf). It used to be the wall colour times 0.62, which
+  // is how a town of pale plaster came out with a town of grey-beige roofs.
+  const typ = typologyOf(f, use), roof = roofOf(f, typ);
+  const [rr, rg, rb] = linRGB(roof.hex);
+  // …and the storey grid is interiors.storeyPlan, the same one the near shell
+  // stands its boxes on, so a window is at the same height in both tiers.
+  const sp = storeyPlan(f, use);
+  const top = y0 + depth;
+  const area = Math.abs(polygonArea(f.o));
+  const parapet = facades && hasParapet(typ, roof, area) ? PARAPET_H : 0;
 
   if (facades) {
-    // storey count prefers the RÚIAN level tag; the variant cell hashes the
-    // building type (neighbourhoods stay coherent) with a pinch of _id so
-    // twin rows don't read as photocopies. Paneláky and industrial types skip
-    // the hash and go straight to their purpose-painted cells.
-    const storeys = Math.max(1, Math.min(60, Math.round(f.lv ?? depth / STOREY_H)));
+    const rows = facadeRows_(f, use);
+    const sH = Math.min(sp.sH, depth / sp.storeys);
+    // The street entrance: which edge wears the shopfront or the garage doors,
+    // and which bays the near shell will turn into its doorway (they carry no
+    // window light here either). Same guard as interiors.hasInterior, because
+    // only a building that can have a shell has a doorway to agree with.
+    const ent = (f.y ?? 0) < 0.5 && area >= 14
+      ? entranceOf(f, cell?.roads, cell?.buildings) : null;
     const P = {
-      y0, top: y0 + depth, sH: depth / storeys, storeys, wr, wg, wb,
-      cellA: f.t === 'panel' ? PANEL_CELL
-        : BRICK_TYPES.has(f.t) ? BRICK_UV[f._id % BRICK_UV.length]
-        : GENERIC[(hashStr(f.t ?? '') + f._id % 5) % GENERIC.length],
-      storeC: STORE_TYPES.has(f.t) ? STORE_CELL : null,
+      y0, top, sH, storeys: sp.storeys, gridTop: y0 + sH * sp.storeys, wr, wg, wb,
+      rows, id: f._id, lit: litOf(f, typ), trimUV: trimRect(rows.trim), parapet, ent,
       // v5: every building that has an inside gets a front door in its facade.
       // entranceOf caches its answer on the feature, so the hole never moves
       // between rebuilds and always matches the gap pieces.js leaves in the
       // interior lining.
-      door: y0 < 0.5 && Math.abs(polygonArea(f.o)) >= 14
-        ? entranceOf(f, cell?.roads, cell?.buildings) : null,
+      // (NOTE: `y0 < 0.5` has been false on every real building since the
+      // terrain arrived, y0 being metres above sea level, so the far mesh cuts
+      // no doors today. Left exactly as found: the near shell has no canopy or
+      // sign board to match, so switching it back on would add a tier pop.)
+      door: y0 < 0.5 && ent ? ent : null,
     };
+    // shopfront, blank gable or garage doors, per edge
+    P.roles = edgeRoles(f.o, rows, ent?.i);
     // a chain's fascia colour rides on the plan, so the canopy sign comes out
     // Kaufland red / Lidl blue rather than generic amber
     if (brand?.sign !== undefined) {
@@ -2771,11 +3770,12 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) 
     }
     ringFacade(sink, f.o, false, P);
     if (P.door && P.sH > INTERIOR.entryH + 0.35) doorInto(sink, trim, sign, f.o, P);
-    for (const h of f.i ?? []) if (h.length >= 3) ringFacade(sink, h, true, P);
-    capInto(sink, f.o, f.i, y0 + depth, true, rr, rg, rb);
+    const holes = f.i ?? [];
+    for (let k = 0; k < holes.length; k++)
+      if (holes[k].length >= 3) ringFacade(sink, holes[k], true, P, 1000 * (k + 1));
     // skyway underside — tested against the building's own offset now that y0
     // carries the ground height, or every house on a hill would grow a lid
-    if ((f.y ?? 0) > 0.5) capInto(sink, f.o, f.i, y0, false, rr, rg, rb);
+    if ((f.y ?? 0) > 0.5) capInto(sink, f.o, f.i, y0, false, wr * 0.5, wg * 0.5, wb * 0.5);
   } else {
     // v1 flat-color path: one extrude, painted vertices, no uv anywhere
     const g = new THREE.ExtrudeGeometry(ringShape(f.o, f.i), { depth, bevelEnabled: false, steps: 1 });
@@ -2800,7 +3800,9 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) 
   // chain signage in BOTH wall modes — a Lidl is a Lidl with facades toggled
   // off, and the fascia/totem must match pieces.js regardless of the atlas
   if (brand?.sign !== undefined && sign && trim && marks)
-    brandSignage(f, y0, y0 + depth, brand, cell, trim, sign, marks);
+    brandSignage(f, y0, top, brand, cell, trim, sign, marks,
+      Math.min(sp.sH, depth / sp.storeys), signOverGround(use, sp.storeys),
+      !!brandOf(f) || use === 'supermarket' || use === 'mall');
   // The footing. A plain skirt in the wall colour, darkened, from the floor
   // down past the lowest ground the footprint touches — what a real building
   // shows as a plinth where the pavement falls away from it.
@@ -2823,27 +3825,28 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) 
     }
   }
 
-  // Roofs. In facade mode their tris pin to the plain plaster cell, so they
-  // read as flat colour either way.
-  //
-  // A village house is one ridge over one rectangle, and an OBB prism is
-  // exactly right for it. Prague is not that: its blocks are 400–2000 m² and
-  // L- or U-shaped around a courtyard, and one giant ridge across such a
-  // footprint would sail straight over the yard. Those get a CAP instead — the
-  // real outline offset inward and lifted — which is what a hipped or mansard
-  // roof actually is, and it follows every wing of the plan.
-  if (f.r && f.r !== 'flat') {
-    const a = Math.abs(polygonArea(f.o));
-    const topY = y0 + depth;
-    if (f.r === 'gabled' && a < 300) ridgePrism(sink, f.o, topY, rr, rg, rb);
-    else if (a >= 300 && PITCHED.has(f.r)) roofCap(sink, f.o, topY, a, rr, rg, rb);
+  // The roof (roofs.js): a ridge with eaves and plaster gables over anything
+  // like a rectangle, an inward-offset cap that follows an L or a courtyard
+  // block, and the furniture standing on it. The same call builds the near
+  // shell's roof (roofGeometry below), so the two tiers cannot disagree.
+  const covered = roofInto(sink, f, typ, roof, top, [wr, wg, wb], sp.storeys,
+    lite ? { bare: true } : null);
+  if (facades) {
+    // the deck: only where no pitched roof covers it (a ridge closes its own
+    // ends, so the cap underneath was 120 000 triangles a tile nobody could see)
+    if (!covered) {
+      sink.pinTo(...roofPin(roof.style));
+      capInto(sink, f.o, f.i, top, true, rr, rg, rb);
+      sink.pinTo(PIN_U, PIN_V);
+    }
+    if (parapet) parapetInto(sink, f.o, top, parapet, 0.3, [wr, wg, wb]);
   }
 }
 
 /**
- * The roof of ONE building as a standalone geometry, in world space, using the
- * same two shapes the chunk mesh uses — a ridge prism for a village house, an
- * inward-offset cap for anything big enough to turn a corner.
+ * The roof of ONE building as a standalone geometry, in world space: the same
+ * roofInto() the chunk mesh runs, pitched shape, eaves, chimneys, lift houses
+ * and all.
  *
  * It exists because interiorsim REPLACES a nearby building with its box shell,
  * and the shell's roof was a flat slab with a parapet. So every building you
@@ -2851,169 +3854,20 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain) 
  * carefully the chunk mesh had built one 450 m further away. The model owns
  * this geometry, so it dies with the model and a blast takes the roof off.
  *
- * Returns null for a building that has no pitched roof to build.
+ * Carries the facade uvs, so the shell can draw it with the wall material and
+ * keep its tiles. Returns null for a building with nothing at all on its deck.
  */
 export function roofGeometry(f, topY, wallHex) {
-  if (!f?.r || f.r === 'flat' || !f.o?.length) return null;
-  _c.setHex(wallHex ?? 0xb0a89c);
-  const r = _c.r * ROOF_DARKEN, g = _c.g * ROOF_DARKEN, b = _c.b * ROOF_DARKEN;
-  const sink = new TriSink(false, false);      // a roof is a building, not ground
-  const a = Math.abs(polygonArea(f.o));
-  if (f.r === 'gabled' && a < 300) ridgePrism(sink, f.o, topY, r, g, b);
-  else if (a >= 300 && PITCHED.has(f.r)) roofCap(sink, f.o, topY, a, r, g, b);
-  else return null;
+  if (!f?.o || f.o.length < 3) return null;
+  const use = classify(f), typ = typologyOf(f, use), roof = roofOf(f, typ);
+  _c.setHex(wallHex ?? buildingWallHex(f));
+  const sink = new BuildingSink();             // a roof is a building, not ground
+  roofInto(sink, f, typ, roof, topY, [_c.r, _c.g, _c.b], storeyPlan(f, use).storeys,
+    { soffit: true });
   return sink.geo();
 }
-
-// Roof shapes worth building a cap for. Everything else in the OSM/IPR domain
-// (dome, onion, sawtooth…) stays flat: 108 domes in Prague are not worth a
-// geometry path that could go wrong on the other 78 000.
-const PITCHED = new Set(['gabled', 'hipped', 'half-hipped', 'mansard', 'gambrel',
-  'pyramidal', 'hip-and-gable', 'round']);
-
-const ROOF_MAX_N = 200;                   // bounds the O(n²) simplicity test
-const ROOF_STEPS = [1, 0.5, 0.25, 0.125]; // depth fractions tried, deepest first
-
-// Offset one ring inward by d along each vertex's angle bisector. Returns null
-// for geometry that cannot be offset at all (a repeated vertex, a 180° spike);
-// the CALLER decides whether the result is usable.
-function insetRing(ring, d, sgn) {
-  const n = ring.length, out = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const [px, pz] = ring[(i - 1 + n) % n], [cx, cz] = ring[i], [nx2, nz2] = ring[(i + 1) % n];
-    let ax = cx - px, az = cz - pz, bx = nx2 - cx, bz = nz2 - cz;
-    const la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
-    if (la < 1e-6 || lb < 1e-6) return null;
-    ax /= la; az /= la; bx /= lb; bz /= lb;
-    // inward normals of the two edges meeting here, and their bisector
-    const n1x = -az * sgn, n1z = ax * sgn, n2x = -bz * sgn, n2z = bx * sgn;
-    let mx = n1x + n2x, mz = n1z + n2z;
-    const ml = Math.hypot(mx, mz);
-    if (ml < 1e-3) return null;
-    mx /= ml; mz /= ml;
-    // the bisector travels 1/cos(half-angle) so both eaves stay parallel at
-    // distance d; the clamp stops a sharp corner shooting off to infinity
-    const k = Math.min(4, 1 / Math.max(0.25, (mx * n1x + mz * n1z)));
-    out[i] = [cx + mx * d * k, cz + mz * d * k];
-  }
-  return out;
-}
-
-// Does a closed ring cross itself? The area and winding guards do not catch a
-// ring that folded through a thin wing — over the real Prague footprints they
-// pass 7 603 rings that are knots — so the simplicity test has to be explicit.
-function ringSelfIntersects(ring) {
-  const n = ring.length;
-  const side = (ox, oz, ax, az, bx, bz) => (ax - ox) * (bz - oz) - (az - oz) * (bx - ox);
-  for (let i = 0; i < n; i++) {
-    const a = ring[i], b = ring[(i + 1) % n];
-    for (let j = i + 2; j < n; j++) {
-      if (i === 0 && j === n - 1) continue;     // shares the closing vertex
-      const c = ring[j], dd = ring[(j + 1) % n];
-      const d1 = side(c[0], c[1], dd[0], dd[1], a[0], a[1]);
-      const d2 = side(c[0], c[1], dd[0], dd[1], b[0], b[1]);
-      const d3 = side(a[0], a[1], b[0], b[1], c[0], c[1]);
-      const d4 = side(a[0], a[1], b[0], b[1], dd[0], dd[1]);
-      if (((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0))) return true;
-    }
-  }
-  return false;
-}
-
-// A roof by inward offset: every eave vertex slides along its own angle
-// bisector toward the interior by `d`, and the band between the original ring
-// and the shrunken one becomes the slope. On a rectangle that is a hipped roof;
-// on an L it is a hipped roof that turns the corner; on a courtyard block it is
-// a mansard that follows all four wings — which is Prague's roofscape.
-//
-// Concave corners are where naive offsetting self-intersects, so the result is
-// CHECKED rather than trusted: a ridge that folded through itself shows up as a
-// collapsed or sign-flipped area, and the building simply keeps its flat top.
-// Better a flat roof than a knot of triangles over Vinohrady.
-export function roofCap(sink, ring, topY, area, r, g, b) {
-  const n = ring.length;
-  if (n < 3 || n > ROOF_MAX_N) return;
-  const sgn = polygonArea(ring) > 0 ? 1 : -1;   // which side of an edge is inside
-  // Slope depth scales with the footprint, capped so a 2 000 m² block does not
-  // grow a cathedral. But a block with a 6 m wing cannot give up 3.5 m from
-  // both sides of it, and the naive offset answers that by folding through
-  // itself — measured over the real data, at full depth that is 55 % of
-  // Prague's big pitched blocks. So the depth STEPS DOWN until the ring comes
-  // back simple, which rescues nine in ten of them; the rest stay flat.
-  const d0 = Math.min(3.5, Math.max(1.2, Math.sqrt(area) / 7));
-  let inner = null, d = 0;
-  for (const f of ROOF_STEPS) {
-    d = d0 * f;
-    const cand = insetRing(ring, d, sgn);
-    if (!cand) continue;
-    const ia = polygonArea(cand);
-    if (!(ia * sgn > 0) || Math.abs(ia) < area * 0.06 || Math.abs(ia) > area) continue;
-    if (ringSelfIntersects(cand)) continue;
-    inner = cand;
-    break;
-  }
-  if (!inner) return;
-  // rise follows the depth that actually survived — a 0.4 m lip with a 4 m
-  // rise would be a spike, not a roof
-  const rise = Math.min(4.2, Math.max(0.8, d * 1.15));
-  const ry = topY + rise;
-  for (let i = 0; i < n; i++) {
-    const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % n];
-    const [cx2, cz2] = inner[(i + 1) % n], [dx2, dz2] = inner[i];
-    // outward-and-up normal of the slope, from the eave edge and the rise
-    let ex = bx - ax, ez = bz - az;
-    const el = Math.hypot(ex, ez);
-    if (el < 1e-6) continue;
-    const ox = ez / el * sgn, oz = -ex / el * sgn;   // outward horizontal
-    const ny = d / Math.hypot(d, rise), nh = rise / Math.hypot(d, rise);
-    const nx3 = ox * ny, nz3 = oz * ny;
-    sink.triFacing(ax, topY, az, bx, topY, bz, cx2, ry, cz2, nx3, nh, nz3, r, g, b);
-    sink.triFacing(ax, topY, az, cx2, ry, cz2, dx2, ry, dz2, nx3, nh, nz3, r, g, b);
-  }
-  // the flat top of the mansard, fanned from the first inner vertex — convex
-  // enough after the area guard, and it is only ever seen from the air. The
-  // facing hint is straight up whatever the ring's winding: triFacing flips the
-  // triangle to match it, and a roof that faces down renders black.
-  for (let i = 1; i < n - 1; i++)
-    sink.triFacing(inner[0][0], ry, inner[0][1], inner[i][0], ry, inner[i][1],
-      inner[i + 1][0], ry, inner[i + 1][1], 0, 1, 0, r, g, b);
-}
-
-// OBB of the footprint (dominant axis = its longest edge), ridge along the
-// long axis: two slopes + two gable triangles; slight overhang is invisible
-// from a car at < 300 m²
-function ridgePrism(sink, ring, topY, r, g, b) {
-  let best = 0, ux = 1, uz = 0;
-  for (let i = 0; i < ring.length; i++) {
-    const [ax, az] = ring[i], [bx, bz] = ring[(i + 1) % ring.length];
-    const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz;
-    if (L2 > best) { best = L2; const L = Math.sqrt(L2); ux = dx / L; uz = dz / L; }
-  }
-  const vx = uz, vz = -ux;
-  let u0 = 1e9, u1 = -1e9, v0 = 1e9, v1 = -1e9;
-  for (const [x, z] of ring) {
-    const pu = x * ux + z * uz, pv = x * vx + z * vz;
-    if (pu < u0) u0 = pu; if (pu > u1) u1 = pu;
-    if (pv < v0) v0 = pv; if (pv > v1) v1 = pv;
-  }
-  const hl = (u1 - u0) / 2, hw = (v1 - v0) / 2;
-  if (hl < 0.5 || hw < 0.5) return;
-  const cx = ux * (u0 + u1) / 2 + vx * (v0 + v1) / 2;
-  const cz = uz * (u0 + u1) / 2 + vz * (v0 + v1) / 2;
-  const ry = topY + Math.min(3.0, Math.max(1.2, hw * 0.75));
-  const Ax = cx - ux * hl - vx * hw, Az = cz - uz * hl - vz * hw;
-  const Bx = cx + ux * hl - vx * hw, Bz = cz + uz * hl - vz * hw;
-  const Cx = cx + ux * hl + vx * hw, Cz = cz + uz * hl + vz * hw;
-  const Dx = cx - ux * hl + vx * hw, Dz = cz - uz * hl + vz * hw;
-  const R0x = cx - ux * hl, R0z = cz - uz * hl;
-  const R1x = cx + ux * hl, R1z = cz + uz * hl;
-  sink.triFacing(Ax, topY, Az, Bx, topY, Bz, R1x, ry, R1z, -vx, 0, -vz, r, g, b);
-  sink.triFacing(Ax, topY, Az, R1x, ry, R1z, R0x, ry, R0z, -vx, 0, -vz, r, g, b);
-  sink.triFacing(Cx, topY, Cz, Dx, topY, Dz, R0x, ry, R0z, vx, 0, vz, r, g, b);
-  sink.triFacing(Cx, topY, Cz, R0x, ry, R0z, R1x, ry, R1z, vx, 0, vz, r, g, b);
-  sink.triFacing(Bx, topY, Bz, Cx, topY, Cz, R1x, ry, R1z, ux, 0, uz, r, g, b);
-  sink.triFacing(Dx, topY, Dz, Ax, topY, Az, R0x, ry, R0z, -ux, 0, -uz, r, g, b);
-}
+// the cap roof lives in roofs.js now; kept importable from here
+export { roofCap };
 
 // ---- ortho ground: carve the aerial photo quad around sunken water ----
 // The photo mesh arrives as an opaque quad; wherever water crosses the cell
@@ -3128,8 +3982,7 @@ function bboxArea(ring) {
  * the geometry carries its atlas uvs either way.
  */
 export function facadeMaterial(mats) {
-  return (mats._facadeMat ??= new THREE.MeshLambertMaterial({
-    vertexColors: true, map: facadeAtlas() }));
+  return (mats._facadeMat ??= buildFacadeMaterial());
 }
 
 export function buildBuildingsMesh(city, cx, cz, mats) {
@@ -3138,7 +3991,7 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   if (!cell) return null;
   const facades = !!mats.facades;
   const hidden = mats.hidden;
-  const bGeos = [], bSink = new TriSink(facades, false);
+  const bGeos = [], bSink = facades ? new BuildingSink() : new TriSink(false, false);
   // door dressing lives in its own two batches: the surround/canopy carry no
   // atlas uv, and the sign board needs an emissive material main.js can turn up
   // at dusk. Two extra draw calls per chunk buys a city where you can see which
@@ -3155,15 +4008,25 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   const small = mats.shellLod
     ? (f) => bboxArea(f.o) < SHELL_MIN_AREA && (f.h ?? 6) < SHELL_MIN_H
     : () => false;
+  let lmBatch = null;
   for (const f of cell.buildings) {
     if (f._home !== key) continue;
+    // A landmark is modelled by hand (js/landmarks.js) and is the same model in
+    // every tier: never hidden behind a shell, never dropped as small.
+    const lm = landmarkOf(f);
+    if (lm) {
+      (lmBatch ??= new LandmarkBatch()).add(lm, f, mats.terrain ? groundFor(f, mats.terrain) : 0, mats.terrain ?? null, cell.roads);
+      continue;
+    }
     if (hidden && hidden.has(f._id)) continue;   // now made of boxes instead
     if (small(f)) continue;
-    buildingInto(f, bGeos, bSink, facades, cell, trim, sign, marks, mats.terrain);
+    buildingInto(f, bGeos, bSink, facades, cell, trim, sign, marks, mats.terrain,
+      !!mats.shellLod);
   }
   const pg = bSink.geo();
   if (pg) bGeos.push(pg);
-  if (!bGeos.length) return null;
+  const lmGeo = lmBatch?.geo() ?? null;
+  if (!bGeos.length && !lmGeo) return null;
   const mat = facades ? facadeMaterial(mats) : mats.building;
   const group = new THREE.Group();
   group.name = 'buildings';
@@ -3171,9 +4034,16 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
   // class index would take the whole chunk's buildings out. Nothing here reads
   // it; strip it rather than depend on every producer remembering.
   for (const g of bGeos) g.deleteAttribute('surf');
-  const m = new THREE.Mesh(mergeGeometries(bGeos, false), mat);
-  m.castShadow = m.receiveShadow = true;
-  group.add(m);
+  if (bGeos.length) {
+    const m = new THREE.Mesh(mergeGeometries(bGeos, false), mat);
+    m.castShadow = m.receiveShadow = true;
+    group.add(m);
+  }
+  if (lmGeo) {
+    const lmMesh = new THREE.Mesh(lmGeo, mats.landmark);
+    lmMesh.castShadow = lmMesh.receiveShadow = true;
+    group.add(lmMesh);
+  }
   const tg = trim.geo();
   if (tg) {
     const t = new THREE.Mesh(tg, mats.doorTrim);
@@ -3208,7 +4078,7 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
 // the whole city on for free — no lights, no shadow cost.
 // One zebra: white longitudinal bars side by side across the carriageway,
 // centred on the OSM crossing node, at the road's own absolute deck height.
-function zebraInto(sink, cr, cell, terrain) {
+function zebraInto(sink, cr, cell, terrain, signsOut = null, offRoad = null) {
   const [x, z] = cr.p[0];
   // the crossing belongs to the road it plausibly CROSSES — scored by
   // distance over half-width, so a wide main street beats a narrow service
@@ -3262,18 +4132,18 @@ function zebraInto(sink, cr, cell, terrain) {
   // than this crossing's own road, and the pad swallowed the stripes whole
   let y = gy + LAYER_Y.marking + 0.02;
   const ck = chunkKey(x, z);
-  for (const j of junctionsIn(ck) ?? []) {
-    if (j._cluster || j._ring) continue;
-    if ((x - j.x) ** 2 + (z - j.z) ** 2 > (j.padR ?? 6) ** 2) continue;
-    y = Math.max(y, junctionDeckY(j, x, z, terrain) + LAYER_Y.road + 0.012 + 0.05);
+  // (the pad stands a hair over its highest-ranked arm: 3.5 cm clears any of
+  // them). Asked of the pad's own OUTLINE, at the band's middle and both ends.
+  const pads = [...(junctionsIn(ck) ?? []), ...(clustersIn(ck) ?? [])];
+  const pad = pads.length ? (inPads(pads, x, z) ?? inPads(pads, x + ux * 1.8, z + uz * 1.8)
+    ?? inPads(pads, x - ux * 1.8, z - uz * 1.8)) : null;
+  if (pad) {
+    const dy = pad.members ? clusterDeckY(pad, x, z, terrain) : junctionDeckY(pad, x, z, terrain);
+    y = Math.max(y, dy + LAYER_Y.road + 0.012 + 0.035 + MARK);
   }
-  for (const cl of clustersIn(ck) ?? []) {
-    if ((x - cl.x) ** 2 + (z - cl.z) ** 2 > cl.padR ** 2) continue;
-    const ring = clusterHull(cl);
-    if (ring && pointInPolygon(x, z, ring)) {
-      y = Math.max(y, clusterDeckY(cl, x, z, terrain) + LAYER_Y.road + 0.012 + 0.05);
-    }
-  }
+  // IP 6 on each approach, where the zebra crosses a real street on its own
+  // (inside a junction box the signals or the junction's own signs speak)
+  if (signsOut && offRoad && !pad && (road.w ?? 0) >= 5) crossingSigns(x, z, ux, uz, road, offRoad, signsOut);
   sink.at(SURF.paint);
   _c.setHex(COLORS.marking);
   const mr = _c.r, mg = _c.g, mb = _c.b;
@@ -3383,21 +4253,150 @@ function wireSpan(sink, ax, az, bx, bz, minor, kV, terrain) {
 // centreline and the rest is Czech practice: contact wire 5.5 m up, two wires
 // 0.6 m apart per direction, masts every 32 m alternating kerbs with a span
 // bracket reaching over. Absolute heights (fixFrom), like every other fixture.
+//
+// The WIRES of a way are drawn whole from its home chunk, like its ribbon. The
+// MASTS belong to the cell they stand in, like the lamps: a mast has to know
+// what it would be standing in, and only the cell it is in (with the eight
+// round it) holds the carriageways, crossings and houses that can answer.
+// Drawn whole from the home chunk they were placed half a width and 0.8 m off
+// the centreline and nothing else was asked: of the 1 316 masts of Pardubice
+// 214 stood in another carriageway, 39 in a bus lay-by, 25 on the asphalt of a
+// junction (the Palackého crossing had them in its middle) and 3 in a house.
 const TW_H = 5.5, TW_GAP = 0.6, TW_STEP = 32;
-function trolleyInto(sink, f, terrain) {
+const TW_OUT = 0.8;             // m behind the kerb line a mast stands
+const TW_SLIDE = 6;             // m a mast may be moved along the street to find a place
+const TW_ZEBRA = 4;             // m of kerb either side of a crossing kept clear
+
+/**
+ * "May a mast stand at (x, z)?" for cell `key`, as a function that answers
+ * true when it may NOT: on a carriageway or in a lay-by (lampInRoad), on the
+ * asphalt of a junction, or inside a house. The same lists, from the same nine
+ * cells, as the lamps are tested against (lampGround, lampHouses), so the mesh
+ * worker has every one of them. `self` is the mast's own way when it stands
+ * inside that way's width on purpose (a bridge deck).
+ */
+function mastGuard(cell, key, city) {
+  const c = key.indexOf(','), x0 = +key.slice(0, c) * CHUNK, z0 = +key.slice(c + 1) * CHUNK;
+  const { roads, pads } = lampGround(city, cell, key);
+  const over = new Map();
+  return (x, z, self) => {
+    if (lampInRoad(roads, self, x, z, LAMP_CLEAR)) return true;
+    if (self) return false;
+    const j = inPads(pads, x, z);
+    if (j && cornerLift(j, x, z) < 0) return true;
+    const k = chunkKey(x, z);
+    if (k === key) return lampInHouse(cell.buildings ?? [], x, z);
+    let hs = over.get(k);
+    if (hs === undefined) {
+      const nb = city?.chunkIndex?.get(k);
+      over.set(k, hs = nb?.houses ?? lampHouses(nb, x0, z0, x0 + CHUNK, z0 + CHUNK));
+    }
+    return lampInHouse(hs, x, z);
+  };
+}
+
+/**
+ * Where the masts of trolley way `f` stand in cell `key`, as
+ * [x, z, cx, cz, side, seg, t, s]: the mast, the point of the centreline it
+ * serves, which kerb (+1 / -1 along the segment's left normal), and where that
+ * point is (segment index, 0..1 along it, arclength along the way).
+ *
+ * One station every TW_STEP from the way's first vertex, whichever cell asks,
+ * and a station is the business of the cell its centreline point is in. At
+ * each: the kerb the alternation gives, 0.8 m behind the kerb line, and the
+ * kerb line steps out round a bus lay-by. If that is no place for a mast
+ * (`blocked`, a dropped kerb, a crossing) the far kerb; if that is none either
+ * the same two a few metres up the street and then down it; and if nothing is
+ * free there is no mast, and the wire spans the gap as it does over any big
+ * crossing. On a bridge the mast stands on the deck's edge.
+ */
+export function trolleyMasts(f, key, cell, blocked, out = []) {
+  const p = f.p;
+  if (!p || p.length < 2) return out;
+  const c = key.indexOf(','), x0 = +key.slice(0, c) * CHUNK, z0 = +key.slice(c + 1) * CHUNK;
+  const x1 = x0 + CHUNK, z1 = z0 + CHUNK;
+  const half = (f.w ?? 7) / 2, deck = !!f.br;
+  const vg = deck ? null : streetOf(f);
+  const zebra = (x, z) => {
+    for (const cr of cell?.crossings ?? []) {
+      if ((cr.p[0][0] - x) ** 2 + (cr.p[0][1] - z) ** 2 < TW_ZEBRA * TW_ZEBRA) return true;
+    }
+    return false;
+  };
+  let carry = (f._id % 13) * 2, run = 0;
+  for (let i = 0; i < p.length - 1; i++) {
+    const ax = p[i][0], az = p[i][1];
+    let dx = p[i + 1][0] - ax, dz = p[i + 1][1] - az;
+    const L = Math.hypot(dx, dz);
+    if (L < 0.01) continue;
+    dx /= L; dz /= L;
+    const px = -dz, pz = dx;
+    for (let d = TW_STEP - carry; d < L; d += TW_STEP) {
+      const sx = ax + dx * d, sz = az + dz * d;
+      if (sx < x0 || sx >= x1 || sz < z0 || sz >= z1) continue;      // this cell only
+      const first = ((f._id + Math.round(d / TW_STEP)) & 1) ? 1 : -1;
+      place: for (let k = 0; k < 3; k++) {
+        const dd = d + (k === 1 ? TW_SLIDE : k === 2 ? -TW_SLIDE : 0);
+        if (dd < 0 || dd > L) continue;
+        const cx = ax + dx * dd, cz = az + dz * dd;
+        // (moved along, it stays this cell's: the lists it is tested against
+        // reach 14 m past the cell, and a mast is up to 9 m off its station)
+        if (k && (cx < x0 || cx >= x1 || cz < z0 || cz >= z1)) continue;
+        if (!deck && zebra(cx, cz)) continue;
+        for (let e = 0; e < 2; e++) {
+          const side = e ? -first : first;
+          // bayAt and the verge count sides by the ribbon's perpendicular, the
+          // opposite of `side` here
+          const off = deck ? half - 0.25 : half + TW_OUT + bayAt(f, run + dd, -side);
+          const mx = cx + px * side * off, mz = cz + pz * side * off;
+          if (vg) {
+            const v = vergeAt(f, run + dd, side < 0 ? 1 : 0);
+            if (v.u && v.drop > 0.25) continue;                       // a dropped kerb: somebody crosses here
+          }
+          if (blocked && blocked(mx, mz, deck ? f : null)) continue;
+          out.push([mx, mz, cx, cz, side, i, dd / L, run + dd]);
+          break place;
+        }
+      }
+    }
+    carry = (carry + L) % TW_STEP;
+    run += L;
+  }
+  return out;
+}
+
+/** Every trolley mast of cell `key`, as trolleyMasts gives them: what js/trolleymasts.js plants. */
+export function trolleyPlan(city, key, owners = null) {
+  const cell = city?.chunkIndex?.get(key), out = [];
+  if (!cell) return out;
+  let guard = null;
+  for (const r of cell.roads) {
+    if (!r.tw || !r.p) continue;
+    const n0 = out.length;
+    trolleyMasts(r, key, cell, guard ??= mastGuard(cell, key, city), out);
+    // (`owners`, when given, gets the way of each mast: what its bracket reaches over)
+    if (owners) for (let k = n0; k < out.length; k++) owners.push(r);
+  }
+  return out;
+}
+
+function trolleyInto(sink, f, terrain, stand = null, key = null, blocked = null, cell = null) {
   if (!f.p || f.p.length < 2 || !terrain) return;
   const mark = sink.mark();
   sink.at(SURF.concrete);
-  _c.setHex(0x6f7378);
-  const mr = _c.r, mg = _c.g, mb = _c.b;
   _c.setHex(0x2a2c30);
   const wr = _c.r, wg = _c.g, wb = _c.b;
   const half = (f.w ?? 7) / 2;
   // the wire pairs ride either side of the centreline (one per direction);
   // a narrow street carries a single pair down the middle
   const offs = half > 4.5 ? [-half * 0.5, half * 0.5] : [0];
-  let carry = (f._id % 13) * 2;
-  for (let i = 0; i < f.p.length - 1; i++) {
+  // What a wire is 5.5 m over. On a bridge that is the deck: over the ground
+  // under it the pair dived into the valley and came up through the far
+  // abutment. Anywhere else the ground the road was levelled into, as before.
+  const lens = [0];
+  for (let i = 0; i < f.p.length - 1; i++) lens.push(lens[i] + Math.hypot(f.p[i + 1][0] - f.p[i][0], f.p[i + 1][1] - f.p[i][1]));
+  const under = (i, x, z) => (f.br ? bridgeDeckHeight(f, lens[i], terrain) + LAYER_Y.road : terrain.heightAt(x, z));
+  if (key === null || f._home === key) for (let i = 0; i < f.p.length - 1; i++) {
     const [ax, az] = f.p[i], [bx, bz] = f.p[i + 1];
     let dx = bx - ax, dz = bz - az;
     const L = Math.hypot(dx, dz);
@@ -3410,8 +4409,8 @@ function trolleyInto(sink, f, terrain) {
         const c = o + w;
         const x0w = ax + px * c, z0w = az + pz * c;
         const x1w = bx + px * c, z1w = bz + pz * c;
-        const y0 = terrain.heightAt(x0w, z0w) + TW_H;
-        const y1 = terrain.heightAt(x1w, z1w) + TW_H;
+        const y0 = under(i, x0w, z0w) + TW_H;
+        const y1 = under(i + 1, x1w, z1w) + TW_H;
         // a thin double-sided ribbon reads as a wire from the street
         sink.quad(x0w, y0 - 0.035, z0w, x1w, y1 - 0.035, z1w,
           x1w, y1 + 0.035, z1w, x0w, y0 + 0.035, z0w, wr, wg, wb);
@@ -3419,33 +4418,62 @@ function trolleyInto(sink, f, terrain) {
           x1w, y1 - 0.035, z1w, x0w, y0 - 0.035, z0w, wr, wg, wb);
       }
     }
-    // masts, this chunk only — the wires above are drawn from the way's home
-    for (let d = TW_STEP - carry; d < L; d += TW_STEP) {
-      const mx0 = ax + dx * d, mz0 = az + dz * d;
-      const side = ((f._id + Math.round(d / TW_STEP)) & 1) ? 1 : -1;
-      const mx = mx0 + px * side * (half + 0.8), mz = mz0 + pz * side * (half + 0.8);
-      const g = terrain.heightAt(mx, mz);
-      const top = g + TW_H + 0.9;
-      for (const [ox, oz] of [[px, pz], [dx, dz]]) {
-        for (const flip of [1, -1]) {
-          sink.quad(mx - ox * 0.09 * flip, g - 0.3, mz - oz * 0.09 * flip,
-            mx + ox * 0.09 * flip, g - 0.3, mz + oz * 0.09 * flip,
-            mx + ox * 0.07 * flip, top, mz + oz * 0.07 * flip,
-            mx - ox * 0.07 * flip, top, mz - oz * 0.07 * flip, mr, mg, mb);
-        }
-      }
-      // the bracket reaching over the carriageway to the far wire pair
-      const reach = half + 0.8 + (offs.length > 1 ? half * 0.5 : 0);
-      const ex = mx - px * side * reach, ez = mz - pz * side * reach;
-      const by = top - 0.25;
-      for (const flip of [1, -1]) {
-        sink.quad(mx, by - 0.06 * flip, mz, ex, by - 0.06 * flip, ez,
-          ex, by + 0.06 * flip, ez, mx, by + 0.06 * flip, mz, mr, mg, mb);
-      }
-    }
-    carry = (carry + L) % TW_STEP;
   }
+  // The MASTS are not chunk geometry any more: a mast can be knocked down, and
+  // one row of a merged chunk cannot be taken out of it. js/trolleymasts.js
+  // plants the masts of the cells round the player from trolleyPlan, draws
+  // each with trolleyMastInto below and hands it to js/poles.js. (`key`,
+  // `blocked` and `cell` stay in the signature for the callers.)
   sink.fixFrom(mark);
+}
+
+/**
+ * One trolley mast with the bracket that carries the wire, as trolleyMasts
+ * planned it (`m` is one of its rows) for trolley way `f`, standing at height
+ * `g`. The arm starts wherever the mast found room and ends over the far pair,
+ * level with the wire AT THIS STATION (read off the same two segment ends the
+ * wire was drawn between), and each pair hangs from it on a dropper. So a mast
+ * moved behind a lay-by or across the street still holds the wire, on a
+ * longer arm. Written into `sink` (anything with quad, tri and triFacing) at
+ * absolute coordinates less (ox, oy, oz), so the same mast can be a row of a
+ * batch and, felled, a mesh of its own about its foot.
+ */
+export function trolleyMastInto(sink, f, m, terrain, g, ox = 0, oy = 0, oz = 0) {
+  const [mx, mz, cx, cz, side, i, t] = m;
+  _c.setHex(0x6f7378);
+  const mr = _c.r, mg = _c.g, mb = _c.b;
+  const half = (f.w ?? 7) / 2;
+  const offs = half > 4.5 ? [-half * 0.5, half * 0.5] : [0];
+  const [ax, az] = f.p[i], [bx, bz] = f.p[i + 1];
+  const L = Math.hypot(bx - ax, bz - az) || 1e-6;
+  const px = -(bz - az) / L, pz = (bx - ax) / L;
+  let l0 = 0;
+  if (f.br) for (let k = 0; k < i; k++) l0 += Math.hypot(f.p[k + 1][0] - f.p[k][0], f.p[k + 1][1] - f.p[k][1]);
+  const under = (k, x, z) => (f.br ? bridgeDeckHeight(f, l0 + (k ? L : 0), terrain) + LAYER_Y.road : terrain.heightAt(x, z));
+  const wireY = (c) => {
+    const y0 = under(0, ax + px * c, az + pz * c), y1 = under(1, bx + px * c, bz + pz * c);
+    return y0 + (y1 - y0) * t + TW_H;
+  };
+  let hi = -Infinity;
+  for (const o of offs) hi = Math.max(hi, wireY(o));
+  const armY = hi + 0.34;
+  const top = Math.max(armY + 0.6, g + 3);
+  const X = mx - ox, Z = mz - oz, G = g - oy, A = armY - oy, Tp = top - oy;
+  // a tapered steel mast on a flange, standing on the pavement (or the deck)
+  kitDrum(sink, X, Z, G, G + 0.04, 0.2, 0.2, 8, mr * 0.8, mg * 0.8, mb * 0.8, 1);
+  kitDrum(sink, X, Z, G + 0.04, Tp, 0.105, 0.07, 8, mr, mg, mb, 1);
+  // the arm, 0.4 m past the far pair, and the stay that holds its end up
+  const far = -side * (offs.length > 1 ? half * 0.5 : 0) - side * 0.4;
+  const ex = cx + px * far - ox, ez = cz + pz * far - oz;
+  kitBar(sink, X, A, Z, ex, A, ez, 0.07, mr, mg, mb);
+  kitBar(sink, X, Tp - 0.03, Z, X + (ex - X) * 0.7, A + 0.03, Z + (ez - Z) * 0.7, 0.035, mr, mg, mb);
+  for (const o of offs) {
+    const wx = cx + px * o - ox, wz = cz + pz * o - oz, wy = wireY(o) - oy;
+    // the dropper, and the spreader that holds the two wires of a pair apart
+    kitBar(sink, wx, A, wz, wx, wy + 0.06, wz, 0.03, mr, mg, mb);
+    kitBar(sink, wx - px * TW_GAP / 2, wy + 0.06, wz - pz * TW_GAP / 2,
+      wx + px * TW_GAP / 2, wy + 0.06, wz + pz * TW_GAP / 2, 0.03, mr, mg, mb);
+  }
 }
 
 // ---- refuge island: the kerbed slab a crossing splits around ---------------
@@ -3565,7 +4593,7 @@ function bayInto(sink, r, along, offX, offZ, terrain) {
   sink.fixFrom(mark);          // absolute deck heights: the drape must skip it
 }
 
-function busStopInto(sink, x, z, cell, terrain) {
+function busStopInto(sink, x, z, cell, terrain, stand = null, deco = null) {
   let dx = 0, dz = -1, best = 30 * 30;
   let bestR = null, bestAlong = 0, qx = x, qz = z;
   for (const r of cell.roads) {
@@ -3587,33 +4615,21 @@ function busStopInto(sink, x, z, cell, terrain) {
     }
   }
   bayInto(sink, bestR, bestAlong, x - qx, z - qz, terrain);
+  // the označník: a post on the pavement, the blue IJ 4b plate on top looking
+  // both ways along the street, and the timetable case at reading height
+  const y0 = (stand ?? terrain) ? (stand ?? terrain).heightAt(x, z) : 0;
+  const mark = sink.mark();
   sink.at(SURF.concrete);
   _c.setHex(0x8a8d92);
   const pr = _c.r, pg = _c.g, pb = _c.b;
-  const ux = -dz, uz = dx;                       // panel plane faces along travel
-  for (const [ox, oz] of [[ux, uz], [dx, dz]]) {
-    for (const flip of [1, -1]) {
-      sink.quad(x - ox * 0.03 * flip, 0, z - oz * 0.03 * flip,
-        x + ox * 0.03 * flip, 0, z + oz * 0.03 * flip,
-        x + ox * 0.03 * flip, 3.0, z + oz * 0.03 * flip,
-        x - ox * 0.03 * flip, 3.0, z - oz * 0.03 * flip, pr, pg, pb);
-    }
-  }
-  _c.setHex(0x1a5fb4);                           // IJ4 blue flag, both faces
-  const br = _c.r, bg = _c.g, bb = _c.b;
-  _c.setHex(0xf2f0ea);
-  const wr = _c.r, wg = _c.g, wb = _c.b;
+  kitDrum(sink, x, z, y0, y0 + 0.05, 0.09, 0.06, 6, pr * 0.8, pg * 0.8, pb * 0.8, 1);
+  kitPost(sink, x, z, y0 + 0.05, y0 + 2.95, 0.032, pr, pg, pb);
+  if (terrain) sink.fixFrom(mark);
+  if (!deco) return;
   for (const flip of [1, -1]) {
     const fx = dx * flip, fz = dz * flip;
-    sink.triFacing(x - ux * 0.34, 2.92, z - uz * 0.34, x + ux * 0.34, 2.92, z + uz * 0.34,
-      x + ux * 0.34, 2.42, z + uz * 0.34, fx, 0, fz, br, bg, bb);
-    sink.triFacing(x - ux * 0.34, 2.92, z - uz * 0.34, x + ux * 0.34, 2.42, z + uz * 0.34,
-      x - ux * 0.34, 2.42, z - uz * 0.34, fx, 0, fz, br, bg, bb);
-    // the bus glyph, abstracted to a white slab with a windscreen gap
-    sink.triFacing(x - ux * 0.2, 2.78, z - uz * 0.2, x + ux * 0.2, 2.78, z + uz * 0.2,
-      x + ux * 0.2, 2.56, z + uz * 0.2, fx, 0, fz, wr, wg, wb);
-    sink.triFacing(x - ux * 0.2, 2.78, z - uz * 0.2, x + ux * 0.2, 2.56, z + uz * 0.2,
-      x - ux * 0.2, 2.56, z - uz * 0.2, fx, 0, fz, wr, wg, wb);
+    deco.panel('bus', x + fx * 0.045, y0 + 2.58, z + fz * 0.045, 0.72, 0.72, fx, fz);
+    deco.panel('timetable', x + fx * 0.045, y0 + 1.5, z + fz * 0.045, 0.34, 0.5, fx, fz);
   }
 }
 
@@ -3913,8 +4929,33 @@ function bumpInto(sink, node, cell, terrain) {
   sink.fixFrom(mark);
 }
 
-// one sign: post + panel, all vertex-coloured triangles in the chunk sink
-function signPost(sink, sg, cell, terrain) {
+// ---- road signs ---------------------------------------------------------------
+// A sign is a round galvanised post standing on the pavement and one or two
+// plates on it. The post is steel in the chunk sink; the plates are quads in
+// the textured sink, showing a face of the street atlas (js/signatlas.js: real
+// Czech signs, painted once) with the same plate's grey back behind it.
+const SIGN_H = 2.3, SIGN_H2 = 2.72;       // centre of the top plate: one plate, two
+function signInto(sink, deco, stand, px, pz, dx, dz, a, b) {
+  const y0 = stand ? stand.heightAt(px, pz) : 0;
+  const H = b ? SIGN_H2 : SIGN_H;
+  // RIGID, like every other fixture (wireSpan, pylonInto, busStopInto): one
+  // height for the whole sign, and the chunk-wide drape is told to skip it.
+  const mark = sink.mark();
+  sink.at(SURF.concrete);
+  _c.setHex(0x8a8d92);                            // galvanised
+  kitDrum(sink, px, pz, y0, y0 + 0.05, 0.075, 0.05, 6, _c.r * 0.8, _c.g * 0.8, _c.b * 0.8, 1);
+  kitPost(sink, px, pz, y0 + 0.05, y0 + H + SIGN_M * 0.34, 0.03, _c.r, _c.g, _c.b);
+  if (stand) sink.fixFrom(mark);                  // absolute heights: the drape must skip them
+  if (!deco) return;
+  // the plate looks AGAINST the travel it speaks to, a thumb proud of the post
+  const fx = -dx, fz = -dz, o = 0.046;
+  deco.panel(a, px + fx * o, y0 + H, pz + fz * o, SIGN_M, SIGN_M, fx, fz, 'back:' + a);
+  if (b) deco.panel(b, px + fx * o, y0 + H - SIGN_M * 0.88, pz + fz * o, SIGN_M * 0.9, SIGN_M * 0.9, fx, fz, 'back:' + b);
+}
+
+// one SURVEYED sign (an OSM node, which sits on the way at the stop line):
+// pushed to the right kerb of the travel it governs, facing the oncoming driver
+function signPost(sink, deco, sg, cell, stand) {
   const [x, z] = sg.p[0];
   // face against the travel of the nearest drivable road, from its right kerb
   let dx = 0, dz = -1, hw = 3;
@@ -3936,114 +4977,364 @@ function signPost(sink, sg, cell, terrain) {
       }
     }
   }
-  const px = x - dz * (hw + 0.6), pz = z + dx * (hw + 0.6);   // right of travel
-  // panel corners live in the plane facing −travel; u runs across it
-  const ux = -dz, uz = dx;
-  const H = 2.2;                                  // panel centre height
-  sink.at(SURF.concrete);
-  // RIGID, like every other fixture (wireSpan, pylonInto, busStopInto): one
-  // ground sample for the whole sign, and the chunk-wide drape is told to skip
-  // it. Draping per vertex was pulling the panel's layers apart by fractions
-  // of a millimetre in an uncorrelated way, which is why the z-fight below
-  // crawled and shimmered instead of sitting still.
-  const mark = sink.mark();
-  const y0 = terrain ? terrain.heightAt(px, pz) : 0;
-  _c.setHex(0x8a8d92);                            // galvanised post
-  const prm = _c.r, pgm = _c.g, pbm = _c.b;
-  for (const [ox, oz] of [[ux, uz], [dx, dz]]) {  // two crossed fins read as a post
-    sink.quad(px - ox * 0.035, y0, pz - oz * 0.035, px + ox * 0.035, y0, pz + oz * 0.035,
-      px + ox * 0.035, y0 + H + 0.45, pz + oz * 0.035, px - ox * 0.035, y0 + H + 0.45, pz - oz * 0.035,
-      prm, pgm, pbm);
-    sink.quad(px + ox * 0.035, y0, pz + oz * 0.035, px - ox * 0.035, y0, pz - oz * 0.035,
-      px - ox * 0.035, y0 + H + 0.45, pz - oz * 0.035, px + ox * 0.035, y0 + H + 0.45, pz + oz * 0.035,
-      prm, pgm, pbm);
-  }
-  // THE PANEL NEEDS A DEPTH AXIS. Every coloured surface of a sign used to be
-  // authored in one plane at zero separation — the post's first fin included,
-  // which is a grey quad lying exactly in the panel's plane and facing the
-  // same way. The depth buffer then had to break an exact tie per pixel, the
-  // winner changed with the camera, and the face crawled between grey, red and
-  // white as you drove: the reported "blikání". The author's own "+12 mm"
-  // nudges did nothing because they moved the symbol UP the panel (+v) rather
-  // than OUT of it — the flat-decal idiom, where +y really is the normal,
-  // transplanted onto a vertical plate.
-  const PLATE = 0.05;    // clears the 35 mm post fins with 15 mm to spare
-  const LAYER = 0.012;   // one layer of relief; still resolvable at ~165 m
-  const P = (u, v) => [px + ux * u, y0 + H + v, pz + uz * u];
-  // k = 0 is the plate face, 1 a symbol painted on it, 2 anything on THAT. The
-  // front copy steps along −travel and the back copy along +travel, so the two
-  // faces stack OUTWARD and can never meet in the middle.
-  const tri2 = (a, b, c2, r, g, b2, k = 0) => { // both windings — read from both sides
-    const o = PLATE + k * LAYER;
-    const F = (p, s) => [p[0] - dx * s * o, p[1], p[2] - dz * s * o];
-    const a0 = F(a, 1), b0 = F(b, 1), c0 = F(c2, 1);
-    const a1 = F(a, -1), b1 = F(b, -1), c1 = F(c2, -1);
-    sink.triFacing(a0[0], a0[1], a0[2], b0[0], b0[1], b0[2], c0[0], c0[1], c0[2], -dx, 0, -dz, r, g, b2);
-    sink.triFacing(a1[0], a1[1], a1[2], c1[0], c1[1], c1[2], b1[0], b1[1], b1[2], dx, 0, dz, r, g, b2);
-  };
-  _c.setHex(0xc8332a); const rr = _c.r, rg = _c.g, rb = _c.b;
-  _c.setHex(0xf2f0ea); const wr2 = _c.r, wg2 = _c.g, wb2 = _c.b;
-  if (sg.k === 'give_way') {
-    // inverted triangle: red border, white heart
-    tri2(P(-0.45, 0.45), P(0.45, 0.45), P(0, -0.35), rr, rg, rb);
-    tri2(P(-0.30, 0.36), P(0.30, 0.36), P(0, -0.17), wr2, wg2, wb2, 1);
-  } else if (sg.k === 'stop') {
-    // red octagon (fan) with a white ring hinted by a lighter inner fan
-    const R = 0.42;
-    for (let i = 0; i < 8; i++) {
-      const a0 = (i / 8) * Math.PI * 2 + Math.PI / 8, a1 = ((i + 1) / 8) * Math.PI * 2 + Math.PI / 8;
-      tri2(P(0, 0), P(Math.cos(a0) * R, Math.sin(a0) * R), P(Math.cos(a1) * R, Math.sin(a1) * R),
-        rr, rg, rb);
-    }
-    // the white STOP bar — legible as the word from any driving distance
-    tri2(P(-0.26, 0.055), P(0.26, 0.055), P(-0.26, -0.055), wr2, wg2, wb2, 1);
-    tri2(P(0.26, 0.055), P(0.26, -0.055), P(-0.26, -0.055), wr2, wg2, wb2, 1);
-  } else {
-    // hlavní silnice: yellow diamond in a white one
-    tri2(P(-0.4, 0), P(0, 0.4), P(0.4, 0), wr2, wg2, wb2);
-    tri2(P(-0.4, 0), P(0.4, 0), P(0, -0.4), wr2, wg2, wb2);
-    _c.setHex(0xe7b33c); const yr = _c.r, yg = _c.g, yb = _c.b;
-    tri2(P(-0.28, 0.01), P(0, 0.29), P(0.28, 0.01), yr, yg, yb, 1);
-    tri2(P(-0.28, 0.01), P(0.28, 0.01), P(0, -0.27), yr, yg, yb, 1);
-  }
-  if (terrain) sink.fixFrom(mark);   // absolute heights: the drape must skip them
+  const px = x - dz * (hw + 0.75), pz = z + dx * (hw + 0.75);   // right of travel
+  signInto(sink, deco, stand, px, pz, dx, dz,
+    sg.k === 'give_way' ? 'give_way' : sg.k === 'stop' ? 'stop' : 'main_road');
 }
 
-const LAMP_STEP = 34, LAMP_MIN_W = 5.4, LAMP_H = 7.2;
+const LAMP_STEP = 34, LAMP_MIN_W = 5.4;
 // clearance a mast keeps from any OTHER carriageway: its own base radius plus
 // enough that a wing mirror does not find it
 const LAMP_CLEAR = 0.45;
-let _lPost = null, _lHead = null;
-function lampTemplates() {
-  if (!_lPost) {
-    // post + arm merged: one upright cylinder, one short horizontal box
-    const post = new THREE.CylinderGeometry(0.075, 0.11, LAMP_H, 6, 1).translate(0, LAMP_H / 2, 0);
-    const arm = new THREE.BoxGeometry(1.05, 0.11, 0.11).translate(0.5, LAMP_H - 0.16, 0);
-    _lPost = mergeGeometries([post, arm], false);
-    _lHead = new THREE.BoxGeometry(0.66, 0.17, 0.3).translate(1.0, LAMP_H - 0.3, 0);
+// A generated lamp this close to a surveyed one IS that lamp: where OSM has the
+// columns, the every-34-metres rule stands down instead of doubling them.
+const LAMP_NEAR = 18;
+// Lanterns along a pedestrian street or an obytná zóna: lower, so closer.
+const PARK_STEP = 26;
+// How far from a kerb a surveyed lamp may stand and still be that street's lamp.
+const LAMP_REACH = 5;
+
+/**
+ * What a mast placed from this cell could be standing in: every carriageway
+ * and every junction pad of the 3x3 cells round it, not the cell's own lists.
+ * A lamp is offset up to a road's half width from a point INSIDE the cell, so
+ * it can land across the border, and roads are bucketed by bounding box and
+ * pads by their node: the neighbour's tertiary and its crossing were in
+ * neither of this cell's lists, and a column stood on that road's centreline
+ * (chunk 9,-7; over the Pardubice tile 8 lamps in a carriageway and 15 on a
+ * pad, every pad one from a neighbouring key). js/chunkspec.js ships the same
+ * nine road lists and the same nine pad buckets, so the worker agrees.
+ */
+function lampGround(city, cell, key, raw = false) {
+  const roads = [], pads = [], seen = new Set();
+  const c = key.indexOf(','), cx = +key.slice(0, c), cz = +key.slice(c + 1);
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const k = (cx + dx) + ',' + (cz + dz);
+    const nb = k === key ? cell : city?.chunkIndex?.get(k);
+    // one way lies in every cell its bbox touches: once is enough
+    for (const r of nb?.roads ?? []) if (r.d && r.p && !seen.has(r)) { seen.add(r); roads.push(r); }
+    // (`raw`: the buckets as they stand, see lampPlan)
+    for (const j of (raw ? JUNCTIONS.get(k) : junctionsIn(k)) ?? []) pads.push(j);
+    for (const j of (raw ? CLUSTERS.get(k) : clustersIn(k)) ?? []) pads.push(j);
   }
-  return [_lPost.clone(), _lHead.clone()];
+  return { roads, pads };
 }
 
-// ---- trees: shared low-poly template, CLONED per chunk (chunk unload
-// disposes geometries; a shared template would lose its GPU buffers) ----
-let _tTrunk = null, _tCrown = null;
-// How tall the template stands at scale 1: the crown sits at 7.4 m with a 3.2 m
-// radius, so its top is 10.6. scatterCanopy divides a MEASURED canopy height by
-// this to get the scale, which is the whole reason the number is written down
-// rather than left implicit in two geometry calls.
-const TREE_H = 10.6;
-function treeTemplates() {
-  if (!_tTrunk) {
-    // A mature tree is a BUILDING-sized object: a Czech boulevard lime runs
-    // 10–15 m, a spruce in the floodplain 20–30 m. The first template topped
-    // out at 3.9 m before jitter, which put a full-grown tree barely above
-    // head height — the single loudest scale error in the city.
-    _tTrunk = new THREE.CylinderGeometry(0.16, 0.27, 5.0, 6, 1).translate(0, 2.5, 0);
-    _tCrown = new THREE.IcosahedronGeometry(3.2, 0).scale(1, 1.05, 1).translate(0, 7.4, 0);
+/**
+ * Is (x, z) on the asphalt of a carriageway other than `self`: its lanes, grown
+ * by `grow`, or a bus lay-by beside them. onCarriageway() knows the lanes only,
+ * and a lay-by is three more metres of road where a bus pulls in.
+ */
+function lampInRoad(roads, self, x, z, grow) {
+  for (const o of roads) {
+    if (o === self) continue;
+    const half = (o.w ?? 3) / 2 + grow, b = o._bays;
+    if (half <= 0) continue;
+    // the widest any of its lay-bys gets: bayAt at the middle of the first one
+    const reach = half + (b?.length ? bayAt(o, b[0], b[1]) : 0);
+    const bb = bboxOfLine(o);
+    if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+    let run = 0;
+    for (let k = 0; k < o.p.length - 1; k++) {
+      const ax = o.p[k][0], az = o.p[k][1], ex = o.p[k + 1][0] - ax, ez = o.p[k + 1][1] - az;
+      const L2 = ex * ex + ez * ez || 1e-9;
+      const tu = ((x - ax) * ex + (z - az) * ez) / L2, t = tu < 0 ? 0 : tu > 1 ? 1 : tu;
+      const d = Math.hypot(x - ax - ex * t, z - az - ez * t);
+      if (d < half) return true;
+      if (reach > half) {
+        const L = Math.sqrt(L2);
+        // Only abreast of this segment, where d is a true distance off the
+        // centreline: measured to a segment END it is a slant, and a mast
+        // behind the taper of its own lay-by read as standing in it.
+        if (tu >= 0 && tu <= 1 && d < reach
+          && d < half + bayAt(o, run + L * t, (x - ax) * ez - (z - az) * ex >= 0 ? 1 : -1)) return true;
+        run += L;
+      }
+    }
   }
-  return [_tTrunk.clone(), _tCrown.clone()];
+  return false;
 }
+
+// How far past the edge of its cell a mast can be planted: half the widest
+// carriageway, a lay-by and the kerb offset come to ten metres.
+const LAMP_OVER = 14;
+/**
+ * The houses of a NEIGHBOURING cell that a mast planted from the cell
+ * (x0, z0)-(x1, z1) could come up through, as bare outlines. A mast offset
+ * across the border stands among the next cell's houses, and a house that
+ * does not reach into this cell is in the next cell's list alone (19 masts in
+ * the walls of one, the deepest 2.1 m, over the 53 000 cells of tile -24_2).
+ * The worker is sent a neighbour's roads and not its buildings, so
+ * js/chunkspec.js sends it this list as `houses`, and the main thread reads
+ * the same list here: the two cannot plan different lamps.
+ */
+export function lampHouses(nb, x0, z0, x1, z1) {
+  const out = [];
+  for (const b of nb?.buildings ?? []) {
+    if (!b.o || b.o.length < 3) continue;
+    const bb = bboxOfRing(b);
+    if (bb[2] < x0 - LAMP_OVER || bb[0] > x1 + LAMP_OVER
+      || bb[3] < z0 - LAMP_OVER || bb[1] > z1 + LAMP_OVER) continue;
+    out.push(b.i?.length ? { o: b.o, i: b.i } : { o: b.o });
+  }
+  return out;
+}
+
+/** Is (x, z) inside the footprint of one of these buildings (courtyards are not)? */
+function lampInHouse(houses, x, z) {
+  for (const b of houses) {
+    if (!b.o || b.o.length < 3) continue;
+    const bb = bboxOfRing(b);
+    if (x < bb[0] || x > bb[2] || z < bb[1] || z > bb[3]) continue;
+    if (!pointInPolygon(x, z, b.o)) continue;
+    let yard = false;
+    for (const h of b.i ?? []) if (pointInPolygon(x, z, h)) { yard = true; break; }
+    if (!yard) return true;
+  }
+  return false;
+}
+
+/**
+ * Every lamp this chunk owns, as two lists of [x, z, rot]: STREET columns (rot
+ * faces the carriageway, the arm reaches over it) and PARK lanterns.
+ *
+ * Three sources, in order of trust: the lamps OSM surveyed (cell.furniture,
+ * which used to be drawn as bare unlit masts), the every-34-metres rule along
+ * the wider carriageways, and lanterns along pedestrian and living streets.
+ */
+function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
+  const street = [], park = [], mapped = [];
+  for (const f of cell.furniture ?? []) if (f.k === 'lamp') mapped.push(f.p[0][0], f.p[0][1]);
+  const nearMapped = (x, z) => {
+    for (let i = 0; i < mapped.length; i += 2) {
+      if ((mapped[i] - x) ** 2 + (mapped[i + 1] - z) ** 2 < LAMP_NEAR * LAMP_NEAR) return true;
+    }
+    return false;
+  };
+  // The asphalt of a junction is carriageway too, and no way's own half width
+  // says so: a big crossing is one pad from kerb to kerb, and a column placed
+  // off the edge of one arm stood in the middle of it (8 of the 504 lamps
+  // around the old town and Palackého, base under the asphalt).
+  // (And the pad may be a neighbouring cell's: see lampGround.)
+  const { roads: near, pads } = lampGround(city, cell, key, raw);
+  const onPad = (x, z) => { const j = inPads(pads, x, z); return !!j && cornerLift(j, x, z) < 0; };
+  // A COLUMN DOES NOT COME UP THROUGH A HOUSE. The kerb offset knows nothing of
+  // what stands behind the kerb, and where a facade is on the building line a
+  // 7.5 m mast grew out of the roof of a 4.3 m house with its arm and its pool
+  // of light over it (50 of 3 998 lamps on the Pardubice tile, 28 of them more
+  // than half a metre inside the walls).
+  // The houses of the cell the spot is IN: a building is listed in every cell
+  // its outline reaches, so that one list holds every house the spot can be
+  // inside. For a spot across the border it is the neighbour's (lampHouses).
+  const over = new Map();
+  const inHouse = (x, z) => {
+    const k = chunkKey(x, z);
+    if (k === key) return lampInHouse(cell.buildings ?? [], x, z);
+    let hs = over.get(k);
+    if (hs === undefined) {
+      const nb = city?.chunkIndex?.get(k);
+      over.set(k, hs = nb?.houses ?? lampHouses(nb, x0, z0, x1, z1));
+    }
+    return lampInHouse(hs, x, z);
+  };
+  // 1. surveyed lamps: a column where a carriageway is within reach, turned to
+  // face it; a lantern anywhere else (a park, a square, a path)
+  for (let m = 0; m < mapped.length; m += 2) {
+    const x = mapped[m], z = mapped[m + 1];
+    if (chunkKey(x, z) !== key) continue;
+    let bd = LAMP_REACH, qx = 0, qz = 0, bh = 0, br = null, bs = 0, bex = 0, bez = 0;
+    for (const r of near) {
+      if ((r.w ?? 0) < 4.4) continue;
+      const half = r.w / 2, bb = bboxOfLine(r), reach = half + LAMP_REACH;
+      if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
+      let run = 0;
+      for (let i = 0; i < r.p.length - 1; i++) {
+        const ax = r.p[i][0], az = r.p[i][1], ex = r.p[i + 1][0] - ax, ez = r.p[i + 1][1] - az;
+        const L2 = ex * ex + ez * ez || 1e-9;
+        let t = ((x - ax) * ex + (z - az) * ez) / L2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const cx2 = ax + ex * t, cz2 = az + ez * t;
+        const d = Math.hypot(x - cx2, z - cz2) - half;
+        const L = Math.sqrt(L2);
+        if (d < bd) { bd = d; qx = cx2; qz = cz2; bh = half; br = r; bs = run + L * t; bex = ex; bez = ez; }
+        run += L;
+      }
+    }
+    if (bd >= LAMP_REACH) {
+      park.push([x, z, rnd(Math.abs(Math.round(x * 7 + z * 13)), 3) * Math.PI * 2]);
+      continue;
+    }
+    let nx = x - qx, nz = z - qz;
+    const L = Math.hypot(nx, nz);
+    if (L < 0.05) { nx = 1; nz = 0; } else { nx /= L; nz /= L; }
+    // surveyed a little inside the kerb line (the node is a GPS fix, the kerb
+    // is our own half width): it stands just behind the kerb instead
+    // (the kerb line steps out round a bus lay-by, and the lamp with it)
+    const bay = br.br ? 0 : bayAt(br, bs, nx * bez - nz * bex >= 0 ? 1 : -1);
+    let lx = x, lz = z;
+    if (bd - bay < 0.5) { lx = qx + nx * (bh + bay + 0.6); lz = qz + nz * (bh + bay + 0.6); }
+    if (lampInRoad(near, null, lx, lz, LAMP_CLEAR) || onPad(lx, lz) || inHouse(lx, lz)) continue;
+    street.push([lx, lz, Math.atan2(-nx, -nz) + Math.PI]);
+  }
+  // 2. the rule: along the wider drivable roads, alternating kerbs.
+  // EVERY way that passes through this cell, not only the ones that start in
+  // it: a lamp belongs to the cell it stands in. (It used to be the way's home
+  // chunk AND this cell, so a street was lit for the first hundred metres from
+  // wherever OSM happened to begin it and black for the rest of its length:
+  // main roads, cut into short ways at every junction, were lit, and the long
+  // residential streets between them were not.) The walk is the same from the
+  // way's first vertex whichever cell does it, so the cells agree on the spots.
+  for (const r of cell.roads) {
+    if (!r.d || r.w < LAMP_MIN_W || !r.p) continue;
+    // on a bridge the column stands on the deck's edge, not in the air beside it
+    const half = r.br ? r.w / 2 - 0.25 : r.w / 2 + 0.7;   // else just off the kerb
+    let carry = (r._id % 17) * 2;            // stagger so junctions aren't twinned
+    let nth = 0, run = 0;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+      let dx = bx - ax, dz = bz - az;
+      const L = Math.hypot(dx, dz);
+      if (L < 0.01) continue;
+      dx /= L; dz /= L;
+      for (let d = LAMP_STEP - carry; d < L; d += LAMP_STEP) {
+        const px = ax + dx * d, pz = az + dz * d;
+        const first = ((nth++ + (r._id % 2)) & 1) ? 1 : -1; // alternate kerbs
+        if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue; // this cell only
+        if (nearMapped(px, pz)) continue;
+        // A LAMP STANDS ON THE KERB, NEVER IN THE ROAD. The offset is
+        // perpendicular to THIS way, and wherever another carriageway runs
+        // close (a junction, a slip road, the far half of a dual
+        // carriageway) perpendicular to one road points straight into the
+        // other. Measured over the Pardubice tile: 106 of 2 083 lamps stood
+        // on a carriageway, 61 of them more than a metre in, the worst
+        // 4.42 m inside a 9 m primary, which is the middle of it.
+        //
+        // So try the far kerb, and if that is in the road too, place no lamp
+        // at all: one dark stretch of street is invisible, a mast in the
+        // running lane is something you hit at fifty.
+        //
+        // The kerb is not always half a width out, either: at a bus lay-by it
+        // steps out three metres, and a column 0.7 m past the lane edge stood
+        // in the bay where the bus pulls in (32 of the 80 lay-bys on the
+        // Pardubice tile). The offset steps out with the kerb. bayAt counts
+        // sides by the ribbon's perpendicular, the opposite of `side` here.
+        for (const side of [first, -first]) {
+          const nx = -dz * side, nz = dx * side;
+          const off = half + (r.br ? 0 : bayAt(r, run + d, -side));
+          const lx = px + nx * off, lz = pz + nz * off;
+          // Its OWN way is tested too (not on a deck, where the column stands
+          // inside the width on purpose): on the inside of a sharp bend the
+          // other leg of the same street comes closer than the kerb offset
+          // (0.25 m into the lane at 3836,-1403). The leg it was offset from
+          // is 0.7 m away and the clearance 0.45, so that one never objects.
+          if (lampInRoad(near, r.br ? r : null, lx, lz, LAMP_CLEAR)
+            || (!r.br && (onPad(lx, lz) || inHouse(lx, lz)))) continue;
+          // rot faces the road: the post stands on the kerb, the head reaches in
+          const spot = [lx, lz, Math.atan2(-nx, -nz) + Math.PI];
+          if (r.br && terrain) spot.push(bridgeDeckHeight(r, run + d, terrain) + LAYER_Y.road);
+          street.push(spot);
+          break;
+        }
+      }
+      carry = (carry + L) % LAMP_STEP;
+      run += L;
+    }
+  }
+  // 3. lanterns: a pedestrian street is lit from inside its own paving, an
+  // obytná zóna from just outside its shared surface
+  for (const r of cell.roads) {
+    const ped = r.t === 'pedestrian';
+    if ((!ped && r.t !== 'living_street') || r.br || !r.p || (r.w ?? 0) < 3.5 || r.w >= LAMP_MIN_W && !ped) continue;
+    const off = ped ? Math.max(0.6, r.w / 2 - 0.6) : r.w / 2 + 0.6;
+    let carry = (r._id % 11) * 2, nth = 0, run = 0;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
+      let dx = bx - ax, dz = bz - az;
+      const L = Math.hypot(dx, dz);
+      if (L < 0.01) continue;
+      dx /= L; dz /= L;
+      for (let d = PARK_STEP - carry; d < L; d += PARK_STEP) {
+        const px = ax + dx * d, pz = az + dz * d;
+        const side = ((nth++ + (r._id % 2)) & 1) ? 1 : -1;
+        if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue;
+        // outside a shared surface means outside its lay-by too
+        const o2 = ped ? off : off + bayAt(r, run + d, -side);
+        const lx = px - dz * side * o2, lz = pz + dx * side * o2;
+        if (nearMapped(lx, lz) || lampInRoad(near, r, lx, lz, LAMP_CLEAR) || onPad(lx, lz) || inHouse(lx, lz)) continue;
+        park.push([lx, lz, rnd(r._id, 40 + nth) * Math.PI * 2]);
+      }
+      carry = (carry + L) % PARK_STEP;
+      run += L;
+    }
+  }
+  return { street, park };
+}
+
+/**
+ * The lamps of one cell, for whoever has to know them WITHOUT building it:
+ * js/farlights.js draws every lamp of the town as a point of light out to
+ * three kilometres, and it kept a centreline copy of the walk above with none
+ * of its guards, so a lamp this file had dropped (in a carriageway, a house, a
+ * lay-by) still shone from the helicopter, on a mast that was not there.
+ *
+ * The same plan, with one difference: the pad buckets are read AS THEY STAND.
+ * junctionsIn works a pad's kerb out on first use, from whatever the chunk
+ * index holds at that moment (js/streets.js on WHEN), and a point of light two
+ * kilometres off must not be what decides that moment for a crossing whose
+ * neighbouring tile is not in yet. On a pad nobody has finished the corner
+ * band is not known, so a lamp anywhere on its outline counts as on asphalt:
+ * measured over the Pardubice tile with no pad finished and with all of them,
+ * the 4 019 lamps come out the same, and once a chunk there has been built
+ * the answer is the built one anyway.
+ */
+export function lampPlan(cell, key, terrain, city = null) {
+  const c = key.indexOf(','), x0 = +key.slice(0, c) * CHUNK, z0 = +key.slice(c + 1) * CHUNK;
+  return lampSpots(cell, key, x0, z0, x0 + CHUNK, z0 + CHUNK, terrain, city, true);
+}
+
+/**
+ * One kind of lamp as two InstancedMeshes (the steel, the lens), standing on
+ * whatever `stand` says is underfoot there: the pavement, not the ground it
+ * was laid over.
+ */
+function lampBatch(group, spots, kind, mats, stand) {
+  if (!spots.length) return;
+  const [pg, hg] = lampGeoms(kind);
+  // CLONED per chunk: unloading a chunk disposes its geometries
+  const posts = new THREE.InstancedMesh(pg.clone(), mats.lampPost, spots.length);
+  const heads = new THREE.InstancedMesh(hg.clone(), mats.lampHead, spots.length);
+  posts.castShadow = true;
+  const ys = [], flat = [];
+  for (let i = 0; i < spots.length; i++) {
+    const [px, pz, rot, deckY] = spots[i];
+    const y = Math.round((deckY ?? (stand ? stand.heightAt(px, pz) : 0)) * 1000) / 1000;
+    ys.push(y); flat.push(px, pz, rot);
+    _q.setFromAxisAngle(_up, rot);
+    _v.set(px, y, pz); _s.set(1, 1, 1);
+    _m4.compose(_v, _q, _s);
+    posts.setMatrixAt(i, _m4);
+    heads.setMatrixAt(i, _m4);
+  }
+  posts.instanceMatrix.needsUpdate = true;
+  heads.instanceMatrix.needsUpdate = true;
+  // A mast is an OBJECT: you cannot drive through it and you can put it in
+  // the road. poles.js needs to turn these instance rows back into things
+  // with positions, so the positions travel WITH the batch: named so it can
+  // find them, plain numbers so they survive the worker codec, and in
+  // instance order so row i here is pole i there. `ys` is each base height
+  // (lightpools.js hangs the glow from it), `kind` the shape that falls.
+  posts.name = kind === 'park' ? 'parkPosts' : 'lampPosts';
+  heads.name = kind === 'park' ? 'parkHeads' : 'lampHeads';
+  posts.userData.spots = flat;
+  posts.userData.ys = ys;
+  posts.userData.kind = kind;
+  group.add(posts, heads);
+}
+
+// ---- trees: js/treeshapes.js says which tree stands where and how big it is,
+// and holds the two far templates every chunk instances. Nothing about a
+// tree's shape lives here any more: this file only decides WHERE they grow.
+const _spec = {}, _m4b = new THREE.Matrix4(), _c2 = new THREE.Color();
 
 // ---- forests: real trees where the data only says "green" ----
 // A wood drawn as a flat polygon reads as PAINT the moment you drive past it.
@@ -4123,6 +5414,11 @@ function woodedGreen(f) {
 // scatterForest has planted it.
 const CANOPY_MIN = 3.5;                   // m — a hedge, and below that a bush
 const CANOPY_ROAD = 1.2;                  // m of clearance beyond the kerb
+// A mapped tree is its own canopy: the raster read ITS crown, so a measured
+// tree within CANOPY_TWIN of it is the same tree counted twice (a third of the
+// street trees had a second trunk beside them). A wood's lattice does not know
+// about mapped points either, but only a trunk nearly touching one is wrong.
+const CANOPY_TWIN = 5, FOREST_TWIN = 2.5; // m
 function scatterCanopy(cell, x0, z0, x1, z1, waters, canopy, out) {
   if (!canopy) return;
   // Same contract as Terrain.missed: a chunk that wanted the canopy and did not
@@ -4162,7 +5458,7 @@ function scatterCanopy(cell, x0, z0, x1, z1, waters, canopy, out) {
       if (ok && waters.length && inWater(x, z, waters)) ok = false;
       if (!ok) continue;
       // the measured height IS the tree's height — no more guessing a scale
-      out.push({ x, z, seed, forest: true, h });
+      out.push({ x, z, seed, forest: true, wild: true, h });
       n++;
     }
   }
@@ -4212,7 +5508,7 @@ function scatterForest(f, x0, z0, x1, z1, waters, out) {
       for (const h of holes) if (pointInPolygon(x, z, h)) { ok = false; break; }
       if (ok && waters.length && inWater(x, z, waters)) ok = false;
       if (!ok) continue;
-      out.push({ x, z, seed, forest: true });
+      out.push({ x, z, seed, forest: true, park: f.t === 'park' });
       n++;
     }
   }
@@ -4391,6 +5687,13 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     return done();
   }
   const flat = [], water = [], sink = new TriSink();
+  // what a prop stands on here: the pavement where a street has one (one
+  // answer for lamps, signs, shelters and benches alike)
+  const stand = standingOn(cell, key, mats.terrain);
+  // two more buckets beside the ground sink: textured street dressing (sign
+  // faces, glass, posters) and café terraces. Both are authored at absolute
+  // heights and never draped.
+  const deco = new DecoSink(), terraces = new TriSink(false, false);
 
   // -- water first: it decides the holes the ground must be carved with --
   const holes = [];
@@ -4542,6 +5845,39 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   // them a smear, and no asphalt anywhere between. A surface the player drives
   // and parks on has to be a real surface, so this one is worth the photograph.
   const scatter = mats.trees !== false && !shell && !roadsOnly;
+  // The trees are gathered HERE, long before they are instanced at the bottom,
+  // because the flat sink below wants them: every tree that turns out to stand
+  // on paving gets its pit cut into that paving (js/treepits.js).
+  const trees = [], plates = [];   // (plates: the sealed rectangles laid below)
+  if (scatter) {
+    yield;
+    // (with whatever the tile says the tree IS: species, height, crown, girth;
+    // a landmark's clear zone, such as the gate arch, keeps its trees out)
+    for (const t of cell.trees) if (t._home === key && !landmarkClear(t.p[0][0], t.p[0][1]))
+      trees.push(mappedTree(t));
+    const mapped = trees.length;
+    for (const f of cell.green) {
+      scatterForest(f, x0, z0, x1, z1, wet, trees);
+      scatterBushes(f, x0, z0, x1, z1, wet, trees);
+      yield;
+    }
+    scatterCanopy(cell, x0, z0, x1, z1, wet, mats.canopy, trees);
+    // no scattered tree on top of a mapped one (see CANOPY_TWIN)
+    let keep = mapped;
+    for (let i = mapped; i < trees.length; i++) {
+      const t = trees[i], reach = t.wild ? CANOPY_TWIN : FOREST_TWIN;
+      let twin = false;
+      if (!t.bush) for (const m of cell.trees) {
+        if (Math.hypot(m.p[0][0] - t.x, m.p[0][1] - t.z) < reach) { twin = true; break; }
+      }
+      if (!twin && !landmarkClear(t.x, t.z)) trees[keep++] = t;   // nor in a landmark's doorway
+    }
+    trees.length = keep;
+  }
+  // the surface model's reading at a mapped tree: a street lime is as tall as
+  // it was measured, not as tall as a dice roll (0 where there is no raster)
+  const measured = mats.canopy && mats.canopy.ready(x0 + 1, z0 + 1) ? mats.canopy : null;
+  const specOf = (t) => treeSpec(t, t.h || !measured ? 0 : measured.heightAt(t.x, t.z), _spec);
   if (!shell && !roadsOnly) {
     // A wood keeps its fill (the trees don't close ranks, and a bare base plane
     // between the trunks would be worse) but it goes to forest-floor tone —
@@ -4635,6 +5971,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
         // 2.22 m — slabs leaning against the cut like fallen fence panels.
         for (const r of rects) {
           yield;
+          plates.push(r);
           const nearRoad = corr.some(({ bb, hw, flare }) => {
             const rc = hw + (flare ?? 0);
             return !(r.x1 < bb[0] - rc || r.x0 > bb[2] + rc || r.z1 < bb[1] - rc || r.z0 > bb[3] + rc);
@@ -4655,6 +5992,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       // plates lean off the corridor bench on any cut slope exactly the same way
       for (const r of mats.ground.rectsIn(x0, z0)) {
         yield;
+        plates.push(r);
         const col = r.c === 2 ? COLORS.inferred.asphalt : COLORS.inferred.paving;
         const sc = r.c === 2 ? SURF.asphalt : SURF.paving;
         const nearRoad = corr.some(({ bb, hw, flare }) => {
@@ -4674,26 +6012,34 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   // has every road in it, at better fidelity than the ribbon, and the ribbon is
   // the single most expensive thing in a rural chunk.
   if (!shell) {
-    for (const f of cell.roads) if (f._home === key) { roadRibbon(sink, f, mats.terrain, cell, key); yield; }
-    for (const f of cell.rails) if (f._home === key) { railWay(sink, f, mats.terrain); yield; }
+    for (const f of cell.roads) if (f._home === key) { roadRibbon(sink, f, mats.terrain, cell, key, city); yield; }
+    for (const f of cell.rails) if (f._home === key) { railWay(sink, f, mats.terrain, cell); yield; }
     // …and the surfaces where they meet, filling what the trims left behind
     const js = junctionsIn(key);
-    if (js) for (const j of js) junctionPad(sink, j, mats.terrain);
+    if (js) for (const j of js) junctionPad(sink, j, mats.terrain, cell);
     yield;
     // signs and zebras write into the SAME sink — and they must do it HERE,
     // before sink.geo() below turns it into geometry. The first version
     // appended them after that line: thirty zebra bars per chunk, emitted
     // into a bucket nobody ever poured out again.
     if (!roadsOnly && cell.signs) for (const sg3 of cell.signs) {
-      if (sg3._home === key) signPost(sink, sg3, cell, mats.terrain);
+      if (sg3._home === key) signPost(sink, deco, sg3, cell, stand);
     }
+    // …and the signs nobody surveyed but the data implies (js/streetsigns.js),
+    // with the crossing plates the zebras ask for as they are painted
+    const offRoad = (px, pz, r) => onCarriageway(cell, r, px, pz, 0.3);
+    const planned = roadsOnly ? [] : plannedSigns(cell, key, js, offRoad, chunkKey);
     if (!roadsOnly && cell.crossings) for (const cr of cell.crossings) {
-      if (cr._home === key) zebraInto(sink, cr, cell, mats.terrain);
+      if (cr._home === key) zebraInto(sink, cr, cell, mats.terrain, planned, offRoad);
     }
+    for (const q of planned) signInto(sink, deco, stand, q[0], q[1], q[2], q[3], q[4], q[5]);
     yield;
-    // trolejové vedení, drawn WHOLE from the way's home chunk like its ribbon
+    // trolejové vedení: the wires drawn WHOLE from the way's home chunk like
+    // its ribbon, the masts by the cell they stand in (see trolleyInto)
+    let tguard = null;
     for (const r of cell.roads) {
-      if (r.tw && r._home === key && !roadsOnly) trolleyInto(sink, r, mats.terrain);
+      if (r.tw && r.p && !roadsOnly) trolleyInto(sink, r, mats.terrain, stand, key,
+        tguard ??= mastGuard(cell, key, city), cell);
     }
     // pylons + wires: towers on this chunk's vertices, spans owned by their
     // midpoint's chunk — same one-owner rule every linear feature uses
@@ -4713,24 +6059,29 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // chunk build is cheaper than teaching the index a fourth node layer
     if (!roadsOnly && city.pois) for (const poi of city.pois) {
       if (chunkKey(poi.p[0], poi.p[1]) !== key) continue;
-      if (poi.t === 'bus_stop') busStopInto(sink, poi.p[0], poi.p[1], cell, mats.terrain);
+      if (poi.t === 'bus_stop') busStopInto(sink, poi.p[0], poi.p[1], cell, mats.terrain, stand, deco);
       else if (poi.t === 'fuel') fuelInto(sink, poi.p[0], poi.p[1], poi.n, cell, mats.terrain);
     }
     yield;
     // …and everything else a Czech street has standing on it (js/furniture.js)
-    if (!roadsOnly) furnitureInto(sink, cell, key, mats.terrain,
-      (hex) => { _c.setHex(hex); return [_c.r, _c.g, _c.b]; },
-      (x, z, i) => rnd(Math.abs(Math.round(x * 7 + z * 13)) + i * 9176, i), chunkKey);
+    const hexRGB = (hex) => { _c.setHex(hex); return [_c.r, _c.g, _c.b]; };
+    const rndAt = (x, z, i) => rnd(Math.abs(Math.round(x * 7 + z * 13)) + i * 9176, i);
+    if (!roadsOnly) furnitureInto(sink, cell, key, stand, hexRGB, rndAt, chunkKey, deco);
+    // zahrádky: tables on the pavement outside every café the tiles name
+    if (!roadsOnly && mats.terrain) terracesInto(terraces, cell, key, stand, hexRGB, rndAt,
+      (x, z, margin) => onCarriageway(cell, null, x, z, margin), chunkKey);
+    // the square of soil every tree on paving stands in (js/treepits.js)
+    if (scatter) treePitsInto(sink, cell, trees, specOf, mats.terrain, plates);
     // fences, walls, noise barriers — the lines that divide one plot from the
     // next, and the reason a town stops looking like houses dropped in a field
     if (cell.barriers) for (const b of cell.barriers) {
-      if (b._home === key) { barrierInto(sink, b, mats.terrain); yield; }
+      if (b._home === key && !landmarkBarrier(b)) { barrierInto(sink, b, mats.terrain); yield; }
     }
     if (!roadsOnly && cell.calming) for (const cm of cell.calming) {
       if (cm._home === key) bumpInto(sink, cm, cell, mats.terrain);
     }
     const cls2 = clustersIn(key);
-    if (cls2) for (const cl of cls2) clusterPad(sink, cl, mats.terrain);
+    if (cls2) for (const cl of cls2) clusterPad(sink, cl, mats.terrain, cell);
   }
   // Roads, rails, kerbs, lane paint, bank skirts and bridge parapets all land
   // in this one sink, and every one of them is authored as a height ABOVE the
@@ -4750,6 +6101,21 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     sinkMesh.castShadow = true;
     sinkMesh.receiveShadow = true;
     group.add(sinkMesh);
+  }
+  const dg = deco.geo();
+  if (dg) {
+    // sign faces, shelter glass, posters: thin plates that cast nothing
+    const decoMesh = new THREE.Mesh(dg, mats.streetDeco);
+    decoMesh.name = 'streetDeco';
+    decoMesh.receiveShadow = true;
+    group.add(decoMesh);
+  }
+  const tg = terraces.geo();
+  if (tg) {
+    const terraceMesh = new THREE.Mesh(tg, mats.terrace);
+    terraceMesh.name = 'terraces';
+    terraceMesh.castShadow = terraceMesh.receiveShadow = true;
+    group.add(terraceMesh);
   }
   if (water.length) {
     const waterMesh = new THREE.Mesh(mergeSurfaceGeometries(water), mats.water);
@@ -4774,74 +6140,12 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     shell ? { ...mats, facades: false, shellLod: true } : mats);
   if (bm) group.add(bm);
 
-  // -- street lamps along the wider drivable roads --
+  // -- street lamps: surveyed ones, the rule along wide roads, lanterns --
   if (mats.lamps !== false && !shell && !roadsOnly) {
     yield;
-    const spots = [];
-    for (const r of cell.roads) {
-      if (!r.d || r.w < LAMP_MIN_W || r._home !== key) continue;
-      const half = r.w / 2 + 0.7;              // just off the kerb
-      let carry = (r._id % 17) * 2;            // stagger so junctions aren't twinned
-      for (let i = 0; i < r.p.length - 1; i++) {
-        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
-        let dx = bx - ax, dz = bz - az;
-        const L = Math.hypot(dx, dz);
-        if (L < 0.01) continue;
-        dx /= L; dz /= L;
-        for (let d = LAMP_STEP - carry; d < L; d += LAMP_STEP) {
-          const px = ax + dx * d, pz = az + dz * d;
-          if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue; // this cell only
-          const first = ((spots.length + (r._id % 2)) & 1) ? 1 : -1; // alternate kerbs
-          // A LAMP STANDS ON THE KERB, NEVER IN THE ROAD. The offset is
-          // perpendicular to THIS way, and wherever another carriageway runs
-          // close — a junction, a slip road, the far half of a dual
-          // carriageway — perpendicular to one road points straight into the
-          // other. Measured over the Pardubice tile: 106 of 2 083 lamps stood
-          // on a carriageway, 61 of them more than a metre in, the worst
-          // 4.42 m inside a 9 m primary, which is the middle of it.
-          //
-          // So try the far kerb, and if that is in the road too, place no lamp
-          // at all: one dark stretch of street is invisible, a mast in the
-          // running lane is something you hit at fifty.
-          let spot = null;
-          for (const side of [first, -first]) {
-            const nx = -dz * side, nz = dx * side;
-            const lx = px + nx * half, lz = pz + nz * half;
-            if (onCarriageway(cell, r, lx, lz, LAMP_CLEAR)) continue;
-            // arm points at the road: post sits on the kerb, head reaches in
-            spot = [lx, lz, Math.atan2(-nx, -nz) + Math.PI];
-            break;
-          }
-          if (spot) spots.push(spot);
-        }
-        carry = (carry + L) % LAMP_STEP;
-      }
-    }
-    if (spots.length) {
-      const [pg, hg] = lampTemplates();
-      const posts = new THREE.InstancedMesh(pg, mats.lampPost, spots.length);
-      const heads = new THREE.InstancedMesh(hg, mats.lampHead, spots.length);
-      posts.castShadow = true;
-      for (let i = 0; i < spots.length; i++) {
-        const [px, pz, rot] = spots[i];
-        _q.setFromAxisAngle(_up, rot);
-        _v.set(px, mats.terrain ? mats.terrain.heightAt(px, pz) : 0, pz); _s.set(1, 1, 1);
-        _m4.compose(_v, _q, _s);
-        posts.setMatrixAt(i, _m4);
-        heads.setMatrixAt(i, _m4);
-      }
-      posts.instanceMatrix.needsUpdate = true;
-      heads.instanceMatrix.needsUpdate = true;
-      // A mast is an OBJECT — you cannot drive through it and you can put it in
-      // the road. poles.js needs to turn these instance rows back into things
-      // with positions, so the positions travel WITH the batch: named so it can
-      // find them, plain numbers so they survive the worker codec, and in
-      // instance order so row i here is pole i there.
-      posts.name = 'lampPosts';
-      heads.name = 'lampHeads';
-      posts.userData.spots = spots.flat();
-      group.add(posts, heads);
-    }
+    const plan = lampSpots(cell, key, x0, z0, x1, z1, mats.terrain, city);
+    lampBatch(group, plan.street, 'street', mats, stand);
+    lampBatch(group, plan.park, 'park', mats, stand);
   }
 
   // -- road signs: dej přednost, stop, hlavní silnice ----------------------
@@ -4856,55 +6160,32 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   // this cell) share one batch — the draw-call budget is per chunk, not per
   // source, and a floodplain cell would otherwise pay twice for the same pair
   // of meshes. Settings can switch the whole lot off (mats.trees === false).
-  const trees = [];
-  if (scatter) {
-    yield;
-    for (const t of cell.trees) if (t._home === key)
-      trees.push({ x: t.p[0][0], z: t.p[0][1], seed: t._id, forest: false });
-    for (const f of cell.green) {
-      scatterForest(f, x0, z0, x1, z1, wet, trees);
-      scatterBushes(f, x0, z0, x1, z1, wet, trees);
-      yield;
-    }
-    scatterCanopy(cell, x0, z0, x1, z1, wet, mats.canopy, trees);
-  }
   if (trees.length) {
-    const [tg, cg] = treeTemplates();
+    const [tg, cg] = farTemplates();
     const trunk = new THREE.InstancedMesh(tg, mats.trunk, trees.length);
     const crown = new THREE.InstancedMesh(cg, mats.crown, trees.length);
     for (let i = 0; i < trees.length; i++) {
-      // instancing is cheap per tree, but a floodplain cell holds thousands —
+      // instancing is cheap per tree, but a floodplain cell holds thousands:
       // every scratch var below is fully re-set each iteration, so the slice
       // boundary is safe
       if (i > 0 && (i % 500) === 0) yield;
-      const t = trees[i], id = t.seed;
-      // forest stock grows taller and leaner than the pruned boulevard rows
-      // (≈11–25 m against 7–12 m) and its crowns go deeper, darker green —
-      // a canopy that shades itself, not a line of park lollipops
-      // …unless the height was MEASURED. scatterCanopy carries the surface
-      // model's own reading, so a 25 m spruce stand comes out 25 m and a 4 m
-      // hedgerow comes out 4, instead of both being a random draw. The template
-      // is TREE_H metres tall at scale 1, so the scale is just the ratio.
-      // the 0.45 floor keeps a MEASURED tree from collapsing to a shrub when
-      // the surface model reads it short; a bush is a shrub on purpose
-      const s = t.bush ? t.h / TREE_H
-        : t.h ? Math.max(0.45, Math.min(2.4, t.h / TREE_H))
-          : t.forest ? 1.05 + rnd(id, 4) * 0.70 : 0.70 + rnd(id, 4) * 0.42;
-      // …and it is WIDER than it is tall, which is what makes it read as a
-      // bush rather than a bonsai tree
-      const yk = t.bush ? 0.8 : t.h ? 1 : t.forest ? 1.0 + rnd(id, 6) * 0.45 : 0.88 + rnd(id, 6) * 0.30;
-      _v.set(t.x, mats.terrain ? mats.terrain.heightAt(t.x, t.z) : 0, t.z);
-      _q.setFromAxisAngle(_up, rnd(id, 5) * Math.PI * 2);
-      _s.set(s, s * yk, s);
-      _m4.compose(_v, _q, _s);
-      trunk.setMatrixAt(i, _m4);
+      const t = trees[i];
+      // Species, height, crown and trunk are all the tree's own id and place
+      // (js/treeshapes.js). A wood's slots and the measured-but-unmapped ones
+      // arrive with their height; a mapped point asks the raster here.
+      const spec = specOf(t);
+      const gy = mats.terrain ? mats.terrain.heightAt(t.x, t.z) : 0;
+      // TWO matrices: the crown's is the unit crown sphere, the trunk's the unit
+      // trunk, so a pine can carry a small crown on a long stem
+      treeMatrices(spec, t.x, gy, t.z, _m4, _m4b);
       crown.setMatrixAt(i, _m4);
-      _c.setHex(COLORS.treeCrown[id % COLORS.treeCrown.length]);
-      if (t.forest) _c.offsetHSL(0.012, 0.05, -0.085 + (rnd(id, 7) - 0.5) * 0.06);
-      else _c.offsetHSL(0, 0, (rnd(id, 7) - 0.5) * 0.08);
-      crown.setColorAt(i, _c);
+      trunk.setMatrixAt(i, _m4b);
+      // the leaf colour carries the species in its low bits: that is how the
+      // far shader and the near models learn it (see crownColor)
+      crown.setColorAt(i, crownColor(spec, _c));
+      trunk.setColorAt(i, barkColor(spec, _c2));
     }
-    // instance matrices live in world space — recompute bounds or the whole
+    // instance matrices live in world space: recompute bounds or the whole
     // batch frustum-culls against the template's origin-sized sphere
     trunk.computeBoundingSphere(); crown.computeBoundingSphere();
     trunk.castShadow = trunk.receiveShadow = true;

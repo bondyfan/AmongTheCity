@@ -25,13 +25,13 @@ register(new URL('./three-alias.mjs', import.meta.url));
 
 const THREE = await import('three');
 const { buildChunkMeshes, makeMaterials } = await import('../js/meshes.js');
-const { indexJunctions, junctionsIn, polylineLength, JUNCTIONS, CLUSTERS } =
+const { indexJunctions, junctionsIn, polylineLength, JUNCTIONS, CLUSTERS, setStreetCity } =
   await import('../js/geo.js');
 const { Terrain } = await import('../js/terrain.js');
 const { Canopy } = await import('../js/canopy.js');
 const { GroundClass, GROUND_RES } = await import('../js/groundclass.js');
 const { orthoQuad } = await import('../js/ortho.js');
-const { chunkSpec } = await import('../js/chunkspec.js');
+const { chunkSpec, applySpec } = await import('../js/chunkspec.js');
 const { makeWorkerState, buildChunkPayload, handleMessage } = await import('../js/meshworker.js');
 const { makeMeshPool, poolSize } = await import('../js/meshpool.js');
 const { decode, MAX_ERR } = await import('../js/geomcodec.js');
@@ -141,6 +141,12 @@ function makeWorld() {
     waterways: [{ w: 3, p: [[0, 20], [120, 26]] }],
   };
   indexJunctions(roads);
+  // …and the streets (js/streets.js): kerbs, pavements and the kerb round the
+  // junction are derived on FIRST USE from the chunk index, on the main thread
+  // only, and have to reach the worker inside the copied roads and pads. With
+  // this fixture's buildings beside its primary and its two residential arms
+  // that is a kerbed crossroads, so the comparison below covers it.
+  setStreetCity(city);
   assert.ok(junctionsIn('0,0')?.length, 'the fixture built no junction pad at all');
 
   const terrain = terrainWith(), canopy = canopyWith(), ground = groundWith();
@@ -188,6 +194,8 @@ test('the worker path builds the same chunk the main thread does', () => {
   const world = makeWorld();
   const sync = buildChunkMeshes(world.city, 0, 0, world.mats, 'full');
   assert.ok(sync, 'the fixture built nothing at all');
+  assert.ok(world.city.chunkIndex.get('0,0').roads.some((r) => r._vg),
+    'no way in the fixture came out kerbed: the street path is untested');
 
   const have = { terrain: new Map(), canopy: new Map() };
   const got = chunkSpec(world, 0, 0, 'full', have);
@@ -249,6 +257,140 @@ test('the worker path builds the same chunk the main thread does', () => {
   // the only difference allowed is geomcodec's own quantisation
   assert.ok(worst < MAX_ERR,
     `${(worst * 1000).toFixed(2)} mm between the two paths at ${worstAt}`);
+});
+
+// ---- with the aerial photo OFF (the low preset, or a photo that never came) --
+// Found in wave 3, the first time the pool lived long enough to be watched: the
+// derived-plaza pass asks the ground classifier `classAt` at every 4 m of the
+// chunk, but only where there is no photo, and the worker's stand-in for the
+// classifier only had `rectsIn`. Every such cell threw "mats.ground.classAt is
+// not a function" in the worker; three of them retired the pool. So on the low
+// preset no chunk was ever meshed off the main thread, in the original game as
+// well. The parity fixture above always had a photo.
+test('the worker builds a cell that has no aerial photo, and builds it the same', () => {
+  const world = makeWorld();
+  world.mats.ortho = null;
+  const sync = buildChunkMeshes(world.city, 0, 0, world.mats, 'full');
+  const have = { terrain: new Map(), canopy: new Map() };
+  const got = chunkSpec(world, 0, 0, 'full', have);
+  assert.ok(got, 'chunkSpec refused the cell');
+  const posted = structuredClone(got.spec, { transfer: got.transfer });
+  const state = makeWorkerState();
+  const { reply } = handleMessage(state, { t: 'build', id: 1, spec: posted });
+  assert.equal(reply.t, 'done', 'the worker failed the cell: ' + reply.error);
+  const decMats = { ...world.mats, codecMats: {} };
+  for (const k of Object.keys(reply.brands)) decMats.codecMats[k] = world.wordmark;
+  const back = decode(reply.payload, decMats);
+  const a = nodesOf(sync), b = nodesOf(back);
+  assert.equal(b.length, a.length, 'the two paths built a different set of meshes');
+  for (let i = 0; i < a.length; i++) {
+    if (!a[i].isMesh) continue;
+    assert.equal(b[i].name, a[i].name);
+    assert.equal(b[i].geometry.attributes.position.count, a[i].geometry.attributes.position.count,
+      `${a[i].name || a[i].type} has a different vertex count without the photo`);
+  }
+
+  // …and the stand-in answers exactly as the raster does, cell by cell
+  const mirror = applySpec(structuredClone(chunkSpec(world, 0, 0, 'full',
+    { terrain: new Map(), canopy: new Map() }).spec), makeWorkerState().cache).mats.ground;
+  let asked = 0, paved = 0;
+  for (let z = 1; z < 120; z += 2) for (let x = 1; x < 120; x += 2) {
+    const want = world.ground.classAt(x, z);
+    assert.equal(mirror.classAt(x, z), want, `class at ${x}, ${z}`);
+    asked++; if (want) paved++;
+  }
+  assert.ok(paved > 20 && paved < asked, `the fixture's yard was not sampled (${paved} of ${asked})`);
+});
+
+// ---- the far ribbons go to a worker too --------------------------------------
+// _sweepFarRibbons built them on the main thread ("a rural ribbon build is
+// milliseconds"). With kerbs, pavements and junction pads on every carriageway
+// one was measured at 271 ms. They are sent to the pool now, so the 'roads'
+// tier has to survive the wire like the others.
+test('the roads-only tier comes back from a worker the same as it is built here', () => {
+  const world = makeWorld();
+  const sync = buildChunkMeshes(world.city, 0, 0, world.mats, 'roads');
+  assert.ok(sync, 'the fixture has no far ribbon to build');
+  const got = chunkSpec(world, 0, 0, 'roads', { terrain: new Map(), canopy: new Map() });
+  assert.ok(got, 'chunkSpec refused the roads tier');
+  const { reply } = handleMessage(makeWorkerState(),
+    { t: 'build', id: 1, spec: structuredClone(got.spec, { transfer: got.transfer }) });
+  assert.equal(reply.t, 'done', 'the worker failed the ribbon: ' + reply.error);
+  const back = decode(reply.payload, { ...world.mats, codecMats: { ortho: world.photo } });
+  const a = nodesOf(sync), b = nodesOf(back);
+  assert.equal(b.length, a.length, 'the two paths built a different set of ribbon meshes');
+  const p = new THREE.Vector3(), q = new THREE.Vector3();
+  let worst = 0, checked = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (!a[i].isMesh) continue;
+    assert.strictEqual(b[i].material, a[i].material, `${a[i].name || a[i].type} lost its material`);
+    const n = a[i].geometry.attributes.position.count;
+    assert.equal(b[i].geometry.attributes.position.count, n);
+    for (let v = 0; v < n; v++) {
+      worst = Math.max(worst, worldVert(a[i], v, 0, p).distanceTo(worldVert(b[i], v, 0, q)));
+      checked++;
+    }
+  }
+  assert.ok(checked > 500, `only ${checked} ribbon vertices compared`);
+  assert.ok(worst < MAX_ERR, `${(worst * 1000).toFixed(2)} mm between the two paths`);
+});
+
+test('a far ribbon is sent to a free worker, lands a frame later, and is dropped if the chunk beat it', () => {
+  const scene = new THREE.Scene();
+  const jobs = [];
+  const pool = { dead: false, free: () => 1,
+    submit: (w, cx, cz, lod) => { const j = { done: false, cx, cz, lod }; jobs.push(j); return j; },
+    finish: () => ({ group: new THREE.Group(), canopyMissed: false, groundMissed: false }), poll() {} };
+  const road = { _home: '5,0' };
+  const w = Object.assign(Object.create(CityWorld.prototype), {
+    scene, mats: {}, pool, viewChunks: 0, queue: [], _detail: new Map(),
+    city: { chunkIndex: new Map([['0,0', { roads: [road], rails: [], barriers: [] }]]) },
+  });
+  w._sweepFarRibbons({ x: 10, z: 10 }, performance.now() + 1e6);
+  assert.equal(jobs.length, 1, 'the ribbon was not offered to the pool');
+  assert.equal(jobs[0].lod, 'roads');
+  assert.equal(scene.children.length, 0, 'something was built on this thread anyway');
+  w._sweepFarRibbons({ x: 10, z: 10 }, performance.now() + 1e6);
+  assert.equal(jobs.length, 1, 'a ribbon in flight was asked for twice');
+  jobs[0].done = true;
+  w._landRibbons();
+  assert.equal(scene.children.length, 1, 'the finished ribbon never reached the scene');
+  assert.ok(w._farRibbons.get('5,0'));
+
+  // the real chunk arrives while a second ribbon is away
+  const road2 = { _home: '6,0' };
+  w.city.chunkIndex.get('0,0').roads.push(road2);
+  w._sweepFarRibbons({ x: 10, z: 10 }, performance.now() + 1e6);
+  assert.equal(jobs.length, 2);
+  w._detail.set('6,0', 'full');
+  jobs[1].done = true;
+  w._landRibbons();
+  assert.equal(scene.children.length, 1, 'a ribbon was drawn under the full chunk that replaced it');
+  assert.equal(w._farRibbons.has('6,0'), false);
+});
+
+test('a far ribbon a worker failed is not sent to a worker again', () => {
+  // It used to be: fail, forget the slot, and the next 1 Hz sweep sent the
+  // same ribbon to the same pool, for as long as the road stayed in view.
+  const warn = console.warn; console.warn = () => {};
+  try {
+    const scene = new THREE.Scene();
+    let sent = 0;
+    const pool = { dead: false, free: () => 1,
+      submit: () => { sent++; return { done: true }; },
+      finish: () => { throw new Error('the worker could not mesh it'); }, poll() {} };
+    const w = Object.assign(Object.create(CityWorld.prototype), {
+      scene, mats: {}, pool, viewChunks: 0, queue: [], _detail: new Map(),
+      city: { chunkIndex: new Map([['0,0', { roads: [{ _home: '5,0' }], rails: [], barriers: [] }]]) },
+    });
+    w._sweepFarRibbons({ x: 10, z: 10 }, performance.now() + 1e6);
+    assert.equal(sent, 1);
+    w._landRibbons();
+    assert.equal(w._farRibbons.has('5,0'), false, 'a failed ribbon kept its slot');
+    w._sweepFarRibbons({ x: 10, z: 10 }, performance.now() + 1e6);
+    assert.equal(sent, 1, 'the ribbon the worker failed was sent to it again');
+    assert.equal(w._farRibbons.has('5,0'), true, 'the failed ribbon was never built on this thread');
+  } finally { console.warn = warn; }
 });
 
 test('a worker keeps its rasters between chunks and drops the stale one', () => {
@@ -392,8 +534,14 @@ test('the streamer keeps its books with a whole pool in flight', () => {
       furniture: [], calming: [], barriers: [] });
   }
 
-  const pool = makeMeshPool({ spawn, max: 3 });
+  const lanes = [];
+  const pool = makeMeshPool({ spawn: () => { const w = spawn(); lanes.push(w); return w; }, max: 3 });
   assert.equal(pool.size, 3, 'the pool did not open three lanes');
+  // A worker takes no work until it has loaded and said so (the ready
+  // handshake, wave 3): the real worker posts this as its module's last line.
+  assert.equal(pool.free(), 0, 'a worker that has not loaded was offered as free');
+  for (const w of lanes) w.onmessage({ data: { t: 'ready' } });
+  assert.equal(pool.free(), 3, 'three ready workers are not three free lanes');
   // the two canvas materials the worker could not build, resolved by name
   world.mats.codecMats = { ortho: world.photo, 'brand:Lidl': world.wordmark };
   const w = Object.assign(Object.create(CityWorld.prototype), {
@@ -444,6 +592,7 @@ test('a worker whose builds keep failing hands the world back to the main thread
   const queue = [];
   const pool = makeMeshPool({ spawn: () => fake, max: 1 });
   assert.equal(pool.dead, false, 'the fake worker did not take');
+  fake.onmessage({ data: { t: 'ready' } });       // loaded: see the ready handshake
   const w = Object.assign(Object.create(CityWorld.prototype), {
     scene, city: world.city, mats: world.mats, terrain: world.terrain,
     canopy: null, ground: null,
@@ -466,4 +615,235 @@ test('a worker whose builds keep failing hands the world back to the main thread
   assert.ok(sent.length >= 3, `only ${sent.length} builds were tried before giving up`);
   assert.equal(w.pool, null, 'the pool was never retired despite failing every build');
   assert.ok(w.built.get('0,0'), 'the chunk was never built after the workers gave up');
+});
+
+// ---- the ready handshake and the watchdog -----------------------------------
+// Seen in the merged game AND in the game as it was before the upgrade, in the
+// automation pane every engineer checks his work in: four workers spawned, each
+// handed a chunk at once, none answered inside the 8 s wall-clock watchdog,
+// three "no answer" failures, pool disposed, the whole session meshed on the
+// main thread. Two causes, both measured: the worker's module graph was still
+// loading when it was given work, and in that pane the main thread's message
+// queue was backed up behind the frame pump, so a worker's reply was delivered
+// 3.2 to 4.4 s after it was posted (see dev/perfprobe.js for the pump). These
+// pin the fix: no work before 'ready', and a watchdog that only counts time in
+// which the line between the threads was proven to deliver.
+function clockPool(max = 1) {
+  let t = 0;
+  const sent = [];
+  const fakes = [];
+  const pool = makeMeshPool({ max, now: () => t, spawn: () => {
+    const w = { postMessage(msg) { sent.push(msg); }, terminate() { w.dead = true; } };
+    fakes.push(w);
+    return w;
+  } });
+  return { pool, sent, fakes, tick(ms) { t += ms; pool.poll(); } };
+}
+
+test('a worker still loading is given nothing and is not retired by the chunk watchdog', () => {
+  const world = makeWorld();
+  world.mats.canopy = null; world.mats.ground = null;
+  const { pool, sent, fakes, tick } = clockPool(1);
+  assert.equal(pool.free(), 0);
+  assert.equal(pool.submit(world, 0, 0, 'full'), null,
+    'a chunk was posted to a worker that has not loaded');
+  // thirty seconds of frames: far past the 8 s a lost CHUNK is allowed
+  for (let i = 0; i < 30 * 60; i++) tick(1000 / 60);
+  assert.equal(pool.dead, false, 'a slow module load was treated as a dead worker');
+  assert.equal(sent.length, 0);
+  fakes[0].onmessage({ data: { t: 'ready' } });
+  assert.equal(pool.ready, 1);
+  const f = pool.submit(world, 0, 0, 'full');
+  assert.ok(f, 'a ready worker refused a chunk');
+  assert.equal(sent.length, 1);
+  fakes[0].onmessage({ data: { t: 'done', id: f.id, empty: true, payload: null, brands: {} } });
+  assert.equal(f.done, true);
+  assert.equal(pool.answered, 1);
+});
+
+// The watchdog's clock only runs while the line between the threads is PROVEN
+// to deliver (any message from any worker, the pool pings to keep them coming),
+// with 20 s of grace for total silence. So these drive time AND answer pings.
+const pongs = (fake) => { fake.onmessage({ data: { t: 'pong' } }); };
+
+test('a worker that never loads is written off in the end', () => {
+  const warn = console.warn; console.warn = () => {};
+  try {
+    const a = clockPool(1);
+    for (let i = 0; i < 70 * 60; i++) a.tick(1000 / 60);
+    assert.equal(a.pool.dead, false, 'retired before the load allowance and the silence grace ran out');
+    for (let i = 0; i < 20 * 60 && !a.pool.dead; i++) a.tick(1000 / 60);
+    assert.equal(a.pool.dead, true, 'a worker that never loaded was kept forever');
+  } finally { console.warn = warn; }
+});
+
+test('a worker that answers pings but not its chunk is failed in 8 s', () => {
+  const warn = console.warn; console.warn = () => {};
+  try {
+    const world = makeWorld();
+    world.mats.canopy = null; world.mats.ground = null;
+    const b = clockPool(1);
+    b.fakes[0].onmessage({ data: { t: 'ready' } });
+    const f = b.pool.submit(world, 0, 0, 'full');
+    for (let i = 0; i < 7 * 60; i++) { b.tick(1000 / 60); pongs(b.fakes[0]); }
+    assert.equal(f.done, false, 'the watchdog fired early');
+    for (let i = 0; i < 2 * 60; i++) { b.tick(1000 / 60); pongs(b.fakes[0]); }
+    assert.equal(f.done, true, 'a chunk nobody answered was never failed');
+    assert.match(f.error, /no answer/);
+    assert.equal(b.pool.dead, true);
+    assert.ok(b.sent.some((m) => m.t === 'ping'), 'the pool never pinged its worker');
+  } finally { console.warn = warn; }
+});
+
+test('one stuck worker is caught in 8 s while the others keep the line open', () => {
+  const warn = console.warn; console.warn = () => {};
+  try {
+    const world = makeWorld();
+    world.mats.canopy = null; world.mats.ground = null;
+    const b = clockPool(2);
+    for (const w of b.fakes) w.onmessage({ data: { t: 'ready' } });
+    const f = b.pool.submit(world, 0, 0, 'full');      // goes to fakes[0], which never speaks again
+    for (let i = 0; i < 9 * 60; i++) { b.tick(1000 / 60); pongs(b.fakes[1]); }
+    assert.equal(f.done, true);
+    assert.match(f.error, /no answer/);
+    assert.equal(b.pool.dead, false, 'the healthy worker was retired with the stuck one');
+    assert.equal(b.pool.size, 1);
+  } finally { console.warn = warn; }
+});
+
+test('a pool of one that dies in silence is still written off', () => {
+  const warn = console.warn; console.warn = () => {};
+  try {
+    const world = makeWorld();
+    world.mats.canopy = null; world.mats.ground = null;
+    const b = clockPool(1);
+    b.fakes[0].onmessage({ data: { t: 'ready' } });
+    const f = b.pool.submit(world, 0, 0, 'full');
+    for (let i = 0; i < 19 * 60; i++) b.tick(1000 / 60);
+    assert.equal(f.done, false, 'total silence was not given its grace');
+    for (let i = 0; i < 11 * 60; i++) b.tick(1000 / 60);
+    assert.equal(f.done, true, 'a dead worker held its chunk forever');
+    assert.equal(b.pool.dead, true);
+  } finally { console.warn = warn; }
+});
+
+test('a slow line is not a dead worker', () => {
+  // The automation pane, measured: with the main thread's queue backed up,
+  // every reply reaches it about 3.2 s after the worker posted it. A chunk's round trip is then over six
+  // seconds and several in a row are far past eight. Frames keep coming at
+  // full rate the whole time, which is what made a wall-clock watchdog wrong.
+  const world = makeWorld();
+  world.mats.canopy = null; world.mats.ground = null;
+  const b = clockPool(1);
+  b.fakes[0].onmessage({ data: { t: 'ready' } });
+  const f = b.pool.submit(world, 0, 0, 'full');
+  for (let s = 0; s < 5; s++) {
+    for (let i = 0; i < 192; i++) b.tick(1000 / 60);   // 3.2 s of frames, nothing delivered
+    pongs(b.fakes[0]);                                 // then one late answer to a ping
+  }
+  assert.equal(f.done, false, 'sixteen seconds on a slow line retired a healthy worker');
+  assert.equal(b.pool.dead, false);
+  b.fakes[0].onmessage({ data: { t: 'done', id: f.id, empty: true, payload: null, brands: {} } });
+  assert.equal(f.done, true);
+  assert.equal(f.error, null);
+});
+
+test('a stalled main thread is not a silent worker', () => {
+  const world = makeWorld();
+  world.mats.canopy = null; world.mats.ground = null;
+  const { pool, fakes, tick } = clockPool(1);
+  fakes[0].onmessage({ data: { t: 'ready' } });
+  const f = pool.submit(world, 0, 0, 'full');
+  // One frame, then the thread is gone for 20 s (tile indexing, a hidden tab).
+  // The frame that follows runs BEFORE the queued message events: the answer
+  // is already waiting, the worker did nothing wrong.
+  tick(16);
+  tick(20000);
+  assert.equal(f.done, false, 'a main-thread stall retired a healthy worker');
+  assert.equal(pool.dead, false);
+  fakes[0].onmessage({ data: { t: 'done', id: f.id, empty: true, payload: null, brands: {} } });
+  assert.equal(f.done, true);
+  assert.equal(f.error, null);
+});
+
+// ---- a dropped chunk gives everything back ----------------------------------
+// three frees an InstancedMesh's matrix and colour buffers only when the MESH is
+// disposed. The streamer walked a dropped chunk disposing geometries alone, so
+// every far-tree batch and every lamp batch of every cell it ever let go left
+// two WebGL buffers behind. They do not show in renderer.info.memory.
+test('a chunk that is replaced gives back its instance buffers as well as its geometry', () => {
+  const scene = new THREE.Scene();
+  const w = Object.assign(Object.create(CityWorld.prototype), {
+    scene, mats: {}, terrain: { grids: new Map() }, canopy: null, ground: null,
+    built: new Map(), _detail: new Map(), _px: new Map(), _hadTerrain: new Map(),
+    _missBy: new Map(), _stale: new Set(), _farRibbons: new Map(),
+    poles: { register() {}, clear() {}, drop() {}, unregister() {} },
+  });
+  const chunk = () => {
+    const g = new THREE.Group();
+    const trees = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial(), 4);
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial());
+    g.add(trees, ground);
+    const freed = { mesh: 0, geo: 0 };
+    trees.addEventListener('dispose', () => freed.mesh++);
+    trees.geometry.addEventListener('dispose', () => freed.geo++);
+    ground.geometry.addEventListener('dispose', () => freed.geo++);
+    return { g, freed };
+  };
+  const inf = { key: '0,0', cx: 0, cz: 0, lod: 'shell', hadTerrain: true, stale: false };
+  const a = chunk(), b = chunk();
+  w._finalizeBuild(inf, a.g, 0, 0, 4, false, false);
+  assert.equal(w.built.get('0,0'), a.g);
+  w._finalizeBuild(inf, b.g, 0, 0, 4, false, false);          // upgraded in place
+  assert.equal(a.freed.geo, 2, 'the old chunk kept a geometry');
+  assert.equal(a.freed.mesh, 1, 'the old chunk kept its instance buffers');
+  assert.equal(b.freed.mesh, 0);
+  // …and one that drifted out of the window while it was being built
+  const c = chunk();
+  w._finalizeBuild({ ...inf, key: '9,9', cx: 9, cz: 9 }, c.g, 0, 0, 4, false, false);
+  assert.equal(c.freed.mesh, 1, 'a chunk dropped on landing kept its instance buffers');
+  assert.equal(w.built.has('9,9'), false);
+});
+
+// ---- a frame takes a bounded weight of finished chunks -----------------------
+// Landing a worker chunk is nearly free on this thread and expensive in the
+// next draw (the upload). With a healthy pool forty could land at once.
+test('finished worker chunks land a bounded weight per frame, and always at least one', () => {
+  const scene = new THREE.Scene();
+  const mk = (key, kb) => ({ key, cx: +key.split(',')[0], cz: 0, lod: 'full', hadTerrain: true, stale: false,
+    pool: { finish: () => ({ group: new THREE.Group(), canopyMissed: false, groundMissed: false }) },
+    job: { done: true, reply: { payload: { buffers: [new ArrayBuffer(kb * 1024)] } } } });
+  const world = () => Object.assign(Object.create(CityWorld.prototype), {
+    scene, mats: {}, terrain: { grids: new Map() }, canopy: null, ground: null, poles: null,
+    built: new Map(), _detail: new Map(), _px: new Map(), _hadTerrain: new Map(),
+    _missBy: new Map(), _stale: new Set(), _farRibbons: new Map(), _poolFails: 0,
+    _inflight: new Map(),
+  });
+  const far = performance.now() + 1e6;                 // the millisecond budget never binds here
+
+  const a = world();
+  a.landBytes = 1.4e6;
+  for (let i = 0; i < 10; i++) a._inflight.set(i + ',0', mk(i + ',0', 700));
+  a._landFlights(far, 0, 0, 20);
+  assert.equal(a.built.size, 2, 'ten 700 kB chunks: a frame takes two (1.4 MB) and stops');
+  a._landFlights(far, 0, 0, 20);
+  assert.equal(a.built.size, 4);
+
+  const b = world();
+  b.landBytes = 1.4e6;
+  b._inflight.set('0,0', mk('0,0', 9000));             // one monster still lands
+  b._inflight.set('1,0', mk('1,0', 9000));
+  b._landFlights(far, 0, 0, 20);
+  assert.equal(b.built.size, 1, 'a frame takes one chunk however big, and no second on top of it');
+
+  const c = world();                                   // a boot: no limit set
+  for (let i = 0; i < 10; i++) c._inflight.set(i + ',0', mk(i + ',0', 700));
+  c._landFlights(far, 0, 0, 20);
+  assert.equal(c.built.size, 10);
+
+  const d = world();                                   // twenty ground cells for a jet
+  d.landBytes = 1.4e6;
+  for (let i = 0; i < 30; i++) d._inflight.set(i + ',0', mk(i + ',0', 69));
+  d._landFlights(far, 0, 0, 40);
+  assert.ok(d.built.size >= 20 && d.built.size < 30, 'ground cells landed: ' + d.built.size);
 });

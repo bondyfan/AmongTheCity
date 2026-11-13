@@ -1,0 +1,80 @@
+// ---- city life: the wiring between the crowd, the traffic and the buses --------
+// pedestrians.js must not import traffic.js and traffic.js must not import
+// pedestrians.js: they are two consumers of one shared clock, not a stack. But
+// a walker has to know when the lights let them cross and whether a car is
+// coming, and a driver has to know who is on the zebra. main.js used to be
+// where every such hook was tied by hand; this module is that knot, in one
+// place, so main.js makes one call after it has built the pieces and one call
+// a frame.
+//
+// Nothing here owns state the co-op world shares: every hook is a question one
+// module asks another about facts both clients already hold.
+
+import { worldT } from './worldclock.js';
+import { hourAt, isWeekend, trafficWeekK } from './dayrhythm.js';
+import { Buses } from './buses.js';
+import { KerbParking, KERB_INTRUDES } from './kerbparking.js';
+import { SITE } from './crowdsites.js';
+import { TransitDress } from './transitdress.js';
+import { StopNames } from './stopnames.js';
+import { TrolleyMasts } from './trolleymasts.js';
+
+/**
+ * Tie the crowd to the traffic. Every argument is something main.js already
+ * built; any of the optional ones may be null.
+ *   { city, traffic, peds, vehicles, world, parked }
+ * Returns { update(dt, pos, t01), trafficK() }.
+ */
+export function wireCityLife({ city, traffic, peds, vehicles = null, world = null, parked = null }) {
+  if (traffic && peds) {
+    // who the drivers give way to: one record per walker on a carriageway or
+    // about to step onto one. The same array for the life of the session.
+    traffic.walkers = peds.crossers;
+    // when the lights let a walker cross (pure in shared time, so it can be
+    // baked into the shared timelines), and whether something is bearing down
+    // on a crossing right now (local, like the lag it causes)
+    peds.signalWait = (x, z, rdx, rdz, t, crossT) => traffic.walkWait(x, z, rdx, rdz, t, crossT);
+    peds.roadBusy = (cx, cz, hw, need, stops) => traffic.threatens(cx, cz, hw, need, stops);
+  }
+  // buses and trolleybuses on their lines (js/buses.js, the real ones through
+  // js/realtransit.js): trips are traffic schedules, the crowd reads the
+  // timetable and the doors
+  const buses = traffic ? new Buses(city, traffic) : null;
+  if (buses && peds) {
+    peds.busEta = (x, z, t) => buses.eta(x, z, t);
+    peds.busAt = (x, z) => buses.standingAt(x, z);
+    peds.busNear = (x, z) => buses.approaching(x, z);
+  }
+  // cars along the kerbs of residential streets (js/kerbparking.js). The
+  // traffic is told which side of a street they stand on, and keeps off it.
+  const kerb = (vehicles && parked && city.chunkIndex)
+    ? new KerbParking(city, vehicles, world, parked,
+      peds ? (x, z) => !!peds.sites.has(SITE.STOP, x, z, 18) : null)
+    : null;
+  if (kerb && traffic) { traffic.kerbOf = (road) => kerb.sideOf(road); traffic.kerbIntrudes = KERB_INTRUDES; }
+  // the masts that carry the trolley wire, as things a car can knock down
+  // (js/trolleymasts.js), and what a bus on a line wears: destination
+  // displays, trolley poles on the wire, off it where a mast is down
+  const masts = (vehicles?.scene?.add && world?.built) ? new TrolleyMasts({ scene: vehicles.scene, city, world }) : null;
+  const dress = (buses && vehicles) ? new TransitDress({ traffic, vehicles, world, deadAt: masts?.deadAt ?? null }) : null;
+  // …and the stops nearest the player wear their names (js/stopnames.js)
+  const names = (buses && vehicles?.scene?.add && typeof document !== 'undefined')
+    ? new StopNames({ scene: vehicles.scene, city, nearEdges: buses.real._near,
+      standY: world?.walkY ? (x, z) => world.walkY(x, z) : null })
+    : null;
+  return {
+    buses, kerb, dress, names, masts,
+    update(dt, pos, t01) {
+      buses?.update(dt, pos);
+      masts?.update(dt, pos);
+      dress?.update(dt, t01);
+      names?.update(dt, pos);
+      kerb?.update(dt, pos, t01);
+    },
+    /** What the day of the week does to main.js's own hourly traffic curve. */
+    trafficK() {
+      const wt = worldT();
+      return trafficWeekK(hourAt(wt), isWeekend(wt));
+    },
+  };
+}

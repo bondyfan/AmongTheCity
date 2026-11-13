@@ -48,7 +48,7 @@
 
 import { makeCarMesh, seatAnchor as carSeatAnchor, normalizeKind } from './vehicles.js';
 import { Helicopter, seatAnchor as heliSeatAnchor } from './helicopter.js';
-import { PLAYER_SCALE } from './config.js';
+import { SIT_DROP, seatX } from './seating.js';
 
 // ---- tuning --------------------------------------------------------------
 const SMOOTH = 12;      // 1/s — how hard the rendered pose chases the target
@@ -92,7 +92,9 @@ function budgetColor(kind, color) {
 // Cushion top → where a citizen GROUP origin (its feet) has to sit so the
 // folded hips rest on the cushion. Same constant player.js uses for the local
 // player; duplicated rather than imported because player.js keeps it private.
-const SIT_DROP = 0.78 * PLAYER_SCALE;
+// SIT_DROP and the inboard seat position come from js/seating.js, the same
+// numbers the local player's body uses, so a remote rider sits inside the car
+const inCar = (a) => { a.x = seatX(a.x); return a; };
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const fin = (v, d = 0) => (Number.isFinite(v) ? v : d);
@@ -153,7 +155,18 @@ export function makeGhostCars(vehicles) {
     // extras beyond the contract, for HUD/minimap callers that want a pose
     // without walking the internals: pose(uid) and the live count.
     pose, get count() { return recs.size; },
+    // Every ghost CAR this client draws itself, for Vehicles.update: it gives
+    // each the distance dress and a contact shadow, which are decided per
+    // frame against the viewer and so cannot be baked in when the mesh is
+    // made. fn(mesh, x, y, z, kind). Not the bound ones (they ride a vehicle
+    // somebody else already draws and shadows) and not helicopters.
+    eachCar(fn) {
+      for (const r of recs.values())
+        if (r.k === 'car' && r.mesh && !r.bind) fn(r.mesh, r.rx, r.ry, r.rz, r.kind);
+    },
   };
+  // a real Vehicles (it has a fleet), not the bare scene a test may pass
+  if (vehicles?.cars) vehicles.ghosts = api;
 
   // ---- appearance ---------------------------------------------------------
   function buildMesh(r, st) {
@@ -439,7 +452,7 @@ export function makeGhostCars(vehicles) {
     const veh = r.k === 'heli'
       ? { rotorSpeed: 0 }
       : { kind: r.kind };
-    const a = r.k === 'heli' ? heliSeatAnchor(veh, i) : carSeatAnchor(veh, i);
+    const a = r.k === 'heli' ? heliSeatAnchor(veh, i) : inCar(carSeatAnchor(veh, i));
     return world(a, r.rx, r.ry, r.rz, r.rh);
   }
 
@@ -454,7 +467,7 @@ export function makeGhostCars(vehicles) {
     const y = isGhost ? v.ry : fin(v.mesh?.position.y, fin(v.y, 0));
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
     const heli = isGhost ? v.k === 'heli' : isHeli(v);
-    const a = heli ? heliSeatAnchor(v, i) : carSeatAnchor(isGhost ? { kind: v.kind } : v, i);
+    const a = heli ? heliSeatAnchor(v, i) : inCar(carSeatAnchor(isGhost ? { kind: v.kind } : v, i));
     return world(a, x, y, z, h);
   }
 
@@ -484,6 +497,7 @@ export function makeGhostCars(vehicles) {
   function dispose() {
     for (const uid of [...recs.keys()]) drop(uid);
     recs.clear();
+    if (vehicles?.ghosts === api) vehicles.ghosts = null;
     api.localVehicles = null; api.world = null;
   }
 

@@ -562,8 +562,13 @@ const BAND_COLOR = 0xe0341c;
 // 1.5 cm proud of the panel each side, which is what makes it a band you can
 // see rather than a decal fighting the hull for the same pixels.
 const BAND_W = 1.93, BAND_H = 0.26, BAND_Y = 0.70;
-const BAND_L = 3.2, BAND_Z = 0.30;   // z −1.30..1.90, all of it inside the
-                                     // constant-width run of the hull
+// BETWEEN THE ARCHES, and no further. This was 3.2 m long (z −1.30..1.90) when
+// the van's wheels stood flush with its flank and hid whatever ran behind
+// them. The v6 body cuts a real arch (centre z ±1.62, top y 0.775) and sets
+// the tyre 2 cm inboard of the panel, so that strip bridged the open rear
+// arch in front of the tyre. The arch's edge comes down to the band's lower
+// edge (y 0.57) at |z| 1.262: ±1.25 is all flank.
+const BAND_L = 2.5, BAND_Z = 0;      // z −1.25..1.25
 // ---- what makes the band a livery and not a paint job --------------------
 // A white van with a red stripe is a delivery van in a hurry. The first pass
 // shipped exactly that and it read as one, which is the same complaint that
@@ -594,9 +599,11 @@ const BAND_L = 3.2, BAND_Z = 0.30;   // z −1.30..1.90, all of it inside the
 const BAND_TEXT = 'ZÁCHRANNÁ SLUŽBA';
 const BAND_CROSS_Z = 1.06;       // ± this in the van's own z
 const BAND_TEXT_Z = 0;           // …and the word centred between them
-const BAND_TEXT_MAX = 0.50;      // no wider than this fraction of the run, so a
+const BAND_TEXT_MAX = 0.64;      // no wider than this fraction of the run, so a
                                  // font fallback that measures wide shrinks to
                                  // fit instead of running under the crosses
+                                 // (1.6 m, as it was when the run was 3.2 m
+                                 // and this said 0.50: the crosses did not move)
 const BAND_CROSS_H = 0.74;       // arm span as a fraction of the band's height
 const BAND_CROSS_T = 0.30;       // …and the arm's thickness as a fraction of that
 const BAND_PX = 1024;            // canvas width; the height is DERIVED (bandMat)
@@ -615,7 +622,9 @@ const BAND_PLAIN_U = 0.997;
 // stands just behind the header at z −0.55, where the roof interpolates to
 // 1.95. Roof half-width there is green.topW · wid/2 = 0.82 × 0.95 = 0.78 m, so
 // a 1.30 m bar has 13 cm of clearance each side.
-const BAR_Y = 1.95, BAR_Z = -0.55, BAR_W = 1.30;
+// (1.975 since the v6 body: the van roof is crowned now and stands 2.5 cm
+// higher on the centreline than its stations say.)
+const BAR_Y = 1.975, BAR_Z = -0.55, BAR_W = 1.30;
 const LAMP_X = 0.40;            // lamps out towards the ends of the bar, wider
                                 // than the police car's 0.30 — a bigger vehicle
                                 // wears a bigger bar, and it is one of the two
@@ -1589,7 +1598,13 @@ export class Ambulance {
     u.seg = pose.seg;
     const targetH = Math.atan2(-pose.dx, -pose.dz);
     u.heading = angWrap(u.heading + angWrap(targetH - u.heading) * Math.min(1, TURN_RATE * dt));
-    const offTgt = Math.min(TRAFFIC.laneOffsetK * (e.road?.w ?? 6), TRAFFIC.laneOffsetMax);
+    let offTgt = Math.min(TRAFFIC.laneOffsetK * (e.road?.w ?? 6), TRAFFIC.laneOffsetMax);
+    // Cars parked along this kerb (js/kerbparking.js): keep off their flanks,
+    // exactly as traffic.js does for its own cars. This file restated the lane
+    // offset before kerb parking existed, and the van drove through the row.
+    const tr = this.traffic;
+    if (tr?.kerbOf && e.road && tr.kerbOf(e.road) === -e.offSign)
+      offTgt = Math.max(0, Math.min(offTgt, e.road.w / 2 - tr.kerbIntrudes - 0.35 - (u.car?.wid ?? 1.9) / 2));
     u.laneOff += (offTgt - u.laneOff) * Math.min(1, 3 * dt);
     const hx = -Math.sin(u.heading), hz = -Math.cos(u.heading);
     u.x = pose.x - hz * u.laneOff;                 // right of heading = (−hz, hx)

@@ -686,6 +686,9 @@ const ENG_KINDS = {
     peak1: 96, peak2: 430, cutLo: 370, cutHi: 2200, vol: 0.255, intake: 0.04 },
   // no pulse train, no pipe, no gearbox — see EV below and engineSet()
   tesla: { ev: 1, vmax: 72 },
+  // a trolleybus is an electric traction motor on one reduction too: the same
+  // whine and hum, never the Octavia four the unknown kind fell back to
+  trolleybus: { ev: 1, vmax: 19.4 },
 };
 // pre-v4 saves and main.js's spawn list still say sedan/hatch/kombi/suv
 const ENG_ALIAS = { sedan: 'octavia', hatch: 'fabia', kombi: 'octavia', suv: 'bmw' };

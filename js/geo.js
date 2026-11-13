@@ -10,6 +10,8 @@
 // and player all share one geometry truth.
 
 import { CHUNK, BRIDGE_Y, BRIDGE_RAMP } from './config.js';
+import { junctionOutline, indexBays, computeVerge, finishJunction, roadRank } from './streets.js';
+import { bayAt, WALK_W } from './streets.js';
 
 // how far ahead of the focus a tile starts loading. View streams ±600 m, so
 // 2600 m of headroom means even 130 km/h driving gives a fetch ~55 s before
@@ -234,8 +236,28 @@ function sampleProfile(prof, dist) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+// The earthworks ask for the profile of EVERY way of a 4.8 km terrain tile
+// (city.conformTerrainTile, and the slices that warm it), and through the door
+// below that used to work out every one of their verges too: 18 000 of the
+// 22 000 at the spawn, a second of main thread for streets nobody may ever
+// drive down, which is the cost "on first use" exists to avoid. Worse, it
+// asked each way's seam questions (does this end meet a road? is another
+// carriageway here?) before the neighbouring data tile was indexed, and the
+// answer stayed: a kerb closed round the end of a through street at a tile
+// border. The bake reads levels, not verges, so it holds them off; the verge
+// is then worked out by whoever first needs it, which is a chunk a few
+// hundred metres from the player, long after its neighbours are in.
+let _vergeHold = 0;
+/** +1 to stop roadProfile deriving verges, -1 to let it again. Always paired. */
+export function holdVerges(d) { _vergeHold += d; }
+
 export function roadProfile(way, terrain) {
   if (!terrain || !way?.p || way.p.length < 2) return null;
+  // Every consumer of a way comes through here first, and so does chunkspec.js
+  // before it copies a chunk's roads for the mesh worker: the one door through
+  // which a way's verge is guaranteed to exist wherever it is read.
+  if (way._vg === undefined && _streets && !_vergeHold) computeVerge(_streets, way);
+  if (way._vg && way._vg.lv === undefined && _streets) levelVerge(way, _lvT = terrain);
   const c = way._prof;
   if (c && c.terrain === terrain
     && (c.ready || c.loads === (terrain._loads ?? 0))) return c;
@@ -413,6 +435,179 @@ export function roadGradeY(way, dist, terrain) {
   // between them. A spline may overshoot; a road may not.
   const lo = p1 < p2 ? p1 : p2, hi = p1 < p2 ? p2 : p1;
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+// ---- the level a rail way is laid at ---------------------------------------------
+// Heavy rail is its own earthwork: levelled like a road, flatter, on its own
+// bed, and that profile is its level. A TRAM is not. Its track is a concrete
+// panel let into a street, and the street has a levelled profile of its own:
+// two lines smoothed separately over the same ground, which agree only where
+// the ground is flat. Laid on the tram's line the panel stood up to 0.56 m
+// proud of the asphalt it is set in, or lay buried under it (Prague tile
+// -20_-2: of 25 631 samples of track inside a carriageway 2 793 more than
+// 10 cm proud and 3 976 more than 10 cm under), and feet stepped onto an
+// invisible plateau either side of it.
+//
+// So a tram takes each station's level from the carriageway that CONTAINS it:
+// the deck of a drivable way, not a bridge, whose half width covers the
+// station. Where no carriageway does (a reservation, a loop, a depot) it
+// keeps its own profile, and the two are blended over TRAM_BLEND metres of
+// track so the panel leaves the street without a step. A street more than
+// TRAM_APART off the tram's own level is not the street it runs in but one
+// passing over or under it, and is not asked.
+//
+// Where SEVERAL carriageways cover the station (the two halves of a boulevard
+// are two ways, each drawn its full width, and levelled apart they overlap on
+// different levels) it is the HIGHEST: that is the asphalt the eye sees there,
+// and under it a panel laid on the nearer, lower one was buried (1 082 of the
+// 23 789 in-street samples of that tile). And inside a crossing there is one
+// more sheet of asphalt, the junction's pad, with a height of its own
+// (junctionDeckY: the nearest arm's deck, never under the ground less the
+// cut), drawn over the ways that run on through it: the track across a pad
+// lies on whichever of the two is on top (tramPadY), or it disappeared under
+// one crossing in three (1 421 of 4 838 samples on pads).
+//
+// One helper, because three things must give the same number: the panel
+// (meshes.railWay), the feet on it (city.heightAt) and the mesh worker, which
+// has no streets to ask. Like a road's profile the answer is worked out on the
+// main thread, cached on the way (`_tg`, the shape sampleProfile reads) and
+// carried to the worker by js/chunkspec.js.
+const TRAM_APART = 1.5;      // m between a tram's own level and a street's: beyond it, another level
+const TRAM_BLEND = 8;        // m of track from the street's deck back to the tram's own bed
+const _tgC = [];             // the carriageways near the tram in hand: [way, x0, z0, x1, z1] flat
+function tramGrade(way, terrain) {
+  const c = way._tg;
+  if (c && c.terrain === terrain && (c.ready || c.loads === (terrain._loads ?? 0))) return c;
+  // a mesh worker has no city: what travelled is the answer, or there is none
+  if (!_streets) return c && c.terrain === terrain ? c : null;
+  const prof = roadProfile(way, terrain);
+  if (!prof) return null;
+  const n = prof.n, y = new Float32Array(n), dl = new Float32Array(n), has = new Uint8Array(n);
+  let ready = prof.ready;
+  // every carriageway that can contain a point of this track
+  let a = Infinity, b = Infinity, c2 = -Infinity, d = -Infinity;
+  for (const q of way.p) { if (q[0] < a) a = q[0]; if (q[1] < b) b = q[1]; if (q[0] > c2) c2 = q[0]; if (q[1] > d) d = q[1]; }
+  a -= 16; b -= 16; c2 += 16; d += 16;
+  _tgC.length = 0;
+  for (let i = Math.floor(a / CHUNK); i <= Math.floor(c2 / CHUNK); i++) {
+    for (let j = Math.floor(b / CHUNK); j <= Math.floor(d / CHUNK); j++) {
+      for (const o of _streets.chunkIndex.get(i + ',' + j)?.roads ?? []) {
+        if (!o.d || o.br || !o.p || o.p.length < 2 || !((o.w ?? 0) > 0) || _tgC.includes(o)) continue;
+        let oa = Infinity, ob = Infinity, oc = -Infinity, od = -Infinity;
+        for (const q of o.p) { if (q[0] < oa) oa = q[0]; if (q[1] < ob) ob = q[1]; if (q[0] > oc) oc = q[0]; if (q[1] > od) od = q[1]; }
+        if (oc < a || oa > c2 || od < b || ob > d) continue;
+        _tgC.push(o, oa, ob, oc, od);
+      }
+    }
+  }
+  for (let i = 0; i < n && _tgC.length; i++) {
+    const x = prof.gx[i], z = prof.gz[i];
+    // the highest deck among the carriageways that cover this station
+    let top = -Infinity, br = null;
+    for (let q = 0; q < _tgC.length; q += 5) {
+      const o = _tgC[q], half = o.w / 2;
+      if (x < _tgC[q + 1] - half || x > _tgC[q + 3] + half || z < _tgC[q + 2] - half || z > _tgC[q + 4] + half) continue;
+      const op = o.p;
+      let al = 0, bd = half, bs = -1;
+      for (let k = 0; k < op.length - 1; k++) {
+        const ax = op[k][0], az = op[k][1], ex = op[k + 1][0] - ax, ez = op[k + 1][1] - az;
+        const L2 = ex * ex + ez * ez || 1e-9, L = Math.sqrt(L2);
+        let t = ((x - ax) * ex + (z - az) * ez) / L2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const dd = Math.hypot(x - ax - ex * t, z - az - ez * t);
+        if (dd < bd) { bd = dd; bs = al + L * t; }
+        al += L;
+      }
+      if (bs < 0) continue;
+      const g = roadGradeY(o, bs, terrain);
+      if (g === null || Math.abs(g - prof.y[i]) > TRAM_APART || g <= top) continue;
+      top = g; br = o;
+    }
+    if (!br) continue;
+    dl[i] = top - prof.y[i]; has[i] = 1;
+    if (!br._prof?.ready) ready = false;
+  }
+  // between two stretches of street, and off the end of one: the difference
+  // is carried across a short gap, and dies away along a long one
+  const reach = Math.max(1, Math.round(TRAM_BLEND / prof.ds));
+  for (let i = 0; i < n; i++) {
+    if (has[i]) continue;
+    let j = i;
+    while (j < n && !has[j]) j++;
+    const L = i - 1, R = j < n ? j : -1, len = j - i;
+    for (let k = i; k < j; k++) {
+      if (L >= 0 && R >= 0 && len <= 2 * reach) dl[k] = dl[L] + (dl[R] - dl[L]) * ((k - L) / (R - L));
+      else {
+        const fl = L >= 0 && k - L < reach ? dl[L] * (0.5 + 0.5 * Math.cos(Math.PI * (k - L) / reach)) : 0;
+        const fr = R >= 0 && R - k < reach ? dl[R] * (0.5 + 0.5 * Math.cos(Math.PI * (R - k) / reach)) : 0;
+        dl[k] = fl + fr;
+      }
+    }
+    i = j;
+  }
+  for (let i = 0; i < n; i++) y[i] = prof.y[i] + dl[i];
+  return (way._tg = { terrain, ds: prof.ds, n, y, has, own: prof.y, gx: prof.gx, gz: prof.gz, ready, loads: terrain._loads ?? 0 });
+}
+
+// The level of the junction pad a tram station lies on, or null where it lies
+// on none. Asked LIVE and not baked into `_tg`: a pad's deck is floored by the
+// ground as it stands (junctionDeckY), the earthworks move that ground after
+// the first chunk has asked, and the pad's own mesh and the feet on it read
+// the height afresh every time. The buckets are read as they stand, with the
+// pad's outline only (geo.junctionHull): nothing here decides when a pad's
+// kerb is worked out (js/streets.js on WHEN), and a mesh worker holds the
+// buckets of every pad a rail homed in its chunk can reach (chunkspec
+// padKeys). The same TRAM_APART as a street: a crossing on a flyover over the
+// track is not the track's.
+function tramPadY(tg, dist, terrain) {
+  const u = Math.max(0, Math.min(tg.n - 1, dist / tg.ds));
+  const i = Math.min(tg.n - 2, Math.floor(u)), f = u - i;
+  const x = tg.gx[i] + (tg.gx[i + 1] - tg.gx[i]) * f, z = tg.gz[i] + (tg.gz[i + 1] - tg.gz[i]) * f;
+  const own = tg.own[i] + (tg.own[i + 1] - tg.own[i]) * f;
+  const ci = Math.floor(x / CHUNK), cj = Math.floor(z / CHUNK);
+  let y = null;
+  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+    const k = (ci + a) + ',' + (cj + b);
+    for (let pass = 0; pass < 2; pass++) {
+      const list = pass ? CLUSTERS.get(k) : JUNCTIONS.get(k);
+      if (!list) continue;
+      for (const j of list) {
+        // a member answers through its cluster, a roundabout node has no pad
+        if (j._cluster || (!pass && j._ring)) continue;
+        const R = (j.padR ?? j.pad ?? 6) + 1;
+        if ((x - j.x) * (x - j.x) + (z - j.z) * (z - j.z) > R * R) continue;
+        const ring = pass ? clusterHull(j) : junctionHull(j);
+        if (!ring || !pointInPolygon(x, z, ring)) continue;
+        // (the pad is drawn 12 mm over its deck height)
+        const g = (pass ? clusterDeckY(j, x, z, terrain) : junctionDeckY(j, x, z, terrain)) + 0.012;
+        if (Math.abs(g - own) <= TRAM_APART && (y === null || g > y)) y = g;
+      }
+    }
+  }
+  return y;
+}
+
+/** The absolute height a rail way is laid at, `dist` along it: a tram's street, a railway's own bed. */
+export function railGradeY(way, dist, terrain) {
+  if (way.t === 'tram' && !way.br && terrain) {
+    const tg = tramGrade(way, terrain);
+    if (tg) {
+      const y = sampleProfile(tg, dist), pad = tramPadY(tg, dist, terrain);
+      if (pad === null) return y;
+      // on a pad: the pad, or the carriageway that runs over it where one does
+      // (a station no carriageway covers has only its own bed in `y`)
+      const i = Math.max(0, Math.min(tg.n - 1, Math.round(dist / tg.ds)));
+      return tg.has[i] && y > pad ? y : pad;
+    }
+  }
+  return roadGradeY(way, dist, terrain);
+}
+
+/** roadProfile for a rail way, with a tram's street level worked out too: what chunkspec forces before it copies. */
+export function railProfile(way, terrain) {
+  const prof = roadProfile(way, terrain);
+  if (prof && way.t === 'tram' && !way.br) tramGrade(way, terrain);
+  return prof;
 }
 
 // Absolute bridge-deck height. Adding bridgeElevation() to the terrain at every
@@ -879,8 +1074,11 @@ function linkOverlaps(roads, at) {
 }
 
 const J_MAX_TRIM = 0.35;    // never eat more than this fraction of a short road
+const CLUSTER_LINK = 32;    // m of shared way that makes two nodes one crossing
+const CLUSTER_RANK = 2;     // …if that way is at least a residential street
 export function indexJunctions(roads) {
   const at = new Map();
+  const fresh = [];            // nodes registered by THIS call, shaped at the end
   for (const r of roads) {
     if (!r.d || !r.p || r.p.length < 2) continue;
     for (let i = 0; i < r.p.length; i++) {
@@ -920,6 +1118,13 @@ export function indexJunctions(roads) {
       const link = { road: road.r, at };
       if (a.i === 0) a.r._ap0 = link; else a.r._ap1 = link;
     }
+    // A way that ENDS where nothing else arrives is a dead end, and a kerbed
+    // street closes its kerb round it (meshes.roadRibbon). Remembered on the
+    // way as a plain flag: the pins that could answer this later do not cross
+    // to the mesh worker.
+    if (e.arms.length === 1 && e.arms[0].end) {
+      if (e.arms[0].i === 0) e.arms[0].r._de0 = 1; else e.arms[0].r._de1 = 1;
+    }
     // Every arm at a shared node remembers where along itself the node is, so
     // roadProfile can pin its level there. Two arms is already a junction for
     // this purpose — it is where OSM split one street into two ways, and a step
@@ -933,7 +1138,17 @@ export function indexJunctions(roads) {
         (a.r._pins ??= []).push({ s: at, node: e });
       }
     }
-    if (e.arms.length < J_MIN_ARMS) continue;
+    // Three DIRECTIONS meeting is a junction, however OSM cut the ways: a side
+    // street joining the middle of a continuous way is two arms and three
+    // directions, and it is the commonest junction a town has. It used to get
+    // no pad at all (the side road's ribbon simply ran into the centreline of
+    // the other), which is exactly where a kerb radius belongs. `_t` marks the
+    // nodes this admits, so the clustering below can leave them out: a street
+    // with a driveway every fifteen metres must not become one long crossing.
+    let deg = 0;
+    for (const a of e.arms) deg += a.end ? 1 : 2;
+    if (deg < J_MIN_ARMS) continue;
+    e._t = e.arms.length < J_MIN_ARMS ? 1 : 0;
     // the pad has to clear the widest road that meets here
     let wMax = 0;
     for (const a of e.arms) wMax = Math.max(wMax, (a.r.w ?? 3) / 2);
@@ -959,7 +1174,7 @@ export function indexJunctions(roads) {
     const k = chunkKey(e.x, e.z);
     let list = JUNCTIONS.get(k);
     if (!list) JUNCTIONS.set(k, list = []);
-    if (!list.some((o) => o.x === e.x && o.z === e.z)) list.push(e);
+    if (!list.some((o) => o.x === e.x && o.z === e.z)) { list.push(e); fresh.push(e); }
   }
 
   // ---- CLUSTERS: several nodes, one real crossing ------------------------
@@ -970,7 +1185,6 @@ export function indexJunctions(roads) {
   // between carriageways) belong to one crossing; union-find over the pin
   // lists gives the components, and each multi-node component becomes one
   // CLUSTER that meshes draws (and physics stands on) as a single surface.
-  const CLUSTER_LINK = 32;
   const find = (n) => { while (n._cRoot && n._cRoot !== n) n = n._cRoot; return n; };
   const union = (a, b) => {
     const ra = find(a), rb = find(b);
@@ -982,16 +1196,24 @@ export function indexJunctions(roads) {
     // exit — exactly the shape the union rule looks for, and clustering it
     // poured one giant pad over the whole circle, island included
     if (r.rb) continue;
+    // …and so is a chain of service ways: the aisles of a car park and the
+    // loop of a station forecourt are a node every fifteen metres, and they
+    // dragged the real crossing beside them into one seventy-metre blob (the
+    // "big junction" west of Pardubice station was fourteen nodes, ten of them
+    // forecourt). A crossing is made of streets.
+    if (roadRank(r) < CLUSTER_RANK) continue;
     if (!r._pins || r._pins.length < 2) continue;
     const ps = [...r._pins].sort((p1, p2) => p1.s - p2.s);
     for (let i = 0; i < ps.length - 1; i++) {
       if (ps[i + 1].s - ps[i].s < CLUSTER_LINK
-        && ps[i].node.pad !== undefined && ps[i + 1].node.pad !== undefined) {
+        && ps[i].node.pad !== undefined && ps[i + 1].node.pad !== undefined
+        && !ps[i].node._t && !ps[i + 1].node._t) {
         union(ps[i].node, ps[i + 1].node);
       }
     }
   }
   const groups = new Map();
+  const newClusters = [];
   for (const list2 of JUNCTIONS.values()) {
     for (const e of list2) {
       if (!e._cRoot) continue;
@@ -1024,26 +1246,212 @@ export function indexJunctions(roads) {
     let clist = CLUSTERS.get(ck);
     if (!clist) CLUSTERS.set(ck, clist = []);
     clist.push(cl);
+    newClusters.push(cl);
   }
   // the union-find marks are scoped to THIS call — a later tile must not see
   // half-built roots on nodes it never touched
   for (const list2 of JUNCTIONS.values()) for (const e of list2) delete e._cRoot;
+  // ---- the outlines: kerb radii, mouths, and the kerb's own stretches ------
+  // Shaped here rather than on first use, because the outline decides how far
+  // each mouth reaches (lg.m), and the ribbons need that before any chunk is
+  // built: their kerb stops where the junction's kerb starts.
+  for (const cl of newClusters) shapeCluster(cl);
+  for (const e of fresh) if (!e._cluster && !e._ring) shapeJunction(e);
   // …and finally the overlaps that never got a node of their own.
   linkOverlaps(roads, at);
 }
 
-/** Junction clusters, bucketed like the pads. */
-export function clustersIn(chunkK) { return CLUSTERS.get(chunkK) ?? null; }
-
-/** The cluster's one footprint: convex hull of every member's hull points. */
-export function clusterHull(cl) {
-  if (cl._ring !== undefined) return cl._ring;
-  const pts = [];
-  for (const m of cl.members) {
-    const r = junctionHull(m);
-    if (r) pts.push(...r);
+// ---- roundabouts have a MIDDLE ------------------------------------------------
+// OSM draws a roundabout as its ring and nothing else, cut into a way per exit,
+// so the game drew a ring of asphalt round whatever ground happened to be there.
+// The island is derived here: the ring's ways are gathered by their shared end
+// nodes, a circle is fitted to them, and ONE way of the ring (the lowest id, so
+// it is the same way on every machine) is told about it. meshes.js draws the
+// island with that way's ribbon, which is what makes it appear exactly once.
+export function indexRoundabouts(roads) {
+  const ring = roads.filter((r) => r.rb && r.d && r.p?.length > 1);
+  if (!ring.length) return;
+  const root = new Map(), parent = new Map();
+  const find = (w) => { while (parent.get(w) !== w) w = parent.get(w); return w; };
+  for (const w of ring) parent.set(w, w);
+  for (const w of ring) {
+    for (const e of [0, w.p.length - 1]) {
+      const k = J_KEY(w.p[e][0], w.p[e][1]);
+      const o = root.get(k);
+      if (o) parent.set(find(w), find(o)); else root.set(k, w);
+    }
   }
-  return (cl._ring = pts.length >= 3 ? convexHull(pts) : null);
+  const groups = new Map();
+  for (const w of ring) {
+    const g = find(w);
+    let l = groups.get(g);
+    if (!l) groups.set(g, l = []);
+    l.push(w);
+  }
+  for (const ws of groups.values()) {
+    let sx = 0, sz = 0, sl = 0, hw = 0;
+    for (const w of ws) {
+      hw = Math.max(hw, (w.w ?? 6) / 2);
+      for (let i = 0; i < w.p.length - 1; i++) {
+        const L = Math.hypot(w.p[i + 1][0] - w.p[i][0], w.p[i + 1][1] - w.p[i][1]);
+        sx += (w.p[i][0] + w.p[i + 1][0]) / 2 * L; sz += (w.p[i][1] + w.p[i + 1][1]) / 2 * L; sl += L;
+      }
+    }
+    if (sl < 12) continue;
+    const cx = sx / sl, cz = sz / sl;
+    let R = 0, lo = Infinity, hi = 0;
+    for (const w of ws) for (const q of w.p) {
+      const d = Math.hypot(q[0] - cx, q[1] - cz);
+      R += d; if (d < lo) lo = d; if (d > hi) hi = d;
+    }
+    let n = 0;
+    for (const w of ws) n += w.p.length;
+    R /= n;
+    // a closed, roughly round ring: its length is its circumference, and no
+    // vertex strays far off the circle (a "roundabout" tag on a square loop of
+    // streets round a park is not an island to pave)
+    if (Math.abs(sl - 2 * Math.PI * R) > 0.3 * 2 * Math.PI * R || hi - lo > 0.45 * R || R > 60) continue;
+    // (the LONGEST piece, lowest id on a tie: the island is drawn with its
+    // owner's levelled ribbon, and a ring is often cut into pieces a few
+    // metres long that are too short to be levelled at all. Owned by one of
+    // those, the island was never drawn.)
+    const lenOf = (w) => w._len ?? polylineLength(w.p);
+    const owner = ws.reduce((a, b) => {
+      const la = lenOf(a), lb = lenOf(b);
+      return la > lb + 1e-6 ? a : lb > la + 1e-6 ? b : ((a._id ?? 0) <= (b._id ?? 0) ? a : b);
+    });
+    owner._isl = [cx, cz, lo - hw];
+  }
+}
+
+// ---- junction outlines ------------------------------------------------------
+// The direction a way leaves vertex i in, measured a few metres out: a rounded
+// bend ends in half-metre pieces whose own bearing is noise.
+function legDir(p, i, dir) {
+  let k = i;
+  while (k + dir >= 0 && k + dir < p.length) {
+    k += dir;
+    if (Math.hypot(p[k][0] - p[i][0], p[k][1] - p[i][1]) >= 3) break;
+  }
+  const dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1], L = Math.hypot(dx, dz) || 1;
+  return [dx / L, dz / L];
+}
+
+/** One leg per direction a way leaves the node in (a through-way has two). */
+function legsOf(node) {
+  const legs = [];
+  for (const a of node.arms) {
+    const p = a.r.p;
+    if (!p || p.length < 2 || a.i < 0) continue;
+    const len = a.r._len ?? polylineLength(p);
+    let s = a.s;
+    if (s === undefined) { s = 0; for (let i = 0; i < a.i; i++) s += Math.hypot(p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1]); }
+    for (const dir of a.end ? [a.i === 0 ? 1 : -1] : [1, -1]) {
+      const [ux, uz] = legDir(p, a.i, dir);
+      legs.push({ nx: node.x, nz: node.z, ux, uz, hw: (a.r.w ?? 3) / 2, pad: node.pad,
+        avail: dir > 0 ? len - s : s, r: a.r, s, dir, m: node.pad });
+    }
+  }
+  return legs;
+}
+
+/** The stretch of each leg's way that lies inside the mouth: no ribbon kerb there. */
+function zonesFrom(legs) {
+  for (const lg of legs) {
+    const z = (lg.r._jz ??= []);
+    if (lg.dir > 0) z.push(lg.s, lg.s + lg.m); else z.push(lg.s - lg.m, lg.s);
+  }
+}
+
+/** The pad's old footprint: two cross-section corners per leg at the pad radius. */
+function padCorners(node, pts = []) {
+  for (const a of node.arms) {
+    const p = a.r.p;
+    const i = a.i;
+    const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
+    let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
+    if (!a.end) {
+      const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
+      dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
+    }
+    const L = Math.hypot(dx, dz) || 1;
+    const ux = dx / L, uz = dz / L, hw = (a.r.w ?? 3) / 2;
+    for (const side of [-1, 1]) {
+      for (const dir of a.end ? [1] : [1, -1]) {
+        pts.push([node.x + ux * dir * node.pad - uz * side * hw,
+          node.z + uz * dir * node.pad + ux * side * hw]);
+      }
+    }
+  }
+  return pts;
+}
+
+function ringRadius(ring, x, z) {
+  let R = 0;
+  for (const q of ring) R = Math.max(R, Math.hypot(q[0] - x, q[1] - z));
+  return R + 0.1;
+}
+
+function shapeJunction(node) {
+  const legs = legsOf(node);
+  const out = legs.length >= 2 ? junctionOutline(legs, node.x, node.z) : null;
+  node._legs = legs;
+  if (out && pointInPolygon(node.x, node.z, out.ring)) {
+    node._hullRing = out.ring; node._edge = out.edge;
+    node.padR = ringRadius(out.ring, node.x, node.z);
+  } else {
+    // not a simple polygon (arms folded over each other): the convex hull this
+    // always was, with no kerb of its own
+    const pts = padCorners(node);
+    node._hullRing = pts.length >= 3 ? convexHull(pts) : null;
+    node._edge = [];
+    for (const lg of legs) lg.m = node.pad;
+  }
+  zonesFrom(legs);
+}
+
+function shapeCluster(cl) {
+  const members = new Set(cl.members);
+  const legs = [], inner = [];
+  for (const m of cl.members) {
+    for (const lg of legsOf(m)) {
+      // a leg that leads straight to another member is the crossing's own inside
+      let link = 0;
+      for (const pin of lg.r._pins ?? []) {
+        if (pin.node === m || !members.has(pin.node)) continue;
+        const d = (pin.s - lg.s) * lg.dir;
+        if (d > 0.01 && d <= CLUSTER_LINK + 2 && (!link || d < link)) link = d;
+      }
+      if (link) { lg.m = link; inner.push(lg); } else legs.push(lg);
+    }
+  }
+  const out = legs.length >= 2 ? junctionOutline(legs, cl.x, cl.z) : null;
+  cl._legs = legs;
+  if (out && cl.members.every((m) => pointInPolygon(m.x, m.z, out.ring))) {
+    cl._ring = out.ring; cl._edge = out.edge;
+    cl.padR = cl.pad = ringRadius(out.ring, cl.x, cl.z);
+  } else {
+    const pts = [];
+    for (const m of cl.members) padCorners(m, pts);
+    cl._ring = pts.length >= 3 ? convexHull(pts) : null;
+    cl._edge = [];
+    for (const lg of legs) lg.m = lg.pad;
+  }
+  zonesFrom(legs);
+  zonesFrom(inner);
+}
+
+/** Junction clusters, bucketed like the pads. */
+export function clustersIn(chunkK) {
+  const l = CLUSTERS.get(chunkK) ?? null;
+  if (l && _streets) for (const cl of l) if (!cl._kd) { clusterHull(cl); finishJunction(_streets, cl, streetOf); }
+  return l;
+}
+
+/** The cluster's one footprint: the outline round its outer legs (see streets.js). */
+export function clusterHull(cl) {
+  if (cl._ring === undefined) shapeCluster(cl);
+  return cl._ring;
 }
 
 /** The cluster's surface height at (x, z): the deck of the nearest arm of any
@@ -1226,33 +1634,15 @@ export function bridgeClearance(way, terrain) {
  * player sank into a pad up to the neck.
  */
 /**
- * The pad's FOOTPRINT: convex hull of the arm mouths — two cross-section
- * corners per arm at the pad radius, both directions for a through-road.
+ * The pad's FOOTPRINT: the ordered outline round the arm mouths, with a kerb
+ * radius in every corner (streets.js junctionOutline), or the old convex hull
+ * of the mouth corners where that outline would not be a simple polygon.
  * Cached on the node; meshes.js draws this ring and city.js stands on it,
  * so the two can never disagree about where the pad ends.
  */
 export function junctionHull(node) {
-  if (node._hullRing !== undefined) return node._hullRing;
-  const pts = [];
-  for (const a of node.arms) {
-    const p = a.r.p;
-    const i = a.i;
-    const k = a.i === 0 ? Math.min(p.length - 1, 1) : Math.max(0, p.length - 2);
-    let dx = p[k][0] - p[i][0], dz = p[k][1] - p[i][1];
-    if (!a.end) {
-      const lo = Math.max(0, i - 1), hi = Math.min(p.length - 1, i + 1);
-      dx = p[hi][0] - p[lo][0]; dz = p[hi][1] - p[lo][1];
-    }
-    const L = Math.hypot(dx, dz) || 1;
-    const ux = dx / L, uz = dz / L, hw = (a.r.w ?? 3) / 2;
-    for (const side of [-1, 1]) {
-      for (const dir of a.end ? [1] : [1, -1]) {
-        pts.push([node.x + ux * dir * node.pad - uz * side * hw,
-          node.z + uz * dir * node.pad + ux * side * hw]);
-      }
-    }
-  }
-  return (node._hullRing = pts.length >= 3 ? convexHull(pts) : null);
+  if (node._hullRing === undefined) shapeJunction(node);
+  return node._hullRing;
 }
 
 /** Andrew's monotone chain. Small inputs (≤ 16 points), so the sort is free. */
@@ -1322,7 +1712,128 @@ export const JUNCTIONS = new Map();
 // that are on this side of the boundary.
 export const CLUSTERS = new Map();
 
-export function junctionsIn(chunkK) { return JUNCTIONS.get(chunkK) ?? null; }
+export function junctionsIn(chunkK) {
+  const l = JUNCTIONS.get(chunkK) ?? null;
+  // the kerb and the control of each pad, worked out the first time anybody
+  // asks for the bucket (see js/streets.js on WHEN)
+  if (l && _streets) for (const j of l) if (!j._kd && !j._cluster && !j._ring) { junctionHull(j); finishJunction(_streets, j, streetOf); }
+  return l;
+}
+
+// ---- streets: the verge of a way, on first use --------------------------------
+// The city whose chunk index the street derivations read. Set by loadCity on
+// the main thread; a mesh worker never sets it, and reads what travelled.
+let _streets = null;
+export function setStreetCity(city) { _streets = city; }
+/** r._vg, worked out now if this thread can and has not yet. null: no kerb. */
+export function streetOf(r) {
+  if (r._vg === undefined && _streets) computeVerge(_streets, r);
+  if (r._vg && r._vg.lv === undefined && _lvT && _streets) levelVerge(r, _lvT);
+  return r._vg ?? null;
+}
+
+// ---- a lawn does not reach out to a footway on another level --------------------
+// Where a footway is mapped alongside a kerbed street, the street's band is a
+// lawn from the kerb out to it (streets.computeVerge), drawn and stood on at
+// the street's level. The derivation is plan only: beside a street up on an
+// embankment the footway at the foot of the bank is "alongside" too, and the
+// lawn became a shelf five metres wide at deck height, three or four metres
+// over the path it was reaching for (the flyover approach by Kaufland; the
+// kerb pull then dragged the path up onto it, meshes.footPullW). So once the
+// street's levelled profile is known, every lawn station is asked how far the
+// footway's OWN grade is from the street's there, and where that is more than
+// VERGE_LEVEL the street gets what it would have had with no footway mapped:
+// the plain paved band. The bank between the two is the terrain's.
+//
+// Done once per way, in place, behind the same two doors the verge itself is
+// worked out behind, so no reader sees the arrays before it; it waits for a
+// profile that is final (a guess over a height tile still loading is asked
+// again). The worker never does this: the arrays arrive done.
+const VERGE_LEVEL = 1.0;        // m between the street's grade and the footway's own
+const LAWN_WALKS = new Set(['footway', 'cycleway', 'pedestrian']);   // streets.js WALKS
+let _lvT = null;                // the terrain grades are read off: the last one roadProfile was asked with
+const _lvC = [];                // the footways near the way in hand: [way, x0, z0, x1, z1] flat
+function levelVerge(way, terrain) {
+  const vg = way._vg;
+  vg.lv = 0;                    // in hand: the profile below comes back in through the door
+  const prof = roadProfile(way, terrain);
+  if (!prof || !prof.ready) { vg.lv = undefined; return; }
+  vg.lv = 1;
+  const n = vg.n, T0 = vg.t[0], T1 = vg.t[1];
+  let any = false;
+  for (let k = 0; k < n && !any; k++) any = T0[k] === 2 || T1[k] === 2;
+  if (!any) return;
+  // the walked ways that can be the one a lawn of this street reaches (6.5 m
+  // past the kerb line of a lay-by, and a metre of slack)
+  const p = way.p, hw = (way.w ?? 3) / 2, m = hw + 11;
+  let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+  for (const q of p) { if (q[0] < a) a = q[0]; if (q[1] < b) b = q[1]; if (q[0] > c) c = q[0]; if (q[1] > d) d = q[1]; }
+  a -= m; b -= m; c += m; d += m;
+  _lvC.length = 0;
+  for (let i = Math.floor(a / CHUNK); i <= Math.floor(c / CHUNK); i++) {
+    for (let j = Math.floor(b / CHUNK); j <= Math.floor(d / CHUNK); j++) {
+      for (const o of _streets.chunkIndex.get(i + ',' + j)?.roads ?? []) {
+        if (o.d || o.br || !LAWN_WALKS.has(o.t) || !o.p || o.p.length < 2 || _lvC.includes(o)) continue;
+        let oa = Infinity, ob = Infinity, oc = -Infinity, od = -Infinity;
+        for (const q of o.p) { if (q[0] < oa) oa = q[0]; if (q[1] < ob) ob = q[1]; if (q[0] > oc) oc = q[0]; if (q[1] > od) od = q[1]; }
+        if (oc < a || oa > c || od < b || ob > d) continue;
+        _lvC.push(o, oa, ob, oc, od);
+      }
+    }
+  }
+  if (!_lvC.length) return;
+  // the footway's own grade at the point a lawn station reaches, or null
+  const gradeAt = (x, z) => {
+    let best = 1.5, y = null;
+    for (let q = 0; q < _lvC.length; q += 5) {
+      if (x < _lvC[q + 1] - 1.5 || x > _lvC[q + 3] + 1.5 || z < _lvC[q + 2] - 1.5 || z > _lvC[q + 4] + 1.5) continue;
+      const o = _lvC[q], op = o.p;
+      let al = 0;
+      for (let i = 0; i < op.length - 1; i++) {
+        const ax = op[i][0], az = op[i][1], ex = op[i + 1][0] - ax, ez = op[i + 1][1] - az;
+        const L2 = ex * ex + ez * ez || 1e-9, L = Math.sqrt(L2);
+        let t = ((x - ax) * ex + (z - az) * ez) / L2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const dd = Math.hypot(x - ax - ex * t, z - az - ez * t);
+        if (dd < best) { const g = roadGradeY(o, al + L * t, terrain); if (g !== null) { best = dd; y = g; } }
+        al += L;
+      }
+    }
+    return y;
+  };
+  // walk the stations as streets.stationsOf lays them: even arclength, and the
+  // band's side by the segment's own normal
+  const off = [new Uint8Array(n), new Uint8Array(n)];
+  let seg = 0, acc = 0, L = Math.hypot(p[1][0] - p[0][0], p[1][1] - p[0][1]) || 1e-6;
+  for (let k = 0; k < n; k++) {
+    if (T0[k] !== 2 && T1[k] !== 2) continue;
+    const s = k * vg.ds;
+    while (s > acc + L + 1e-9 && seg < p.length - 2) {
+      acc += L; seg++;
+      L = Math.hypot(p[seg + 1][0] - p[seg][0], p[seg + 1][1] - p[seg][1]) || 1e-6;
+    }
+    const t = Math.max(0, Math.min(1, (s - acc) / L));
+    const dx = (p[seg + 1][0] - p[seg][0]) / L, dz = (p[seg + 1][1] - p[seg][1]) / L;
+    const x = p[seg][0] + dx * L * t, z = p[seg][1] + dz * L * t;
+    const gy = roadGradeY(way, s, terrain);
+    if (gy === null) continue;
+    for (let side = 0; side < 2; side++) {
+      if (vg.t[side][k] !== 2) continue;
+      const e = side ? 1 : -1;
+      // (the lawn is 0.2 m wider than the footway's centreline is far)
+      const out = hw + bayAt(way, s, e) + vg.w[side][k] * 0.1 - 0.2;
+      const fy = gradeAt(x + dz * e * out, z - dx * e * out);
+      if (fy !== null && Math.abs(gy - fy) > VERGE_LEVEL) off[side][k] = 1;
+    }
+  }
+  const plain = Math.round(WALK_W * 10);
+  for (let side = 0; side < 2; side++) {
+    const O = off[side], T = vg.t[side], W = vg.w[side];
+    // one station of a different mind between two that agree is noise
+    for (let k = 1; k < n - 1; k++) if (O[k - 1] === O[k + 1] && T[k] === 2 && T[k - 1] === 2 && T[k + 1] === 2) O[k] = O[k - 1];
+    for (let k = 0; k < n; k++) if (O[k]) { T[k] = 1; W[k] = plain; }
+  }
+}
 
 export function polylineLength(p) {
   let L = 0;
@@ -1383,15 +1894,58 @@ function forEachCellOf(f, fn) {
   return ring;
 }
 
+// ---- what an index cell weighs ----------------------------------------------
+// Counted after a teleport tour of six places (13 Nov 2026, twenty tiles seen):
+// 625 791 cells, 562 MB of a 1 000 MB heap, more than every road, polygon and
+// building of those tiles together. Two things made it so. A cell was born
+// with fourteen arrays of its own and most cells use one or two of them, so
+// the lists nothing was ever put in are now ONE shared, frozen array (a stray
+// push into it throws, which is the point: every list is still only ever
+// filled here). And see bucketizeLine below for the other.
+const NONE = Object.freeze([]);
+const newCell = () => ({ buildings: NONE, roads: NONE, rails: NONE, water: NONE, green: NONE,
+  paved: NONE, trees: NONE, signs: NONE, crossings: NONE, power: NONE, furniture: NONE,
+  calming: NONE, barriers: NONE, venues: NONE });
+function cellPut(index, key, kind, f, touched) {
+  let cell = index.get(key);
+  if (!cell) index.set(key, cell = newCell());
+  const list = cell[kind];
+  if (list === NONE) cell[kind] = [f]; else list.push(f);
+  touched?.add(key);
+}
+
 function bucketize(index, list, kind, touched) {
   for (const f of list) {
-    const ring = forEachCellOf(f, (key) => {
-      let cell = index.get(key);
-      if (!cell) index.set(key, cell = { buildings: [], roads: [], rails: [], water: [], green: [], paved: [], trees: [], signs: [], crossings: [], power: [], furniture: [], calming: [], barriers: [], venues: [] });
-      cell[kind].push(f);
-      touched?.add(key);
-    });
+    const ring = forEachCellOf(f, (key) => cellPut(index, key, kind, f, touched));
     f._home = chunkKey(ring[0][0], ring[0][1]); // rendered once, here
+  }
+}
+
+// A TRANSMISSION LINE IS NOT ITS BOUNDING BOX. bucketize() above files a
+// feature under every cell of its bbox, which is right for a pond and
+// harmless for a street, and for a 400 kV line running fifty kilometres on a
+// diagonal it is every cell of a fifty-kilometre square: ONE line of 484
+// vertices sat in 329 074 cells of that tour, most of them outside any tile
+// that was loaded and 460 000 outside the world altogether, and 352 683 cells
+// existed for no other reason. The only reader of `cell.power` is the mesher
+// (meshes.js: a tower in the cell its vertex stands in, a span in the cell of
+// its midpoint), so those are exactly the cells a line is filed under.
+function bucketizeLine(index, list, kind, touched) {
+  for (const f of list) {
+    const p = f.p;
+    let last = '';
+    const put = (x, z) => {
+      const key = chunkKey(x, z);
+      if (key === last) return;
+      last = key;
+      if (index.get(key)?.[kind].includes(f)) return;
+      cellPut(index, key, kind, f, touched);
+    };
+    for (let i = 0; i < p.length; i++) {
+      if (i) put((p[i - 1][0] + p[i][0]) / 2, (p[i - 1][1] + p[i][1]) / 2);
+      put(p[i][0], p[i][1]);
+    }
+    f._home = chunkKey(p[0][0], p[0][1]);
   }
 }
 
@@ -1465,11 +2019,14 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   for (const r of rails) r.p = smoothBends(r.p, r.br);
   indexJunctions(roads);
   indexBridgeCrossings(roads, rails);
+  indexRoundabouts(roads);
   bucketize(city.chunkIndex, roads, 'roads', touched);
   bucketize(city.chunkIndex, rails, 'rails', touched);
   bucketize(city.chunkIndex, water, 'water', touched);
   bucketize(city.chunkIndex, green, 'green', touched);
   bucketize(city.chunkIndex, paved, 'paved', touched);
+  // lay-bys: the kerb steps out around them (js/streets.js)
+  indexBays(city, data.pois);
   appendAll(city.roads, roads);
   appendAll(city.rails, rails);
   appendAll(city.water, water);
@@ -1489,7 +2046,9 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   // transmission lines — every vertex is a pylon, wires hang between them.
   // Bucketized like any polyline so each chunk raises its own towers.
   const power = stamp(data.power);
-  bucketize(city.chunkIndex, power, 'power', touched);
+  // (a tile's line by the cells it stands in; the one-file city, which is as
+  // big as it will ever get, keeps the box it always had)
+  (slot ? bucketizeLine : bucketize)(city.chunkIndex, power, 'power', touched);
   appendAll(city.power, power);
   // street furniture — every prop is a point, wrapped like trees so bucketize
   // can hand each chunk its own benches, bins, lamps and crosses
@@ -1553,6 +2112,7 @@ export async function loadCity(url) {
     green: [], paved: [], trees: [], pois: [], venues: [], signals: [], barriers: [],
     chunkIndex: new Map(), _nextId: 1,
   };
+  setStreetCity(city);
   // tile-arrival listeners: cb({roads, signals, tx, tz, cells}) fires AFTER a
   // tile is indexed — roads/signals are that tile's slices (with _id/_len),
   // cells the chunk keys that gained features. Legacy mode registers fine and
@@ -1569,6 +2129,7 @@ export async function loadCity(url) {
   if (!data.tiles) { // legacy single-city file — index it all right now
     indexPayload(city, data);
     city.ensureTiles = () => _resolved; // uniform API: city.js calls this blindly
+    city.routeFilesNear = () => [];     // one city file carries no transit routes
     return city;
   }
 
@@ -1579,7 +2140,7 @@ export async function loadCity(url) {
   // state so the next ensureTiles pass retries — the network hiccuped, or the
   // region download may still be filling the server; either way we self-heal.
   const tiles = data.tiles.map((t, i) => ({
-    tx: t.tx, tz: t.tz, f: t.f, wb: t.wb,
+    tx: t.tx, tz: t.tz, f: t.f, wb: t.wb, rt: t.rt,
     state: 0, slot: i + 1, heavy: null,
   }));
   // The world map needs the region's EXTENT before any of it has streamed —
@@ -1590,6 +2151,20 @@ export async function loadCity(url) {
     const dx = Math.max(t.tx * T - x, 0, x - (t.tx + 1) * T);
     const dz = Math.max(t.tz * T - z, 0, z - (t.tz + 1) * T);
     return dx * dx + dz * dz;
+  };
+  // PUBLIC TRANSPORT ROUTES are not a tile layer: a line is ten kilometres
+  // long and has ONE owner file (docs/TILE-FORMAT.md, js/tiledata.js). What a
+  // manifest tile carries is `rt`, the keys of every route file with a line
+  // passing through that tile, so the lines near a point are known from the
+  // manifest alone, before a single tile has streamed. Returns the URLs to
+  // fetch (app-root-relative, like a tile's `f`), each once, in a stable
+  // order. Allocates: ask about once a second, not per frame.
+  city.routeFilesNear = (x, z, reach = T) => {
+    const keys = new Set();
+    for (const t of tiles)
+      if (t.rt && distSqTo(t, x, z) <= reach * reach) for (const k of t.rt) keys.add(k);
+    const dir = data.routes ?? 'data/routes/';
+    return [...keys].sort().map((k) => `${dir}${k}.json`);
   };
   const distSqToBounds = (b, x, z) => {
     if (!b || b.length !== 4) return Infinity;
@@ -1612,9 +2187,28 @@ export async function loadCity(url) {
       await indexGate();
       const touched = new Set();
       const { roads, signals, heavy } = indexPayload(city, payload, touched, t.slot, back === 3);
+      // A LOADED TILE OWNS ITS CELLS. A chunk with no cell is "outside the
+      // mapped city" and is not meshed at all (meshes.buildChunkMeshesGen), so
+      // whether open country had ground used to hang on some feature's
+      // bounding box happening to cover it: 31 885 of the 32 000 cells of
+      // twenty tiles did exist, 23 of them only under a power line's box and
+      // 115 not at all. Now that a line is filed by where it stands, the tile
+      // says so itself: every cell of its rectangle exists once it is indexed.
+      if (back !== 3) {
+        const c0 = Math.floor((t.tx * T) / CHUNK), c1 = Math.floor(((t.tx + 1) * T - 1e-6) / CHUNK);
+        const d0 = Math.floor((t.tz * T) / CHUNK), d1 = Math.floor(((t.tz + 1) * T - 1e-6) / CHUNK);
+        for (let cx = c0; cx <= c1; cx++) for (let cz = d0; cz <= d1; cz++) {
+          const key = cx + ',' + cz;
+          if (!city.chunkIndex.has(key)) { city.chunkIndex.set(key, newCell()); touched.add(key); }
+        }
+      }
       t.heavy = heavy;
       t.state = 2;
-      for (const cb of listeners) cb({ roads, signals, tx: t.tx, tz: t.tz, cells: touched });
+      // `pois` rides along too: the pump and police-station indexes (main.js)
+      // and the map's fuel marks (career.js) all read t.pois, and without it
+      // they only ever knew the tiles that were loaded at boot. A tile coming
+      // back from slim re-indexes its heavy half only, so it brings none.
+      for (const cb of listeners) cb({ roads, signals, pois: back === 3 ? [] : payload.pois ?? [], tx: t.tx, tz: t.tz, cells: touched });
     } catch (err) {
       t.state = back;
       throw err;
@@ -1665,6 +2259,8 @@ export async function loadCity(url) {
         if (!cell) continue;
         cell.buildings = cell.buildings.filter(f => !gone.has(f));
         cell.trees = cell.trees.filter(f => !gone.has(f));
+        if (!cell.buildings.length) cell.buildings = NONE;
+        if (!cell.trees.length) cell.trees = NONE;
       }
       // in place — every consumer holds this array by reference, forever
       const compact = (arr) => {

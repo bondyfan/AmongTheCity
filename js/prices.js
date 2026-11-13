@@ -246,8 +246,57 @@ export const PRICE = deepFreeze({
     mission: { first: 850, min: 800, max: 3000 },
     delivery: { base: 240, perKm: 42, bonus: 150 },
     pocket: { min: 40, max: 900, fat: 0.06 },
+    // The taxi is the delivery's calmer sibling (js/jobs.js): it needs a car,
+    // it has no stopwatch, and it pays the metres. A 4 km fare is 490 Kč
+    // against the courier's 408 plus bonus, and `smooth` is the share added on
+    // top for a ride nobody had to hold on through, so the best taxi run beats
+    // the best courier run by about a fifth and a rough one loses to it.
+    taxi: { flag: 110, perKm: 95, smooth: 0.4 },
   },
+
+  // What the police take when they finally have you: charged per star at the
+  // hospital door (js/career.js), where the stars are then cleared. Two stars
+  // cost more than the bed does, which is the point.
+  fine: { perStar: 400 },
+
+  // A canister brought out to YOUR car when it has run dry away from a pump
+  // (js/garage.js). Ten units at a steep markup: it exists so an owned car can
+  // never be stranded for good, and it costs enough that the pump stays the
+  // normal way to fill up.
+  rescue: { units: 10, markup: 1.6 },
 });
+
+// ---- a particular car, as opposed to a model ------------------------------
+// PRICE.cars is the list price of a tidy example. The car actually standing in
+// front of the player is one specific car with a history, and `seed` (a hash
+// of where the map parked it, js/garage.js) is that history: the same Fabia
+// costs the same on every visit, and the one two streets away costs something
+// else. 0.45 to 1.0 of list, so the cheapest runner in town is about 8 000 Kč
+// and reachable in an evening of deliveries, while a clean one is still the
+// full 18 000. Crash damage then comes off whatever that was.
+export function carOffer(kind, seed = 0, damage = 0) {
+  const row = PRICE.cars.find((c) => c.kind === kind);
+  if (!row) return null;                       // trucks and buses are not for sale
+  const u = ((seed >>> 0) % 1000) / 999;       // 0..1, stable per car
+  const cond = 0.45 + 0.55 * u;
+  const dmg = Math.min(1, Math.max(0, Number.isFinite(damage) ? damage : 0));
+  const price = Math.round(row.price * cond * (1 - 0.4 * dmg) / 100) * 100;
+  return { kind, name: row.name, note: row.note, list: row.price, cond, price };
+}
+
+/** The price of the rescue canister for a car burning `type`, whole koruna. */
+export function canisterCost(type) {
+  const base = FUEL_PRICE[type] ?? FUEL_PRICE.benzin;
+  return Math.round(base * PRICE.rescue.units * PRICE.rescue.markup / 10) * 10;
+}
+
+/** What putting a car right costs: the garage's flat rate scaled by how bent
+ *  it is, with a floor, because nobody opens a bonnet for free. */
+export function repairCost(damage) {
+  const dmg = Math.min(1, Math.max(0, Number.isFinite(damage) ? damage : 0));
+  if (dmg < 0.02) return 0;
+  return Math.max(250, Math.round(PRICE.garage.repair * dmg / 50) * 50);
+}
 
 // ---- looking a pump up ----------------------------------------------------
 

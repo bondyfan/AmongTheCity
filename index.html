@@ -4,7 +4,7 @@
   
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>Among The City — Pardubice</title>
+  <title>Among The City: Pardubice</title>
   <link rel="stylesheet" href="css/style.css">
   <script type="importmap">
     { "imports": { "three": "./libs/three.module.js" } }
@@ -46,6 +46,9 @@
       <div id="vitals">
         <div class="vt-bar vt-hp"><i></i></div>
         <div class="vt-bar vt-ar"><i></i></div>
+        <!-- Hunger (vitals.energy). The thinnest of the three on purpose: it
+             changes over minutes, not seconds, and only matters at its end. -->
+        <div class="vt-bar vt-en" title="Sytost"><i></i></div>
       </div>
       <!-- Hledanost. FIVE slots, always five, always in the DOM: the row is the
            same 91px wide at nula hvězd and at pět, so lighting one can never
@@ -88,14 +91,22 @@
       <div class="fu-bar"><i></i></div><span class="fu-type"></span><span class="fu-range"></span>
     </div>
     <div id="reticle" class="hidden"><span></span></div>
+    <!-- Objective tracker (js/tracker.js): what you are doing, where it is,
+         how far, how long you have and what it pays. One card, top left, shared
+         by the introduction and by whatever job is running. -->
+    <div id="objective" class="hidden">
+      <div class="ob-head"><span class="ob-icon"></span><span class="ob-title"></span><span class="ob-pay"></span></div>
+      <div class="ob-where"></div>
+      <div class="ob-row"><span class="ob-dist"></span><span class="ob-time"></span></div>
+      <div class="ob-keys"></div>
+    </div>
     <canvas id="minimap" width="220" height="220"></canvas>
     <!-- M was bound in main.js from the day the world map landed and has never
          been listed here: the region is 134 km across and the one key that
          makes it navigable was a secret. -->
     <div id="controls-hint">
-      <b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>Shift</b> sprint ·
-      <b>C</b> pohled řidiče · <b>H</b> klakson · <b>V</b> raketa (z vrtulníku) · <b>M</b> mapa regionu ·
-      <b>myš (drag)</b> kamera · <b>kolečko</b> zoom
+      <b>WASD</b> pohyb · <b>E</b> nastoupit/vystoupit · <b>J</b> zakázky · <b>P</b> přehled ·
+      <b>B</b> auto · <b>M</b> mapa · <b>C</b> pohled řidiče · <b>H</b> klakson
     </div>
   </div>
 
@@ -106,6 +117,9 @@
   <div id="redout"></div>
 
   <div id="banner" class="hidden"></div>
+  <!-- Rewards and events (js/toasts.js). Outside #hud so a toast raised while
+       the map is open is still there when it closes. -->
+  <div id="toasts" aria-live="polite"></div>
 
   <script type="module" src="js/main.js"></script>
 </body>

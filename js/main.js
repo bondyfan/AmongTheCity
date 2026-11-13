@@ -15,7 +15,7 @@ import { Player, worldSeatAnchor } from './player.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
   attachCabin, detachCabin, setVehicleEventSink } from './vehicles.js';
 import { Traffic } from './traffic.js';
-import { makeSky, updateSky, todClock } from './sky.js';
+import { makeSky, updateSky, todClock, EXPOSURE_DAY } from './sky.js';
 import { Minimap } from './minimap.js';
 import { initAudio, sfx, sfxAt, setListener, engineVoices, engineVoicesStop,
   engineStart, engineStop, engineSet, tireSet, setVolume, skidSet, carAudioStop,
@@ -36,9 +36,13 @@ import * as wanted from './wanted.js';
 import { Police } from './police.js';
 import { Ambulance } from './ambulance.js';
 import { ChatBubbles } from './chatbubbles.js';
-import { PostFX } from './postfx.js';
+import { PostFX, gradeFor } from './postfx.js';
+import { setCoverage } from './coverage.js';
+import { shadowDue } from './shadowpace.js';
+import { LightPools, nightBeams, nightLevels } from './lightpools.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
 import { Grass } from './grass.js';
+import { Trees } from './trees.js';
 import { buildAirfields, nearestParked } from './airfield.js';
 import { Fighter } from './aircraft.js';
 import { Clouds } from './clouds.js';
@@ -59,9 +63,16 @@ import { connectCity, queueEvent, getPlayerName, CityNetWS } from './netcity.js'
 // netui:      the HUD that can say "you are alone now" out loud.
 import { tod, setEpoch, setSoloTime } from './worldclock.js';
 import { ParkingLots } from './parkinglots.js';
+import { wireCityLife } from './citylife.js';
+import { Cyclists } from './cyclists.js';
+import { inKerbStall } from './kerbparking.js';
+import { parkSpots } from './parkspot.js';
 import { localUid, strHash } from './identity.js';
 import { makeGhostCars } from './netvehicles.js';
 import { makeNetUI } from './netui.js';
+// jobs, ownership, stats, the save: the whole gameplay layer hangs off this one
+// module (js/career.js lists the hooks main.js calls, and why there are so few)
+import * as career from './career.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -73,7 +84,7 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.08;
+renderer.toneMappingExposure = EXPOSURE_DAY;   // sky.js drives it from here on (it opens up at night)
 $id('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -106,7 +117,9 @@ const game = {
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let parkingLots = null;
+let cityLife = null;     // crowd, traffic and buses tied together (js/citylife.js)
 let peds = null;
+let cyclists = null;     // people on bicycles (js/cyclists.js)
 // Where you wake up when you die: the forecourt of the Pardubice hospital
 // campus (28 buildings, centroid 2287,293 — the nearest `hospital` POI is a
 // node the region filter drops, so this is measured off the BUILDINGS). The
@@ -130,6 +143,7 @@ let chatter = null;      // who says what, and when — js/chatter.js
 let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
 let clouds = null;                // the sky to fly the machines through
+let lightPools = null;            // what the street lamps do to the street
 const _earDir = new THREE.Vector3();
 const _voiceCars = [];            // reused every frame — the pool never keeps it
 const VOICE_SCAN2 = 140 * 140;    // m² — wider than the pool's own 95 m cutoff,
@@ -178,6 +192,7 @@ const _ghostVeh = new Map();
 const _heliClaims = new Map();
 let _heliClaimT = 0;    // s until we re-announce our own claim (late joiners)
 let grass = null;       // the ring of instanced tufts around the camera
+let trees = null;       // the full tree models round the camera, and the shade map
 let _myHeliClaim = -1;  // index of the helicopter WE hold, or -1
 // uid → index into `parkedFleet` that peer is driving. Same mechanism, and for
 // the same reason the helicopter needed one — see claimParked() below.
@@ -1089,7 +1104,7 @@ input.onKey('KeyE', () => {
     });
   } else {
     const car = nearestEnterableCar();
-    if (!car) return;
+    if (!car) { career.use(); return; }   // nothing to board: maybe a food counter
     // A claimed car is already out of `parked`, so this is the double-book
     // window only (two people press E inside one round trip). Say who has it,
     // by name, exactly as the helicopter does — "Obsazeno" on a car standing
@@ -1102,7 +1117,7 @@ input.onKey('KeyE', () => {
     const holder = parkClaimedByPeer(car);
     const seat = holder ? (car.seats?.[1] ? -1 : 1) : freeSeat(car);
     if (seat < 0) {
-      ui_hint(holder ? 'Plné — řídí ' + (net?.peerName(holder) || 'jiný hráč')
+      ui_hint(holder ? 'Plné, řídí ' + (net?.peerName(holder) || 'jiný hráč')
         : 'Obsazeno');
       return;
     }
@@ -1495,26 +1510,15 @@ function spotRnd(x, z, salt) {
   return strHash(salt + ':' + Math.round(x * 10) + ',' + Math.round(z * 10)) / 4294967296;
 }
 function placeParkedCars(city) {
-  const spots = [[SPAWN.x + 9, SPAWN.z + 8, 1.2], [SPAWN.x - 14, SPAWN.z + 12, 1.9]];
-  // parking polygons near the station → one car at each centroid
-  const lots = [];
-  for (const p of city.paved) {
-    if (p.t !== 'parking') continue;
-    let cx = 0, cz = 0;
-    for (const [x, z] of p.o) { cx += x; cz += z; }
-    cx /= p.o.length; cz /= p.o.length;
-    if (Math.hypot(cx - SPAWN.x, cz - SPAWN.z) > 260) continue;
-    lots.push([cx, cz]);
-  }
-  lots.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  for (const [cx, cz] of lots.slice(0, 8))
-    spots.push([cx, cz, spotRnd(cx, cz, 'h') * Math.PI * 2]);
-  for (const [x, z, h] of spots) {
-    const pos = { x, z };
-    world.collide(pos, 1.2); // never inside a wall
-    // hashed off the SPOT, not off the collided position: collide() nudges the
-    // car out of a wall using the local geometry, and a client whose building
-    // tile has not streamed in yet would nudge differently and repaint the car.
+  // WHERE is js/parkspot.js's answer: the two by the spawn and one in each
+  // nearby car park, every one on a footprint clear of walls, props, trees and
+  // lanes (a 1.2 m disc pushed out of a wall was not a car: the first one stood
+  // with its nose in a kiosk). (kx, kz) is the spot as the map gave it.
+  for (const { x: px, z: pz, h, kx: x, kz: z } of parkSpots(city, SPAWN)) {
+    const pos = { x: px, z: pz };
+    // hashed off the SPOT, not off the cleared position: a client whose
+    // building tile has not streamed in yet would clear it differently and
+    // repaint the car.
     const kind = PARK_KINDS[(spotRnd(x, z, 'k') * PARK_KINDS.length) | 0];
     const color = CAR_COLORS[(spotRnd(x, z, 'c') * CAR_COLORS.length) | 0];
     const car = vehicles.add(kind, pos.x, pos.z, h, color);
@@ -1661,6 +1665,7 @@ function updateBlockers() {
   for (const c of parked) {
     const dx = c.x - px, dz = c.z - pz;
     if (dx * dx + dz * dz > 400 * 400) continue;
+    if (inKerbStall(c)) continue;   // at the kerb, out of the lane: traffic steers round (traffic.kerbOf)
     _blockers.push({ x: c.x, z: c.z, half: (c.len ?? 4.4) / 2 + 0.35 });
   }
   return _blockers;
@@ -1727,6 +1732,10 @@ function updateHorizon(dt) {
   // build work from monopolising every frame (each build is now sliced over
   // frames by the streamer, so the gap no longer needs to hide whole hitches)
   if (game.mode === 'play') world.buildCooldownMs = game.jet || alt > 20 ? 0 : 60;
+  world.workersFirst = game.mode === 'play' && !game.jet && !(alt > 20);
+  world.landBytes = game.mode === 'play' ? 1.4e6 : Infinity;
+  world.conformBudgetMs = game.mode === 'play' ? 3 : Infinity;   // earthworks in slices: _warmRoads in js/city.js
+  world.vergeBudgetMs = world.workersFirst ? 1.5 : 0;            // verges ahead of the chunk specs: _warmVerges in js/city.js
   // The aerial photo picks its resolution from distance to the same LOOK-AHEAD
   // point the chunk streamer uses, so the full-detail ring sits over the ground
   // you are about to cross rather than the ground behind you.
@@ -2054,12 +2063,16 @@ function updateNightLights(dt) {
   // city, so dusk lights the whole map with a single assignment
   const lm = world?.mats?.lampHead;
   if (lm) lm.emissiveIntensity = 4.5 * nightK;   // >1 in linear = bloom bites
+  world?.mats?.facadeNight?.(nightK);            // every lit window, far facades and near glass
+  world?.mats?.streetNight?.(nightK, sky?.exposure);   // shelter posters, signal lenses, café terraces
   // car lamps: a dim daytime marker, a real glare after dark
   const vm = lampMats;
   if (vm) {
     vm.head.emissiveIntensity = 1.4 + 5.0 * nightK;
     vm.tail.emissiveIntensity = 1.4 + 4.0 * nightK;
   }
+  lampMats.night?.(nightK);   // cars: projectors, tail clusters and paint reflections follow the dusk
+  nightLevels(world?.mats, lampMats, nightK, sky?.exposure ?? EXPOSURE_DAY, EXPOSURE_DAY);   // glow levels under the night exposure
   const want = !!game.car && nightK > 0.3;
   if (want && !_beamL) {
     const mk = () => {
@@ -2073,6 +2086,7 @@ function updateNightLights(dt) {
     _beamL.target = _beamTarget; _beamR.target = _beamTarget;
   }
   if (_beamL) {
+    nightBeams(_beamL, _beamR, sky?.exposure ?? EXPOSURE_DAY, EXPOSURE_DAY);
     _beamsOn = want;
     _beamL.visible = _beamR.visible = want;
     if (want) {
@@ -2220,6 +2234,7 @@ function updateHud(dt) {
         if (v) { hint.textContent = `🏪 ${v.n}`; hint.classList.remove('hidden'); }
         else hint.classList.add('hidden');
       }
+      career.footHint(hint, inside ? null : car);   // E at a food counter, B at a car
     }
   }
   // rocket readout: rounds left, or the reload bar
@@ -2369,7 +2384,7 @@ function placeReticle() {
   const span = el.firstElementChild;
   if (span) {
     const d = Math.hypot(aimHit.x - game.heli.x, aimHit.y - game.heli.y, aimHit.z - game.heli.z);
-    span.textContent = aimHit.far ? '—' : Math.round(d) + ' m';
+    span.textContent = aimHit.far ? '…' : Math.round(d) + ' m';
   }
 }
 
@@ -2413,6 +2428,7 @@ function applySettings(s, key) {
   if (traffic) traffic.maxCars = s.traffic;
   if (traffic) traffic.patrolP = s.police ?? 0.70;
   if (peds) peds.max = s.peds ?? 34;
+  if (cyclists) cyclists.max = s.peds ?? 34;   // the crowd slider thins the riders with the walkers
   // Turning the crowd's voice off must silence what is ALREADY in the air, not
   // just stop the next line — a bubble left hanging over a man's head after
   // you switched him off is the bug the player reports.
@@ -2475,6 +2491,7 @@ function applySettings(s, key) {
     // an old saved `trees: false` must not survive as an invisible switch.
     world.mats.trees = true;
     grass?.setEnabled(s.grass !== false);
+    trees?.setQuality(s);
     if (recipeChanged && (key === undefined || ['ortho', 'preset'].includes(key))) {
       world.rebuildAll();
       // …and the SHELLS, which are what you are actually looking at within the
@@ -2507,13 +2524,17 @@ async function boot() {
   city.onTileLoaded?.((t) => grass?.invalidate(t));
   world.ground?.onTileLoaded?.((t) => grass?.invalidate(t));
   grass.setEnabled(getSettings().grass !== false);
-  sky = makeSky(scene);
+  trees = new Trees(scene, world, renderer);
+  trees.setQuality(getSettings());
+  sky = makeSky(scene, renderer);
+  lightPools = new LightPools(scene);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
   // because it is the whole identity contract in one line: this same string
   // picks our jacket here, picks the dot in the co-op HUD, and is what every
   // other client hashes to dress our avatar. One function, one uid, one look —
   // "the blue one is me" used to be true on four screens at once.
   player = new Player(scene, SPAWN.x, SPAWN.z, SPAWN.heading, localUid());
+  await career.spawn(player, city);   // "Pokračovat": stand where the save left you
   vehicles = new Vehicles(scene);
   // Immediately, not later: every car built from here on — parked, spawned by
   // the dev tools, or a peer's — asks this for the height of the road it is
@@ -2575,7 +2596,12 @@ async function boot() {
   indexStations(city.pois);
   city.onTileLoaded?.((t) => { indexPumps(t.pois); indexStations(t.pois); });
 
-  peds = new Pedestrians(scene, city, world.terrain);
+  peds = new Pedestrians(scene, city, world.footing ?? world.terrain);   // feet on the pavement, not under it
+  cityLife = wireCityLife({ city, traffic, peds, vehicles, world, parked });
+  // riders on the cycleways: they read the crowd's indexes and the traffic's lights
+  cyclists = new Cyclists(scene, city, world.footing ?? world.terrain, { peds, traffic, parked,
+    playerCar: () => game.car, walker: () => (game.car || game.heli || game.jet ? null : player.pos) });
+  cyclists.max = getSettings().peds ?? 34;
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact,
   // attenuated by distance like the debris audio. The gender used to be
   // `Math.random() < 0.5` PER SCREAM, so one victim could scream as a man and
@@ -2666,7 +2692,9 @@ async function boot() {
   // into open country instead of stopping against nothing.
   const apron = new THREE.Mesh(
     new THREE.PlaneGeometry(60000, 60000),
-    new THREE.MeshBasicMaterial({ color: 0x8a9182, fog: true, depthWrite: false }));
+    // lit, not basic: an unlit grey is a white sheet under the night exposure
+    // wherever a chunk has not arrived yet (0xa9b19f lit is 0x8a9182 at noon)
+    new THREE.MeshLambertMaterial({ color: 0xa9b19f, fog: true, depthWrite: false }));
   apron.rotation.x = -Math.PI / 2;
   apron.position.y = -0.6;      // under every road, kerb and water surface
   apron.renderOrder = -800;     // before the city, after the sky dome
@@ -2795,6 +2823,7 @@ async function boot() {
     }, 4000);
   });
 
+  career.attach(careerHost());
   game.mode = 'play';
   // builds pace themselves from here on — during boot the queue must drain
   // flat out; in play each build is sliced over frames, so the cooldown only
@@ -2875,16 +2904,27 @@ function tick(src) {
       postfx = new PostFX(renderer);
       postfx.setSize(renderer.domElement.width, renderer.domElement.height);
     }
+    setCoverage(renderer, wantPost && postfx ? 4 : null);   // alpha to coverage needs MSAA: js/coverage.js
+    renderer.shadowMap.autoUpdate = false;                  // moon shadows at half rate: js/shadowpace.js
+    renderer.shadowMap.needsUpdate = shadowDue(gs, sky?.nightK ?? 0);
     if (wantPost && postfx) {
       postfx.setSize(renderer.domElement.width, renderer.domElement.height);
       let rays = null;
       if (gs.rays !== false && sky?.sunDir) {
-        const dayK = Math.min(1, Math.max(0, (sky.sun?.intensity ?? 0) / 1.4));
-        if (dayK > 0.02) rays = { dir: sky.sunDir, color: sky.sun.color, strength: dayK * 0.7 };
+        // sky.sunI, not sky.sun.intensity: after dark that one light is the
+        // MOON, and shafts toward a sun that set three hours ago are a bug
+        const dayK = Math.min(1, Math.max(0, (sky.sunI ?? 0) / 1.4));
+        // Shafts belong to a LOW sun. At noon the origin is pinned to the top
+        // edge of the frame and full strength laid a milky sheet over every
+        // tree crown under it, so the high sun gets a third and the golden
+        // hour (sky.warm, 0 at noon and 1 on the horizon) gets all of it.
+        const low = 0.32 + 0.68 * (sky.warm ?? 0);
+        if (dayK > 0.02) rays = { dir: sky.sunDir, color: sky.sunColor, strength: dayK * 0.7 * low };
       }
       // SSAO was fully built, plumbed through the composite — and hard-coded
       // OFF at this one call site, which is why "ambient occlusion nefunguje".
-      postfx.render(scene, camera, { ssao: gs.ao !== false, bloom: gs.bloom !== false, rays, canopy: null,
+      postfx.render(scene, camera, { ssao: gs.ao !== false, bloom: gs.bloom !== false, rays, canopy: trees?.shade() ?? null,
+        lamps: lightPools,   // street light: baked to a map, applied in the composite (js/lampmap.js)
         // The composite does `ao = max(mix(1, ao, aoStrength), aoFloor)`, so
         // aoStrength IS the deepest darkening the effect can ever reach: at
         // 0.34 a fully occluded pixel came out at 0.66 — two thirds bright,
@@ -2896,7 +2936,8 @@ function tick(src) {
         aoStrength: 0.82, aoFloor: 0.20, aoRadius: 2.4,
         motionBlur: gs.mblur === false ? 0 : motionBlurAmount(),
         blurAniso: game.jet ? MB_ANISO_JET : MB_ANISO_GROUND,
-        flare: gs.flare === false ? 0 : flareAmount() });
+        flare: gs.flare === false ? 0 : flareAmount(),
+        grade: sky ? gradeFor(sky.warm ?? 0, sky.nightK ?? 0) : null });
     } else {
       renderer.render(scene, camera);
     }
@@ -2956,6 +2997,7 @@ function stepGame(dt) {
   // and pushing it two seconds down the track would leave the player standing
   // in a bare circle at any speed.
   grass?.update(focus.x, focus.z, dt);
+  trees?.update(camera, dt, sky?.nightK ?? 0);
 
   if (game.jet) {
     // Same hands as the helicopter, and the same hands GTA trained everyone's
@@ -3012,7 +3054,7 @@ function stepGame(dt) {
     heliSet?.(Math.min(1, (game.heli.rotorSpeed ?? 0) / 60),
       Math.min(1, Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) / 62));
   } else if (game.car) {
-    const gas = -input.moveZ;
+    const gas = career.throttle(game.car, -input.moveZ);   // a dry tank coasts
     driveStep(game.car, {
       gas,                                     // W forward, S reverse/brake
       steer: input.moveX,
@@ -3092,8 +3134,10 @@ function stepGame(dt) {
   peds.setViewer(view);
   traffic.actors = updateActors();
   traffic.blockers = updateBlockers();
+  cyclists?.blockInto(traffic.blockers);   // riders out in a lane are hulls the traffic waits behind
   traffic.update(dt, player.pos, game.car);
   parkingLots?.update(dt, player.pos, tod());
+  cityLife?.update(dt, player.pos, tod());
   // ragdoll physics needs to know what can hit a pedestrian: every SHARED AI
   // car plus whatever the player is driving, refreshed per frame because the
   // player's car changes identity on every E. Ghosts are filtered out here and
@@ -3102,6 +3146,7 @@ function stepGame(dt) {
   peds.cars = sharedCars();
   peds.playerCar = game.car;
   peds.update(dt, focus);
+  if (cyclists) { cyclists.setViewer(view); cyclists.update(dt, focus); }   // after the crowd: its crossers list is theirs too
   trains?.update(dt, focus);
   for (const h of helis) if (h !== game.heli) h.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
   for (const j of fighters) if (j !== game.jet) j.update(dt, { throttle: 0 }, world);
@@ -3123,6 +3168,7 @@ function stepGame(dt) {
     if (sky.sunDir) wu.uSun.value.copy(sky.sunDir);
     wu.uNight.value = sky.nightK ?? 0;
     if (scene.fog) wu.uSky.value.copy(scene.fog.color);
+    sky.env?.bindWater(world.mats.water);   // the same sky the PBR ground reflects
   }
   if (traffic) {
     // Shared clock in, shared fleet out. No per-player place factor any more
@@ -3130,7 +3176,7 @@ function stepGame(dt) {
     // facts both clients hold, and "how built-up it is where I am standing" is
     // not one of them.
     const base = getSettings().traffic ?? 60;
-    traffic.maxCars = Math.round(base * trafficTimeK(tod()));
+    traffic.maxCars = Math.round(base * trafficTimeK(tod()) * (cityLife?.trafficK() ?? 1));
   }
   updateNavigation(dt);
   updateHorizon(dt);
@@ -3198,6 +3244,7 @@ function stepGame(dt) {
   // and the default y≈0 anchor put the whole shadow frustum underground
   updateSky(sky, tod(), camera, scene,
     world?.terrain?.heightAt?.(camera.position.x, camera.position.z) ?? (camera.position.y - 6));
+  lightPools?.update(dt, camera, world, sky, renderer.domElement.height, traffic?.cars, game.car);
   updateHud(dt);
 
   // ---- the body, the wallet, the tank ----
@@ -3231,6 +3278,7 @@ function stepGame(dt) {
   // know about.
   if (game.car) fuel.burn(game.car, dt);
   pumpStep(dt);
+  career.update(dt);
   statusbar.update(dt, _vitCtx);
 
   // ---- net: server co-op pump (menu → Multiplayer only; null in single) ----
@@ -3473,7 +3521,7 @@ async function start() {
         // stopped moving and the player carried on driving round a city they
         // believed was shared. Now it says so, and keeps saying so.
         ui.setStatus({ online: false, count: 0, names: [] });
-        if (!info?.expected) ui.toast('Server spadl — pokračuješ sám', 'error');
+        if (!info?.expected) ui.toast('Server spadl, pokračuješ sám', 'error');
         // every proxy dies with the session; pumpGhosts finishes the job on
         // the next frame once `net` goes null, this covers the socket dropping
         // while the session object is still alive
@@ -3489,11 +3537,17 @@ async function start() {
       // A banner, not a console line. "Multiplayer nefunguje" was the single
       // most common report, and the reason was always visible in a console
       // nobody had open — the game simply started, in silence, alone.
-      console.error('Multiplayer: připojení selhalo — spouštím jednohráčovku.', err);
+      console.error('Multiplayer: připojení selhalo, spouštím jednohráčovku.', err);
       net = null;
-      ui.toast('Server je nedostupný — hraješ sám', 'error');
+      ui.toast('Server je nedostupný, hraješ sám', 'error');
     }
   }
+  // Read the save before anything is built from it, in the mode the session
+  // REALLY has. This used to be called with the menu's choice before the
+  // connection was tried, so a failed connect played alone on a save loaded as
+  // co-op: the saved hour was dropped (and overwritten with none) and an owned
+  // fleet car came back as a second car on top of the original.
+  career.choose({ ...choice, mode: net ? 'server' : 'single' });
   if (!net) {
     // Every fresh single-player world starts at dawn. This is applied only
     // after the menu choice (and also after a failed server connection), so it
@@ -3563,6 +3617,7 @@ window.__atc = {
   // of inferring it from pops. A copy: the real record is mutated in place.
   viewer: () => { const v = viewerState(); return v && { ...v }; },
   get weapons() { return weapons; },
+  get trees() { return trees; },
   // The crowd and its mouth, for the same reason `weapons` is here: a harness
   // has to be able to assert that a bubble EXISTS after a honk, not infer it
   // from a screenshot. `_live` is the real array, mutated in place.
@@ -3583,9 +3638,12 @@ window.__atc = {
   get interiors() { return world?.interiors; },
   get postfx() { return postfx; },
   get heli() { return heli; }, get clouds() { return clouds; },
+  get sky() { return sky; }, get lightPools() { return lightPools; },
+  get settings() { return getSettings(); },
   get player() { return player; }, get world() { return world; },
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
   get parked() { return parked; }, get peds() { return peds; },
+  get cyclists() { return cyclists; },
   get trains() { return trains; }, get worldMap() { return worldMap; },
   // multiplayer session (null in single player). net.onRemoteVehicle is wired
   // to the ghost fleet: a harness asserting "my friend is in a car" should ask
@@ -3596,3 +3654,23 @@ window.__atc = {
   // the shared clock, so a harness can prove two tabs agree on the hour
   get tod() { return tod(); }, get heliClaims() { return [..._heliClaims]; },
 };
+
+// ---------- the gameplay layer's view of the game ----------
+// js/career.js (jobs, the owned car, stats, the save) gets the live objects
+// through this and through nothing else: getters, because half of them are
+// `let`s that are null until boot() has built them, and a snapshot taken at
+// attach time would hold the nulls forever.
+function careerHost() {
+  return {
+    game, input, scene, parked, parkedFleet,
+    get world() { return world; }, get player() { return player; },
+    get vehicles() { return vehicles; }, get traffic() { return traffic; },
+    get navigation() { return navigation; }, get worldMap() { return worldMap; },
+    get minimap() { return minimap; }, get placeFinder() { return placeFinder; },
+    get parkingLots() { return parkingLots; }, get trains() { return trains; },
+    get sky() { return sky; },
+    hint: ui_hint,
+    camReset() { camInit = false; camYaw = player.heading; },
+  };
+}
+window.__atc.career = career;

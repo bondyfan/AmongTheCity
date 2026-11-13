@@ -22,10 +22,33 @@
 // sun.intensity (as callers used to) breaks the moment the intensity curve is
 // retuned.
 
+// What this module publishes beyond the two above (all read-only for callers):
+//   sky.sunColor  the sun's own colour, also while the moon holds the light
+//   sky.sunI      the sun's own intensity, 0 once it is down (god rays and the
+//                 lens flare want THIS, not sky.sun.intensity: after dark that
+//                 light is the moon)
+//   sky.moonK     0 by day, 1 once the moon carries the scene
+//   sky.lightDir  where the one DirectionalLight stands: sun by day, moon by night
+//   sky.env       the sky environment map (envmap.js), or null without a renderer
+//   sky.exposure  the tone-mapping exposure of the moment (it opens up at night)
+
 import * as THREE from 'three';
+// Imported for its side effect as much as for setAirFog: heightfog.js replaces
+// three's fog shader chunks at import, which has to happen before the first
+// material compiles. sky.js is imported by main.js long before that.
+import { setAirFog, FOG_WALL_START, AFTERGLOW_GLSL } from './heightfog.js';
+import { SkyEnv } from './envmap.js';
 
 // ---- the sun's path, and the darkness that FOLLOWS from it ----
 const SUNRISE = 5, SUNSET = 21, SUN_PEAK = 75; // hours, hours, degrees
+// How far under the horizon the sun stands at solar midnight. The night half
+// of the path used to mirror the day half (75 degrees down), and since the
+// night is half as long as the day the sun DOUBLED its speed the instant it
+// set: it fell through the whole of twilight in twenty seconds, and dusk was a
+// switch. At 40 degrees it crosses the horizon at the speed it arrived with
+// (about 15 degrees an hour on both sides), which is also much nearer the
+// truth of a Central European summer, where the sun never gets far under.
+const SUN_DIP = 40;
 // 0..1 from sunrise to sunset, then 1..2 on through the night — one continuous
 // phase, so elevation genuinely goes negative after dark instead of the disc
 // parking above the horizon all night
@@ -34,38 +57,124 @@ function solarPhase(h) {
   const nh = h < SUNRISE ? h + 24 : h;
   return 1 + (nh - SUNSET) / (24 - SUNSET + SUNRISE);
 }
-const sunElevAt = h => SUN_PEAK * Math.sin(Math.PI * solarPhase(h));
+const elevOfPhase = sp => (sp <= 1 ? SUN_PEAK : SUN_DIP) * Math.sin(Math.PI * sp);
+const sunElevAt = h => elevOfPhase(solarPhase(h));
 const smooth01 = t => { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); };
 // Night is derived from the sun: full day while it is well up, twilight as it
 // sinks through the horizon, full night once it is properly under.
-const TWILIGHT_TOP = 8, TWILIGHT_BOTTOM = -10; // degrees of elevation
+// The bottom is astronomical dusk, 18 degrees under: with the path above that
+// makes the way from day to full night about an hour and three quarters of
+// game time (105 real seconds), most of it AFTER sunset, the way it goes.
+const TWILIGHT_TOP = 8, TWILIGHT_BOTTOM = -18; // degrees of elevation
 const nightAtHour = h =>
   smooth01((TWILIGHT_TOP - sunElevAt(h)) / (TWILIGHT_TOP - TWILIGHT_BOTTOM));
 
-// ---- palette: urban gray-blues by day; the Woods' sunset/night bands kept ----
-const DAY_FOG = new THREE.Color(0xa8b8c8); // gray-blue city haze
-const DAY_SKY = { horizon: new THREE.Color(0x9fc0dd), zenith: new THREE.Color(0x5a8fc0) };
-const NIGHT_SKY = new THREE.Color(0x02040c), NIGHT_FOG = new THREE.Color(0x03040b);
-// sunset: warm haze along the horizon, pink-violet in the sky above it — the
+// ---- palette (linear working space) ----
+// The fog has no colour of its own any more: it takes the dome's HORIZON
+// colour, exactly, every frame (see heightfog.js). That one decision is what
+// stops the skyline reading as paper cut-outs, because a block that fades out
+// now fades into precisely what is drawn behind it. So the horizon entries
+// below are also the haze: a pale blue-grey by day, a warm band at sunset.
+// (The first pair was 0xa9c3d9 over 0x4c86c2, a grey-blue under a pale blue: an
+// overcast afternoon. A clear summer day is cleaner at the horizon and a good
+// deal deeper overhead.)
+const DAY_SKY = { horizon: new THREE.Color(0xa4c8ea), zenith: new THREE.Color(0x3a7ac6) };
+// NIGHT IS BLUE, NOT BLACK. A clear night under a moon is a deep blue you can
+// see shapes against; pure black is what a monitor shows when nothing was lit.
+// The horizon carries a trace of warmth: a town's own glow in its own haze.
+// (These look tiny. They are seen through the night exposure below, which
+// multiplies everything by about two and a half.)
+const NIGHT_SKY = { horizon: new THREE.Color().setRGB(0.0125, 0.0135, 0.0205),
+                    zenith: new THREE.Color().setRGB(0.0028, 0.0048, 0.0120) };
+// sunset: warm haze along the horizon, pink-violet in the sky above it. The
 // band across the AIR is what actually reads as a sunset; sun colour alone
 // barely registers when most of the frame is facades and asphalt
 const SUNSET_FOG = new THREE.Color(0xe08c4a), SUNSET_SKY = new THREE.Color(0x9c5f80);
-// sun light colour (linear working space): neutral warm-white high up → deep
+// sun light colour (linear working space): neutral warm-white high up, deep
 // sunset orange at the horizon. GOLDEN_TOP is the elevation where warming starts.
 const GOLDEN_TOP = 30;
 const SUN_DAY = new THREE.Color(1.0, 0.97, 0.92);
 const SUN_LOW = new THREE.Color(1.0, 0.38, 0.13);
-// linear fog wall: generous by day (city blocks read out to ~900 m), pulled in
-// at night so the dark swallows the distance instead of a luminous gray wash
-const FOG_DAY = { near: 180, far: 900 }, FOG_NIGHT = { near: 120, far: 520 };
+// ---- the moon as a light ----
+// The dome has always drawn a moon opposite the sun. It lit nothing: after
+// dark the scene had a 3.5 % ambient and that was all, which is a black
+// screen with glowing lamp heads in it. The ONE DirectionalLight now changes
+// hands at dusk. It is the sun while the sun is up, it is dark for the degree
+// or so in which the sun crosses the horizon, and then it comes back from the
+// opposite side as a dim blue key, with the same shadow map. Still one light,
+// still one shadow pass, and a night with form in it.
+const MOON_COL = new THREE.Color().setRGB(0.60, 0.72, 1.0);
+// The moon is the JUNIOR partner on the ground, on purpose: the town's light
+// at night is the lamps (lightpools.js), and a moon strong enough to compete
+// with them flattens every pool. A sixth of the ambient's weight still gives
+// walls a lit side and a dark side.
+const MOON_I = 0.085;
+// The day's fill was 0.74 of a nearly white sky, and open shade came out at a
+// quarter of the sunlit ground in the SCENE and at a tenth of it on screen,
+// once the tone curve's toe had had its share: a lawn under a tree was black
+// at noon. A clear sky gives more than that and gives it BLUE, which is what
+// makes a shadow read as shade and not as a hole (the colour is in updateSky).
+// (The night's 0.14 and the moon's 0.10 came down a seventh when the toe of the
+// tone curve was opened, heightfog.js lookGLSL: that lift does the work the
+// extra light was doing, and roofs were turning red at midnight.)
+const HEMI_DAY = 0.98, HEMI_NIGHT = 0.12;
+// peak of the afterglow band, linear (see updateSky)
+const AFTERGLOW = 0.22;
+// ---- exposure: the eye adapts, so the camera does ----
+// The night's light levels above are honest: a fifth of the day's ambient, a
+// moon at a twentieth of the sun. Shown through the DAY exposure they land in
+// the toe of the tone curve, where the filmic fit crushes everything under
+// about 2 % to black, and the street really was black again, moon or no moon.
+// The answer is not to lie about the light (an ambient bright enough to
+// survive the curve is what once made the lamps pointless) but to do what an
+// eye or a camera does after dusk: open up. The exposure climbs geometrically
+// with the same night curve everything else follows. Lamp pools, headlights
+// and lit windows keep their RATIO to the moonlit street, which is the thing
+// that makes them read as light.
+// The day value replaces the old 1.08: with the tone curve now applied on
+// every path, 1.08 put the whole frame a stop too high and washed it out.
+// (0.82 for a while: with the fuller sky fill above and the opened toe in
+// heightfog.js, 0.86 puts sunlit paving where a summer noon has it.)
+export const EXPOSURE_DAY = 0.86, EXPOSURE_NIGHT = 2.5;
+// The wall that hides the streamed edge. Generous by day; pulled in a little at
+// night, where it costs nothing visually (it is the colour of the night) and
+// keeps the number of actors that have to exist down.
+const FOG_DAY_FAR = 900, FOG_NIGHT_FAR = 640;
 
-// ---- gradient sky dome (ported verbatim from the Woods, moon included) ----
-// Horizon→zenith gradient; on top of it drifting FBM clouds (sun-lit, dark
-// undersides, silver lining), a proper sun — tight bright core plus a wide
-// warm forward-scatter halo — dimmed behind clouds and faded out at night via
-// uDay, and a cool moon disc OPPOSITE the sun so it is up exactly when the sun
-// is down. The dome is small (well inside camera.far) and re-centered on the
-// camera every frame, so at any distance it shows no parallax at all.
+// ---- the shadow box ----
+// Half-width of the ortho shadow frustum, by map size, so a texel stays near
+// 10 cm at every setting: 1024 covers a street, 2048 a block, 4096 a district.
+const shadowHalf = (mapSize) => mapSize >= 4096 ? 150 : mapSize >= 2048 ? 115 : 90;
+const SHADOW_DIST = 170;         // how far up its own ray the light stands
+// The centre of the box sits this share of its half-width AHEAD of the camera:
+// what is behind you needs to cast into the frame, it does not need to receive.
+const SHADOW_LEAD = 0.38;
+// The light's direction is HELD and moved in steps this size. See the note at
+// the shadow rig in updateSky for why that is the whole trick.
+const SHADOW_STEP_COS = Math.cos(0.12 * Math.PI / 180);
+
+// Shadows used to end in a ruled line at the edge of the box. This feathers
+// the last tenth of it instead. One chunk, patched once at import, before any
+// material compiles; the sun is the only light that casts.
+THREE.ShaderChunk.shadowmap_pars_fragment = THREE.ShaderChunk.shadowmap_pars_fragment.replace(
+  '\t\t}\n\t\treturn shadow;\n\t}\n\tvec2 cubeToUV',
+  '\t\t}\n\t\tvec2 atcEdge = abs( shadowCoord.xy - 0.5 ) * 2.0;\n'
+  + '\t\tshadow = mix( shadow, 1.0, smoothstep( 0.86, 1.0, length( atcEdge ) ) );\n'
+  + '\t\treturn shadow;\n\t}\n\tvec2 cubeToUV');
+
+// ---- gradient sky dome ----
+// Horizon to zenith gradient; on top of it drifting FBM clouds (sun-lit, dark
+// undersides, silver lining), a proper sun (tight bright core plus a wide warm
+// forward-scatter halo) dimmed behind clouds and faded out at night via uDay,
+// a cool moon disc OPPOSITE the sun so it is up exactly when the sun is down,
+// and a star field behind all of it. The dome is small (well inside
+// camera.far) and re-centered on the camera every frame, so at any distance it
+// shows no parallax at all.
+//
+// ONE SHADER, TWO USES. Compiled with ATC_ENV it is the picture envmap.js
+// bakes into the reflection map: the same sky, minus the stars (a prefiltered
+// map would only smear them into noise), with the ground's own brightness
+// below the horizon so a car door reflects tarmac rather than more sky.
 const SKY_VERT = /* glsl */`
   varying vec3 vSkyDir;
   void main() {
@@ -81,6 +190,10 @@ const SKY_FRAG = /* glsl */`
   uniform float uDay;      // 1 = full daylight, 0 = deep night
   uniform float uMoon;     // 0 = no moon, 1 = full night moon
   uniform float uCloudAmt; // cloud opacity master (0 hides them entirely)
+  uniform float uStars;    // 0 = none (day, twilight), 1 = a clear night
+  uniform float uAfter;    // 0..1: the afterglow band where the sun went down
+  uniform vec3 uGround;    // ATC_ENV only: what the ground sends back up
+  uniform float uEnvGain;  // ATC_ENV only: the global reflection scale
   varying vec3 vSkyDir;
   float chash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
   float cnoise(vec2 p) {
@@ -94,13 +207,49 @@ const SKY_FRAG = /* glsl */`
     for (int i = 0; i < 4; i++) { s += a * cnoise(p); p = p * 2.17 + vec2(11.3, 7.9); a *= 0.5; }
     return s;
   }
+  ${AFTERGLOW_GLSL}
+  #ifndef ATC_ENV
+  // Stars: the direction is folded onto the faces of a cube and each face cut
+  // into cells; one cell in five holds a star at a hashed spot. A cube and not
+  // latitude/longitude, because a lat/long grid crowds every star it has into
+  // the zenith. px is the size of a screen pixel in cell units: a star is
+  // never drawn smaller than a pixel, or it would flicker in and out as the
+  // camera turns.
+  vec3 starField(vec3 d, float px) {
+    vec3 a = abs(d);
+    vec2 uv; float face;
+    if (a.y >= a.x && a.y >= a.z) { uv = d.xz / a.y; face = 0.0; }
+    else if (a.x >= a.z) { uv = d.zy / a.x; face = d.x > 0.0 ? 1.0 : 2.0; }
+    else { uv = d.xy / a.z; face = d.z > 0.0 ? 3.0 : 4.0; }
+    vec2 g = uv * 40.0;
+    vec2 seed = floor(g) + face * 71.0;
+    float pick = chash(seed);
+    if (pick < 0.80) return vec3(0.0);
+    vec2 c = vec2(chash(seed + 3.1), chash(seed + 7.7)) * 0.7 + 0.15;
+    float r = max(0.034, px * 40.0);
+    float core = 1.0 - smoothstep(r * 0.3, r, length(fract(g) - c));
+    float mag = pow(chash(seed + 13.3), 5.0);          // most stars are faint
+    float tw = 0.80 + 0.20 * sin(uTime * (1.3 + 3.5 * chash(seed + 5.5)) + pick * 40.0);
+    vec3 tint = mix(vec3(0.74, 0.84, 1.0), vec3(1.0, 0.90, 0.74), chash(seed + 9.9));
+    // a star stretched to a whole pixel must not gain light by it
+    float keep = min(1.0, (0.034 * 0.034) / (r * r) * 2.2);
+    return tint * (core * (0.035 + 0.34 * mag) * tw * keep);
+  }
+  #endif
   void main() {
     vec3 dir = normalize(vSkyDir);
+    // taken here, outside every branch: a derivative inside one is undefined
+    float px = length(fwidth(dir));
     float h = clamp(dir.y, -1.0, 1.0);
     float t = pow(1.0 - max(h, 0.0), 1.8);
+    // Below the horizon the dome is simply the horizon colour. It is only ever
+    // seen past the edge of the streamed world, and the fog there IS this
+    // colour, so the ground runs out into it without a line.
     vec3 col = mix(uZenith, uHorizon, t);
-    if (h < 0.0) col = mix(col, uHorizon * 0.55, smoothstep(0.0, -0.35, h));
     vec3 sd = normalize(uSunDir);
+    // the afterglow: under the clouds' own colour, so a cloud bank stands dark
+    // against it (heightfog.js adds the same band to the haze)
+    if (uAfter > 0.001) col += atcAfterglow(dir, sd) * uAfter;
     float sunDot = max(dot(dir, sd), 0.0);
     // clouds: two FBM layers on a slowly drifting plane overhead
     float cov = 0.0;
@@ -109,30 +258,53 @@ const SKY_FRAG = /* glsl */`
       float den = cfbm(cuv * 1.1) * 0.72 + cfbm(cuv * 3.1 + 40.0) * 0.28;
       cov = smoothstep(0.54, 0.72, den) * smoothstep(0.015, 0.14, h) * uCloudAmt;
       float thick = smoothstep(0.54, 0.95, den);
-      vec3 cLight = mix(vec3(0.17, 0.19, 0.26), vec3(1.08, 1.06, 1.02), uDay);
-      vec3 cShade = mix(vec3(0.09, 0.10, 0.15), vec3(0.72, 0.76, 0.84), uDay);
+      vec3 cLight = mix(vec3(0.014, 0.018, 0.030), vec3(1.08, 1.06, 1.02), uDay);
+      vec3 cShade = mix(vec3(0.004, 0.005, 0.010), vec3(0.72, 0.76, 0.84), uDay);
       vec3 cloudCol = mix(cLight, cShade, thick);
       // silver lining: cloud edges facing the sun catch its color
       cloudCol += uSunColor * pow(sunDot, 4.0) * 0.35 * (1.0 - thick) * uDay;
       col = mix(col, cloudCol, cov);
     }
-    // the sun: bright core disc, soft rim, wide warm halo — dims behind clouds
+    #ifndef ATC_ENV
+    // stars: gone under cloud, gone in twilight, and thinned out toward the
+    // horizon, where you are looking through twenty times as much air
+    if (uStars > 0.001 && h > 0.0) {
+      col += starField(dir, px) * (uStars * (1.0 - cov) * smoothstep(0.0, 0.24, h));
+    }
+    #endif
+    // the sun: bright core disc, soft rim, wide warm halo. Dims behind clouds.
+    // heightfog.js repeats this halo term for the haze: keep the two in step.
     float disc = smoothstep(0.99935, 0.99985, sunDot);
     float halo = pow(sunDot, 80.0) * 0.6 + pow(sunDot, 7.0) * 0.25;
-    col += uSunColor * (disc * 1.6 + halo) * uDay * (1.0 - cov * 0.85);
-    // the moon: a small cool disc opposite the sun — the sun really sets here,
+    col += uSunColor * (disc * 1.6 * (1.0 - cov * 0.85) + halo * (1.0 - cov * 0.85 * step(0.015, h))) * uDay;
+    // the moon: a small cool disc opposite the sun. The sun really sets here,
     // so the night sky needs its own light source to read as a sky at all
     if (uMoon > 0.001) {
       float mDot = max(dot(dir, -sd), 0.0);
       // A MOON IS A PEBBLE LIT BY THE SUN, not a second sun. It used to paint
-      // the dome hard enough to read as daylight — "měsíc svítí opravdu krutě"
-      // — which is also what stopped the street lamps meaning anything: you
-      // cannot light a scene that is already lit.
-      float mDisc = smoothstep(0.9991, 0.9997, mDot);
-      float mHalo = pow(mDot, 260.0) * 0.10;
-      col += vec3(0.70, 0.76, 0.94) * (mDisc * 0.5 + mHalo) * uMoon * (1.0 - cov * 0.9);
+      // the dome hard enough to read as daylight ("měsíc svítí opravdu krutě"),
+      // which is also what stopped the street lamps meaning anything: you
+      // cannot light a scene that is already lit. The disc stays under the
+      // bloom threshold and the glow around it stays a few degrees wide.
+      // 1.6° across where it used to be 4°: still three times the real thing,
+      // because a true half-degree moon is four pixels and reads as a star.
+      float mDisc = smoothstep(0.99955, 0.99982, mDot);
+      float mHalo = pow(mDot, 600.0) * 0.030 + pow(mDot, 30.0) * 0.003;
+      // a hint of the maria, so it is a body and not a hole in the sky
+      float mSurf = 0.78 + 0.22 * cnoise(dir.xy * 95.0 + 3.7);
+      col += vec3(0.72, 0.80, 1.0) * (mDisc * 0.42 * mSurf + mHalo) * uMoon * (1.0 - cov * 0.9);
     }
+    #ifdef ATC_ENV
+    col = mix(col, uGround, smoothstep(0.0, -0.10, h)) * uEnvGain;
+    #endif
     gl_FragColor = vec4(col, 1.0);
+    // Both chunks, like every other material: on the canvas (post off) they
+    // apply the renderer's tone curve and the sRGB encode; into the post
+    // target, or the reflection cube, three makes them no-ops and the dome
+    // stays linear. Without them the direct path showed linear values as if
+    // they were sRGB, and the low preset had a different sky.
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }`;
 
 function makeSkyDome(radius) {
@@ -149,24 +321,39 @@ function makeSkyDome(radius) {
       uDay: { value: 1 },
       uMoon: { value: 0 },
       uCloudAmt: { value: 0.82 },
+      uStars: { value: 0 },
+      uAfter: { value: 0 },
+      uGround: { value: new THREE.Color(0.15, 0.15, 0.15) },
+      uEnvGain: { value: 1 },
     },
   });
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.renderOrder = -1000; // always draws first — depth-less, nothing else needs to know
+  mesh.renderOrder = -1000; // always draws first: depth-less, nothing else needs to know
   mesh.frustumCulled = false;
   mesh.matrixAutoUpdate = false; // re-positioned + updateMatrix()ed by updateSky
   return mesh;
 }
 
+// The capture twin of the dome's material: same shader with ATC_ENV, and the
+// SAME uniform holders, so the two can never disagree about the sky.
+function makeEnvDomeMaterial(domeMat) {
+  return new THREE.ShaderMaterial({
+    vertexShader: SKY_VERT, fragmentShader: SKY_FRAG, side: THREE.BackSide,
+    depthWrite: false, depthTest: false, fog: false,
+    defines: { ATC_ENV: '' },
+    uniforms: domeMat.uniforms,
+  });
+}
+
 // ---- public API ----
 
 // Unit sun direction for a time of day. tod 0..1 with 0 = midnight. City axes:
-// x east, z SOUTH — so az 0 points east, π/2 south, π west: the sun arcs
+// x east, z SOUTH, so az 0 points east, π/2 south, π west: the sun arcs
 // through the southern sky exactly as it should at Pardubice's latitude, and
 // travels on under the horizon through the night (solarPhase runs 1..2 there).
 export function sunDirOf(tod, out = new THREE.Vector3()) {
   const sp = solarPhase((((tod % 1) + 1) % 1) * 24);
-  const elev = SUN_PEAK * Math.sin(Math.PI * sp) * (Math.PI / 180); // ±75°
+  const elev = elevOfPhase(sp) * (Math.PI / 180); // +75° at noon, −40° at midnight
   const az = Math.PI * sp;
   return out.set(Math.cos(elev) * Math.cos(az), Math.sin(elev), Math.cos(elev) * Math.sin(az));
 }
@@ -182,33 +369,31 @@ export function nightKOf(tod) {
 
 // "HH:MM" for the HUD clock. Floors to the minute; tolerates tod outside 0..1.
 // The epsilon absorbs float error at exact minute boundaries (23:59 read as
-// 23:58 without it — 1439/1440 * 1440 lands a hair under the integer).
+// 23:58 without it: 1439/1440 * 1440 lands a hair under the integer).
 export function todClock(tod) {
   const m = Math.floor((((tod % 1) + 1) % 1) * 24 * 60 + 1e-6);
   return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 }
 
 // Build the whole sky rig: gradient dome + hemisphere ambient + shadow sun.
-// Lighting leans DIRECTIONAL — a strong warm sun against a modest ambient, so
+// Lighting leans DIRECTIONAL: a strong warm sun against a modest ambient, so
 // facades get punchy sun-lit faces and deep readable shadows, not a flat wash.
-export function makeSky(scene) {
+// `renderer` is optional: with it the sky also bakes itself into
+// scene.environment (see envmap.js); without it (tests) nothing else changes.
+export function makeSky(scene, renderer = null) {
   const dome = makeSkyDome(45); // small but depth-less: inside any camera.far
   scene.add(dome);
   // hemisphere adapted to the city palette: cool daylight from the sky above,
   // asphalt-gray bounce from the streets below (the Woods used forest greens)
-  const hemi = new THREE.HemisphereLight(0xdfe7f0, 0x3a3d42, 0.74);
+  const hemi = new THREE.HemisphereLight(0xdfe7f0, 0x3a3d42, HEMI_DAY);
   const sun = new THREE.DirectionalLight(0xfff2dd, 1.8);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  // ortho frustum: ±90 m around the target covers a street scene plus the
-  // towers throwing long shadows into it. The light stands 140 m out (see
-  // updateSky), so the far plane must reach 140 + 90 + margin past the near.
-  sun.shadow.camera.left = -90; sun.shadow.camera.right = 90;
-  sun.shadow.camera.top = 90; sun.shadow.camera.bottom = -90;
+  // The ortho frustum is sized every frame in updateSky from the map size
+  // (shadowHalf), so a setting that changes the map changes the box with it.
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 280;
-  // ~2 texels of the 2048 map over the 180 m box — enough to keep flat roofs
-  // and roadways free of shadow acne without visibly detaching thin casters
+  // about 2 texels: enough to keep flat roofs and roadways free of shadow acne
+  // without visibly detaching thin casters
   sun.shadow.normalBias = 0.15;
   scene.add(hemi, sun, sun.target);
   return {
@@ -218,10 +403,19 @@ export function makeSky(scene) {
     cloudAmt: 0.82,   // main may thin/hide the DOME's painted clouds (0 = clear);
                       // the 3D cluster field in clouds.js is separate from these
     time: 0, _last: 0, // internal cloud-drift clock (wall time, clamped)
+    sunColor: SUN_DAY.clone(), sunI: 1.8, moonK: 0, warm: 0, after: 0,
+    lightDir: new THREE.Vector3(0.704, 0.557, 0.44),
+    _held: new THREE.Vector3(), _half: 0,   // shadow rig state, see updateSky
+    env: renderer ? new SkyEnv(renderer, scene, makeEnvDomeMaterial(dome.material)) : null,
+    exposure: EXPOSURE_DAY, renderer,
   };
 }
 
-const _fogC = new THREE.Color(), _horC = new THREE.Color(), _zenC = new THREE.Color();
+const _horC = new THREE.Color(), _zenC = new THREE.Color(), _gndC = new THREE.Color();
+const _ld = new THREE.Vector3(), _rt = new THREE.Vector3(), _up = new THREE.Vector3();
+const _fw = new THREE.Vector3();
+// what an average street sends back up, for the lower half of the reflection
+const GROUND_ALBEDO = 0.19;
 
 // Drive the whole atmosphere from tod (0..1). Call once per frame, after the
 // camera has moved. Sets scene.fog + scene.background, all dome uniforms, the
@@ -236,61 +430,85 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
 
   const dir = sunDirOf(tod, sky.sunDir);
   const nightK = nightAtHour((((tod % 1) + 1) % 1) * 24);
-  sky.nightK = nightK; // published for clouds.js & co — see the header note
+  sky.nightK = nightK; // published for clouds.js & co, see the header note
+  // one exposure for both render paths: the direct path reads it off the
+  // renderer, and the post composite reads the renderer too
+  sky.exposure = EXPOSURE_DAY * Math.pow(EXPOSURE_NIGHT / EXPOSURE_DAY, nightK);
+  if (sky.renderer) sky.renderer.toneMappingExposure = sky.exposure;
   const sunElev = Math.asin(Math.max(-1, Math.min(1, dir.y))) * 180 / Math.PI;
 
-  // Night bites hard: the world's own lights drop close to nothing after dark
-  // (hemi ~0.10, sun off) so street lamps and headlights are what carve out
-  // the visible bubble — we darken the LIGHTS, never a screen overlay, which
-  // would flatten any local light sources into the murk too.
-  // A CITY at night is not a forest at night: sodium street lighting bounces
-  // off tarmac and facades into a permanent warm glow (light pollution), so
-  // the floor sits well above the Woods' near-black and drifts amber as the
-  // sun goes. Pitch dark would also hide the pedestrians and the traffic that
-  // make the place feel alive.
-  // NIGHT IS DARK. The old floor sat at 0.22 — a third of full daylight — on
-  // the theory that a city bounces sodium light off its tarmac into a
-  // permanent warm glow. It does, but the glow belongs to the LAMPS, and
-  // baking it into the ambient meant the lamps and the headlights lit nothing
-  // that was not already lit: there was no point to them, and no night. The
-  // ambient now falls to 0.035, which is a moonlit field with no lamp on it —
-  // enough to make out a kerb and a silhouette, not enough to read by. What
-  // carries a Czech street after dark is the street's own lighting.
-  hemi.intensity = 0.74 * (1 - 0.953 * nightK);
-  hemi.color.setRGB(0.87 - 0.30 * nightK, 0.91 - 0.30 * nightK, 1.0 - 0.20 * nightK);
-  hemi.groundColor.setRGB(0.23 - 0.17 * nightK, 0.24 - 0.18 * nightK, 0.26 - 0.16 * nightK);
-  // the directional sun switches off as it crosses the horizon — fading over
+  // ---- ambient ----
+  // The ambient is the sky's own light and nothing else. By day it is the
+  // blue bowl; at night it is a deep blue fifth of that, which is a moonlit
+  // field: a kerb, a silhouette, the shape of a street. It is NOT the town's
+  // lighting. That belongs to the lamps (lightpools.js draws their pools on
+  // the road), and an ambient bright enough to stand in for them is what once
+  // made the lamps pointless. The old floor of 3.5 % was the other mistake:
+  // with no pools and no moon it left a black screen.
+  hemi.intensity = HEMI_DAY + (HEMI_NIGHT - HEMI_DAY) * nightK;
+  hemi.color.setRGB(0.72 - 0.27 * nightK, 0.84 - 0.26 * nightK, 1.0 - 0.02 * nightK);
+  hemi.groundColor.setRGB(0.23 - 0.05 * nightK, 0.24 - 0.09 * nightK, 0.26 - 0.13 * nightK);
+
+  // ---- the sun, and who holds the light ----
+  // the directional sun switches off as it crosses the horizon, fading over
   // the ~4° around it, like the disc sinking in: it must still rake warm light
   // down the streets AT sunset, not switch off a degree early
   const above = Math.max(0, Math.min(1, (sunElev + 2) / 4));
-  sun.intensity = 1.8 * (1 - 0.94 * nightK) * above;
+  const sunI = 1.8 * (1 - 0.94 * nightK) * above;
   // GOLDEN HOUR, driven purely by how low the sun hangs: neutral warm-white
   // high up, deepening through amber to sunset orange at the horizon. Not
-  // gated by nightK — that would cancel the warmth exactly when the sun sits
+  // gated by nightK: that would cancel the warmth exactly when the sun sits
   // lowest and the light would never actually go gold.
   const warm = smooth01((GOLDEN_TOP - sunElev) / GOLDEN_TOP);
-  sun.color.copy(SUN_DAY).lerp(SUN_LOW, warm);
+  sky.sunColor.copy(SUN_DAY).lerp(SUN_LOW, warm);
+  sky.warm = warm;        // the grade in postfx.js follows the same curve
+  sky.sunI = sunI;
+  // The moon takes over once the sun is 3° under and is fully up by 13°. The
+  // sun has been at zero since 2° under, so the light changes sides while it
+  // is dark and nothing on screen jumps.
+  const moonK = smooth01((-sunElev - 3) / 10);
+  sky.moonK = moonK;
+  const moonUp = sunElev < -2.5;
+  if (moonUp) {
+    sky.lightDir.copy(dir).negate();
+    sun.color.copy(MOON_COL);
+    sun.intensity = MOON_I * moonK;
+  } else {
+    sky.lightDir.copy(dir);
+    sun.color.copy(sky.sunColor);
+    sun.intensity = sunI;
+  }
   // afterglow weight for the AIR (fog + sky): peaks across the golden hour,
   // dies once the sun is well under, so the warm band fades with the light
   // instead of being dragged on through the night
-  const glowK = warm * Math.max(0, Math.min(1, (sunElev + 8) / 10));
+  const glowK = warm * Math.max(0, Math.min(1, (sunElev + 14) / 16));
+  // …and the band itself, which belongs to the time AFTER sunset: nothing
+  // while the disc is still up to do the job, brightest with the sun four or
+  // five degrees under, and gone at astronomical dusk. Its level is tiny
+  // because it is seen through an exposure that has already begun to open.
+  const after = AFTERGLOW * smooth01((3 - sunElev) / 7) * smooth01((sunElev + 17) / 11);
+  sky.after = after;
 
-  // SUNSET first, then night — applied in that order so the gold gets
-  // swallowed by the dark as dusk deepens. The night lerp goes to 0.99: a
-  // hint of the day hue survives, which reads as moonlit haze, not pure black.
-  _fogC.copy(DAY_FOG).lerp(SUNSET_FOG, glowK * 0.75).lerp(NIGHT_FOG, nightK * 0.99);
-  _horC.copy(DAY_SKY.horizon).lerp(SUNSET_FOG, glowK * 0.75).lerp(NIGHT_FOG, nightK * 0.99);
-  _zenC.copy(DAY_SKY.zenith).lerp(SUNSET_SKY, glowK * 0.62).lerp(NIGHT_SKY, nightK * 0.99);
-  if (!scene.fog) scene.fog = new THREE.Fog(_fogC.getHex(), FOG_DAY.near, FOG_DAY.far);
-  scene.fog.color.copy(_fogC);
-  if (scene.fog.isFog) { // linear fog: the wall pulls in as night falls
+  // SUNSET first, then night, applied in that order so the gold gets
+  // swallowed by the dark as dusk deepens.
+  _horC.copy(DAY_SKY.horizon).lerp(SUNSET_FOG, glowK * 0.75).lerp(NIGHT_SKY.horizon, nightK);
+  _zenC.copy(DAY_SKY.zenith).lerp(SUNSET_SKY, glowK * 0.62).lerp(NIGHT_SKY.zenith, nightK);
+  if (!scene.fog) scene.fog = new THREE.Fog(0, 600, FOG_DAY_FAR);
+  // The stock uniform is still fed: a material that never heard of
+  // heightfog.js falls back to it, and main.js reads it for the apron.
+  scene.fog.color.copy(_horC);
+  if (scene.fog.isFog) {
     // sky.fogScale lets the caller stretch the haze when the view radius grows
     // (flight streams the city much further out). The wall must always sit
     // INSIDE the streamed edge, or you see the world simply stop.
     const fs = sky.fogScale ?? 1;
-    scene.fog.near = (FOG_DAY.near + (FOG_NIGHT.near - FOG_DAY.near) * nightK) * fs;
-    scene.fog.far = (FOG_DAY.far + (FOG_NIGHT.far - FOG_DAY.far) * nightK) * fs;
+    scene.fog.far = (FOG_DAY_FAR + (FOG_NIGHT_FAR - FOG_DAY_FAR) * nightK) * fs;
+    // near is where the WALL starts now, not where the haze starts: the haze
+    // is heightfog.js's exponential and begins at your feet
+    scene.fog.near = scene.fog.far * FOG_WALL_START;
   }
+  const uDay = 1 - nightK * 0.92;   // sun + bright clouds fade out at night
+  setAirFog(_horC, dir, sky.sunColor, uDay, scene.fog.far ?? FOG_DAY_FAR, groundY, after);
   // background still matters behind the dome: postfx passes and clears see it,
   // and if main ever hides the dome the scene collapses to a sane flat sky
   if (!scene.background?.isColor) scene.background = new THREE.Color();
@@ -303,25 +521,73 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
   u.uHorizon.value.copy(_horC);
   u.uZenith.value.copy(_zenC);
   u.uSunDir.value.copy(dir);
-  u.uSunColor.value.copy(sun.color); // disc, cloud lining and halo all read it
+  u.uSunColor.value.copy(sky.sunColor); // disc, cloud lining and halo all read it
   u.uTime.value = sky.time;
-  u.uDay.value = 1 - nightK * 0.92;  // sun + bright clouds fade out at night
+  u.uDay.value = uDay;
   u.uMoon.value = nightK;            // …and the moon takes over as they go
   u.uCloudAmt.value = sky.cloudAmt;
+  // stars wait for real darkness: nothing until the sky is 55 % of the way to
+  // night, all of them only once it is there
+  u.uStars.value = smooth01((nightK - 0.55) / 0.45);
+  u.uAfter.value = after;
 
-  // park the shadow rig on the camera so shadows always cover what you see.
-  // Heights are RELATIVE to groundY — the terrain under the camera. This is
-  // an absolute-elevation world (Pardubice streets lie at ~220 m ASL), and
-  // the Woods' rig parked at y = 0..140 put the whole shadow frustum a
-  // hundred metres under the pavement: diffuse light looked right (only the
-  // direction matters there), so every flag read "on" while not one surface
-  // ever fell inside the shadow map — "stíny vůbec nefungují". The light's
-  // height above ground keeps its old floor: once the sun is down its
-  // intensity is zero anyway, and a light below the streets would throw the
-  // whole ortho shadow frustum upside down.
-  sun.position.set(
-    camera.position.x + dir.x * 140,
-    groundY + Math.max(0.12, dir.y) * 140,
-    camera.position.z + dir.z * 140);
-  sun.target.position.set(camera.position.x, groundY, camera.position.z);
+  // ---- the reflection of all of the above ----
+  // What a horizontal street throws back up: its albedo times the light that
+  // lands on it. Used only for the lower half of the environment map.
+  const down = Math.max(0, sky.lightDir.y) * sun.intensity;
+  _gndC.setRGB(
+    GROUND_ALBEDO * (sun.color.r * down + hemi.color.r * hemi.intensity) / Math.PI,
+    GROUND_ALBEDO * (sun.color.g * down + hemi.color.g * hemi.intensity) / Math.PI,
+    GROUND_ALBEDO * (sun.color.b * down + hemi.color.b * hemi.intensity) / Math.PI);
+  u.uGround.value.copy(_gndC);
+  sky.env?.update(dir, nightK, sky.cloudAmt, now);
+
+  // ---- the shadow rig ----
+  // Parked on the camera so shadows always cover what you see. Heights are
+  // RELATIVE to groundY, the terrain under the camera: this is an
+  // absolute-elevation world (Pardubice streets lie at ~220 m ASL), and a rig
+  // parked at y = 0..140 puts the whole shadow frustum a hundred metres under
+  // the pavement ("stíny vůbec nefungují"). The light's height above ground
+  // keeps a floor: a light below the streets would throw the whole ortho
+  // frustum upside down.
+  //
+  // WHY SHADOWS USED TO SWIM. The box followed the camera continuously, so the
+  // shadow map's texel grid slid across the world with every step and each
+  // edge was resampled differently every frame. The cure is to move the box
+  // only in whole texels. That needs a grid that is FIXED in the world, and
+  // the grid is defined by the light's own axes, so it is only fixed while the
+  // light's direction is. Here the sun turns a quarter of a degree a second,
+  // and three kilometres from the origin that drags the grid two texels a
+  // frame: snapping against a turning direction snaps to nothing. So the
+  // direction the light is DRAWN from is held still and stepped 0.12° at a
+  // time (a shadow tip moves about 2 cm per step at noon). Between steps the
+  // grid is world-fixed and the snap is exact.
+  _ld.set(sky.lightDir.x, Math.max(0.12, sky.lightDir.y), sky.lightDir.z).normalize();
+  if (sky._held.lengthSq() < 0.5 || sky._held.dot(_ld) < SHADOW_STEP_COS) sky._held.copy(_ld);
+  const ld = sky._held;
+  const half = shadowHalf(sun.shadow.mapSize.x);
+  const sc = sun.shadow.camera;
+  if (sky._half !== half) {
+    sky._half = half;
+    sc.left = -half; sc.right = half; sc.top = half; sc.bottom = -half;
+    sc.far = SHADOW_DIST + half * 1.5 + 60;
+    sc.updateProjectionMatrix();
+  }
+  // the light's own right and up, exactly as three builds them (lookAt with
+  // world +Y), so a texel here is a texel in the map
+  _rt.set(ld.z, 0, -ld.x).normalize();          // +Y × ld
+  _up.crossVectors(ld, _rt);
+  camera.getWorldDirection(_fw);
+  const fl = Math.hypot(_fw.x, _fw.z) || 1;
+  const cx = camera.position.x + (_fw.x / fl) * half * SHADOW_LEAD;
+  const cz = camera.position.z + (_fw.z / fl) * half * SHADOW_LEAD;
+  const texel = (half * 2) / sun.shadow.mapSize.x;
+  const a = Math.round((cx * _rt.x + groundY * _rt.y + cz * _rt.z) / texel) * texel;
+  const b = Math.round((cx * _up.x + groundY * _up.y + cz * _up.z) / texel) * texel;
+  const c = cx * ld.x + groundY * ld.y + cz * ld.z;
+  const tx = _rt.x * a + _up.x * b + ld.x * c;
+  const ty = _rt.y * a + _up.y * b + ld.y * c;
+  const tz = _rt.z * a + _up.z * b + ld.z * c;
+  sun.target.position.set(tx, ty, tz);
+  sun.position.set(tx + ld.x * SHADOW_DIST, ty + ld.y * SHADOW_DIST, tz + ld.z * SHADOW_DIST);
 }

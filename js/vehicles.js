@@ -1,27 +1,36 @@
-// ---- Vehicles: low-poly cars + arcade drive physics (v5: the branded fleet) ----
+// ---- Vehicles: the cars + arcade drive physics (v6: real sheet metal) ----
 // Cars are the city's second citizens: traffic.js marches a swarm of them
 // along the road graph (setting x/z/heading/speed directly) and the player
 // steals one and drives it through driveStep(). Geometry is built ONCE per
 // kind and materials are cached per paint color, so traffic can churn cars
 // at the despawn ring without allocating anything that matters.
 //
-// v5 throws away the taper-box wedges for LOFTED HULLS. Every body is a 2D
-// side profile — bumper lip, bonnet edge, scuttle, belt, deck, tail — lofted
-// through 8-point cross-section rings whose width varies station to station
-// (narrow nose, widest at the B-pillar, tapering tail), indexed so the paint
-// shades smooth. The greenhouse is a second, crisper loft that emits every
-// face as glass OR body-color by role: the windscreen and backlight are the
-// raked end segments, the roof is the top run, and the A/B/C pillars are the
-// side walls of deliberately narrow segments — which is how an Octavia keeps
-// its fastback sail panel while the Tesla runs an unbroken glass canopy.
-// Wheel arches are dark half-cylinder liners poked through the flanks (no
-// CSG — a dark arc slightly wider than the tyre reads as a cutout from any
-// distance this game renders at). Brands ride tiny cached CanvasTextures:
-// the Škoda roundel, BMW quadrants, the Mercedes star, the Tesla T, plus a
-// deterministic Czech "5E" plate hashed from kind+paint. Legacy kind names
-// (sedan/hatch/kombi/suv) still resolve through ALIAS, and the v3 machinery
-// underneath is untouched: the a = accel·(1 − v/vmax)^1.3 power curve,
-// progressive drift, two-circle car-car collision, and the offroad shake.
+// v6 keeps v5's SILHOUETTES and replaces everything that was hung on them. The
+// KIND table below still describes each body as a side profile through a
+// handful of stations, and a greenhouse over it; the cabin, the seats and the
+// first-person eye are still derived from exactly those numbers. But the hull
+// that used to be lofted straight through the nine stations with 8-point rings
+// (about 900 faceted triangles, in matte Lambert) is now built by three
+// sibling modules:
+//
+//   carbody.js    splines the stations into a smooth surface with a proper
+//                 cross-section, cuts round wheel arches into it, and can drape
+//                 any flat outline onto it (that is how glass, lamps, grilles
+//                 and shut lines are made: flush, and any shape)
+//   cardetail.js  the per-kind drawings: what makes an Octavia an Octavia
+//   carwheels.js  tyre, rim, spokes and brake disc as ONE mesh a corner
+//   carpaint.js   clearcoat paint, reflective glass, one vertex-coloured PBR
+//                 material for all the fixed-colour trim, gated lamps, and the
+//                 instanced contact shadows
+//
+// A near car is about 6.5k triangles in 11 draw calls (it was 900 in 16 to
+// 18); past 60 m it swaps to a 1k-triangle variant in 4. Brands still ride the
+// tiny cached CanvasTextures (the Škoda roundel, BMW quadrants, the Mercedes
+// star, the Tesla T) plus a deterministic Czech "5E" plate hashed from
+// kind+paint. Legacy kind names (sedan/hatch/kombi/suv) still resolve through
+// ALIAS, and the machinery underneath is untouched: the
+// a = accel·(1 − v/vmax)^1.3 power curve, the tyre model, two-circle car-car
+// collision, and the offroad shake.
 //
 // Convention (ARCHITECTURE.md): heading 0 faces −z (north); a mesh authored
 // facing −z with mesh.rotation.y = heading moves along
@@ -30,6 +39,9 @@
 
 import * as THREE from 'three';
 import { CAR, CAR_COLORS } from './config.js';
+import { paintMatFor, glassMat, detailMat, headMat, tailMat, brakeMat, carNight,
+  makeContactShadows } from './carpaint.js';
+import { buildCar } from './cardetail.js';
 import { crash, sfxAt, skidChirp, skidBark } from './audio.js';   // no-ops headless — safe for node --check/tests
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
@@ -78,28 +90,17 @@ function emitVehicleEvent(type, data) {
   return true;
 }
 
-// ---- shared materials (glass/rubber/lamps never vary; body paint is cached) --
-const glassMat = new THREE.MeshLambertMaterial({ color: 0x1e242b });
-const wheelMat = new THREE.MeshLambertMaterial({ color: 0x24262a });
-const hubMat = new THREE.MeshLambertMaterial({ color: 0x989ea6 });
-// truck cargo boxes are always that faded fleet-white, never body-color
-const cargoMat = new THREE.MeshLambertMaterial({ color: 0xbcbfba });
-// badge/trim: near-black bumper plastic (also arch liners + grilles), chrome
-// brightwork, and the white DPMP livery band — shared across the fleet
-const grilleMat = new THREE.MeshLambertMaterial({ color: 0x0b0d10 });
+// ---- shared materials -------------------------------------------------------
+// The paint, the glass, the one vertex-coloured detail material and the lamps
+// all live in carpaint.js now (PBR, and a per-vertex gate on the lamps). What
+// stays here is the handle main.js has always driven at dusk: one assignment
+// to lampMats.head / .tail still lights every car in the city, and
+// lampMats.night(k) tells the same shaders how dark it is (the projectors, the
+// tail clusters and the fallback sky follow it).
+// chrome for the CABIN only (the interior is Lambert and unlit by design)
 const chromeMat = new THREE.MeshLambertMaterial({ color: 0xd4dae2 });
-const liveryMat = new THREE.MeshLambertMaterial({ color: 0xe9eae6 });
-// lamps overbright (×2.5) so the bloom pass has something to bite on at night
-const headMat = new THREE.MeshLambertMaterial({ color: 0xfff3d0, emissive: 0xffedb8, emissiveIntensity: 2.5, toneMapped: false });
-const tailMat = new THREE.MeshLambertMaterial({ color: 0x7a1616, emissive: 0xff2418, emissiveIntensity: 2.5, toneMapped: false });
-// main drives these at dusk: one assignment lights every car in the city
-export const lampMats = { head: headMat, tail: tailMat };
-const _bodyMats = new Map();
-const bodyMatFor = (hex) => {
-  let m = _bodyMats.get(hex);
-  if (!m) _bodyMats.set(hex, m = new THREE.MeshLambertMaterial({ color: hex }));
-  return m;
-};
+export const lampMats = { head: headMat, tail: tailMat, brake: brakeMat, night: carNight };
+export { carNight };
 
 // ---- brand badges: tiny CanvasTextures drawn once, cached forever ----
 // A 13 cm plane on the nose is only ever seen from a few meters, so 128 px is
@@ -204,7 +205,8 @@ function badgeMatFor(brand) {
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
-  m = new THREE.MeshLambertMaterial({ map: tex, transparent: true, polygonOffset: true, polygonOffsetFactor: -2 });
+  // -5: decals ride above every draped layer (glass and trim -2, lamps -3, brake -4)
+  m = new THREE.MeshLambertMaterial({ map: tex, transparent: true, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 });
   _badgeMats.set(brand, m);
   return m;
 }
@@ -236,25 +238,29 @@ function plateMatFor(kind, hex) {
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
-  _plateMats.set(key, m = new THREE.MeshLambertMaterial({ map: tex, polygonOffset: true, polygonOffsetFactor: -2 }));
+  _plateMats.set(key, m = new THREE.MeshLambertMaterial({ map: tex, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 }));
   return m;
 }
 
 // ---- per-kind silhouette + engine specs ----
-// hull: the lofted lower body. sts = stations [z, yLo, yHi, w] front→rear
-// (w is a fraction of wid/2); the first and last stations become flat caps
-// (grille face, tail panel) with their own crisp normals. yA/yB place the
-// wheel-arch line and the doorline inside each ring, sh tucks the shoulders
-// in (tumblehome), bw tucks the rocker under. The PROFILE is the identity:
-// the Octavia's belt climbs into a liftback deck, the Fabia chops off high
-// and early, the BMW sits 4 cm lower than anything Czech, the Mercedes
-// stretches 20 cm statelier, the Tesla droops its grille-less nose.
+// hull: the lower body's side profile. sts = stations [z, yLo, yHi, w]
+// front→rear (w is a fraction of wid/2). yA/yB place the arch line and the
+// doorline, sh tucks the shoulders in, bw tucks the rocker under. The PROFILE
+// is the identity: the Octavia's belt climbs into a liftback deck, the Fabia
+// chops off high and early, the BMW sits 4 cm lower than anything Czech, the
+// Mercedes stretches 20 cm statelier, the Tesla droops its grille-less nose.
 //
-// green: the greenhouse loft. sts = [z, yBase, yRoof]; each segment names
-// its top and side face roles ('g' glass, 'p' paint), which is where the
-// windscreen rake, the pillars and the roof come from. Tesla's segs run the
-// top glass end to end — the continuous canopy. Truck/bus skip green and
-// wear proud glass boxes instead (flat commercial glazing looks right).
+// green: the greenhouse. sts = [z, yBase, yRoof]; baseW/topW are its half
+// widths at the belt and at the roof (the tumblehome), and the segment list
+// says which stretches of the side are glass ('g') and which are pillar
+// ('p'). Truck and bus have no greenhouse: their glass is drawn straight onto
+// the slab-sided hull.
+//
+// THESE NUMBERS ARE THE SKELETON, NOT THE SKIN. The cabin (cabinSpec,
+// seatAnchor, eyeAnchor) is cut from them exactly as written, so they must
+// not drift. The exterior is carbody.js's smooth surface THROUGH them, and
+// cardetail.js may restyle a nose or a tail for the outside only (its STYLE
+// table), always outward of what is written here so the interior still fits.
 //
 // Engine: accel is the PEAK m/s² fed into a = accel·(1 − v/vmax)^1.3 — 0–100:
 // octavia ~5.7 s, fabia ~6.6, bmw ~4.3, mercedes ~4.6, tesla ~3.2, van ~14.5,
@@ -392,6 +398,18 @@ const KIND = {
       [-5.50, 0.30, 2.80, 0.90], [-5.30, 0.24, 2.92, 0.98], [-4.60, 0.22, 2.95, 1.00],
       [4.60, 0.22, 2.95, 1.00], [5.30, 0.24, 2.92, 0.98], [5.50, 0.30, 2.75, 0.92]] },
   },
+  // Škoda 32Tr (SOR TNS 12) trolleybus, the solo twelve-metre car DPMP runs:
+  // low floor, three kerbside doors, traction gear in a long roof fairing and
+  // the two pole bases behind it. The poles themselves are js/trolleypoles.js
+  // (they move). Not in CAR_KINDS: it runs on its lines, nobody buys one.
+  trolleybus: {
+    len: 12.2, wid: 2.55, wheelR: 0.47, wheelW: 0.36, axle: 3.7,
+    accel: 3.4, vmax: 70 / 3.6, grip: 5.2, mass: 14,
+    plateF: 0.52, plateR: 0.60,
+    hull: { sh: 0.90, bw: 0.94, yA: 0.34, yB: 0.80, sts: [
+      [-6.10, 0.30, 2.78, 0.90], [-5.90, 0.24, 2.94, 0.98], [-5.20, 0.22, 2.98, 1.00],
+      [5.20, 0.22, 2.98, 1.00], [5.90, 0.24, 2.94, 0.98], [6.10, 0.30, 2.78, 0.92]] },
+  },
 };
 // spawn code rolls from this — traffic.js picks BY NAME from its own pools
 // (indexing broke the day the roster was renamed, so never rely on order)
@@ -435,6 +453,7 @@ const CAR_LABELS = {
   van:      ['Dodávka', 'skříňová · do 3,5 t'],
   truck:    ['Nákladní vůz', 'trambus · skříňová nástavba'],
   bus:      ['SOR NS 12', 'nízkopodlažní · DPMP'],
+  trolleybus: ['Škoda 32Tr', 'trolejbus · nízkopodlažní · DPMP'],
 };
 // Accepts a kind string OR a whole car object: seatAnchor() next door takes
 // the car, and one confused argument would otherwise print "Vozidlo" forever
@@ -458,6 +477,7 @@ const KIND_COLORS = {
   van: [0xd8d5ce, 0xd8d5ce, 0xd8d5ce, 0xc4c9cf, 0xbcbfba, 0x3a63a8],
   truck: [0xd8d5ce, 0xbcbfba, 0x8a9096, 0x476b46, 0x3a63a8],
   bus: [0xb5271f, 0xb5271f, 0xb5271f, 0xd8d5ce, 0x9a2822],
+  trolleybus: [0xb5271f, 0xb5271f, 0x9a2822],
 };
 export function pickCarColor(kind) {
   const pool = KIND_COLORS[ALIAS[kind] ?? kind] ?? CAR_COLORS;
@@ -688,7 +708,12 @@ function tyreStep(car, K, gas, hb, dt) {
   car.z += (fz * car.speed + rz * car._lat) * dt;
 }
 
-// ---- geometry builders ----
+// ---- geometry ---------------------------------------------------------------
+// The exterior is built by cardetail.js (which drives carbody.js and
+// carwheels.js): a smooth lofted hull with cut wheel arches, glass and lamps
+// draped onto it, and a coarse distance variant of the same recipe. What is
+// left in this file is the part of the geometry the CABIN is made of, and the
+// one definition of where the cabin sits inside the shell.
 
 // How far aft of the windscreen base the hull deck survives as a SCUTTLE
 // strip. greenHull() emits no front cap, so at the windscreen base there is an
@@ -728,174 +753,6 @@ function cabinCut(K) {
   };
 }
 
-// Split a station list at the given z values, interpolating a new station
-// linearly in every column. The loft is piecewise-linear between stations, so
-// an inserted station is EXACTLY on the surface it splits — the silhouette,
-// the widths and (because a coplanar quad split into two keeps the same
-// area-weighted normal sum) the shading are all unchanged. It exists purely so
-// bodyHull() can drop the deck on one side of a z that no station happened to
-// sit on.
-function cutStations(sts, cut) {
-  if (!cut) return sts;
-  const out = sts.slice();
-  for (const z of [cut.deckZ0, cut.z1]) {
-    if (!(z > out[0][0] && z < out[out.length - 1][0])) continue;
-    let i = 1;
-    while (out[i][0] < z) i++;
-    if (out[i][0] === z || out[i - 1][0] === z) continue;   // a station is already here
-    const a = out[i - 1], b = out[i], t = (z - a[0]) / (b[0] - a[0]);
-    out.splice(i, 0, [z, a[1] + (b[1] - a[1]) * t,
-      a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]);
-  }
-  return out;
-}
-
-// The lower-body loft. Each station ring is 8 points — rocker, arch line,
-// doorline, shoulder, mirrored — lofted with SHARED vertices so
-// computeVertexNormals rounds the paint over the shoulders and along the
-// bonnet, which under Lambert is what makes sheet metal read as sheet metal.
-// The end caps duplicate their ring so the grille face and tail panel keep
-// crisp flat normals instead of smearing around the bumper corners.
-//
-// `cut` = [z0, z1, x] is THE CABIN OPENING and it is not cosmetic. The loft's
-// top run (ring points 3→4, at yHi) is a full-width horizontal deck: bonnet
-// ahead of the screen, boot lid behind the backlight — and, between them, a
-// LID sealed straight across the passenger compartment at roughly window-sill
-// height. Its normal is +y, so from outside it is invisible under the
-// greenhouse, but from the driver's seat (eye ~19 cm above it) it is a
-// front-facing sheet of body colour covering everything below: dash, wheel,
-// instrument cluster, floor, the lot. Measured before this cut, a third of
-// the first-person frame was that lid and the cluster drew ZERO pixels.
-//
-// So the deck loses its MIDDLE over [z0, z1] and keeps a ledge outboard of
-// ±x — the door top. Two reasons the ledge is not optional. Outside: nothing
-// changes, because the greenhouse encloses the deck there anyway (its base
-// ring is both wider than the deck, 0.80 vs 0.76 m on an Octavia, and lower
-// than it). Inside: the cavity between the door trim and the door skin is
-// full of body-colour furniture — the doorline crease and the handle bars are
-// modelled as beams spanning the whole car, with only their ends protruding —
-// and the door skin itself is a backface, i.e. a hole to the sky. The ledge
-// is the lid over exactly that cavity and nothing else. Passed only for kinds
-// that HAVE a greenhouse; the cab-over pair (truck, bus) seat the eye inside
-// the hull volume, where the deck is already a backface.
-function bodyHull(spec, wid, cut = null) {
-  const half = wid / 2, sts = cutStations(spec.sts, cut), n = sts.length;
-  const pos = [], idx = [];
-  const ring = (st) => {
-    const w = st[3] * half, yLo = st[1], yHi = st[2];
-    const yA = yLo + (yHi - yLo) * spec.yA, yB = yLo + (yHi - yLo) * spec.yB;
-    return [
-      [-w * spec.bw, yLo], [-w, yA], [-w, yB], [-w * spec.sh, yHi],
-      [w * spec.sh, yHi], [w, yB], [w, yA], [w * spec.bw, yLo],
-    ];
-  };
-  for (let i = 0; i < n; i++) {
-    const r = ring(sts[i]), z = sts[i][0];
-    for (const p of r) pos.push(p[0], p[1], z);
-  }
-  for (let i = 0; i < n - 1; i++) {
-    // j === 3 is the deck between the two shoulders; cutStations() has already
-    // split the loft exactly at deckZ0/z1, so a whole segment is either inside
-    // the cabin opening or outside it — never half of each.
-    const zMid = (sts[i][0] + sts[i + 1][0]) / 2;
-    const open = cut && zMid > cut.deckZ0 && zMid < cut.z1;
-    for (let j = 0; j < 8; j++) {
-      if (j === 3 && open) continue;
-      const j2 = (j + 1) % 8;
-      const a = i * 8 + j, b = (i + 1) * 8 + j, c = (i + 1) * 8 + j2, d = i * 8 + j2;
-      idx.push(a, b, c, a, c, d);
-    }
-  }
-  if (cut) {
-    // The two door-top ledges, replacing the deck quad we just skipped. Their
-    // OUTER edge reuses ring points 3 and 4, so those vertices keep collecting
-    // a +y face normal and the shoulder goes on shading exactly as it did —
-    // only the inner edge is new geometry, and a hard crease there is right:
-    // it is the lip of an opening. Clamped 2 cm inside the shoulder so a
-    // narrow station can never invert the quad.
-    const edge = new Map();
-    for (let i = 0; i < n; i++) {
-      const st = sts[i], z = st[0], sh = st[3] * half * spec.sh;
-      if (z < cut.deckZ0 - 1e-9 || z > cut.z1 + 1e-9) continue;
-      const xi = Math.min(cut.xIn, sh - 0.02), xo = Math.max(cut.xOut, sh);
-      edge.set(i, pos.length / 3);
-      pos.push(-xi, st[2], z, xi, st[2], z, -xo, st[2], z, xo, st[2], z);
-    }
-    for (let i = 0; i < n - 1; i++) {
-      const zMid = (sts[i][0] + sts[i + 1][0]) / 2;
-      if (!(zMid > cut.deckZ0 && zMid < cut.z1)) continue;
-      const e0 = edge.get(i), e1 = edge.get(i + 1);
-      if (e0 === undefined || e1 === undefined) continue;
-      const s0 = i * 8 + 3, s1 = (i + 1) * 8 + 3, t0 = i * 8 + 4, t1 = (i + 1) * 8 + 4;
-      idx.push(s0, s1, e1, s0, e1, e0);                             // ledge, left
-      idx.push(e0 + 1, e1 + 1, t1, e0 + 1, t1, t0);                 // ledge, right
-      idx.push(e0 + 2, e1 + 2, s1, e0 + 2, s1, s0);                 // seam skirt, left
-      idx.push(t0, t1, e1 + 3, t0, e1 + 3, e0 + 3);                 // seam skirt, right
-    }
-  }
-  const cap = (i, flip) => {
-    const st = sts[i], r = ring(st), z = st[0];
-    const base = pos.length / 3;
-    let cy = 0;
-    for (const p of r) cy += p[1] / 8;
-    for (const p of r) pos.push(p[0], p[1], z);
-    pos.push(0, cy, z);
-    const ctr = base + 8;
-    for (let j = 0; j < 8; j++) {
-      const j2 = (j + 1) % 8;
-      if (flip) idx.push(ctr, base + j2, base + j);
-      else idx.push(ctr, base + j, base + j2);
-    }
-  };
-  cap(0, false);       // nose faces −z
-  cap(n - 1, true);    // tail faces +z
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  return g;
-}
-
-// The greenhouse loft: 4-point trapezoid rings (tumblehome baked in via
-// topW < baseW). Each segment emits its top and two side quads into the
-// glass OR the paint soup by role — the raked first segment's top IS the
-// windscreen, narrow segments' side walls ARE the B-pillars, and because
-// glass and paint faces share their boundary vertices exactly there is no
-// z-fighting and no grow factor. Emitted non-indexed → flat normals →
-// glazing stays crisp against the smooth-shaded hull below it.
-function greenHull(spec, wid) {
-  const half = wid / 2;
-  const soup = { g: [], p: [] };
-  const ring = (st) => {
-    const wb = spec.baseW * half, wt = spec.topW * half;
-    return [[-wb, st[1], st[0]], [-wt, st[2], st[0]], [wt, st[2], st[0]], [wb, st[1], st[0]]];
-  };
-  const quad = (arr, a, b, c, d) => arr.push(a, b, c, a, c, d);
-  for (let i = 0; i < spec.sts.length - 1; i++) {
-    const r0 = ring(spec.sts[i]), r1 = ring(spec.sts[i + 1]);
-    const top = soup[spec.segs[i][0]], side = soup[spec.segs[i][1]];
-    quad(side, r0[0], r1[0], r1[1], r0[1]);   // left wall (glass or pillar)
-    quad(top, r0[1], r1[1], r1[2], r0[2]);    // roof / windscreen / backlight
-    quad(side, r0[2], r1[2], r1[3], r0[3]);   // right wall
-  }
-  if (spec.capEnd) {   // vans end in a vertical rear wall, not a raked pinch
-    const r = ring(spec.sts[spec.sts.length - 1]);
-    quad(soup[spec.capEnd], r[3], r[2], r[1], r[0]);
-  }
-  return { glass: soupGeo(soup.g), paint: soup.p.length ? soupGeo(soup.p) : null };
-}
-
-function soupGeo(tris) {
-  const a = new Float32Array(tris.length * 3);
-  for (let i = 0; i < tris.length; i++) {
-    a[i * 3] = tris[i][0]; a[i * 3 + 1] = tris[i][1]; a[i * 3 + 2] = tris[i][2];
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(a, 3));
-  g.computeVertexNormals();
-  return g;
-}
-
 // Everything of one material merges into ONE BufferGeometry, so a whole car
 // is ~10 draw calls no matter how many mirrors and lamps dress it. Only
 // position+normal survive the merge — none of these materials carries a map.
@@ -931,12 +788,6 @@ const pairB = (arr, w, h, l, x, y, z, sweep = 0, rx = 0) => {
   B(arr, w, h, l, -x, y, z, sweep, rx);
   B(arr, w, h, l, x, y, z, -sweep, rx);
 };
-const Cz = (arr, r, len, x, y, z) => {   // cylinder poking along z (lamp rings, exhausts)
-  const g = new THREE.CylinderGeometry(r, r, len, 10);
-  g.rotateX(Math.PI / 2);
-  g.translate(x, y, z);
-  arr.push(g);
-};
 
 function widthAt(sts, z, half) {
   if (z <= sts[0][0]) return sts[0][3] * half;
@@ -950,210 +801,6 @@ function widthAt(sts, z, half) {
   return sts[sts.length - 1][3] * half;
 }
 
-// Wheel arches without CSG: a dark half-cylinder liner a touch wider than
-// the body at that station. Its half-disc caps poke through both flanks and
-// draw the black arc around the tyre; the curved shell hides inside the sill.
-function arches(arr, K) {
-  const ax = K.axle ?? (K.len / 2 - K.wheelR - 0.35);
-  const r = K.wheelR + 0.10;
-  for (const s of [-1, 1]) {
-    const hw = widthAt(K.hull.sts, s * ax, K.wid / 2);
-    const g = new THREE.CylinderGeometry(r, r, hw * 2 + 0.05, 12, 1, false, 0, Math.PI);
-    g.rotateZ(Math.PI / 2);   // axis onto x, open chord facing down
-    g.translate(0, K.wheelR + 0.02, s * ax);
-    arr.push(g);
-  }
-}
-
-function mirrors(arr, W, y, z, hw = 0.13, hh = 0.09) {
-  for (const s of [-1, 1]) {
-    B(arr, 0.14, 0.03, 0.04, s * (W + 0.05), y + 0.02, z);   // arm
-    B(arr, hw, hh, 0.05, s * (W + 0.14), y, z);              // head
-  }
-}
-// doorhandle nubs: one full-width sliver per door line pokes 1 cm out of
-// both flanks at once — two boxes dress four doors
-// A PAIR of stubs, not one bar through the car. Same outer edge (wid/2 + 0.01)
-// and therefore the same silhouette it always had, but the 1.6 m of it that
-// used to cross the passenger compartment is gone: since bodyHull() opened the
-// deck over the cabin, anything spanning the centreline is furniture in the
-// driver's footwell, in body colour, at knee height.
-function handles(arr, wid, y, zs) {
-  for (const z of zs) pairB(arr, 0.14, 0.028, 0.16, wid / 2 - 0.06, y, z);
-}
-// Same story for the doorline crease every kind wears: a flank strip, kept
-// buried in the hull at its inboard end (≥ 8 cm at the narrowest station of
-// every kind) so the exterior read is unchanged.
-function crease(arr, wid, h, len, y, z) {
-  pairB(arr, 0.16, h, len, wid / 2 - 0.068, y, z);
-}
-
-// ---- per-kind dressing ----
-// Shaped lights, grilles, mirrors, creases, exhausts — the pieces that carry
-// the brand at 15 m. Everything lands in a per-material soup and merges, so
-// none of this costs meshes. Lamp boxes straddle the nose/tail surface so
-// roughly half pokes proud of the paint; headMat/tailMat glow through the
-// dusk toggle in main.js exactly as before.
-const DETAIL = {
-  octavia(K, d, c) {
-    arches(d.dark, K);
-    mirrors(d.paint, c.W, 0.90, -0.50);
-    handles(d.paint, K.wid, 0.76, [-0.15, 0.85]);
-    crease(d.paint, K.wid, 0.05, 2.6, 0.60, 0.35);            // doorline crease
-    B(d.paint, 0.05, 0.07, 0.20, 0, 1.43, 1.28);                    // shark-fin antenna
-    pairB(d.head, 0.46, 0.07, 0.12, 0.55, 0.60, c.zN + 0.07, 0.35); // slim swept LED wedges
-    B(d.dark, 1.02, 0.09, 0.12, 0, 0.50, c.zN + 0.05);              // the one wide grille slit
-    B(d.dark, 1.10, 0.15, 0.10, 0, 0.30, c.zN + 0.02);              // lower intake valance
-    pairB(d.tail, 0.40, 0.07, 0.12, 0.52, 0.70, c.zT - 0.03, -0.35);
-    B(d.dark, 1.26, 0.10, 0.08, 0, 0.24, c.zT - 0.01);              // diffuser strip
-    Cz(d.chrome, 0.035, 0.14, -0.55, 0.27, c.zT + 0.02);            // single exhaust tip
-  },
-  fabia(K, d, c) {
-    arches(d.dark, K);
-    mirrors(d.paint, c.W, 0.86, -0.36);
-    handles(d.paint, K.wid, 0.72, [-0.05, 0.82]);
-    crease(d.paint, K.wid, 0.05, 2.2, 0.56, 0.45);
-    B(d.paint, 0.05, 0.07, 0.18, 0, 1.42, 1.25);
-    pairB(d.head, 0.38, 0.08, 0.12, 0.52, 0.57, c.zN + 0.06, 0.30);
-    B(d.dark, 0.92, 0.08, 0.12, 0, 0.49, c.zN + 0.05);
-    B(d.dark, 1.02, 0.14, 0.10, 0, 0.29, c.zN + 0.02);
-    pairB(d.tail, 0.16, 0.22, 0.10, 0.58, 0.68, c.zT - 0.02);       // upright hatch lamps
-    B(d.dark, 1.14, 0.09, 0.08, 0, 0.24, c.zT - 0.01);
-    Cz(d.chrome, 0.032, 0.12, -0.52, 0.26, c.zT + 0.015);
-  },
-  bmw(K, d, c) {
-    arches(d.dark, K);
-    mirrors(d.paint, c.W, 0.86, -0.20);
-    handles(d.paint, K.wid, 0.72, [0.05, 1.00]);
-    crease(d.paint, K.wid, 0.05, 2.7, 0.55, 0.50);
-    B(d.paint, 0.05, 0.06, 0.18, 0, 1.39, 1.18);
-    pairB(d.dark, 0.36, 0.17, 0.10, 0.55, 0.58, c.zN + 0.05, 0.20); // dark lens housings…
-    Cz(d.head, 0.055, 0.10, -0.46, 0.58, c.zN + 0.015);             // …with the twin round
-    Cz(d.head, 0.055, 0.10, -0.64, 0.58, c.zN + 0.03);              // elements behind them
-    Cz(d.head, 0.055, 0.10, 0.46, 0.58, c.zN + 0.015);
-    Cz(d.head, 0.055, 0.10, 0.64, 0.58, c.zN + 0.03);
-    B(d.dark, 0.24, 0.26, 0.12, -0.15, 0.50, c.zN + 0.03, 0, -0.12);   // twin kidneys,
-    B(d.dark, 0.24, 0.26, 0.12, 0.15, 0.50, c.zN + 0.03, 0, -0.12);    // leaning forward,
-    B(d.chrome, 0.26, 0.28, 0.10, -0.15, 0.50, c.zN + 0.055, 0, -0.12);// chrome-framed
-    B(d.chrome, 0.26, 0.28, 0.10, 0.15, 0.50, c.zN + 0.055, 0, -0.12);
-    B(d.dark, 1.15, 0.13, 0.10, 0, 0.28, c.zN + 0.02);
-    pairB(d.tail, 0.42, 0.09, 0.10, 0.58, 0.66, c.zT - 0.03, -0.30);
-    B(d.dark, 1.20, 0.10, 0.08, 0, 0.23, c.zT - 0.01);
-    Cz(d.chrome, 0.036, 0.12, -0.60, 0.26, c.zT + 0.015);           // twin exhausts
-    Cz(d.chrome, 0.036, 0.12, 0.60, 0.26, c.zT + 0.015);
-  },
-  mercedes(K, d, c) {
-    arches(d.dark, K);
-    mirrors(d.paint, c.W, 0.89, -0.32);
-    handles(d.paint, K.wid, 0.75, [-0.05, 0.95]);
-    crease(d.paint, K.wid, 0.05, 2.8, 0.58, 0.50);
-    B(d.paint, 0.05, 0.07, 0.20, 0, 1.43, 1.30);
-    pairB(d.head, 0.40, 0.10, 0.12, 0.54, 0.60, c.zN + 0.06, 0.40); // swept wedge lamps
-    B(d.dark, 1.02, 0.22, 0.10, 0, 0.51, c.zN + 0.05);              // grille panel…
-    B(d.chrome, 1.00, 0.045, 0.12, 0, 0.565, c.zN + 0.04);          // …with two chrome
-    B(d.chrome, 1.00, 0.045, 0.12, 0, 0.475, c.zN + 0.04);          // louvres; star rides proud
-    B(d.dark, 1.20, 0.12, 0.10, 0, 0.28, c.zN + 0.02);
-    pairB(d.tail, 0.44, 0.09, 0.12, 0.56, 0.70, c.zT - 0.03, -0.40);
-    B(d.dark, 1.24, 0.10, 0.08, 0, 0.23, c.zT - 0.01);
-    B(d.chrome, 0.18, 0.06, 0.06, -0.60, 0.27, c.zT + 0.01);        // integrated trim tips
-    B(d.chrome, 0.18, 0.06, 0.06, 0.60, 0.27, c.zT + 0.01);
-  },
-  tesla(K, d, c) {
-    arches(d.dark, K);
-    mirrors(d.paint, c.W, 0.85, -0.76);
-    // no doorhandles — they sit flush on the real car, so their absence IS the detail
-    crease(d.paint, K.wid, 0.05, 2.7, 0.55, 0.50);
-    B(d.paint, 0.05, 0.06, 0.18, 0, 1.39, 1.22);
-    pairB(d.head, 0.34, 0.05, 0.10, 0.55, 0.55, c.zN + 0.05, 0.35); // slim DRL strips only
-    B(d.dark, 0.90, 0.10, 0.10, 0, 0.26, c.zN + 0.02);              // just a lower intake slit
-    B(d.tail, K.wid * 0.86, 0.06, 0.10, 0, 0.68, c.zT - 0.02);      // full-width light bar
-    B(d.dark, 1.10, 0.10, 0.08, 0, 0.23, c.zT - 0.01);
-  },
-  van(K, d, c) {
-    arches(d.dark, K);
-    mirrors(d.paint, c.W, 1.12, -1.58, 0.12, 0.15);
-    handles(d.paint, K.wid, 0.92, [-1.00, 0.50]);                   // cab door + sliding door
-    crease(d.paint, K.wid, 0.06, 3.2, 0.70, 0.40);
-    pairB(d.head, 0.30, 0.16, 0.12, 0.60, 0.72, c.zN + 0.04, 0.10);
-    B(d.dark, 1.15, 0.22, 0.12, 0, 0.60, c.zN + 0.03);
-    B(d.dark, 1.25, 0.14, 0.10, 0, 0.30, c.zN + 0.02);
-    pairB(d.tail, 0.12, 0.30, 0.10, 0.80, 0.90, c.zT - 0.02);       // tall rear-door lamps
-    B(d.dark, 1.30, 0.10, 0.08, 0, 0.26, c.zT - 0.01);
-    Cz(d.chrome, 0.03, 0.12, -0.55, 0.25, c.zT + 0.01);
-  },
-  truck(K, d, c) {
-    arches(d.dark, K);
-    for (const s of [-1, 1]) {                                      // tall stalked mirrors
-      B(d.paint, 0.04, 0.55, 0.04, s * (c.W + 0.10), 2.02, -3.55);
-      B(d.paint, 0.09, 0.34, 0.06, s * (c.W + 0.17), 2.02, -3.55);
-    }
-    B(d.glass, 2.00, 0.80, 0.10, 0, 1.90, c.zN + 0.03, 0, 0.08);    // one-piece windscreen
-    B(d.glass, K.wid + 0.04, 0.55, 1.00, 0, 1.95, -2.85);           // cab side windows
-    B(d.dark, 1.90, 0.55, 0.10, 0, 0.95, c.zN + 0.03);              // full-width grille panel
-    B(d.dark, 2.10, 0.30, 0.10, 0, 0.35, c.zN + 0.02);              // steel bumper
-    B(d.dark, 1.30, 0.45, 4.60, 0, 0.55, 1.20);                     // chassis rails under the box
-    pairB(d.head, 0.34, 0.14, 0.10, 0.80, 0.62, c.zN + 0.02);
-    pairB(d.tail, 0.14, 0.30, 0.08, 0.95, 1.06, 3.66);              // on the cargo box tail
-  },
-  bus(K, d, c) {
-    arches(d.dark, K);
-    for (const s of [-1, 1]) {                                      // long-arm coach mirrors
-      B(d.paint, 0.22, 0.03, 0.03, s * (c.W + 0.06), 2.46, c.zN + 0.30);
-      B(d.paint, 0.09, 0.30, 0.06, s * (c.W + 0.16), 2.32, c.zN + 0.30);
-    }
-    B(d.glass, 2.15, 1.15, 0.10, 0, 1.95, c.zN + 0.04, 0, 0.10);    // one-piece raked screen
-    B(d.glass, K.wid + 0.05, 0.95, 9.40, 0, 1.92, -0.10);           // full-length glazing band
-    B(d.glass, 1.80, 0.70, 0.08, 0, 2.30, c.zT + 0.01);             // rear window
-    B(d.glass, 0.07, 1.95, 1.25, c.W + 0.01, 1.10, -3.55);          // curbside door recesses
-    B(d.glass, 0.07, 1.95, 1.25, c.W + 0.01, 1.10, 0.45);
-    B(d.white, K.wid + 0.04, 0.24, 9.60, 0, 1.34, -0.10);           // DPMP livery strips
-    B(d.white, K.wid + 0.04, 0.20, 9.60, 0, 2.50, -0.10);           // framing the glass
-    B(d.white, 1.70, 0.26, 2.60, 0, 3.07, 0.90);                    // roof A/C pod
-    B(d.head, 1.35, 0.28, 0.10, 0, 2.62, c.zN + 0.05, 0, 0.06);     // destination box (glows
-    pairB(d.head, 0.30, 0.16, 0.10, 0.85, 0.70, c.zN + 0.02);       // at night via headMat)
-    B(d.dark, 2.20, 0.25, 0.10, 0, 0.32, c.zN + 0.02);
-    B(d.dark, 1.60, 0.60, 0.08, 0, 1.30, c.zT - 0.01);              // rear engine grille
-    pairB(d.tail, 0.16, 0.34, 0.10, 0.98, 0.80, c.zT - 0.02);
-  },
-};
-
-// one geometry set per kind, built lazily and shared by every car forever
-const _geo = new Map();
-function geomFor(kind) {
-  kind = ALIAS[kind] ?? kind;            // cache under the modern name only
-  let g = _geo.get(kind);
-  if (g) return g;
-  const K = KIND[kind] ?? KIND.octavia;
-  const sts = K.hull.sts;
-  const c = { W: K.wid / 2, zN: sts[0][0], zT: sts[sts.length - 1][0] };
-  const d = { paint: [], glass: [], dark: [], chrome: [], head: [], tail: [], white: [] };
-  d.paint.push(bodyHull(K.hull, K.wid, cabinCut(K)));
-  if (K.green) {
-    const gh = greenHull(K.green, K.wid);
-    d.glass.push(gh.glass);
-    if (gh.paint) d.paint.push(gh.paint);   // pillars + roof, body-color
-  }
-  DETAIL[kind]?.(K, d, c);
-  const merged = (list) => (list.length ? mergeGeoms(list) : null);
-  let cargo = null;
-  if (K.cargo) {                         // truck: separate box body riding the chassis
-    const cg = K.cargo;
-    cargo = new THREE.BoxGeometry(cg.w, cg.h, cg.l);
-    cargo.translate(0, cg.y + cg.h / 2, cg.z);
-  }
-  const wheel = new THREE.CylinderGeometry(K.wheelR, K.wheelR, K.wheelW ?? 0.24, 12);
-  wheel.rotateZ(Math.PI / 2);            // cylinder axis onto x → rolling = rotation.x
-  const hub = new THREE.CylinderGeometry(K.wheelR * 0.54, K.wheelR * 0.54, 0.035, 10);
-  hub.rotateZ(Math.PI / 2);
-  _geo.set(kind, g = {
-    K, zN: c.zN, zT: c.zT,
-    paint: merged(d.paint), glass: merged(d.glass), dark: merged(d.dark),
-    chrome: merged(d.chrome), head: merged(d.head), tail: merged(d.tail),
-    white: merged(d.white), cargo, wheel, hub,
-  });
-  return g;
-}
-
 // shared plane geometries for the flat decals (badges by size, plates fixed)
 const _planes = new Map();
 function planeGeoFor(w, h) {
@@ -1162,21 +809,126 @@ function planeGeoFor(w, h) {
   if (!g) _planes.set(k, g = new THREE.PlaneGeometry(w, h));
   return g;
 }
-// Front decals face −z (rotation.y = π); spec.rx (already sign-corrected for
-// the YXZ order) lays a badge back onto a raked bonnet — the BMW roundel lies
-// nearly flat on the hood like the real one, the Tesla T leans up the nose.
-function badgeMesh(brand, spec, zBase, rear) {
-  const m = new THREE.Mesh(planeGeoFor(spec.size, spec.size), badgeMatFor(brand));
-  m.rotation.order = 'YXZ';
-  if (!rear) m.rotation.y = Math.PI;
-  if (spec.rx) m.rotation.x = spec.rx;
-  m.position.set(spec.x ?? 0, spec.y, zBase + spec.dz);
-  return m;
+
+// one geometry set per kind, built lazily and shared by every car forever:
+// the near car, its distance variant, the two handed wheels and the decals
+const _geo = new Map();
+function geomFor(kind) {
+  kind = ALIAS[kind] ?? kind;            // cache under the modern name only
+  let g = _geo.get(kind);
+  if (g) return g;
+  const key = KIND[kind] ? kind : 'octavia';
+  const K = KIND[key];
+  const car = buildCar(key, K, cabinCut(K));
+  const S = car.shape;
+  _geo.set(kind, g = {
+    K, zN: S.z0, zT: S.z1, shape: S, near: car.near, far: car.far, wheel: car.wheel, wx: car.wx,
+    plates: plateGeo(K, S), badges: badgeGeo(K, S, car.style),
+  });
+  return g;
 }
-function plateMesh(mat, y, z, rear) {
-  const m = new THREE.Mesh(planeGeoFor(0.52, 0.11), mat);
-  if (!rear) m.rotation.y = Math.PI;
-  m.position.set(0, y, z);
+
+// ---- bodySurface(kind) → where the outside of a kind's body is -------------
+// For whoever bolts something onto a car from outside this file (the police
+// livery in traffic.js, the ambulance band): the flank is a curve with real
+// wheel openings in it, so "the hull is w·half wide at this station" is no
+// longer something a caller can transcribe. halfAt(z, y) is the half width at a
+// height, topAt(z, x) the roof or bonnet height, archTop(z) the top of a wheel
+// opening at that z (0 where there is none). Local frame, nose at −z.
+export function bodySurface(kind) {
+  const S = geomFor(kind).shape;
+  return {
+    z0: S.z0, z1: S.z1, halfAt: S.halfAt, topAt: S.topAt,
+    archTop(z) {
+      let y = 0;
+      for (const a of S.arches) {
+        const d = z - a;
+        if (Math.abs(d) < S.R) y = Math.max(y, S.wheelR + Math.sqrt(S.R * S.R - d * d));
+      }
+      return y;
+    },
+  };
+}
+
+// ---- decals: plates and badges, one merged mesh each -----------------------
+// A plate or a badge is a textured quad standing a centimetre off the panel
+// it belongs to, leaning with that panel: the body module is asked where the
+// face is at the decal's height and which way it looks. Front and rear share
+// one geometry (and therefore one draw call) because they share a material.
+const _dq = new THREE.Quaternion(), _de = new THREE.Euler(), _dm = new THREE.Matrix4();
+const _dv = new THREE.Vector3(), _d1 = new THREE.Vector3(1, 1, 1);
+function decalQuad(w, h, x, y, z, ny, nz, rear, lift) {
+  const g = new THREE.PlaneGeometry(w, h);
+  // YXZ: yaw the quad onto its end of the car, then lean it back with the panel
+  const a = rear ? Math.atan2(-ny, nz) : Math.atan2(-ny, -nz);
+  _de.set(a, rear ? 0 : Math.PI, 0, 'YXZ');
+  _dq.setFromEuler(_de);
+  _dv.set(x, y + ny * lift, z + nz * lift);
+  g.applyMatrix4(_dm.compose(_dv, _dq, _d1));
+  return g;
+}
+function mergeDecals(list) {
+  if (!list.length) return null;
+  const n = list.length * 6;
+  const pos = new Float32Array(n * 3), nor = new Float32Array(n * 3), uv = new Float32Array(n * 2);
+  let o = 0;
+  for (const src of list) {
+    const g = src.toNonIndexed();
+    pos.set(g.attributes.position.array, o * 3);
+    nor.set(g.attributes.normal.array, o * 3);
+    uv.set(g.attributes.uv.array, o * 2);
+    o += 6;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return out;
+}
+function plateGeo(K, S) {
+  const list = [];
+  for (const rear of [false, true]) {
+    const y = rear ? K.plateR : K.plateF;
+    if (y === undefined) continue;
+    if (rear && K.plateRz !== undefined) { list.push(decalQuad(0.52, 0.11, 0, y, K.plateRz, 0, 1, true, 0.012)); continue; }
+    const p = S.facePoint(y, rear);
+    if (!p) continue;
+    // a plate hangs close to upright whatever the bumper under it is doing
+    const lean = clamp(p.ny, -0.25, 0.35), nz = (rear ? 1 : -1) * Math.sqrt(1 - lean * lean);
+    list.push(decalQuad(0.52, 0.11, 0, y, p.z, lean, nz, rear, 0.013));
+  }
+  return mergeDecals(list);
+}
+function badgeGeo(K, S, style) {
+  if (!K.brand) return null;
+  const list = [];
+  for (const rear of [false, true]) {
+    const spec = rear ? K.badgeR : K.badgeF;
+    if (!spec) continue;
+    const y = (rear ? style.badgeRy : style.badgeFy) ?? spec.y;
+    const p = S.facePoint(y, rear);
+    if (p) list.push(decalQuad(spec.size, spec.size, 0, y, p.z, p.ny, p.nz, rear, 0.011));
+  }
+  return mergeDecals(list);
+}
+
+// Build every kind in the gaps of the boot instead of on the frame its first
+// car drives into view (about 30 ms a kind). Browser only: a headless import
+// builds nothing until somebody asks for a mesh.
+if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+  let i = 0;
+  const next = () => {
+    if (i >= CAR_KINDS.length) return;
+    geomFor(CAR_KINDS[i++]);
+    window.setTimeout(next, 40);
+  };
+  window.setTimeout(next, 600);
+}
+
+// shadow + matrix housekeeping for a part that never moves on its parent
+function fixed(m, cast, receive) {
+  m.castShadow = cast; m.receiveShadow = receive;
+  m.matrixAutoUpdate = false;
   return m;
 }
 
@@ -1185,65 +937,115 @@ function plateMesh(mat, y, z, rear) {
 // the wheels lives in an inner "body" group so suspension roll/pitch tilts
 // the shell while the wheels stay planted. wheels = [FL, FR, RL, RR] (front
 // = −z); front wheels use YXZ euler order so steering yaw and rolling spin
-// compose. Budget: one mesh per material soup + decals + wheels/hubs — a car
-// is 14–18 meshes, well under the 28 cap, and every geometry is shared.
+// compose.
+//
+// Budget. A near car is 11 draw calls: paint, glass, detail, head lamps, tail
+// lamps, plates, badges and four one-piece wheels (the brake element is a
+// twelfth that only exists while the car is slowing). Beyond LOD_FAR the body
+// swaps to its distance variant, four draw calls with the wheels baked in.
+// Only the paint and the wheels cast shadows: a number plate's shadow was
+// never visible and cost a draw in the shadow pass regardless.
 export function makeCarMesh(colorHex, kind = 'octavia') {
   kind = ALIAS[kind] ?? kind;
   const g = geomFor(kind), K = g.K;
   const group = new THREE.Group();
   const body = new THREE.Group();
   group.add(body);
-  const paint = bodyMatFor(colorHex);
-  const add = (geo, mat, shadow = false) => {
-    if (!geo) return;
-    const m = new THREE.Mesh(geo, mat);
-    m.castShadow = shadow;
-    body.add(m);
+  const near = new THREE.Group(), far = new THREE.Group();
+  near.matrixAutoUpdate = far.matrixAutoUpdate = false;
+  far.visible = false;
+  body.add(near, far);
+  const paint = paintMatFor(colorHex);
+  const part = (parent, geo, mat, cast, receive = true) => {
+    if (!geo) return null;
+    const m = fixed(new THREE.Mesh(geo, mat), cast, receive);
+    parent.add(m);
+    return m;
   };
-  add(g.paint, paint, true);
-  add(g.glass, glassMat, true);
-  // the crumple (dentCar) needs to find the sheet metal: paint hull first,
-  // glass second — they are always the first two children of `body`
-  group.userData.hulls = [body.children[0], body.children[1]];
-  add(g.dark, grilleMat);
-  add(g.chrome, chromeMat);
-  add(g.white, liveryMat);
-  add(g.head, headMat);
-  add(g.tail, tailMat);
-  if (g.cargo) add(g.cargo, cargoMat, true);
-  if (K.brand && K.badgeF) body.add(badgeMesh(K.brand, K.badgeF, g.zN, false));
-  if (K.brand && K.badgeR) body.add(badgeMesh(K.brand, K.badgeR, g.zT, true));
-  const pm = plateMatFor(kind, colorHex);
-  if (K.plateF !== undefined) body.add(plateMesh(pm, K.plateF, g.zN - 0.015, false));
-  if (K.plateR !== undefined) body.add(plateMesh(pm, K.plateR, K.plateRz ?? g.zT + 0.015, true));
+  const N = g.near, F = g.far;
+  // (the glass is a skin over the paint now, so its shadow would only repeat the paint's)
+  const pm = part(near, N.paint, paint, true), gm = part(near, N.glass, glassMat, false);
+  // the truck's cargo body lives in the detail mesh, so there it must cast
+  const dm = part(near, N.detail, detailMat, !!K.cargo);
+  const hm = part(near, N.head, headMat, false, false), tm = part(near, N.tail, tailMat, false, false);
+  const bm = part(near, N.brake, brakeMat, false, false);
+  if (bm) bm.visible = false;
+  // dentCar crumples these. Paint first and glass second, as the crash code
+  // has always assumed; the trim and the lamps follow so a pushed-in nose
+  // takes its grille and headlamps with it instead of leaving them in mid-air.
+  group.userData.hulls = [pm, gm, dm, hm, tm, bm].filter(Boolean);
+  if (g.plates) part(near, g.plates, plateMatFor(kind, colorHex), false, false);
+  if (g.badges) part(near, g.badges, badgeMatFor(K.brand), false, false);
+  part(far, F.paint, paint, true);
+  part(far, F.detail, detailMat, true);
+  part(far, F.head, headMat, false, false);
+  part(far, F.tail, tailMat, false, false);
   // long kinds tuck the axles inside the overhangs (a bus pivots mid-body,
   // not at the bumpers) — K.axle overrides the wheels-at-the-corners default
   const ax = K.axle ?? (K.len / 2 - K.wheelR - 0.35);
-  const hubX = (K.wheelW ?? 0.24) / 2 + 0.012;
   const wheels = [];
   for (let i = 0; i < 4; i++) {
-    const w = new THREE.Mesh(g.wheel, wheelMat);
-    w.rotation.order = 'YXZ';
     const side = i & 1 ? 1 : -1;
-    w.position.set(side * (K.wid / 2 - 0.07), K.wheelR, (i < 2 ? -1 : 1) * ax);
-    // alloy face on the outer side only; it spins with the tyre (invisibly —
-    // it's radially symmetric) but yaws with the steering, which is what shows
-    const hub = new THREE.Mesh(g.hub, hubMat);
-    hub.position.x = side * hubX;
-    w.add(hub);
+    const w = new THREE.Mesh(g.wheel[i & 1], detailMat);
+    w.rotation.order = 'YXZ';
+    w.castShadow = true; w.receiveShadow = true;
+    // each axle takes its track from the body AT that axle, so the tyre sits
+    // just inside its own arch lip instead of 5 cm proud of a tapering nose
+    w.position.set(side * g.wx[i < 2 ? 0 : 1], K.wheelR, (i < 2 ? -1 : 1) * ax);
     group.add(w);
     wheels.push(w);
   }
   group.userData.body = body;
   group.userData.wheelR = K.wheelR;
+  group.userData.lod = { near, far, wheels, far_: false };
+  group.userData.brake = bm;
   return { group, wheels };
 }
+
+// Swap a car between its near and its distance dress. Exported for the co-op
+// ghosts, which own their meshes and are not in Vehicles.cars.
+export function setCarLod(group, isFar) {
+  const l = group?.userData?.lod;
+  if (!l || l.far_ === isFar) return;
+  l.far_ = isFar;
+  l.near.visible = !isFar;
+  l.far.visible = isFar;
+  for (const w of l.wheels) w.visible = !isFar;
+}
+const LOD_FAR = 62, LOD_NEAR = 54;       // m, with hysteresis so a car on the line does not flicker
 
 // ---- Vehicles: owns every car mesh in the scene, animates the dressing ----
 export class Vehicles {
   constructor(scene) {
     this.scene = scene;
     this.cars = new Set();
+    // CO-OP GHOSTS. A peer's car is a proxy js/netvehicles.js owns: it is not
+    // in this.cars (nothing here may write its pose), so it never got the two
+    // things that are decided per frame for every other car in view: the
+    // distance dress and the contact shadow. A remote Octavia 300 m off was
+    // 6,500 triangles in eleven draws, and it floated. The ghost fleet sets
+    // this to itself and update() visits its cars after its own.
+    this.ghosts = null;
+    this._nb = 0;
+    this._ghostCar = (mesh, x, y, z, kind) => {
+      const lod = mesh.userData.lod, fo = this.focus, force = this.forceLod;
+      if (lod) {
+        let isFar = lod.far_;
+        if (force) isFar = force === 'far';
+        else if (fo) {
+          const dx = x - fo.x, dz = z - fo.z;
+          isFar = dx * dx + dz * dz > (isFar ? LOD_NEAR * LOD_NEAR : LOD_FAR * LOD_FAR);
+        }
+        if (isFar !== lod.far_) setCarLod(mesh, isFar);
+      }
+      const blobs = this._blobs;
+      if (blobs && mesh.visible && this._nb < blobs.userData.capacity) {
+        const K = KIND[kind] ?? KIND.octavia;
+        _bp.set(x, y + 0.035, z);
+        _bs.set(K.wid * 1.42, 1, K.len * 1.16);
+        blobs.setMatrixAt(this._nb++, _bm.compose(_bp, mesh.quaternion, _bs));
+      }
+    };
   }
 
   // kind: any of CAR_KINDS, or a legacy alias (resolved — car.kind stores the
@@ -1263,15 +1065,25 @@ export class Vehicles {
     // 221 m underground, which reads exactly like "the spawn button does
     // nothing".
     const y0 = this.world?.surfaceY ? this.world.surfaceY(x, z).y : 0;
-    // a car without a shadow floats — every hull and wheel casts, and the
-    // body receives so a bridge's shade falls across the bonnet
-    group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    // Shadow flags are set per part in makeCarMesh (paint, glass and wheels
+    // cast; everything receives so a bridge's shade falls across the bonnet).
+    // The soft blob under the car is what keeps it on the ground where the sun
+    // shadow does not reach: one InstancedMesh for the whole fleet, made the
+    // first time a car exists so a headless Vehicles never builds a texture.
+    if (!this._blobs && this.scene?.add) {
+      this.scene.add(this._blobs = makeContactShadows(256));
+    }
     const car = { mesh: group, wheels, x, z, heading, speed: 0, steer: 0,
       kind, color, len: K.len, wid: K.wid, ai: null,
       y: y0, _lat: 0, _pv: 0, _acc: 0, _roll: 0, _pitch: 0, _rammedT: 0,
       offroad: 0, _bumpT: 0 };
     group.position.set(x, y0, z);
     group.rotation.y = heading;
+    // Drawn after the street-light quads of the direct path (js/lightpools.js,
+    // renderOrder 0.5 in the opaque pass): a car covers the light under it
+    // instead of having its tyres painted by it. Opaque parts only, so glass
+    // and lamp halos keep their place among the transparents.
+    group.traverse(drawAfterLight);
     this.scene.add(group);
     this.cars.add(car);
     return car;
@@ -1280,6 +1092,8 @@ export class Vehicles {
   remove(car) {
     this.cars.delete(car);
     this.scene.remove(car.mesh);         // geometry + materials are shared: keep them
+    // …except the sheet metal a crash made this car's own (dentCar clones it)
+    for (const h of car.mesh.userData?.hulls ?? []) if (h.userData.owned) h.geometry.dispose();
   }
 
   // Sync meshes from car state, spin wheels, settle the suspension tilt.
@@ -1289,8 +1103,36 @@ export class Vehicles {
   update(dt) {
     if (dt <= 0) return;
     const k = Math.min(1, 8 * dt);
+    // contact shadows: grow the instance buffer if the city outgrew it
+    let blobs = this._blobs, nb = 0;
+    const want = this.cars.size + (this.ghosts?.count ?? 0);
+    if (!blobs && want && this.ghosts?.count && this.scene?.add) {
+      // a session whose only cars so far are other people's
+      this.scene.add(blobs = this._blobs = makeContactShadows(256));
+    }
+    if (blobs && want > blobs.userData.capacity) {
+      this.scene.remove(blobs);
+      blobs.dispose();
+      blobs.geometry.dispose();          // its own quad and material; the
+      blobs.material.dispose();          // blob texture is shared and stays
+      this.scene.add(blobs = this._blobs = makeContactShadows(Math.max(want + 64, blobs.userData.capacity * 2)));
+    }
+    const fo = this.focus, force = this.forceLod;
     for (const car of this.cars) {
       const m = car.mesh;
+      // ---- level of detail ----
+      // Past LOD_FAR a car is its distance dress: four draw calls, a thousand
+      // triangles, wheels baked in. Measured against the focus (the player),
+      // which the camera is never more than a few metres from.
+      if (m.userData.lod) {
+        let isFar = m.userData.lod.far_;
+        if (force) isFar = force === 'far';
+        else if (fo) {
+          const dx = car.x - fo.x, dz = car.z - fo.z, d2 = dx * dx + dz * dz;
+          isFar = d2 > (isFar ? LOD_NEAR * LOD_NEAR : LOD_FAR * LOD_FAR);
+        }
+        if (isFar !== m.userData.lod.far_) setCarLod(m, isFar);
+      }
       // A car nobody drives is placed ONCE and then just sits there — but at
       // boot it is placed before its height map has arrived, so it is placed at
       // sea level and stays there. Parked cars therefore settle onto the road
@@ -1445,6 +1287,28 @@ export class Vehicles {
           } else car._smokeT = 0.3;
         }
       }
+      // ---- brake lights ----
+      // The same smoothed deceleration that dips the nose. No per-car material:
+      // the brake element is a mesh of its own that simply exists or does not.
+      const bl = m.userData.brake;
+      if (bl) {
+        // (against the direction of travel: pulling away in reverse is a
+        // negative acceleration too, and it is not braking)
+        const on = (car.speed < 0 ? -car._acc : car._acc) < -2.4 && Math.abs(car.speed) > 0.5;
+        if (bl.visible !== on) bl.visible = on;
+      }
+      // ---- contact shadow ----
+      // Rides the car's own matrix (so it lies along the hill with the car),
+      // except in the air, where it stays on the ground the car left and fades.
+      // (not for a car the co-op layer has hidden: a parked car a peer has
+      // claimed is drawn as his ghost, and its blob would stay behind alone)
+      if (blobs && m.visible && nb < blobs.userData.capacity) {
+        const air = (car.air ?? 0) > 0 ? Math.max(0, car.y - (car._surf ?? car.y)) : 0;
+        const sh = Math.max(0, 1 - air * 0.5);
+        _bp.set(car.x, car.y - air + 0.035, car.z);
+        _bs.set(car.wid * 1.42 * sh, 1, car.len * 1.16 * sh);
+        blobs.setMatrixAt(nb++, _bm.compose(_bp, m.quaternion, _bs));
+      }
       const b = m.userData.body;
       // crash damage shows: the shell sags and takes a permanent list — cheap,
       // and it reads as "that car has had a day" from any distance
@@ -1454,7 +1318,20 @@ export class Vehicles {
       b.rotation.z = car._roll + bumpR + (car._crushR ?? 0);  // +z roll lifts the right flank
       b.rotation.x = car._pitch;         // +x pitch lifts the nose
     }
+    if (this.ghosts?.eachCar) {
+      this._nb = nb;
+      this.ghosts.eachCar(this._ghostCar);
+      nb = this._nb;
+    }
+    if (blobs) {
+      blobs.count = nb;
+      blobs.instanceMatrix.needsUpdate = true;
+    }
   }
+}
+const _bp = new THREE.Vector3(), _bs = new THREE.Vector3(), _bm = new THREE.Matrix4();
+function drawAfterLight(o) {
+  if (o.isMesh && o.material && !o.material.transparent && o.renderOrder === 0) o.renderOrder = 1;
 }
 
 // ---- driveStep(car, ctl, dt, world, others): the player's arcade physics ----
@@ -1497,9 +1374,17 @@ export function dentCar(car, wx, wy, wz, nx, nz, depth) {
       const d = Math.hypot(px - lx, (py - ly) * 1.4, pz2 - lz);
       if (d >= R) continue;
       const t = 1 - d / R;
-      // smoothstep falloff × depth, plus crinkle noise off the vertex index
+      // smoothstep falloff × depth, plus crinkle noise off the vertex POSITION.
+      // It used to hash the vertex index, which was fine while every triangle
+      // owned its corners. The hull is indexed now and the glass, the trim and
+      // the lamps are separate meshes laid on it: two vertices that sit at the
+      // same spot must take the same push, or a dent tears the windscreen off
+      // the pillar it is draped over. And the wave is LONG (about half a
+      // metre): a draped layer rides 3 to 7 mm off the paint, so at the old
+      // 8 cm wavelength two stacked vertices still took pushes up to 2 cm
+      // apart and a hit nose came out as shards of grille and paint.
       const k = t * t * (3 - 2 * t) * depth;
-      const n = (Math.sin(i * 12.9898 + px * 78.233) * 0.5 + 0.5) * 0.35 + 0.65;
+      const n = (Math.sin(px * 13.1 + py * 9.7 + pz2 * 11.3) * 0.5 + 0.5) * 0.35 + 0.65;
       pos.setXYZ(i,
         px + lnx * k * n,
         py - k * 0.22 * n,                                   // metal folds DOWN a little too
@@ -2280,16 +2165,30 @@ function buildCabin(kind) {
   // The pillar IS the windscreen's rake: it runs from the glass base at the
   // cowl to the roof at the header station, so every kind's own screen angle
   // falls out of KIND without a single per-car constant.
-  const dy = roofY - scrY, dz = hdrZ - cowlZ, prx = Math.atan2(dz, dy), pt = 0.085;
+  const dy = roofY - scrY, dz = hdrZ - cowlZ, prx = Math.atan2(dz, dy), pt = 0.07;
   // Centring the prism ON the glass line would leave half of it OUTSIDE the
   // windscreen — a rotated box is also longer in y than its own length, since
   // half its thickness projects onto y as well. So: shorten it by its own
   // thickness, then push the whole thing along the screen's inward normal
   // (sin prx, −cos prx points outward) until it hangs entirely under the glass.
   const pLen = Math.max(0.15, Math.hypot(dy, dz) - pt * 1.6), pOff = pt / 2 + 0.008;
-  pairB(d.trim, 0.075, pLen, pt, s.pillarX,
-    (scrY + roofY) / 2 - Math.sin(prx) * pOff,
-    (cowlZ + hdrZ) / 2 + Math.cos(prx) * pOff, 0, prx);
+  // …and it LEANS IN with the glasshouse. The trim used to stand at the roof's
+  // half width from top to bottom, which on a saloon is 18 cm inboard of where
+  // the pillar actually meets the scuttle: a post rising out of the middle of
+  // the dashboard, straight in front of a driver who sits this close to the
+  // door. Foot at the glass base, head at the roof rail, like the pillar
+  // outside it. Cab-over kinds have upright slab sides and keep the old post.
+  const pFoot = s.g ? Math.max(s.pillarX, iwF - 0.03) : s.pillarX;
+  const pLean = Math.atan2(pFoot - s.pillarX, Math.hypot(dy, dz));
+  for (const sg of [-1, 1]) {
+    const pg = new THREE.BoxGeometry(0.06, pLen, pt);
+    pg.rotateZ(sg * pLean);                 // +z rotation tips the head toward −x
+    pg.rotateX(prx);
+    pg.translate(sg * (pFoot + s.pillarX) / 2,
+      (scrY + roofY) / 2 - Math.sin(prx) * pOff,
+      (cowlZ + hdrZ) / 2 + Math.cos(prx) * pOff);
+    d.trim.push(pg);
+  }
   B(d.trim, iwT * 2, 0.08, 0.16, 0, roofY - 0.055, hdrZ + 0.09);
   pairB(d.trim, 0.32, 0.022, 0.17, iwT * 0.50, roofY - 0.115, hdrZ + 0.17);
   // B-pillar: the deliberately narrow 'pp' greenhouse segment IS the pillar,

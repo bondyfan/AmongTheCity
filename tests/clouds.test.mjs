@@ -141,8 +141,14 @@ test('switching range rebuilds the sky and lets go of the old one', () => {
   assert.equal(c.dist, 'furthest');
   assert.equal(c.clusters.length, CLOUD_RANGES.furthest.n);
   assert.equal(c.range, CLOUD_RANGES.furthest.range);
-  // the group must not still be carrying the medium field's sprites
-  assert.equal(c.group.children.length, c.clusters.reduce((n, cl) => n + cl.puffs.length, 0));
+  // The sky must not still be carrying the medium field. This used to count
+  // the group's children, one THREE.Sprite per puff; the field is ONE instanced
+  // mesh now (clouds.js header), so what "let go" means is that the single mesh
+  // is the only child and its instance buffers were re-cut to the new count.
+  const puffs = c.clusters.reduce((n, cl) => n + cl.puffs.length, 0);
+  assert.equal(c.group.children.length, 1, 'the sky is one draw call');
+  assert.equal(c.puffCount, puffs);
+  assert.equal(c.mesh.geometry.getAttribute('iPos').count, puffs);
 });
 
 test('setting the range it already has does nothing, and junk is ignored', () => {
@@ -158,4 +164,43 @@ test('an unknown range at construction falls back rather than exploding', () => 
   const c = build('nonsense');
   assert.equal(c.dist, CLOUD_DIST_DEFAULT);
   assert.equal(c.clusters.length, CLOUD_RANGES[CLOUD_DIST_DEFAULT].n);
+});
+
+// ---------------------------------------------------------------------------
+// one draw call, drawn in the right order
+// ---------------------------------------------------------------------------
+
+test('the puffs reach the GPU far-to-near, whatever order they were built in', () => {
+  // Soft alpha quads blend in the order they are drawn. As separate sprites the
+  // renderer sorted them; as instances of one mesh nothing does, so update()
+  // has to hand them over back-to-front or a cloud's grey belly paints over
+  // its lit crown the moment you fly round it.
+  const c = build('medium');
+  const cam = new THREE.PerspectiveCamera(55, 16 / 9, 0.5, 6000);
+  cam.position.set(310, 240, -95);
+  c.update(0.016, cam, new THREE.Vector3(0.4, 0.8, 0.3), 0);
+  assert.ok(c.drawn > 500, `only ${c.drawn} puffs in view of a camera standing under the deck`);
+  assert.equal(c.mesh.geometry.instanceCount, c.drawn);
+  const pos = c.mesh.geometry.getAttribute('iPos').array;
+  let prev = Infinity, worst = 0;
+  for (let i = 0; i < c.drawn; i++) {
+    const d = Math.hypot(pos[i * 4] - 310, pos[i * 4 + 1] - 240, pos[i * 4 + 2] + 95);
+    // buckets are a few metres deep: allow that much disorder and no more
+    worst = Math.max(worst, d - prev);
+    prev = Math.min(prev, d);
+  }
+  assert.ok(worst < 12, `a puff is drawn ${worst.toFixed(1)} m out of order`);
+});
+
+test('a second update writes the same sky (nothing accumulates but the wind)', () => {
+  const c = build('medium');
+  const cam = new THREE.PerspectiveCamera(55, 16 / 9, 0.5, 6000);
+  cam.position.set(0, 230, 0);
+  const sun = new THREE.Vector3(0.4, 0.8, 0.3);
+  c.update(0, cam, sun, 0);
+  const first = Array.from(c.mesh.geometry.getAttribute('iCol').array.subarray(0, 64));
+  const n = c.drawn;
+  c.update(0, cam, sun, 0);
+  assert.equal(c.drawn, n);
+  assert.deepEqual(Array.from(c.mesh.geometry.getAttribute('iCol').array.subarray(0, 64)), first);
 });

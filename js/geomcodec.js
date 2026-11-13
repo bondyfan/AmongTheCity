@@ -84,7 +84,7 @@ const SQRT3 = Math.sqrt(3);           // three axes round independently — see 
 // lazily and parks on mats._facadeMat, so it has no slot of its own. flatFar is
 // unused by the builder today and costs one string to keep honest.
 const MAT_SLOTS = ['flat', 'water', 'building', 'trunk', 'flatFar', 'lampPost',
-  'lampHead', 'crown', 'doorTrim', 'doorSign'];
+  'lampHead', 'crown', 'doorTrim', 'doorSign', 'streetDeco', 'terrace', 'landmark'];
 const FACADE = 'facade';
 
 // Attribute encodings. `n` is three's `normalized` flag, which is what makes the

@@ -17,6 +17,7 @@
 
 import { COLORS } from './config.js';
 import { forEachChunkInRadius } from './geo.js';
+import { drawMark, drawRimMark } from './mapmarks.js';
 
 // Aeroway lines live in the road layer (see build-region.mjs) but are drawn at
 // their real width — a runway is the clearest landmark an air map has.
@@ -119,6 +120,11 @@ export class Minimap {
     this._R = -1;                    // cached HUD radius → font/arrow sizes
     this._renderT = 0;               // pending debounced-render timer (0 = none)
     this.waypoint = null;            // {x,z} mirrored from the world map, or null
+    // Gameplay marks (job offers, your car, pumps): an array of { x, z, kind,
+    // rim } owned and rewritten in place by js/career.js, read here by
+    // reference every frame. Glyphs live in js/mapmarks.js so the region map
+    // draws the identical ones.
+    this.markers = null;
     // ---- street-label state (see _scanStreets / _drawStreets) ----
     // Every array here is allocated ONCE and rewritten in place: labels are
     // the only per-frame loop in this file that could otherwise allocate.
@@ -340,6 +346,18 @@ export class Minimap {
       if (dx * dx + dz * dz > gate * gate) continue;
       g.fillRect(cx + dx * k - 1.5, cy + dz * k - 1.5, 3, 3);
     }
+    // gameplay marks: over the traffic, under the people. Inside the window a
+    // mark sits on its spot; outside it only the ones that asked for it (`rim`)
+    // become a chevron on the ring, drawn after the arrow so the clip is armed.
+    const marks = this.markers;
+    if (marks) {
+      const ms = Math.max(3.5, R * 0.055), lim = R - ms * 1.4;
+      for (let i = 0; i < marks.length; i++) {
+        const m = marks[i];
+        const mx = (m.x - px) * k, mz = (m.z - pz) * k;
+        if (mx * mx + mz * mz < lim * lim) drawMark(g, m.kind, cx + mx, cy + mz, ms);
+      }
+    }
     // co-op players, under the player's own arrow but over the traffic dots —
     // a friend must never be hidden by an AI car sharing the same pixel
     if (peers) this._drawPeers(g, cx, cy, R, k, px, pz, peers);
@@ -413,6 +431,22 @@ export class Minimap {
         g.stroke();
       }
       g.restore();
+    }
+    if (marks) {
+      const ms = Math.max(3.5, R * 0.055), lim = R - ms * 1.4;
+      for (let i = 0; i < marks.length; i++) {
+        const m = marks[i];
+        if (!m.rim) continue;
+        const mx = (m.x - px) * k, mz = (m.z - pz) * k;
+        if (mx * mx + mz * mz < lim * lim) continue;
+        g.save();
+        g.beginPath();
+        g.arc(cx, cy, R, 0, TAU);
+        g.clip();
+        g.translate(cx, cy);
+        drawRimMark(g, m.kind, mx, mz, R, a);
+        g.restore();
+      }
     }
     // rim ring + north tick at the top of the circle
     g.beginPath();
