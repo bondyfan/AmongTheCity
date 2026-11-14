@@ -310,6 +310,7 @@ const KIND = {
   bmw: {
     len: 4.7, wid: 1.86, wheelR: 0.33, axle: 1.44,
     accel: 9.0, vmax: 69, grip: 8.6, mass: 1.7,
+    driveRear: 0.95,          // rear-wheel drive: the throttle lives in the rear circle
     brand: 'bmw',
     badgeF: { size: 0.12, y: 0.675, dz: 0.29, rx: -1.33 }, badgeR: { size: 0.10, y: 0.62, dz: 0.02 },
     plateF: 0.38, plateR: 0.42,
@@ -327,6 +328,7 @@ const KIND = {
   mercedes: {
     len: 4.9, wid: 1.86, wheelR: 0.33, axle: 1.52,
     accel: 8.5, vmax: 67, grip: 8.2, mass: 1.9,
+    driveRear: 0.9,           // rear-wheel drive, a softer foot than the BMW's
     brand: 'mb',
     badgeF: { size: 0.20, y: 0.53, dz: -0.035 }, badgeR: { size: 0.10, y: 0.68, dz: 0.02 },
     plateF: 0.37, plateR: 0.44,
@@ -486,9 +488,7 @@ export function pickCarColor(kind) {
 export { CAR_COLORS };   // re-export so callers can grab the fallback pool here too
 
 // ---- collision tunables ----
-const HIT_SCRUB = 0.55;   // fraction of closing speed a car-car impact eats (40–70% band)
 const HIT_RANGE2 = 144;   // 12 m center-distance gate — covers even bus vs bus nose-to-nose
-const HIT_SPIN = 0.09;    // yaw a car takes from an off-centre shove, rad/s per m/s
 
 // ---- v13: the tyres get a say --------------------------------------------
 // "Ať se to fakt víc smýká, ať je to fakt jako v nějakém GTAčku."
@@ -561,6 +561,9 @@ const REAR_BIAS = 1.06;   // × rear grip against the front's
 // power-on oversteer so mild it read as understeer, and front brakes so weak a
 // panic stop never bit.
 const DRIVE_REAR = 0.60;  // share of THROTTLE the rear circle carries
+const SPIN_LOW = 1.5;     // rear-drive torque surplus in first gear (× delivered)…
+const SPIN_CAP = 0.86;      // …and never more than this share of the rear circle
+const SPIN_V = 20;        // …gone by this many m/s (72 km/h)
 const BRAKE_FRONT = 0.65; // …and of the BRAKES the front does
 const HB_MU = 0.30;       // handbrake: what is left of the rear tyre's grip…
 const HB_LAT = 0.35;      // …and of the circle it has to spend on cornering
@@ -649,8 +652,29 @@ function tyreStep(car, K, gas, hb, dt) {
   // Friction circle: rubber spent going forwards is rubber not available for
   // going sideways. This single term is where power-on oversteer comes from —
   // flooring it mid-corner eats the rear's circle and the tail leaves.
-  const rearShare = ax >= 0 ? DRIVE_REAR : 1 - BRAKE_FRONT;
-  const uR = Math.min(0.98, Math.abs(ax) * rearShare / Math.max(0.5, capR));
+  // The drive share is per KIND where the car says so: the BMW and the
+  // Mercedes are rear-wheel drive ("zadokolka" on their own badges), and a
+  // rear-drive car is the one whose tail a heavy right foot can swing out of a
+  // tight corner. The Škodas keep the old shared number on purpose: they are
+  // the car most people drive, and a keyboard throttle is always fully open.
+  const rearShare = ax >= 0 ? (K.driveRear ?? DRIVE_REAR) : 1 - BRAKE_FRONT;
+  // …and a rear-drive engine in a low gear can ask the rear tyres for more
+  // than they can give. The delivered acceleration above is what the car
+  // gets; the TORQUE behind it is what the tyres must carry, and in first and
+  // second that is more than the circle holds, so the tail lets go. It fades
+  // out by SPIN_V because in the high gears the same foot simply cannot.
+  //
+  // The surplus is CAPPED (SPIN_CAP) rather than allowed to eat the whole
+  // circle, and that cap is the line between a power slide and a spin. Let
+  // through, a BMW turning right at a junction at 25 km/h with W held (which
+  // is how everybody drives on a keyboard) went round 190°: the rear passed
+  // the Pacejka peak and the falling tail did the rest. Capped, the tail steps
+  // out a few degrees, smokes, and comes back when the wheel straightens.
+  let uR = Math.min(0.98, Math.abs(ax) * rearShare / Math.max(0.5, capR));
+  if (ax > 0 && K.driveRear) {
+    const uSpin = uR * (1 + SPIN_LOW * Math.max(0, 1 - vx / SPIN_V));
+    uR = Math.max(uR, Math.min(SPIN_CAP, uSpin));
+  }
   let latR = Math.sqrt(1 - uR * uR);
   const uF = Math.min(0.98, Math.abs(ax) * (1 - rearShare) / Math.max(0.5, capF));
   const latF = Math.sqrt(1 - uF * uF);
@@ -680,13 +704,22 @@ function tyreStep(car, K, gas, hb, dt) {
   vx += (aLong - vy * r) * dt;
   vy += (aLat + vx * r) * dt;
   r += rdot * dt;
+  // What the body FEELS, for the springs (bodyStep): the tyre forces, which
+  // is the acceleration of the car in its own frame. A coasting car's drag is
+  // included, the rotating-frame terms are not, because a passenger is thrown
+  // by the forces and not by the bookkeeping of a turning coordinate system.
+  car._aLat = aLat;
+  car._aLong = aLong;
 
   // ---- the low-speed kinematic constraint ----
   // Below walking-into-jogging pace real tyres do not slip at all: they roll,
   // and the geometry alone decides the yaw rate. The force model cannot know
   // that (its forces vanish with speed, so a car would park like a boat), so
   // the kinematic answer is blended back in as a soft pull that dies at KIN_V.
-  const kin = 1 - Math.abs(vx) / KIN_V;
+  // GROUND speed, not the forward component: a car sliding sideways at 25
+  // m/s has almost no vx, and judging it by vx alone treated a broadside as a
+  // car at parking pace and stopped it dead in a metre and a half.
+  const kin = 1 - Math.sqrt(vx * vx + vy * vy) / KIN_V;
   if (kin > 0) {
     const g2 = Math.min(1, KIN_K * kin * dt);
     r += (-Math.tan(d) * vx / L - r) * g2;
@@ -696,6 +729,9 @@ function tyreStep(car, K, gas, hb, dt) {
   if (ax > 0 && vx > K.vmax) vx = K.vmax;
   if (ax < 0 && vx < -CAR.vrev) vx = -CAR.vrev;
   if (coast !== 0 && Math.abs(vx) < 0.02) vx = 0;   // coast to a real stop, not an asymptote
+  // rolling resistance has nothing to push against at a standstill, and a
+  // parked car must not sit with its nose dipped by it forever
+  if (vx === 0 && ax === 0) car._aLong = 0;
   car.speed = vx;
   car._lat = vy < -LAT_MAX ? -LAT_MAX : vy > LAT_MAX ? LAT_MAX : vy;
   car.yaw = r < -R_MAX ? -R_MAX : r > R_MAX ? R_MAX : r;
@@ -1200,8 +1236,17 @@ export class Vehicles {
       const acc = (car.speed - car._pv) / Math.max(dt, 1e-4);
       car._pv = car.speed;
       car._acc += (acc - car._acc) * Math.min(1, 6 * dt);   // smooth the jitter
-      car._roll += (clamp(car.steer * car.speed * 0.004, -0.05, 0.05) - car._roll) * k;
-      car._pitch += (clamp(car._acc * 0.008, -0.05, 0.05) - car._pitch) * k;
+      // The player's car rides real springs (bodyStep, fed by the tyre
+      // forces); everyone else's keeps the cheap lean, and a car the player
+      // has just left eases from the one into the other.
+      if (car._bLive) {
+        car._roll = car._bRoll; car._pitch = car._bPitch;
+        car._bLive = false;
+      } else {
+        car._roll += (clamp(car.steer * car.speed * 0.004, -0.05, 0.05) - car._roll) * k;
+        car._pitch += (clamp(car._acc * 0.008, -0.05, 0.05) - car._pitch) * k;
+        if (car._heave) car._heave *= 1 - k;
+      }
       // OFFROAD shake: the body judders and rocks with speed over rough
       // ground. Three incommensurate sines beat against each other so the
       // bounce never settles into a metronome; amplitude follows both how far
@@ -1314,7 +1359,7 @@ export class Vehicles {
       // and it reads as "that car has had a day" from any distance
       const dmgK = Math.min(1, car.damage ?? 0);
       // …and the springs compress under a landing, then push back out
-      b.position.y = -0.055 * dmgK - 0.14 * (car._sag ?? 0);
+      b.position.y = -0.055 * dmgK - 0.14 * (car._sag ?? 0) + (car._heave ?? 0);
       b.rotation.z = car._roll + bumpR + (car._crushR ?? 0);  // +z roll lifts the right flank
       b.rotation.x = car._pitch;         // +x pitch lifts the nose
     }
@@ -1398,6 +1443,299 @@ export function dentCar(car, wx, wy, wz, nx, nz, depth) {
   }
 }
 
+// ---- v14: collisions that bounce, and a body that has weight -----------------
+// "Udělej to ovládání auta trošku lepší, jako v GTA San Andreas, s fyzikou."
+//
+// The wall pass used to SCALE the velocity (speed × 0.4, slide × 0.3) on every
+// step that any corner touched masonry. Scaling is not a collision response:
+// the velocity still points into the wall, so with the throttle held the car
+// re-hit the same wall every frame, ground to a halt against it, took a fresh
+// crunch and a fresh slice of damage each time (a 40 km/h tap measured 0.85 of
+// a write-off) and a 30° glance at 70 km/h stopped dead instead of scraping off.
+//
+// What replaced it is an ordinary rigid-body impulse at the contact point:
+// the push the world applied gives the normal, the contact offset gives the
+// lever, and the impulse removes the closing velocity of THAT POINT (so a hit
+// on one corner spins the car, a square hit on both does not), hands a little
+// of it back as bounce, and lets the friction of the scrape take at most a
+// fixed share of the tangential motion. Everything stays in specific units
+// (mass 1) exactly like the tyre model, with the same yaw inertia.
+const COL_STEP = 0.4;     // m of travel between collision passes: no tunnelling
+const COL_MAX = 8;        // …and at most this many passes per call
+const E_HI = 0.34;        // restitution of a gentle knock…
+const E_LO = 0.1;         // …and of a 70 km/h one, where the crumple zone eats it
+const E_REST = 1.0;       // m/s of closing below which contact just rests (no jitter)
+const WALL_MU = 0.32;     // friction of metal scraping along a wall
+const HIT_DMG_V = 2;      // m/s of closing speed before anything is bent
+
+/** Bounce left in a hit closing at `vn` m/s. Hard hits are plastic. */
+function restitution(vn) {
+  if (vn < E_REST) return 0;
+  const k = clamp((vn - 2) / 18, 0, 1);
+  return E_HI + (E_LO - E_HI) * k;
+}
+
+/** Yaw radius of gyration², the tyre model's own number. */
+function yawInertia(car) {
+  const L = car.len * WHEELBASE, a = L * CG_FRONT;
+  return KZ2 * a * (L - a);
+}
+
+/**
+ * Keep the hardest hit of this driveStep call on the car, for whoever wants to
+ * know what just happened (js/ejection.js decides from it whether the driver
+ * stays in his seat). impactCos is 1 for the nose going square into the thing,
+ * 0 for a broadside, negative for reversing into it. The velocity is the car's
+ * ground velocity BEFORE the impulse, which is the speed an unbelted body keeps.
+ */
+function noteImpact(car, vn, nx, nz, vwx, vwz, what) {
+  if (vn <= (car.impactV ?? 0)) return;
+  car.impactV = vn;
+  car.impactCos = Math.sin(car.heading) * nx + Math.cos(car.heading) * nz;
+  car.impactVx = vwx; car.impactVz = vwz;
+  car.impactWith = what;
+}
+
+// ---- CAR-CAR: two-circle bodies, impulse at the contact ----
+// Each car ≈ two discs riding its long axis (front/rear, r ≈ wid·0.62):
+// the cheapest shape that lets glancing hits slide off and T-bones connect
+// at the door instead of a phantom bbox corner. Runs BEFORE the wall pass
+// so a shoved player still ends the frame outside the architecture.
+function carCarPass(car, others, world) {
+  const h = car.heading;
+  const fx = -Math.sin(h), fz = -Math.cos(h);
+  const rx = Math.cos(h), rz = -Math.sin(h);
+  const rA = car.wid * 0.62, dA = Math.max(0, car.len / 2 - rA);
+  const mA = kindOf(car.kind).mass;
+  const I = yawInertia(car);
+  for (const o of others) {
+    if (o === car) continue;           // the iterable may contain ourselves
+    const cdx = car.x - o.x, cdz = car.z - o.z;
+    if (cdx * cdx + cdz * cdz > HIT_RANGE2) continue;   // 12 m gate
+    const ofx = -Math.sin(o.heading), ofz = -Math.cos(o.heading);
+    const rB = o.wid * 0.62, dB = Math.max(0, o.len / 2 - rB);
+    const mB = kindOf(o.kind).mass;
+    const wA = mB / (mA + mB), wB = mA / (mA + mB);     // light party moves more
+    for (let ci = -1; ci <= 1; ci += 2) for (let cj = -1; cj <= 1; cj += 2) {
+      const aox = fx * dA * ci, aoz = fz * dA * ci;     // our disc, their disc
+      const box = ofx * dB * cj, boz = ofz * dB * cj;
+      let nx = (car.x + aox) - (o.x + box), nz = (car.z + aoz) - (o.z + boz);
+      const d2 = nx * nx + nz * nz, rr = rA + rB;
+      if (d2 >= rr * rr) continue;
+      const d = Math.sqrt(d2) || 1e-6;
+      nx /= d; nz /= d;                // contact normal, other → us
+      const pen = rr - d;
+      car.x += nx * pen * wA; car.z += nz * pen * wA;   // separate both bodies
+      o.x -= nx * pen * wB; o.z -= nz * pen * wB;
+      // the contact point on our side, as a lever from our centre
+      const ax = aox - nx * rA, az = aoz - nz * rA;
+      const r = car.yaw ?? 0, lat = car._lat ?? 0;
+      const vwx = fx * car.speed + rx * lat, vwz = fz * car.speed + rz * lat;
+      const cvx = vwx + r * az - ofx * o.speed;
+      const cvz = vwz - r * ax - ofz * o.speed;
+      const vn = cvx * nx + cvz * nz;  // < 0 while closing
+      if (vn < 0) {
+        const closing = -vn;
+        // Momentum, not a scrub factor. The old 0.55 of the closing speed left
+        // the two still closing after the "impact", so the next step hit again
+        // and the cars ground into each other rather than knocking apart. A
+        // truck barely feels a hatch, a hatch very much feels a truck: that is
+        // the two inverse masses, and the lever term is what makes a hit on the
+        // rear quarter swing the tail.
+        const e = restitution(closing);
+        const qn = nx * az - nz * ax;
+        const invA = (1 + qn * qn / I) / mA, invB = 1 / mB;
+        const j = (1 + e) * closing / (invA + invB);
+        const dvx = nx * j / mA, dvz = nz * j / mA;
+        car.speed += dvx * fx + dvz * fz;
+        car._lat = lat + dvx * rx + dvz * rz;
+        car.yaw = clamp(r + qn * j / (mA * I), -R_MAX, R_MAX);
+        // the other car only carries a scalar speed: project its shove onto
+        // its own forward, clamp against absurd launches, and twist it a touch
+        o.speed = clamp(o.speed - (nx * ofx + nz * ofz) * j / mB, -55, 55);
+        o.heading += clamp((boz * -nx - box * -nz) * j / mB * 0.02, -0.04, 0.04);
+        noteImpact(car, closing, nx, nz, vwx, vwz, 'car');
+        // BeamNG-lite bookkeeping: both parties take damage by closing
+        // speed, the hit crunches audibly, and a hard one sheds trim
+        if (closing > HIT_DMG_V) {
+          const sev = Math.min(1, closing / 18);
+          car.damage = Math.min(1.2, (car.damage ?? 0) + sev * 0.45);
+          o.damage = Math.min(1.2, (o.damage ?? 0) + sev * 0.45);
+          crash(sev);
+          const mx = (car.x + o.x) / 2, mz = (car.z + o.z) / 2;
+          dentCar(car, mx, car.y + 0.55, mz, -nx, -nz, sev * 0.3);
+          dentCar(o, mx, o.y + 0.55, mz, nx, nz, sev * 0.3);
+          if (closing > 6) world.crashDebris?.(
+            (car.x + o.x) / 2, car.y, (car.z + o.z) / 2, car.color,
+            Math.min(8, 2 + closing | 0), closing * 0.5);
+          if (sev > 0.4) car._crushR = ((car._crushR ?? 0) + (Math.random() - 0.5) * 0.05);
+        }
+      }
+      o._rammedT = 2.5;                // tell the traffic AI it just got hit
+    }
+  }
+}
+
+// A LAMP MAST GOES OVER BEFORE IT IS A WALL. Asked first, because
+// world.collide() below now treats a standing mast as solid, and a column
+// you hit at fifty should end up in the gutter, not stop the car dead like
+// masonry. Below the felling speed nothing happens here and the mast wins
+// the ordinary way, which is what parking against one should feel like.
+function polePass(car, world) {
+  if (!world.poles?.strike) return;
+  const vx = -Math.sin(car.heading) * car.speed, vz = -Math.cos(car.heading) * car.speed;
+  const nose = car.len / 2;
+  const felled = world.poles.strike(
+    car.x - Math.sin(car.heading) * nose, car.z - Math.cos(car.heading) * nose,
+    vx, vz, car.wid / 2 + 0.4) ?? 0;
+  if (felled) {
+    // it costs the car something, but nothing like a wall: a lamp column is
+    // a thin steel tube and the car walks away with a dent
+    car.speed *= 0.86;
+    car.damage = Math.min(1.2, (car.damage ?? 0) + 0.05 * felled);
+  }
+}
+
+// 4-corner sampling against buildings + water (6 points on truck/bus, since a
+// long flank must not thread itself through a building corner): every pushed
+// point drags the whole car out with it, and their summed push is the contact
+// normal. Points are pulled slightly inboard so brushing a wall reads as paint
+// contact, not a force field.
+function wallPass(car, world) {
+  const h = car.heading;
+  const fx = -Math.sin(h), fz = -Math.cos(h);
+  const rx = Math.cos(h), rz = -Math.sin(h);
+  const hl = car.len / 2 - 0.2, hw = car.wid / 2 - 0.1;
+  const nPts = car.len > 5.5 ? 6 : 4;
+  // Every corner is asked from the SAME pose before anything moves. Moving
+  // the car after each one (the old way) meant the first corner's push lifted
+  // the second clear of the wall, so a square hit read as a one-corner hit and
+  // span the car on a dead-straight run into a flat wall.
+  let n = 0, snx = 0, snz = 0, sax = 0, saz = 0, sw = 0, deep = 0;
+  for (let i = 0; i < nPts; i++) {
+    const of = i < 2 ? hl : i < 4 ? -hl : 0, os = i & 1 ? hw : -hw;
+    const wox = fx * of + rx * os, woz = fz * of + rz * os;
+    _pt.x = car.x + wox; _pt.z = car.z + woz;
+    const ox = _pt.x, oz = _pt.z;
+    if (world.collide(_pt, 0.5)) {
+      const px = _pt.x - ox, pz = _pt.z - oz;
+      const pl = Math.sqrt(px * px + pz * pz);
+      snx += px; snz += pz; n++;
+      sax += wox * pl; saz += woz * pl; sw += pl;   // deeper corners carry the lever
+      if (pl > deep) { deep = pl; _hitX = ox; _hitZ = oz; }   // where metal met masonry
+    }
+  }
+  if (!n) return;
+  const nl = Math.sqrt(snx * snx + snz * snz);
+  if (nl < 1e-6 || sw < 1e-9) return;
+  const nx = snx / nl, nz = snz / nl;            // out of the wall, into the car
+  // out by the deepest corner's push along that normal, all of the car at once
+  let depth = 0;
+  for (let i = 0; i < nPts; i++) {
+    const of = i < 2 ? hl : i < 4 ? -hl : 0, os = i & 1 ? hw : -hw;
+    _pt.x = car.x + fx * of + rx * os; _pt.z = car.z + fz * of + rz * os;
+    const ox = _pt.x, oz = _pt.z;
+    if (world.collide(_pt, 0.5)) depth = Math.max(depth, (_pt.x - ox) * nx + (_pt.z - oz) * nz);
+  }
+  car.x += nx * depth; car.z += nz * depth;
+  const ax = sax / sw, az = saz / sw;            // lever: centre → contact
+  const I = yawInertia(car);
+  const r = car.yaw ?? 0, lat = car._lat ?? 0;
+  const vwx = fx * car.speed + rx * lat, vwz = fz * car.speed + rz * lat;
+  // the contact point's velocity: the centre's plus the spin's (dp/dt = r·(pz, −px))
+  const cvx = vwx + r * az, cvz = vwz - r * ax;
+  const vn = cvx * nx + cvz * nz;
+  if (vn >= 0) return;                           // separating: the push was the contact
+  const impact = -vn;
+  const e = restitution(impact);
+  const qn = nx * az - nz * ax;
+  const jn = impact * (1 + e) / (1 + qn * qn / I);
+  // the scrape: friction takes the sliding of the contact point, up to μ·jn
+  const tx = -nz, tz = nx;
+  const qt = tx * az - tz * ax;
+  const vt = cvx * tx + cvz * tz;
+  const jmax = WALL_MU * jn;
+  const jt = clamp(-vt / (1 + qt * qt / I), -jmax, jmax);
+  const Jx = nx * jn + tx * jt, Jz = nz * jn + tz * jt;
+  const nvx = vwx + Jx, nvz = vwz + Jz;
+  car.speed = nvx * fx + nvz * fz;
+  car._lat = nvx * rx + nvz * rz;
+  car.yaw = clamp(r + (Jx * az - Jz * ax) / I, -R_MAX, R_MAX);
+  noteImpact(car, impact, nx, nz, vwx, vwz, 'wall');
+  // CLOSING speed of the contact, not longitudinal speed: a car that arrives
+  // at a wall sideways out of a drift used to hit it for free, because
+  // car.speed reads near zero in a broadside. It still cannot, and a car that
+  // merely scrapes along a wall now pays for the scrape and not for its speed.
+  if (impact > HIT_DMG_V) {
+    // the wall wins, the car pays: severity by impact speed. CRASH sound,
+    // permanent damage, a spray of body-colour trim, and above ~50 km/h
+    // the BUILDING pays too: a small localized blast (a fraction of a
+    // rocket) knocks a few pieces off the facade where the nose went in.
+    const sev = Math.min(1, impact / 20);
+    car.damage = Math.min(1.2, (car.damage ?? 0) + sev * 0.55);
+    crash(sev);
+    // the push normal points OUT of the wall = into the car: dent along it
+    dentCar(car, _hitX, car.y + 0.55, _hitZ, nx, nz, sev * 0.34);
+    world.crashDebris?.(_hitX, car.y, _hitZ, car.color,
+      Math.min(10, 2 + impact * 0.5 | 0), impact * 0.45);
+    if (sev > 0.4) car._crushR = ((car._crushR ?? 0) + (Math.random() - 0.5) * 0.07);
+    car._chipCd = Math.max(0, (car._chipCd ?? 0));
+    if (impact > 14 && car._chipCd <= 0 && world.damageBuilding) {
+      car._chipCd = 1.5;
+      const hy = car.y + 1.0, rad = 2.0 + sev * 1.2;
+      world.damageBuilding(null, _hitX, hy, _hitZ, rad);
+      // …and the same hole on everyone else's copy of that facade. Same
+      // {x,y,z,r} shape city.applyHit() takes, so the receiver has nothing to
+      // translate. Rounded to 10 cm: this is a 2–3 m blast sphere, the extra
+      // digits are pure bandwidth. Rate-limited inside emitVehicleEvent:
+      // per-car _chipCd (1.5 s) is not a global cap and never was.
+      emitVehicleEvent('vhit', {
+        x: +_hitX.toFixed(1), y: +hy.toFixed(1), z: +_hitZ.toFixed(1),
+        r: +rad.toFixed(2),
+      });
+    }
+  }
+}
+
+// ---- the body on its springs ----
+// The shell used to lean by `steer × speed × 0.004`, a guess with a clamp at
+// 2.9°, and pitch off a differentiated speed. It now rides two damped springs
+// driven by the accelerations the tyres actually produced, so the weight shows
+// where it really goes: the nose dives when the brakes bite and lifts back
+// with a little overshoot when they let go, the shell leans out of a corner in
+// proportion to the g it is pulling and rocks back through a quick S-bend.
+// Mesh only: none of this touches the tyre model, car.y or the ground
+// attitude (_gp/_gr), so nothing that drives or collides can see it.
+const ROLL_K = 0.0072;    // rad of roll per m/s² of cornering: ~4° at 1 g, GTA-soft
+const PITCH_K = 0.0052;   // rad of pitch per m/s² along the car: ~3° in a panic stop
+const ROLL_MAX = 0.12, PITCH_MAX = 0.075;
+const BODY_W = 8.5;       // rad/s, the sprung body's natural frequency (≈1.35 Hz)
+const BODY_Z = 0.42;      // damping ratio: one visible overshoot, then settled
+const HEAVE_W = 14;       // rad/s up and down (≈2.2 Hz): a kerb is a quick jolt
+const HEAVE_Z = 0.38;
+const HEAVE_SOAK = 0.85;  // share of a surface step the springs take (the tyre the rest)
+const HEAVE_MAX = 0.11;   // m either way before the bump stops
+function bodyStep(car, dt) {
+  const n = Math.max(1, Math.ceil(dt * 120));
+  const h = dt / n;
+  const tR = clamp(ROLL_K * (car._aLat ?? 0), -ROLL_MAX, ROLL_MAX);
+  const tP = clamp(PITCH_K * (car._aLong ?? 0), -PITCH_MAX, PITCH_MAX);
+  let r = car._bRoll ?? 0, rv = car._bRollV ?? 0;
+  let p = car._bPitch ?? 0, pv = car._bPitchV ?? 0;
+  let y = car._heave ?? 0, yv = car._heaveV ?? 0;
+  const w2 = BODY_W * BODY_W, c = 2 * BODY_Z * BODY_W;
+  const hw2 = HEAVE_W * HEAVE_W, hc = 2 * HEAVE_Z * HEAVE_W;
+  for (let i = 0; i < n; i++) {
+    rv += (w2 * (tR - r) - c * rv) * h; r += rv * h;
+    pv += (w2 * (tP - p) - c * pv) * h; p += pv * h;
+    yv += (-hw2 * y - hc * yv) * h; y += yv * h;
+  }
+  car._bRoll = clamp(r, -ROLL_MAX * 1.4, ROLL_MAX * 1.4); car._bRollV = rv;
+  car._bPitch = clamp(p, -PITCH_MAX * 1.4, PITCH_MAX * 1.4); car._bPitchV = pv;
+  car._heave = clamp(y, -HEAVE_MAX, HEAVE_MAX); car._heaveV = clamp(yv, -3, 3);
+  car._bLive = true;               // vehicles.update: this car's shell is sprung
+}
+
 export function driveStep(car, ctl, dt, world, others) {
   // crash damage starves the drivetrain: a wreck at damage ≥ 1 no longer
   // pulls at all, and everything in between loses proportionate punch
@@ -1433,20 +1771,31 @@ export function driveStep(car, ctl, dt, world, others) {
   // dt arrives as anything up to 1/20 (the clamp above, and stepGame will hand
   // us twenty of those in one tick after a hidden tab). A tyre model integrated
   // at 20 Hz is a tyre model that oscillates and then spins the car, so it runs
-  // at SUB_DT regardless of what the frame is doing. Six substeps at the worst
-  // case, one or two normally; everything in tyreStep is arithmetic on scalars.
+  // at SUB_DT regardless of what the frame is doing. Everything in tyreStep is
+  // arithmetic on scalars.
   const gas = clamp(ctl.gas ?? 0, -1, 1);
   const hb = !!ctl.brake;
-  const nSub = Math.max(1, Math.ceil(dt / SUB_DT));
-  const sdt = dt / nSub;
-  for (let i = 0; i < nSub; i++) tyreStep(car, K, gas, hb, sdt);
-
-  // The body axes AFTER the substeps — the collision and wall passes below both
-  // work in them, and `s` is what those passes call the longitudinal speed.
-  const s = car.speed;
-  const h = car.heading;
-  const fx = -Math.sin(h), fz = -Math.cos(h);   // forward
-  const rx = Math.cos(h), rz = -Math.sin(h);    // right
+  car.impactV = 0; car.impactCos = 0; car.impactWith = null;
+  // ---- …and the collisions on theirs ----
+  // One wall pass after a 1/20 s step at 130 km/h is 1.8 m of travel, and a
+  // 30 cm wall (a garden wall, a parapet) is simply not there at either end of
+  // it: measured, the car came out the far side. So the step is cut into
+  // pieces no longer than COL_STEP and the tyres, the other cars, the masts and
+  // the walls each get a say after every piece. At 60 fps in town that is one
+  // or two passes; it only multiplies when the frame is long or the car fast.
+  const vg0 = Math.sqrt(car.speed * car.speed + (car._lat ?? 0) * (car._lat ?? 0)) + K.accel * dt;
+  const nCol = Math.min(COL_MAX, Math.max(1, Math.ceil(vg0 * dt / COL_STEP)));
+  const cdt = dt / nCol;
+  const nSub = Math.max(1, Math.ceil(cdt / SUB_DT));
+  const sdt = cdt / nSub;
+  for (let c = 0; c < nCol; c++) {
+    for (let i = 0; i < nSub; i++) tyreStep(car, K, gas, hb, sdt);
+    if (others) carCarPass(car, others, world);
+    polePass(car, world);
+    wallPass(car, world);
+  }
+  bodyStep(car, dt);
+  if ((car._chipCd ?? 0) > 0) car._chipCd -= dt;
 
   // ---- what the rest of the game is told about the slide ----
   // GROUND speed, not car.speed. car.speed is longitudinal by contract and a
@@ -1496,155 +1845,6 @@ export function driveStep(car, ctl, dt, world, others) {
   car._slipPrev = car.slip01;
   car._hbPrev = hb;
 
-  // ---- CAR-CAR: two-circle bodies, mass-weighted shove ----
-  // Each car ≈ two discs riding its long axis (front/rear, r ≈ wid·0.62) —
-  // the cheapest shape that lets glancing hits slide off and T-bones connect
-  // at the door instead of a phantom bbox corner. Runs BEFORE the wall pass
-  // so a shoved player still ends the frame outside the architecture.
-  if (others) {
-    const rA = car.wid * 0.62, dA = Math.max(0, car.len / 2 - rA);
-    for (const o of others) {
-      if (o === car) continue;           // the iterable may contain ourselves
-      const cdx = car.x - o.x, cdz = car.z - o.z;
-      if (cdx * cdx + cdz * cdz > HIT_RANGE2) continue;   // 12 m gate
-      const ofx = -Math.sin(o.heading), ofz = -Math.cos(o.heading);
-      const rB = o.wid * 0.62, dB = Math.max(0, o.len / 2 - rB);
-      const mA = kindOf(car.kind).mass;
-      const mB = kindOf(o.kind).mass;
-      const wA = mB / (mA + mB), wB = mA / (mA + mB);     // light party moves more
-      for (let ci = -1; ci <= 1; ci += 2) for (let cj = -1; cj <= 1; cj += 2) {
-        const aox = fx * dA * ci, aoz = fz * dA * ci;     // our disc, their disc
-        const box = ofx * dB * cj, boz = ofz * dB * cj;
-        let nx = (car.x + aox) - (o.x + box), nz = (car.z + aoz) - (o.z + boz);
-        const d2 = nx * nx + nz * nz, rr = rA + rB;
-        if (d2 >= rr * rr) continue;
-        const d = Math.sqrt(d2) || 1e-6;
-        nx /= d; nz /= d;                // contact normal, other → us
-        const pen = rr - d;
-        car.x += nx * pen * wA; car.z += nz * pen * wA;   // separate both bodies
-        o.x -= nx * pen * wB; o.z -= nz * pen * wB;
-        // impulse: scrub HIT_SCRUB of the closing speed along the normal and
-        // hand it out by mass ratio — a truck barely feels a hatch, a hatch
-        // very much feels a truck
-        const vRx = (fx * s + rx * car._lat) - ofx * o.speed;
-        const vRz = (fz * s + rz * car._lat) - ofz * o.speed;
-        const closing = -(vRx * nx + vRz * nz);           // >0 when approaching
-        if (closing > 0) {
-          const imp = closing * HIT_SCRUB;
-          // BeamNG-lite bookkeeping: both parties take damage by closing
-          // speed, the hit crunches audibly, and a hard one sheds trim
-          if (closing > 2) {
-            const sev = Math.min(1, closing / 18);
-            car.damage = Math.min(1.2, (car.damage ?? 0) + sev * 0.45);
-            o.damage = Math.min(1.2, (o.damage ?? 0) + sev * 0.45);
-            crash(sev);
-            const mx = (car.x + o.x) / 2, mz = (car.z + o.z) / 2;
-            dentCar(car, mx, car.y + 0.55, mz, -nx, -nz, sev * 0.3);
-            dentCar(o, mx, o.y + 0.55, mz, nx, nz, sev * 0.3);
-            if (closing > 6) world.crashDebris?.(
-              (car.x + o.x) / 2, car.y, (car.z + o.z) / 2, car.color,
-              Math.min(8, 2 + closing | 0), closing * 0.5);
-            if (sev > 0.4) car._crushR = ((car._crushR ?? 0) + (Math.random() - 0.5) * 0.05);
-          }
-          // our delta-v decomposed back into the scalar speed + lateral slide
-          car.speed += (nx * fx + nz * fz) * imp * wA;
-          car._lat += (nx * rx + nz * rz) * imp * wA;
-          // the other car only carries a scalar speed — project its shove onto
-          // its own forward, clamp against absurd launches
-          o.speed = clamp(o.speed - (nx * ofx + nz * ofz) * imp * wB, -55, 55);
-          // off-center hits twist both cars (same torque form as the wall hit).
-          // Ours also takes real yaw RATE now rather than a one-frame nudge —
-          // with rotational inertia in the model, a T-bone should set the car
-          // spinning and leave the player to catch it.
-          car.heading += clamp((aoz * nx - aox * nz) * imp * 0.02, -0.05, 0.05);
-          car.yaw = clamp((car.yaw ?? 0) + (aoz * nx - aox * nz) * imp * HIT_SPIN, -R_MAX, R_MAX);
-          o.heading += clamp((boz * -nx - box * -nz) * imp * 0.02, -0.04, 0.04);
-        }
-        o._rammedT = 2.5;                // tell the traffic AI it just got hit
-      }
-    }
-  }
-
-  // 4-corner sampling against buildings + water (6 points on truck/bus — a
-  // long flank must not thread itself through a building corner): any pushed
-  // point drags the whole car with it, the 2D torque of the push glances the
-  // nose off the wall, and the impact scrubs 60% of the speed. Points are
-  // pulled slightly inboard so brushing a wall reads as paint contact, not a
-  // force field.
-  const hl = car.len / 2 - 0.2, hw = car.wid / 2 - 0.1;
-  const nPts = car.len > 5.5 ? 6 : 4;
-  let hit = false;
-  // A LAMP MAST GOES OVER BEFORE IT IS A WALL. Asked first, because
-  // world.collide() below now treats a standing mast as solid — and a column
-  // you hit at fifty should end up in the gutter, not stop the car dead like
-  // masonry. Below the felling speed nothing happens here and the mast wins
-  // the ordinary way, which is what parking against one should feel like.
-  {
-    const vx = -Math.sin(car.heading) * car.speed, vz = -Math.cos(car.heading) * car.speed;
-    const nose = car.len / 2;
-    const felled = world.poles?.strike?.(
-      car.x - Math.sin(car.heading) * nose, car.z - Math.cos(car.heading) * nose,
-      vx, vz, car.wid / 2 + 0.4) ?? 0;
-    if (felled) {
-      // it costs the car something, but nothing like a wall: a lamp column is
-      // a thin steel tube and the car walks away with a dent
-      car.speed *= 0.86;
-      car.damage = Math.min(1.2, (car.damage ?? 0) + 0.05 * felled);
-    }
-  }
-  for (let i = 0; i < nPts; i++) {
-    const of = i < 2 ? hl : i < 4 ? -hl : 0, os = i & 1 ? hw : -hw;
-    const wox = fx * of + rx * os, woz = fz * of + rz * os;
-    _pt.x = car.x + wox; _pt.z = car.z + woz;
-    const ox = _pt.x, oz = _pt.z;
-    if (world.collide(_pt, 0.5)) {
-      const px = _pt.x - ox, pz = _pt.z - oz;
-      car.x += px; car.z += pz;
-      car.heading += clamp((woz * px - wox * pz) * 0.03, -0.05, 0.05);
-      hit = true;
-      _hitX = ox; _hitZ = oz;                    // where metal met masonry
-    }
-  }
-  if (hit) {
-    // GROUND speed, not longitudinal. A car that arrives at a wall sideways out
-    // of a drift used to hit it for free: car.speed reads near zero in a
-    // broadside, so there was no crunch, no damage and no debris. Now that
-    // slides are a state you can hold, that stopped being a rare case.
-    const impact = Math.sqrt(car.speed * car.speed + (car._lat ?? 0) * (car._lat ?? 0));
-    car.speed *= 0.4; car._lat *= 0.3;
-    car.yaw = (car.yaw ?? 0) * 0.5;      // the wall takes the spin out too
-    if (impact > 2) {
-      // the wall wins, the car pays: severity by impact speed. CRASH sound,
-      // permanent damage, a spray of body-colour trim — and above ~50 km/h
-      // the BUILDING pays too: a small localized blast (a fraction of a
-      // rocket) knocks a few pieces off the facade where the nose went in.
-      const sev = Math.min(1, impact / 20);
-      car.damage = Math.min(1.2, (car.damage ?? 0) + sev * 0.55);
-      crash(sev);
-      // the push normal points OUT of the wall = into the car: dent along it
-      dentCar(car, _hitX, car.y + 0.55, _hitZ,
-        car.x - _hitX, car.z - _hitZ, sev * 0.34);
-      world.crashDebris?.(_hitX, car.y, _hitZ, car.color,
-        Math.min(10, 2 + impact * 0.5 | 0), impact * 0.45);
-      if (sev > 0.4) car._crushR = ((car._crushR ?? 0) + (Math.random() - 0.5) * 0.07);
-      car._chipCd = Math.max(0, (car._chipCd ?? 0));
-      if (impact > 14 && car._chipCd <= 0 && world.damageBuilding) {
-        car._chipCd = 1.5;
-        const hy = car.y + 1.0, r = 2.0 + sev * 1.2;
-        world.damageBuilding(null, _hitX, hy, _hitZ, r);
-        // …and the same hole on everyone else's copy of that facade. Same
-        // {x,y,z,r} shape city.applyHit() takes, so the receiver has nothing to
-        // translate. Rounded to 10 cm: this is a 2–3 m blast sphere, the extra
-        // digits are pure bandwidth. Rate-limited inside emitVehicleEvent —
-        // per-car _chipCd (1.5 s) is not a global cap and never was.
-        emitVehicleEvent('vhit', {
-          x: +_hitX.toFixed(1), y: +hy.toFixed(1), z: +_hitZ.toFixed(1),
-          r: +r.toFixed(2),
-        });
-      }
-    }
-  }
-  if ((car._chipCd ?? 0) > 0) car._chipCd -= dt;
 
   // ---- what the tyres are touching ----
   // surfaceY puts the wheels ON the rendered deck (LAYER_Y.road above the
@@ -1732,11 +1932,13 @@ function suspension(car, surf, dt, world) {
   // budgeting here trips the re-seat branch mid-drift, which hard-resets y,
   // _vy, air and the whole attitude in the middle of a slide.
   const budget = STEP_FLOOR + STEP_SLOPE * (car.vGround ?? Math.abs(car.speed)) * dt;
-  const jumped = Math.abs(surf - (car._surf ?? surf)) > budget;
+  const dSurf = surf - (car._surf ?? surf);
+  const jumped = Math.abs(dSurf) > budget;
   car._surf = surf;
   if (jumped) {
     car.y = surf; car._vy = 0; car.air = 0; car._sag = 0;
     car._gp = 0; car._gr = 0;
+    car._heave = 0; car._heaveV = 0; car._wVy = 0;
     return;
   }
 
@@ -1762,6 +1964,18 @@ function suspension(car, surf, dt, world) {
     }
     car.air = 0;
     y = surf;
+    // ---- the springs soak the road ----
+    // The wheels follow the surface exactly (that is what car.y is), but the
+    // body on top of them is driven by the wheels' vertical ACCELERATION, not
+    // their position: a steady climb moves wheels and body together and bends
+    // no spring, while a kerb is a sudden change of vertical speed that kicks
+    // the shell, which then springs back (bodyStep). Feeding position instead
+    // sank the body 15 cm into every long hill.
+    if (dt > 0) {
+      const wVy = dSurf / dt;
+      car._heaveV = (car._heaveV ?? 0) - (wVy - (car._wVy ?? wVy)) * HEAVE_SOAK;
+      car._wVy = wVy;
+    }
     // The wheels are down, so the ground writes the vertical speed. Below a
     // walking pace nothing may launch — otherwise terrain noise makes a parked
     // car hover a centimetre off its own driveway.
@@ -2279,3 +2493,6 @@ export function detachCabin(car) {
 
 // Test/debug hook: the derived interior dimensions for a kind, no THREE needed.
 export { cabinSpec };
+
+// The traffic AI drives its near cars on the same tyres (js/aidriver.js, js/traffic.js).
+export { tyreStep, kindOf };

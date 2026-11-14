@@ -19,15 +19,22 @@ test('a bridge holds one flat deck over a terrain valley', () => {
   // flat-world fossil, and it was the whole reason these crossings had a ramp.
   const deck = 12;
 
-  // The SPAN is level — that is the whole point of a bridge, and it must not
-  // follow the −4 m river bed underneath it. With the deck at the higher bank
-  // and ramps at a road's 7.5 % grade, the 2 m rise from the low bank takes
-  // 12 m (capped at two fifths of the span) and the high bank needs none.
-  for (const distance of [13, 20, 28])
-    assert.equal(bridgeDeckHeight(way, distance, terrain), deck);
-  // …and it never dives below either bank anywhere.
-  for (let d = 0; d <= 30; d += 0.5)
-    assert.ok(bridgeDeckHeight(way, d, terrain) >= 10 - 1e-9, `deck dived at ${d} m`);
+  // The span must not follow the −4 m river bed underneath it. It used to be
+  // a level at the higher bank with a straight ramp off the lower one, which
+  // held to two fifths of the span is a 17 % ramp meeting a flat deck at a
+  // fold (wave 7, "you hit into the road"): banks this close on a span this
+  // short are now ONE smooth grade from bank to bank, which is what such a
+  // bridge is. It still never dives, and it climbs the whole way.
+  let prev = -Infinity, worst = 0;
+  for (let d = 0; d <= 30; d += 0.5) {
+    const y = bridgeDeckHeight(way, d, terrain);
+    assert.ok(y >= 10 - 1e-9, `deck dived at ${d} m`);
+    assert.ok(y >= prev - 1e-9, `deck went backwards at ${d} m`);
+    if (d > 0) worst = Math.max(worst, (y - prev) / 0.5);
+    prev = y;
+  }
+  assert.ok(worst <= 0.11, `the grade reached ${(worst * 100).toFixed(1)} %`);
+  assert.equal(bridgeDeckHeight(way, 30, terrain), deck);
 });
 
 test('the deck comes down to meet the road at both abutments', () => {
@@ -57,8 +64,8 @@ test('the deck comes down to meet the road at both abutments', () => {
   // …and it is not a wall: a road's grade, not a kerb
   const grade = (bridgeDeckHeight(way, 1, terrain) - 10) / 1;
   assert.ok(grade <= 0.18, `approach ramp is a ${(grade * 100).toFixed(0)} % climb`);
-  // the deck still holds a level middle — the ramps must not eat the span
-  assert.equal(bridgeDeckHeight(way, 20, terrain), 12);
+  // (no level middle on a span this short with banks this close: one grade
+  // bank to bank, see the test above)
 });
 
 test('a short bridge stays a bridge instead of becoming two ramps', () => {

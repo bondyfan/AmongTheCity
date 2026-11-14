@@ -24,7 +24,10 @@
 // build, and per shell of every falling piece of debris. It is four array reads
 // and three lerps, with no allocation.
 
+import { STAMPS, stampHeight, stampsBox } from './terrainstamps.js';
+
 const TERRAIN_URL = (tx, tz) => `data/terrain/${tx}_${tz}.bin`;
+const STAMP_BOX = stampsBox(STAMPS);
 const NO_DATA = -32768;
 const _crRows = new Float64Array(4);   // heightAt's scratch — it is HOT
 
@@ -37,6 +40,9 @@ export class Terrain {
     this.grids = new Map();               // "tx,tz" → Int16Array | null (failed)
     this._pending = new Set();
     this._listeners = [];
+    // The earthworks that are not roads (js/terrainstamps.js): the same list
+    // on every Terrain, the worker's included, so both read one ground.
+    this.stamps = STAMPS;
     // Height maps are static files, so a tile that has been fetched once is
     // never re-fetched — but they are also only ~116 KB each, and the whole
     // world is 21 MB, so nothing is ever evicted either. The feature tiles are
@@ -126,6 +132,21 @@ export class Terrain {
    * chunk is marked incomplete, and it rebuilds when the height map lands.
    */
   heightAt(x, z) {
+    const h = this._gridAt(x, z);
+    // (one compare for the whole world outside the stamps' box)
+    if (!this.stamps || x < STAMP_BOX.x0 || x > STAMP_BOX.x1 || z < STAMP_BOX.z0 || z > STAMP_BOX.z1) return h;
+    return stampHeight(this.stamps, x, z, h);
+  }
+
+  /** How far the stamps move the ground at (x, z): negative where they dig. 0 almost everywhere. */
+  stampDelta(x, z) {
+    if (!this.stamps || x < STAMP_BOX.x0 || x > STAMP_BOX.x1 || z < STAMP_BOX.z0 || z > STAMP_BOX.z1) return 0;
+    const h = this._gridAt(x, z);
+    return stampHeight(this.stamps, x, z, h) - h;
+  }
+
+  /** The height grid alone, with no stamp on it: what heightAt answered before stamps. */
+  _gridAt(x, z) {
     const T = this.tile, R = this.res, n = this.n;
     let tx = Math.floor(x / T), tz = Math.floor(z / T);
     let g = this.grids.get(tx + ',' + tz);

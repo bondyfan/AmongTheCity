@@ -1749,6 +1749,72 @@ function rubble(t, v) {
   src.onended = () => { src.disconnect(); bp.disconnect(); g.disconnect(); };
 }
 
+// ---- police gunfire: a pistol report and the round arriving ----------------
+// No sample on disk and none may be added, so both are synthesized out of the
+// shared noise buffer, the same way explosion() is. A pistol at 10 m is a dry
+// CRACK (the supersonic round and the muzzle blast, a few milliseconds of
+// broadband noise) over a short low THUMP; at 150 m the air has eaten the top,
+// so the crack's lowpass closes with distance and what is left is a flat pop.
+// gainAt() gives the same 1/r law every other positioned cue uses.
+let _shotCd = 0;
+export function gunshotAt(x, z, vol = 1) {
+  if (!ctx || ctx.state !== 'running') return;
+  const g0 = gainAt(vol, x, z, 420);
+  if (g0 < 0.01) return;
+  const t = ctx.currentTime;
+  if (t < _shotCd) return;                     // two reports in 25 ms are one to the ear
+  _shotCd = t + 0.025;
+  const d = lisSet ? Math.hypot(x - lisX, z - lisZ) : 10;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer();
+  src.playbackRate.value = 0.9 + Math.random() * 0.2;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.Q.value = 0.7;
+  lp.frequency.value = Math.max(900, 9000 - d * 45);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.95 * g0, t + 0.002);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16 + Math.min(0.5, d * 0.004));
+  src.connect(lp); lp.connect(g); g.connect(master);
+  src.start(t, Math.random() * 0.6, 0.8);
+  src.stop(t + 0.75);
+  src.onended = () => { src.disconnect(); lp.disconnect(); g.disconnect(); };
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(150, t);
+  osc.frequency.exponentialRampToValueAtTime(48, t + 0.11);
+  const og = ctx.createGain();
+  og.gain.setValueAtTime(0.0001, t);
+  og.gain.exponentialRampToValueAtTime(0.55 * g0, t + 0.004);
+  og.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+  osc.connect(og); og.connect(master);
+  osc.start(t); osc.stop(t + 0.18);
+  osc.onended = () => { osc.disconnect(); og.disconnect(); };
+}
+
+// A round arriving. `metal` is a hit on a car body: a short bright ping with a
+// clank under it. Anything else is a dull slap of masonry or tarmac.
+export function bulletHitAt(x, z, metal = false, vol = 1) {
+  if (!ctx || ctx.state !== 'running') return;
+  const g0 = gainAt(vol, x, z, 160);
+  if (g0 < 0.01) return;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer();
+  const bp = ctx.createBiquadFilter();
+  bp.type = metal ? 'bandpass' : 'lowpass';
+  bp.frequency.value = metal ? 3200 + Math.random() * 1400 : 1400;
+  bp.Q.value = metal ? 6 : 0.8;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime((metal ? 0.6 : 0.45) * g0, t + 0.002);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + (metal ? 0.22 : 0.09));
+  src.connect(bp); bp.connect(g); g.connect(master);
+  src.start(t, Math.random() * 0.6, 0.3);
+  src.stop(t + 0.25);
+  src.onended = () => { src.disconnect(); bp.disconnect(); g.disconnect(); };
+}
+
 // ---- a speed-banded sample crossfader --------------------------------------
 // Three layers below need the same machine: several recordings of ONE thing
 // made at several speeds, crossfaded by speed, and pitch-tracked inside each

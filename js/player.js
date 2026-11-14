@@ -96,6 +96,7 @@ import { seatAnchor as carSeatAnchor } from './vehicles.js';
 import { seatAnchor as heliSeatAnchor } from './helicopter.js';
 import { seatAnchor as jetSeatAnchor } from './aircraft.js';
 import { SIT_DROP, seatX } from './seating.js';
+import { launchBody, stepBody, feetFor } from './ejection.js';
 
 const TWO_PI = Math.PI * 2;
 // v5: the player now has a y. Buildings have floors, so "the ground" stopped
@@ -200,6 +201,7 @@ export class Player {
     this.seat = 0;           // which veh.seats slot we occupy while inCar
     this.boarding = null;    // { veh, seat, phase:'walk'|'slide', t, … } or null
     this.exiting = null;     // { veh, t, from…, to… } or null
+    this.ragdoll = null;     // thrown through a windscreen: js/ejection.js state, or null
     this._dirX = 0; this._dirZ = -1;  // last move direction — decel glides along it
     this._world = null;      // remembered from update() so beginExit() can collide
     this.mesh.scale.setScalar(PLAYER_SCALE);
@@ -210,6 +212,7 @@ export class Player {
 
   update(dt, { input, camYaw, world }) {
     this._world = world;
+    if (this.ragdoll) { this._ragStep(dt, world); return; }
     if (this.exiting) { this._exitStep(dt); return; }
     if (this.boarding) { this._boardStep(dt, world); return; }
     if (this.inCar) {
@@ -533,6 +536,70 @@ export class Player {
     }
   }
 
+  // ---- thrown out through the windscreen ---------------------------------
+  // Called by main.js on the step a crash was hard and square enough
+  // (js/ejection.js shouldEject). Lets go of the seat the way setInCar(null)
+  // does (seat registry, re-parenting out of the car's body group, limbs) but
+  // instead of standing the body beside the car it hands it to the ragdoll,
+  // which flies it from the seat it was sitting in. While `ragdoll` is set,
+  // update() belongs to _ragStep and input does nothing. cbs.onHit(u, what)
+  // hears the first ground contact and the first wall, for the bill.
+  eject(veh, cbs = null) {
+    if (!veh || this.inCar !== veh) return false;
+    const seat = this.seat;
+    const a = bodySeat(veh, seat);
+    if (veh.seats?.[seat] === this) veh.seats[seat] = null;
+    this.inCar = null; this.boarding = null; this.exiting = null;
+    this.aimLock = false;
+    this._scene.add(this.mesh);          // world space again
+    const st = launchBody(veh, a, 0.92 * PLAYER_SCALE);
+    st.onHit = cbs?.onHit ?? null;
+    this.ragdoll = st;
+    this.mesh.rotation.order = 'YXZ';    // yaw outermost: the tumble is about the body's own axes
+    this._cit.ragdollPose();
+    this.mesh.visible = true;
+    this._ragPlace();
+    return true;
+  }
+
+  _ragStep(dt, world) {
+    const st = this.ragdoll;
+    const going = stepBody(st, dt, world, st.onHit);
+    this._ragPlace();
+    if (st.phase === 'rise' && !st._stood) { st._stood = true; this._stand(); }
+    if (!going) this.endRagdoll();
+  }
+
+  // pos/y/heading/speed mirror the flying body, so the chase camera, the
+  // streamer, the minimap and the wire all follow it with no code of their
+  // own. `grounded` stays true and `vy` 0 on purpose: js/vitals.js bills a
+  // grounded false → true edge as a fall, and the ragdoll bills its own.
+  _ragPlace() {
+    const st = this.ragdoll;
+    const f = feetFor(st, this._ragFeet ??= { x: 0, y: 0, z: 0 });
+    this.mesh.position.set(f.x, f.y, f.z);
+    this.mesh.rotation.set(st.pitch, st.yaw, st.roll);
+    this.pos.x = st.x; this.pos.z = st.z;
+    this.y = Math.max(st.gy, st.y - st.hip);
+    this.vy = 0; this.grounded = true;
+    this.heading = st.yaw;
+    this.speed = Math.sqrt(st.vx * st.vx + st.vz * st.vz);
+  }
+
+  /** Back on two feet where the body lies (also: the hospital respawn). */
+  endRagdoll() {
+    const st = this.ragdoll;
+    if (!st) return;
+    this.ragdoll = null;
+    this.mesh.rotation.order = 'XYZ';
+    this.mesh.rotation.set(0, this.heading, 0);
+    this.y = st.gy; this.vy = 0; this.grounded = true; this.speed = 0;
+    this._dirX = -Math.sin(this.heading); this._dirZ = -Math.cos(this.heading);
+    this.mesh.position.set(this.pos.x, this.y, this.pos.z);
+    this._stand();
+    this._animate(this.walkT, 0);
+  }
+
   // ---- instant path (legacy) ---------------------------------------------
   // The old teleport enter/exit, kept for tools, tests and interruption
   // fallbacks — same seat registry, same parenting, zero animation. The
@@ -590,7 +657,7 @@ export class Player {
     const veh = this.inCar ?? this.boarding?.veh ?? null;
     const seat = this.inCar ? this.seat : this.boarding?.seat;
     if (veh?.seats && seat != null && veh.seats[seat] === this) veh.seats[seat] = null;
-    this.inCar = null; this.boarding = null; this.exiting = null;
+    this.inCar = null; this.boarding = null; this.exiting = null; this.ragdoll = null;
     this._cit.dispose();
   }
 }

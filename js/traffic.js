@@ -5,8 +5,8 @@
 // outgoing edge at each node, hug the right side of the road, brake for
 // corners ahead, for red lights and for the car in front. Visuals come from
 // vehicles.add(); we are only the brain, writing x/z/heading/speed and the
-// mesh transform directly (no driveStep physics — rail-following is cheaper
-// and never wanders off the asphalt).
+// mesh transform directly (v1 to v10 by rail-following; v11 drives a body,
+// see the v11 note at the end of this header).
 //
 // v3: the graph GROWS — city.onTileLoaded streams 4.8 km region tiles in and
 // addTile() ingests their roads/signals incrementally (node keys are rounded
@@ -331,6 +331,26 @@
 // hundred. A driver passes within 150 m of a different police car about every
 // three minutes. See PATROL_P for the sweep those numbers came out of.
 // ==========================================================================
+// v11: THE CARS HAVE BODIES. "Když auta NPC zatáčí, otočí se okamžitě."
+//
+// Until v10 the driving layer was a rail: the arc along the lane was
+// integrated and the car WAS that point, heading eased after it, so at a
+// junction vertex a car pivoted on its centre at up to 20 rad/s. Now each
+// car carries p.body (js/aidriver.js): a pose with speed, sideways slip and
+// yaw rate. Within PHYS_R of the player it runs vehicles.js tyreStep, the
+// player's own tyres, so it rolls, pitches, slides when shoved and spins
+// when T-boned; past that a kinematic arc on the same steering, which costs
+// next to nothing and still never turns faster than its lock allows. The
+// wheel puts the front axle on the lane rounded to a radius the vehicle can
+// drive (js/ailane.js), and the speed planner brakes for that radius.
+//
+// The SCHEDULE is untouched: the contract above is now kept on the target
+// speed (an envelope that never lets the body pass its schedule, a floor
+// that hauls it inside LAG_MAX) and the arc the rest of this file reasons
+// with is the body's position projected back onto its route. See _drive.
+// Being hit is _absorbHits + _rammedStep; a car that ends up too far off its
+// lane, turned round, or broken stays where it is as a wreck (_wreck).
+// ==========================================================================
 
 import * as THREE from 'three';
 import { TRAFFIC, CAR_COLORS } from './config.js';
@@ -342,6 +362,9 @@ import { LAYER_Y } from './config.js';
 // import of something a stale vehicles.js doesn't have is a hard link error —
 // the typeof check below degrades to CAR_COLORS instead
 import * as VEH from './vehicles.js';
+import { CAR as CAR_CFG } from './config.js';
+import { AI, cornerR, stanley, pedal, pedalFor, kinStep, ramImpulse } from './aidriver.js';
+import { laneAt, laneFoot, lanePt, projectArc, curveCap } from './ailane.js';
 import { horn } from './audio.js';   // safe headless — no-ops without an AudioContext
 import { worldT } from './worldclock.js';
 import { sigAssets as sigModel, LAMP_Y, LAMP_Z, PED_Y, PED_X } from './signalmodel.js';
@@ -425,6 +448,20 @@ const CTL_REACH = 26;         // m from the line a driver starts reading the jun
 const CTL_BACK_DFLT = 5;      // m the line sits back from the node where the mouth is unknown
 const CTL_CHUNKS_PER_STEP = 1; // junction buckets finished per sim step for the lookup
 const RAM_FRICTION = 4.0;     // m/s² a rammed (AI-suspended) car scrubs while sliding out
+// v11, the body (js/aidriver.js). Near the player a car runs the player's own
+// tyre model; past PHYS_R a kinematic arc on the same pursuit. 160 m is where
+// a 0.05 rad body roll is a pixel; the step costs about 1 µs a car either way.
+const PHYS_R = 160, PHYS_HYST = 20;
+const PHYS_SUB = 6;           // tyre substeps per 1/20 s step: the model's own 1/120 s clock
+const HAUL_W = 20;            // m inside LAG_MAX where the speed is floored above the schedule's…
+const HAUL_K = 0.4;           // …by this much per metre of lag beyond that line
+const SCHED_GAP0 = 1.0, SCHED_GAP_T = 0.3; // m + s×v the body keeps behind its schedule (see the envelope in _drive)
+const ARRIVE_V = 0.8;          // m/s the last metres to a stop are crept at, not coasted
+const LOST_R = 6;                     // m off its lane past which a body is looked for afresh along its route
+const OFF_LANE = 0.7, OFF_LANE_V = 4.5;   // m off the lane at which a car slows, and to what (see _drive)
+const HAUL_SNAP = 25;         // m past LAG_MAX at which an unseen car is put back on its schedule
+const RAM_LOST = 1.35;        // rad (77°) off its lane after a shunt: the driver gives up, a wreck
+const RAM_WIDE = 4.5;         // m off its lane after a shunt: likewise
 const FAST_EDGE = 50 / 3.6;   // commercial traffic only bothers with ≥50 km/h roads
 // where a signal mast may stand, tried in this order: metres back up the
 // approach from the mapped point, and metres out from the carriageway edge
@@ -3169,6 +3206,12 @@ export class Traffic {
     }
     car.vK = p.vK;
     car.speed = this._nomV(p);
+    // the BODY the driver steers (js/aidriver.js): born on the lane, at the
+    // schedule's speed, going straight
+    p.body = { x: p.sx, z: p.sz, heading, speed: car.speed, _lat: 0, yaw: 0, steer: 0, kappa: 0,
+      len: car.len ?? 4.6, wid: car.wid ?? 1.8, offroad: 0, kind: car.kind, phys: false,
+      r0: cornerR(car.len ?? 4.6) };
+    p.bArc = p.sR; p.tI = p.ri; p.tSeg = 0;
     car.ai = p;
     car.y = p.sy;
     car.mesh.position.set(p.sx, p.sy, p.sz);
@@ -3389,6 +3432,15 @@ export class Traffic {
           this._obst.push(b.x, b.z, b.half ?? 2.6);
     }
 
+    // (v11) a car that has just been hit, or lies wrecked, is a hull too: it
+    // stands at any angle, and the follow rule only knows cars that point the
+    // way you do
+    this._absorbHits(playerCar);
+    for (const car of this.cars) {
+      const p = car.ai;
+      if (p && (p.wreck || car._rammedT > 0)) this._obst.push(car.x, car.z, (car.len ?? 4.6) / 2 + 2);
+    }
+
     // ---- fixed steps on a SHARED grid ----
     const grid = Math.floor(wt / SIM_DT) * SIM_DT;
     let n = Math.round((grid - this._simT) / SIM_DT);
@@ -3409,7 +3461,15 @@ export class Traffic {
       car.heading = angWrap(p.ph + angWrap(p.sh - p.ph) * alpha);
       car.mesh.position.set(car.x, car.y, car.z);
       car.mesh.rotation.y = car.heading;
+      // what we rendered, for _absorbHits to tell somebody else's hand by
+      p.rx = car.x; p.rz = car.z; p.rh = car.heading; p.rv = car.speed;
     }
+    // the player's velocity BEFORE whatever driveStep does to it next frame
+    if (playerCar) {
+      const h = playerCar.heading, s = playerCar.speed ?? 0, l = playerCar._lat ?? 0;
+      this._pvx = -Math.sin(h) * s + Math.cos(h) * l;
+      this._pvz = -Math.cos(h) * s - Math.sin(h) * l;
+    } else this._pvx = this._pvz = undefined;
   }
 
   _step(dt, T) {
@@ -3475,21 +3535,20 @@ export class Traffic {
       police: k === POLICE_K ? 1 : 0 });
   }
 
-  // A rammed car (vehicles.js stamped _rammedT on impact) is momentum, not
-  // brain: the collision impulse already rewrote its speed and yawed it, so we
-  // just let it slide along wherever it now points, scrubbing RAM_FRICTION of
-  // speed per second, until the timer runs out — then snap back to the rail.
-  // Being rammed is by definition a local event (only one client's player did
-  // the ramming), so this is pure lag: the schedule keeps rolling, the wreck
-  // falls behind, and the catch-up term walks it back into agreement once it
-  // is driving again.
+  // A rammed car (vehicles.js stamped _rammedT on impact, weapons.js too) is
+  // momentum, not brain. v11: it is a BODY on the player's tyre model, so the
+  // blow that _absorbHits turned into a push, a sideways slide and a yaw rate
+  // plays out as one: the car skates, spins as far as its inertia and its
+  // tyres let it, and stops where it stops. The driver straightens the wheel
+  // and brakes after the first moment. When the timer runs out it either
+  // drives on from wherever it ended up (the pursuit steers it back into its
+  // lane at a crawl) or, too far off its lane, turned round, or broken
+  // (damage >= 1), it stays where it is: a wreck (see _wreck). Being rammed is
+  // by definition a local event (only one client's player did the ramming), so
+  // this is pure lag: the schedule keeps rolling, and the catch-up term walks
+  // a car that drives on back into agreement.
   _rammedStep(p, dt) {
     const car = p.car;
-    // vehicles.js wrote the impulse straight onto car.speed and car.heading;
-    // adopt the yaw as-is (no interpolation for the 2.5 s of the shunt — the
-    // impulse can turn the car faster than a lerp between two 20 Hz poses
-    // would ever show) and keep integrating position from it.
-    p.sh = p.ph = car.heading;
     // getting rammed is the one honk that doesn't wait 2.5 s — but it still
     // draws the global budget, so a pile-up gets a couple of blasts, not a
     // brass section, and the ram spends the personal cooldown too
@@ -3503,26 +3562,63 @@ export class Traffic {
       }
     }
     car._rammedT -= dt;
-    const s = car.speed;
-    car.speed = s > 0 ? Math.max(0, s - RAM_FRICTION * dt) : Math.min(0, s + RAM_FRICTION * dt);
-    p.sx += -Math.sin(p.sh) * car.speed * dt;
-    p.sz += -Math.cos(p.sh) * car.speed * dt;
+    p.ramAge = (p.ramAge ?? 0) + dt;
+    this._freeBody(p, dt, p.ramAge > 0.35 ? 0.55 : 0);
     if (car._rammedT > 0) return;
-    // recovery: nearest point of the car's OWN edge — the shove rarely moves a
-    // car more than a lane over, so its old rail is the right one. The arc it
-    // lands on becomes the new rendered position; the lag against the schedule
-    // is whatever the shunt cost, and the normal drive step eases position and
-    // heading back over the next second.
-    const e = p.edge, pts = e.pts;
-    let bestD = 1e9, bestS = p.s, bestSeg = 0;
-    for (let i = 0; i < pts.length - 1; i++) {
-      const d = distPointToSegment(p.sx, p.sz, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], _snap);
-      if (d < bestD) { bestD = d; bestSeg = i; bestS = e.cum[i] + _snap.t * (e.cum[i + 1] - e.cum[i]); }
-    }
-    p.seg = bestSeg;
-    this._setRendered(p, p.route[p.ri].base + bestS);
-    car.speed = Math.max(0, car.speed);           // rails only run forward
     car._hornRam = 0;                             // next ram may honk again
+    p.ramAge = 0;
+    if (p.wreck) return;                          // a wreck stays one
+    // recovery: where along its own route the shove left it. The window is
+    // generous both ways; a shunt rarely moves a car more than a lane over or
+    // a length along, so its old route is the right one.
+    const b = p.body;
+    const arc = projectArc(p.route, p.ri, p.sR, b.x, b.z, b.heading, 30, 30);
+    const lp = laneAt(p.route, p.ri, 0, arc, p.laneOff, lanePt, p.body.r0);
+    const lat = Math.abs((b.x - lp.x) * -lp.dz + (b.z - lp.z) * lp.dx);
+    const off = Math.abs(angWrap(b.heading - Math.atan2(-lp.dx, -lp.dz)));
+    if ((car.damage ?? 0) >= 1 || off > RAM_LOST || lat > RAM_WIDE) { this._wreck(p); return; }
+    p.tI = p.ri; p.tSeg = 0;
+    this._setRendered(p, arc);
+    p.bArc = p.sR; p.fArc = undefined;
+  }
+
+  // The body with nobody driving it: the wheel back to centre, `brake` of the
+  // pedal (always against the way it is rolling, never into reverse), the
+  // handbrake once it has stopped. Shared by a rammed car and a wreck.
+  _freeBody(p, dt, brake) {
+    const car = p.car, b = p.body;
+    const ds = AI.STEER_RATE * dt;
+    b.steer += -b.steer > ds ? ds : -b.steer < -ds ? -ds : -b.steer;
+    const v = b.speed;
+    // (a negative pedal on a car rolling backwards is reverse throttle in the
+    // tyre model, and a positive one is its brake)
+    const gas = v > 0.4 ? -brake : v < -0.4 ? brake : 0;
+    const K = VEH.kindOf ? VEH.kindOf(car.kind) : null;
+    const h = dt / PHYS_SUB;
+    if (K && VEH.tyreStep) {
+      for (let i = 0; i < PHYS_SUB; i++) VEH.tyreStep(b, K, gas, Math.abs(b.speed) < 0.4, h);
+    } else {
+      // (no tyre model: the v10 slide, friction along the heading)
+      const s = b.speed;
+      b.speed = s > 0 ? Math.max(0, s - RAM_FRICTION * dt) : Math.min(0, s + RAM_FRICTION * dt);
+      b.x += -Math.sin(b.heading) * b.speed * dt;
+      b.z += -Math.cos(b.heading) * b.speed * dt;
+    }
+    b.phys = true;
+    b.heading = angWrap(b.heading);
+    p.sx = b.x; p.sz = b.z; p.sh = b.heading;
+    car.speed = b.speed;
+    car.steer = b.steer;
+  }
+
+  // A car that will not drive on. It leaves the shared population (the slot
+  // is refilled by the next scan, and takes no mesh while this one stands, the
+  // _standIn rule), stands where the crash left it with the handbrake on, is a
+  // hull the rest of the traffic stops for (see the obstacle list in update),
+  // and goes the way every ghost goes: once nobody is looking at it.
+  _wreck(p) {
+    p.wreck = 1;
+    if (!p.ghost) { this._standIn.set(p.key, p); this._toGhost(p); }
   }
 
   // A ghost about to run out of itinerary gets another leg. This is the piece
@@ -3564,6 +3660,76 @@ export class Traffic {
   // Place the rendered car at route arc `arc`: find the step it falls in and
   // publish (edge, s, seg, next) for the driving code, which is otherwise
   // unchanged from v7 and still thinks in terms of one edge at a time.
+  // Where the SCHEDULE is about to come to rest, as a route arc, or Infinity:
+  // the stop line of a light it will find red (redWait is a pure function of
+  // the shared clock, so this is the very wait _nomTo will compute when it
+  // gets there), the bus stop it is about to call at, the end of its trip.
+  // Read only, the schedule is not touched.
+  _schedStop(p, T) {
+    let stop = p.routeEnd;
+    if (p.ndone || p.nwait > 0) return stop;
+    const st = p.route[p.ni], e = st?.e;
+    if (!e) return stop;
+    if (!p.nsig && e.sig && e.sigStop > p.na && p.nv > 0.1) {
+      const tArr = p.nt + (e.sigStop - p.na) / p.nv;
+      if (redWait(e.sig, e.sigPh, tArr) > 0) stop = Math.min(stop, st.base + e.sigStop);
+    }
+    if (p.stops && p.nstop < p.stops.length) stop = Math.min(stop, p.stops[p.nstop].arc);
+    return stop;
+  }
+
+  // Put the body on its lane at route arc `arc`, at rest in yaw and slide, with
+  // no interpolation from where it was. Only ever where nobody can see it (the
+  // lag clamp's last resort).
+  _snapBody(p, arc) {
+    const b = p.body;
+    const lp = laneAt(p.route, p.ri, 0, arc, p.laneOff, lanePt, p.body.r0);
+    b.x = p.px = p.sx = lp.x; b.z = p.pz = p.sz = lp.z;
+    b.heading = p.ph = p.sh = Math.atan2(-lp.dx, -lp.dz);
+    b.yaw = 0; b._lat = 0; b.kappa = 0;
+    p.tI = lp.i; p.tSeg = lp.seg;
+    p.bArc = arc; p.fArc = undefined;
+  }
+
+  // Before the steps: what somebody else did to our cars since the last
+  // frame. driveStep (the player's car) and weapons.js write straight onto an
+  // AI car's x/z/heading/speed and stamp _rammedT; the render below would
+  // overwrite all of it. So the difference against what we rendered is read
+  // here and handed to the BODY: a positional shove moves it (and both step
+  // poses, so the interpolation does not swing), and the first frame of a
+  // blow from the player's car becomes a rigid-body impulse with yaw
+  // (aidriver ramImpulse), from the player's velocity BEFORE the blow, which
+  // is the one we kept last frame. driveStep's own answer for the struck car
+  // is a scalar speed along its nose and a nudge of heading: the impulse
+  // replaces it, so a T-bone pushes a car sideways and spins it instead of
+  // speeding it up. Anything else (a rocket) keeps its speed change and turns
+  // its heading kick into a yaw rate, so even that does not snap.
+  _absorbHits(playerCar) {
+    const pc = playerCar && !playerCar.ai ? playerCar : null;
+    for (const car of this.cars) {
+      const p = car.ai, b = p?.body;
+      if (!b || p.rx === undefined) continue;
+      const dx = car.x - p.rx, dz = car.z - p.rz;
+      const dh = angWrap(car.heading - p.rh), dv = car.speed - p.rv;
+      if (dx === 0 && dz === 0 && dh === 0 && dv === 0) continue;
+      if (dx * dx + dz * dz < 25) {
+        b.x += dx; b.z += dz; p.sx += dx; p.sz += dz; p.px += dx; p.pz += dz;
+      }
+      let hit = 0;
+      if (car._rammedT > 0 && pc && this._pvx !== undefined &&
+          dist(pc.x - car.x, pc.z - car.z) < ((pc.len ?? 4.6) + b.len) / 2 + 1.5) {
+        const mA = VEH.kindOf ? VEH.kindOf(pc.kind).mass : 1, mB = VEH.kindOf ? VEH.kindOf(car.kind).mass : 1;
+        hit = ramImpulse(b, mB, pc.x, pc.z, pc.heading, pc.len ?? 4.6, this._pvx, this._pvz, mA);
+      }
+      if (!hit) {
+        b.speed += dv;
+        const kick = dh / 0.25;
+        b.yaw = Math.max(-3.4, Math.min(3.4, (b.yaw ?? 0) + kick));
+      }
+      car.speed = b.speed;
+    }
+  }
+
   _setRendered(p, arc) {
     if (!(arc >= 0)) arc = 0;
     if (arc > p.routeEnd) arc = p.routeEnd;
@@ -3582,6 +3748,7 @@ export class Traffic {
     const car = p.car;
     if (!car) return;
     if (car._rammedT > 0) { this._rammedStep(p, dt); return; } // AI suspended
+    if (p.wreck) { this._freeBody(p, dt, 1); return; }          // nobody at the wheel
 
     // A GHOST has no schedule any more (the slot belongs to the next
     // generation), so there is nothing to clamp against and nothing to catch
@@ -3790,8 +3957,13 @@ export class Traffic {
              if (fv < tgt) { tgt = fv; held = true; if (fv < BLOCK_V) blocked = true; } }
     }
 
+    // (v11: patience comes back only once the car is actually moving again.
+    // A body pulls away over a few steps, not in one like the rail did, and a
+    // car released by spent patience was held again the very next step, as
+    // the timer dipped under CROSS_PATIENCE: four cars round a player standing
+    // in a junction held one another like that for minutes)
     if (crossHeld && car.speed < 0.5) p.crsT += dt;
-    else if (p.crsT > 0) p.crsT = Math.max(0, p.crsT - dt * 2);
+    else if (p.crsT > 0 && car.speed > 0.5) p.crsT = Math.max(0, p.crsT - dt * 2);
 
     // ---- people. A walker on the carriageway ahead, or stepping onto it, is
     // stopped for; one waiting at a zebra is stopped for by a driver who can do
@@ -3993,72 +4165,13 @@ export class Traffic {
       this.onHonk?.(p.sx, p.sz);
     }
 
-    // ---- integrate speed, advance along the rail, then CLAMP against the
-    // schedule. The clamp is the entire multiplayer contract in three lines:
-    //   · never ahead of the schedule (so a client cannot invent progress),
-    //   · never more than LAG_MAX behind (past that we admit disagreement
-    //     rather than let a car drift half a block out of the shared world),
-    //   · when pinned at the schedule, adopt the schedule's own speed, so the
-    //     wheels and the engine hum match what the car is actually doing.
-    if (car.speed < tgt) car.speed = Math.min(tgt, car.speed + ACCEL * dt);
-    else car.speed = Math.max(tgt, car.speed - (hard ? BRAKE_HARD : BRAKE_SOFT) * dt);
-    let arc = p.sR + car.speed * dt;
-    if (arc >= Snom) { arc = Snom; const nv = p.ghost ? 0 : this._nomV(p); if (car.speed > nv) car.speed = nv; }
-    if (!p.ghost && arc < Snom - LAG_MAX) {
-      // Dragged forward against the brakes: this car has fallen so far behind
-      // the shared schedule that the two clients would draw it a block apart.
-      //
-      // But NOT through a hull. That is what this used to do — eleven seconds
-      // after you left your car in the lane, the queue behind it was hauled
-      // forward and drove straight through, which is the whole "auta stále
-      // projíždějí jako ghosts mým autem" report. A car physically stopped by
-      // something solid LEAVES the shared population instead: it becomes a
-      // local ghost, keeps its nose against the obstruction like a real
-      // driver, and the sweeper retires it once nobody is looking. Desync is
-      // the honest answer here — the obstruction is local to this client.
-      if (blocked) {
-        // (through _toGhost, which also hands the slot back: flagged a ghost
-        // but left in the pool, it was a ghost holding a shared slot. The slot's
-        // schedule is minted afresh by the next scan and runs on, shared as
-        // ever; it takes no mesh while this car is still standing here, or
-        // every queue would put a second copy of each of its cars on the road
-        // a block further on.)
-        if (!p.ghost) { this._standIn.set(p.key, p); this._toGhost(p); }
-      } else {
-        arc = Snom - LAG_MAX;
-        car.speed = Math.max(car.speed, (arc - p.sR) / dt);
-      }
-    }
-    this._setRendered(p, arc);
-
-    // ---- arrival. The schedule ran out of route; the car finishes whatever
-    // lag it still owes, then stands there, and is marked done. `dead` is only
-    // a REQUEST to the sweep — _retire() decides what actually happens to the
-    // mesh, and if the player is watching, the answer is "it drives off as a
-    // ghost", not "it blinks out". RETIRE_R survives as the no-camera
-    // fallback: without a viewer _visible() is false for everything, so this
-    // is the only thing standing between a v8 caller and a car evaporating in
-    // its own mirror. RETIRE_GRACE is what stops a finished car standing at
-    // the kerb for ever when nobody is near enough for RETIRE_R to matter.
-    if (!p.ghost && p.ndone && p.sR >= p.routeEnd - 0.05) {
-      p.graceT += dt;
-      if (p.graceT > RETIRE_GRACE ||
-          dist(p.sx - this._px, p.sz - this._pz) > RETIRE_R) p.dead = 1;
-    }
-
-    // ---- pose: centerline point + smoothed heading + right-lane offset
+    // ---- v11: the lane first, because the driver now steers FOR it. Same
+    // offset as ever (right of the centreline, clear of the kerb, round the
+    // parked cars, into a bus bay, squeezed for an oncoming car); what changed
+    // is that it is a target for the wheel, not a place the car is put.
     const re = p.edge;
-    const pose = poseAt(re, p.s, p.seg);
-    p.seg = pose.seg;
-    const targetH = Math.atan2(-pose.dx, -pose.dz);
-    // exponential smoothing kills the heading snap at polyline corners and at
-    // edge handoffs; wrap keeps the -π/π seam from spinning the car around
-    p.sh = angWrap(p.sh + angWrap(targetH - p.sh) * Math.min(1, TURN_RATE * dt));
-    // the lane offset rides on the SMOOTHED heading, so through a corner the
-    // car sweeps across its lane instead of teleporting at each vertex; the
-    // magnitude eases too because road width changes between edges
-    // …and never so far that the body hangs over the kerb, with half a metre
-    // to spare: on a 3.6 m service way a bus offset like a car swept a metre of
+    // …never so far that the body hangs over the kerb, with half a metre to
+    // spare: on a 3.6 m service way a bus offset like a car swept a metre of
     // pavement, and a car hugging the edge round a bend clipped whoever was
     // standing at the kerb waiting to cross.
     let offTgt = Math.max(0, Math.min(TRAFFIC.laneOffsetK * re.road.w, TRAFFIC.laneOffsetMax,
@@ -4087,15 +4200,177 @@ export class Traffic {
       if (squeeze > room) squeeze = room > 0 ? room : 0;
     }
     p.laneOff += (offTgt + bay + squeeze - p.laneOff) * Math.min(1, 3 * dt);
-    const hx = -Math.sin(p.sh), hz = -Math.cos(p.sh);
-    p.sx = pose.x - hz * p.laneOff;               // right of heading = (-hz, hx)
-    p.sz = pose.z + hx * p.laneOff;
+
+    // ---- v11: pedals and wheel, then the schedule. Until v10 this was a rail:
+    // the speed was integrated straight into an arc, and the arc WAS the car.
+    // Now the arc is where the body has got to along its lane (projected back
+    // after the step), and the multiplayer contract is kept on the target
+    // speed instead of on the position:
+    //   · never ahead of the schedule: the target never exceeds what still
+    //     lets the car slow to the schedule's own speed by the schedule's arc
+    //     (v^2 = vn^2 + 2 b d), so it comes to rest at the schedule's red light
+    //     on its own brakes rather than being stopped dead by a clamp;
+    //   · never more than LAG_MAX behind: inside HAUL_W of the clamp the target
+    //     is FLOORED above the schedule's speed (unless a hull is in the way,
+    //     which ghosts the car exactly as before), and a car that still falls
+    //     past it is put back on its schedule only where nobody can see that;
+    //   · when pinned at the schedule the envelope hands it the schedule's own
+    //     speed, so the wheels and the engine hum match what it is doing.
+    const b = p.body;
+    const nomV = p.ghost ? 0 : this._nomV(p);
+    // (the body's own arc, which may be a little past the reported one: see
+    // the projection below)
+    const bArc = p.bArc ?? p.sR;
+    if (Snom < Infinity) {
+      // The schedule's speed is piecewise constant: it steps down at a corner
+      // and to nothing at a red, which a rail could follow and a car cannot.
+      // So the car keeps a speed-proportional buffer behind it, and brakes
+      // properly for a stop the schedule is about to make (_schedStop).
+      const buf = p.ndone ? 0 : SCHED_GAP0 + SCHED_GAP_T * b.speed;
+      const env = Math.sqrt(nomV * nomV + 2 * BRAKE * Math.max(0, Snom - bArc - buf));
+      if (env < tgt) tgt = env;
+      const stop = p.ghost ? Infinity : this._schedStop(p, T);
+      if (stop < Infinity) {
+        // (the end of the trip is driven right up to: arrival below is a
+        // metre's tolerance, and a car stopped short of it stood there for good)
+        const d = stop - bArc - (stop >= p.routeEnd ? 0.2 : 0.6);
+        let es = Math.sqrt(2 * BRAKE * Math.max(0, d));
+        if (d > 0.2 && es < ARRIVE_V) es = ARRIVE_V;
+        if (es < tgt) tgt = es;
+      }
+    }
+    if (!p.ghost && !blocked && lag > LAG_MAX - HAUL_W)
+      tgt = Math.max(tgt, nomV + (lag - (LAG_MAX - HAUL_W)) * HAUL_K);
+    // the turn ahead, at the speed the tyres allow with a comfortable margin
+    const aLat = (car.len ?? 4.6) > 6 ? AI.A_LAT_BIG : AI.A_LAT;
+    const cc = curveCap(p.route, p.ri, bArc, look + 20, aLat, BRAKE, p.laneOff, b.r0);
+    if (cc < tgt) tgt = cc;
+    const v0 = b.speed;
+    // the wheel: the front axle onto the lane (aidriver stanley), the lane's
+    // own curvature fed forward. The foot point is carried from step to step.
+    const L = b.len * AI.WHEELBASE, fa = L * 0.45;
+    const ax = b.x - Math.sin(b.heading) * fa, az = b.z - Math.cos(b.heading) * fa;
+    const g0 = (p.fArc > bArc - 1 && p.fArc < bArc + fa + 6) ? p.fArc : bArc + fa;
+    const ft = laneFoot(p.route, p.tI ?? p.ri, p.tSeg ?? 0, g0, ax, az, p.laneOff, b.r0, lanePt, bArc - 1, bArc + fa + 3);
+    p.fArc = ft.arc; p.tI = ft.i; p.tSeg = ft.seg;
+    const sw = stanley(b, ft, v0);
+    // OFF ITS LANE, A CAR CREEPS. A corner tighter than the vehicle can steer
+    // (OSM draws some service-road bends at two metres) or the way back from a
+    // shunt leaves the body a metre or more off the lane it wants, which on a
+    // narrow street is the pavement. Until it is back the driver goes no
+    // faster than a person can step away from (under pedestrians.js
+    // HIT_MIN_SPEED once it is two metres out).
+    let offL = dist(ax - ft.x, az - ft.z);
+    if (offL > LOST_R) {
+      // LOST: the body is nowhere near the lane its arc says (a shove, a
+      // corner it could not make, a projection that slid along a lane that
+      // doubles back). Find where on its route it really is, from a window
+      // wide enough to hold any of that, and if even that is far off and
+      // nobody can see it, put it back on its lane.
+      const a = projectArc(p.route, p.ri, p.sR, b.x, b.z, b.heading, 120, 40);
+      p.bArc = a > p.sR ? a : p.sR; p.fArc = undefined;
+      const lp = laneAt(p.route, p.ri, 0, p.bArc, p.laneOff, lanePt, b.r0);
+      const away = dist(b.x - lp.x, b.z - lp.z);
+      if (away > LOST_R && !this._heldVisible(p)) { this._snapBody(p, p.bArc); offL = 0; }
+      // still off where it was found (somebody is watching, so it may not be
+      // put back): it keeps creeping. Zeroing this let a lost car drive on at
+      // full speed across the pavement it had already run onto.
+      else offL = away;
+    }
+    if (offL > OFF_LANE) {
+      const cv = OFF_LANE_V - (offL - OFF_LANE) * 2.4;
+      if (cv < tgt) tgt = cv > BODY_V ? cv : BODY_V;
+    }
+    // the rail's own speed law (up at ACCEL, down at BRAKE_SOFT, or BRAKE_HARD
+    // when something fills the stop gap), handed to the pedals as the
+    // acceleration that reaches it in one step: the planners above were all
+    // tuned against that law, and a softer one stops metres later
+    const bMax = hard ? BRAKE_HARD : BRAKE_SOFT;
+    const vN = v0 < tgt ? Math.min(tgt, v0 + ACCEL * dt) : Math.max(tgt, v0 - bMax * dt);
+    const aW = (vN - v0) / dt;
+    // The full tyre model where somebody can see it, the kinematic arc past
+    // that: the two share the pose, the speed and the curvature, so a car
+    // crossing the line changes nothing anyone could see.
+    const dP = dist(b.x - this._px, b.z - this._pz);
+    if (VEH.tyreStep && dP < PHYS_R + (b.phys ? PHYS_HYST : 0)) {
+      if (!b.phys) { b.yaw = -v0 * (b.kappa ?? 0); b._lat = 0; b.phys = true; }
+      const K = VEH.kindOf(car.kind);
+      pedalFor(aW, v0, K, CAR_CFG.brake);
+      const ds = AI.STEER_RATE * dt;
+      b.steer += sw - b.steer > ds ? ds : sw - b.steer < -ds ? -ds : sw - b.steer;
+      const h = dt / PHYS_SUB, gas = pedal.gas, hb = pedal.hb;
+      for (let i = 0; i < PHYS_SUB; i++) VEH.tyreStep(b, K, gas, hb, h);
+      b.kappa = Math.abs(b.speed) > 0.5 ? -b.yaw / b.speed : Math.tan(b.steer) / L;
+    } else {
+      b.phys = false;
+      const v = v0 + aW * dt;
+      kinStep(b, Math.tan(sw) / L, v > 0 ? v : 0, dt, aLat);
+    }
+    b.heading = angWrap(b.heading);
+    car.speed = b.speed;
+    car.steer = b.steer;
+    // where along the lane the body has got to: forward only, never past the
+    // schedule (a few centimetres of overshoot on the brakes is the body's,
+    // the arc the rest of this file reasons with is the schedule's)
+    let arc = projectArc(p.route, p.ri, bArc, b.x, b.z, b.heading, Math.abs(b.speed) * dt * 2 + 2.5, 0.5);
+    if (arc < bArc) arc = bArc;
+    p.bArc = arc;
+    if (arc > Snom) arc = Snom;
+    if (arc < p.sR) arc = p.sR;
+    if (!p.ghost && arc < Snom - LAG_MAX) {
+      // Fallen behind past the clamp. NOT dragged through a hull: that is what
+      // the clamp used to do: eleven seconds after you left your car in the
+      // lane, the queue behind it was hauled forward and drove straight
+      // through, which is the whole "auta stále projíždějí jako ghosts mým
+      // autem" report. A car physically stopped by something solid LEAVES the
+      // shared population instead: it becomes a local ghost, keeps its nose
+      // against the obstruction like a real driver, and the sweeper retires it
+      // once nobody is looking. Desync is the honest answer here: the
+      // obstruction is local to this client. (Through _toGhost, which also
+      // hands the slot back; the slot's schedule is minted afresh by the next
+      // scan and runs on, shared as ever, and takes no mesh while this car is
+      // still standing here.)
+      // A car that is free to drive is floored up to its schedule above; one
+      // that still fell HAUL_SNAP past the clamp (a body that cannot keep up)
+      // is put back on its schedule where nobody can see it, and is let go as
+      // a ghost where somebody can: a car may not jump in front of the player.
+      if (blocked || (arc < Snom - LAG_MAX - HAUL_SNAP && this._heldVisible(p))) {
+        this._standIn.set(p.key, p); this._toGhost(p);
+      } else if (arc < Snom - LAG_MAX - HAUL_SNAP) {
+        // (just inside the haul band, so the floor does not have to drag it
+        // the last metres and it does not stand at the clamp's very edge)
+        arc = Snom - (LAG_MAX - HAUL_W);
+        this._snapBody(p, arc);
+      }
+    }
+    this._setRendered(p, arc);
+
+    // ---- arrival. The schedule ran out of route; the car finishes whatever
+    // lag it still owes, then stands there, and is marked done. `dead` is only
+    // a REQUEST to the sweep: _retire() decides what actually happens to the
+    // mesh, and if the player is watching, the answer is "it drives off as a
+    // ghost", not "it blinks out". RETIRE_R survives as the no-camera
+    // fallback: without a viewer _visible() is false for everything, so this
+    // is the only thing standing between a v8 caller and a car evaporating in
+    // its own mirror. RETIRE_GRACE is what stops a finished car standing at
+    // the kerb for ever when nobody is near enough for RETIRE_R to matter.
+    if (!p.ghost && p.ndone && p.sR >= p.routeEnd - 1) {
+      p.graceT += dt;
+      if (p.graceT > RETIRE_GRACE ||
+          dist(p.sx - this._px, p.sz - this._pz) > RETIRE_R) p.dead = 1;
+    }
+
+    // ---- pose: the body's. Height still comes off the road the arc is on
+    // (bridge decks and graded embankments live there, not in the terrain).
+    p.sx = b.x; p.sz = b.z; p.sh = b.heading;
+    const fe = p.edge;
+    p.seg = poseAt(fe, p.s, p.seg).seg;
     // off0 + offSign·s = meters from the WAY start (not the edge), which is
     // what the shared ramp math wants — decks rise only near the way's ends.
     const gnd2 = this._groundAt(p.sx, p.sz);
-    const bridgeY = re.road.br
-      ? bridgeDeckHeight(re.road, re.off0 + re.offSign * p.s, this.world?.terrain)
-      : (roadGradeY(re.road, re.off0 + re.offSign * p.s, this.world?.terrain) ?? gnd2);
+    const bridgeY = fe.road.br
+      ? bridgeDeckHeight(fe.road, fe.off0 + fe.offSign * p.s, this.world?.terrain)
+      : (roadGradeY(fe.road, fe.off0 + fe.offSign * p.s, this.world?.terrain) ?? gnd2);
     p.sy = bridgeY + LAYER_Y.road;
   }
 

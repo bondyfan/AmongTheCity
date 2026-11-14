@@ -63,8 +63,8 @@ const P = {
       // alike), a worker took 6.6 s to start, and a console evaluation timed
       // out at 45 s. That, not the game, is what retired the mesher pool in
       // three engineers' tabs, and in the original build too.
-      const ch = new MessageChannel(); const q = [];
-      let inAir = false;
+      const ch = new MessageChannel(); const q = [], rq = [];
+      let inAir = false, lastFrame = 0;
       const kick = () => { if (!inAir) { inAir = true; ch.port2.postMessage(0); } };
       ch.port1.onmessage = () => {
         inAir = false;
@@ -73,10 +73,17 @@ const P = {
         // stops competing for the GPU while the OTHER build is being measured
         if (P.paused) return;
         for (const cb of q.splice(0)) cb(performance.now());
+        // P.vsync: frames no faster than a shown tab's 60 Hz. Without it the
+        // render loop runs back to back and a BOOT measured here is mostly
+        // renders of a scene behind the loading overlay, with every network
+        // reply queued behind one (round 7: 4.5 s of renders in a 9 s boot).
+        const now = performance.now();
+        if (rq.length && (!P.vsync || now - lastFrame >= 16.6)) { lastFrame = now; for (const cb of rq.splice(0)) cb(now); }
+        if (rq.length || q.length) kick();
       };
       P._kick = kick;
       const realSt = window.setTimeout.bind(window);
-      window.requestAnimationFrame = (cb) => { q.push(cb); kick(); return 0; };
+      window.requestAnimationFrame = (cb) => { rq.push(cb); kick(); return 0; };
       window.setTimeout = (fn, d, ...a) => (typeof fn === 'function' && (d ?? 0) <= 50)
         ? (q.push(() => fn(...a)), kick(), -1) : realSt(fn, d, ...a);
     } else {
@@ -610,6 +617,7 @@ Object.assign(P, {
     return 'watching';
   },
   _sampleTiles() {
+    if (!P.samples) return;                        // watch() not called: nothing to sample into
     const city = window.__atc.world.city;
     for (const t of city.manifestTiles ?? []) {
       const k = t.tx + ',' + t.tz;
@@ -814,6 +822,46 @@ Object.assign(P, {
       if (part === 'chunks') out[part].worstMeanShiftMm = Math.round(worst * 10000) / 10;
     }
     return out;
+  },
+});
+
+// ---- round 7: where a boot's seconds go -------------------------------------
+// bootPhases() at the MENU, before the click (with install()); bootReport()
+// once in play. Every fetch is timed to its parsed body (the main thread's
+// JSON.parse is the part a player waits for), and the streamer's warm-up is
+// timed from its first readyFull() question to its last.
+Object.assign(P, {
+  async bootPhases() {
+    performance.setResourceTimingBufferSize(5000);
+    P.fetches = [];
+    const rf = window.fetch.bind(window);
+    window.fetch = async (u, o) => {
+      const rec = { u: String(u).replace(/^.*\/data\//, ''), t0: performance.now(), hdr: 0, body: 0, kb: 0 };
+      P.fetches.push(rec);
+      const res = await rf(u, o);
+      rec.hdr = performance.now();
+      const json = res.json.bind(res), ab = res.arrayBuffer.bind(res);
+      res.json = async () => { const t = performance.now(); const v = await json(); rec.body = performance.now(); rec.parse = rec.body - t; return v; };
+      res.arrayBuffer = async () => { const v = await ab(); rec.body = performance.now(); rec.kb = v.byteLength >> 10; return v; };
+      return res;
+    };
+    const url = performance.getEntriesByType('resource').map((e) => e.name).find((n) => /\/js\/city\.js/.test(n));
+    const { CityWorld } = await import(url ?? '/js/city.js');
+    const rr = CityWorld.prototype.readyFull;
+    P.warm = { first: 0, last: 0, n: 0 };
+    CityWorld.prototype.readyFull = function (...a) {
+      const now = performance.now();
+      if (!P.warm.first) P.warm.first = now;
+      P.warm.last = now; P.warm.n++;
+      return rr.apply(this, a);
+    };
+    return url ?? 'no city.js url';
+  },
+  bootReport() {
+    const c = P.log.click, r = (v) => (v ? Math.round(v - c) : null);
+    const tiles = (P.fetches ?? []).filter((f) => f.t0 < (P.log.play ?? Infinity));
+    return { play: r(P.log.play), world: r(P.log.world), warmFrom: r(P.warm?.first), warmTo: r(P.warm?.last), warmCalls: P.warm?.n,
+      fetches: tiles.map((f) => [f.u, r(f.t0), r(f.hdr), r(f.body), Math.round(f.parse ?? 0)].join(' ')) };
   },
 });
 

@@ -1463,3 +1463,44 @@ and rubber through every fast corner is wallpaper rather than a skid mark.
 The pool cap **is** the memory bound. `city.js` unloads only the chunks in its
 own `built` map, so these outlive the street they were painted on — which is
 what we want, and also why an unbounded emitter would leak forever.
+
+# v14 contract: weight, walls and the windscreen
+
+The ask: *"Udělej to ovládání auta trošku lepší, jako v GTA San Andreas, s
+fyzikou. A když se rychle vybourám, chci vyletět předním sklem, jako v GTA 4."*
+The v13 balance (planted, slides only when provoked) is kept on purpose: full
+lock at 50 to 130 km/h with W held still reads slip01 0.00 in a front-drive car.
+
+* **Body on springs** (`bodyStep`). Roll and pitch are damped springs driven by
+  the tyre forces (`car._aLat`, `car._aLong`), about 4° of roll at 1 g and 3° of
+  dive in a panic stop, one overshoot. Heave is driven by the wheels' vertical
+  ACCELERATION, so a 12 cm kerb kicks the shell and a long hill bends nothing.
+  Mesh only: car.y, `_gp`/`_gr` and the tyre model never see it.
+* **Rear-drive torque** (`driveRear`, `SPIN_LOW`, `SPIN_CAP`). The BMW and the
+  Mercedes can ask the rear tyres for more than the circle holds in low gears,
+  capped at 0.86 of the circle. That cap is bistable territory: 0.92 spun a BMW
+  190° on an ordinary 25 km/h junction turn with W held, 0.84 did nothing.
+  At 0.86 full lock plus full throttle steps the tail out 20 to 27°, a normal
+  junction turn just tightens.
+* **Collisions are impulses.** The wall pass used to scale the velocity on every
+  touching step, so W held against a wall re-crashed every frame (a 40 km/h tap
+  cost 0.85 of a write-off) and a glance stopped dead. Now: every corner probed
+  from one pose, summed push = normal, deepest push = depth, and an impulse at
+  the contact with restitution 0.34 falling to 0.1 at 70 km/h, wall friction
+  0.32, and the yaw inertia of the tyre model, so a one-corner hit spins the car
+  and a square one does not. Car-car is the same with both masses. The step is
+  cut into passes of at most 0.4 m (`COL_STEP`): a 30 cm wall at 130 km/h on a
+  1/20 s frame used to be tunnelled.
+* **The impact record**: `car.impactV` (closing speed of the hardest contact of
+  this call), `impactCos` (1 = nose square on), `impactVx/Vz` (ground velocity
+  BEFORE the impulse) and `impactWith` ('wall' | 'car'). Reset every call.
+* **The kinematic blend uses ground speed.** By vx alone a broadside at 100 km/h
+  was "parking pace" and stopped dead in 1.5 m.
+
+Ejection lives in `js/ejection.js` (pure, no imports): `shouldEject` needs
+impactV ≥ 16.5 m/s, impactCos ≥ 0.8 and a moving car. `Player.eject` hands the
+body to `stepBody`: the crowd's ragdoll (gravity, tumble, one bounce at 0.3,
+slide, settle flat) plus walls and the bonnet of the car it left, then lie
+1.6 s and get up. HP go through `vitals.damage` from two curves (glass, and each
+ground or wall arrival). The abandoned car's hull is excluded from the body's
+collisions (main.js carHulls), or the body is "hit" by the seat it left.

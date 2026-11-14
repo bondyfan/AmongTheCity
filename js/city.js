@@ -490,6 +490,9 @@ export class CityWorld {
     // with no data behind them. A building the player wrecked pins its whole
     // tile — the box model outlives the footprint it was built from.
     city.onTileUnloaded?.((t) => { this._dropCells(t.cells); this._tileIn(t, false); });
+    // ...and the player is a place no tile is evicted near, as well as the
+    // point the fetches are aimed at (which runs ahead of a fast flier)
+    city.evictHolds?.push((out) => { if (this._lfx !== undefined) out.push(this._lfx, this._lfz); });
     if ('keepAlive' in city)
       city.keepAlive = (f) => this.interiors.models.get(f._id)?.damaged === true;
   }
@@ -564,26 +567,7 @@ export class CityWorld {
       // wait behind four tiles nobody could see. With the bake paced over
       // frames (below) that wait would be the ground under the next street
       // settling long after play began.
-      const TT = this.city.tile || 4800;
-      let pick = null, pickD = Infinity, ptx = 0, ptz = 0;
-      for (const tk of this.terrain.grids.keys()) {
-        if (!this.terrain.grids.get(tk)) continue;
-        if (this.terrain._conformed?.has(tk)) continue;
-        // tried while some profile was provisional, and nothing new has
-        // landed since — trying again would compute the same guess
-        if (this.terrain._conformTried?.get(tk) === (this.terrain._loads ?? 0)) continue;
-        const [ttx, ttz] = tk.split(',').map(Number);
-        const d = Math.max(ttx * TT - focus.x, focus.x - (ttx + 1) * TT,
-          ttz * TT - focus.z, focus.z - (ttz + 1) * TT, 0);
-        if (d < pickD) { pickD = d; pick = tk; ptx = ttx; ptz = ttz; }
-      }
-      // in play the bake waits until its roads have been levelled, a few
-      // milliseconds a frame: see _warmRoads
-      if (pick !== null && !this._bake && this._warmRoads(pick, ptx, ptz)) {
-        const roads = this._warm?.key === pick ? this._warm.roads : null;
-        this._warm = null;
-        this._startBake(pick, ptx, ptz, roads);
-      }
+      this._pickBake(focus);
       // These two are only read INSIDE the built window — the canopy for the
       // tree scatter, the ground class for what unmapped ground is sealed with
       // — so they follow the geometry rings rather than the clock, but they
@@ -599,6 +583,17 @@ export class CityWorld {
       this._ribbonDue = true;
     } else if (this._bake) this._bakeStep();
     else if (this._warm) this._warmRoads(this._warm.key, this._warm.tx, this._warm.tz);
+    // BOOT DOES NOT WAIT A SECOND BETWEEN BAKES. Unbudgeted (boot, tests) a
+    // bake is the whole tile at once, and the boot gate (readyFull) waits for
+    // the four tiles under the spawn window, so pacing them by the 1 Hz pass
+    // above held the overlay three seconds of sixty warm-up frames each
+    // (measured 13 Nov 2026: 41 warm-up rounds over 7.3 s, four bakes). The
+    // next one starts as soon as the last is done, and only once every height
+    // map asked for has landed, so the nearest-first ORDER is the one the
+    // complete set gives (a border way keeps the profile its first bake gave
+    // it: see readyFull), never a guess made over half of them.
+    // (Only the tiles in view: those are the gate, and the nearest anyway.)
+    else if (!((this.conformBudgetMs ?? Infinity) < Infinity) && !this.terrain._pending?.size) this._pickBake(focus, true);
     // The ring centre leads a moving focus by ~2.2 s of travel, capped at two
     // chunks, so the cells ahead build while they are still far — the pop-in
     // happens out in the fog and the hitch happens before you are close enough
@@ -889,6 +884,31 @@ export class CityWorld {
     const cm = this.mats?.codecMats;
     if (gone && cm) for (const k in cm) if (gone.includes(cm[k])) delete cm[k];
     used.clear();
+  }
+
+  /** Earthworks: start the bake of the nearest unconformed tile, if any is due. */
+  _pickBake(focus, inView = false) {
+    const TT = this.city.tile || 4800;
+    let pick = null, pickD = Infinity, ptx = 0, ptz = 0;
+    for (const tk of this.terrain.grids.keys()) {
+      if (!this.terrain.grids.get(tk)) continue;
+      if (this.terrain._conformed?.has(tk)) continue;
+      // tried while some profile was provisional, and nothing new has
+      // landed since: trying again would compute the same guess
+      if (this.terrain._conformTried?.get(tk) === (this.terrain._loads ?? 0)) continue;
+      const [ttx, ttz] = tk.split(',').map(Number);
+      if (inView && !this._tileInView(ttx, ttz, focus)) continue;
+      const d = Math.max(ttx * TT - focus.x, focus.x - (ttx + 1) * TT,
+        ttz * TT - focus.z, focus.z - (ttz + 1) * TT, 0);
+      if (d < pickD) { pickD = d; pick = tk; ptx = ttx; ptz = ttz; }
+    }
+    // in play the bake waits until its roads have been levelled, a few
+    // milliseconds a frame: see _warmRoads
+    if (pick !== null && !this._bake && this._warmRoads(pick, ptx, ptz)) {
+      const roads = this._warm?.key === pick ? this._warm.roads : null;
+      this._warm = null;
+      this._startBake(pick, ptx, ptz, roads);
+    }
   }
 
   // LEVEL A TILE'S ROADS BEFORE ITS EARTHWORKS, A SLICE A FRAME. The bake

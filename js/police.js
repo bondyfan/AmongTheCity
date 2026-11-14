@@ -1,21 +1,29 @@
 // ==========================================================================
 // Police — what the patrol does once it wants you
 //
-// THIS IS A FIRST SLICE AND THE EDGES ARE DELIBERATE. One star puts one car
-// behind you; two stars put a second one there. That is the whole feature.
-// There are NO roadblocks, NO officers on foot, NO helicopter and NO bust: a
-// unit that reaches you sits on your bumper with its siren on and waits for a
-// verb that does not exist yet. Above two stars this file does nothing extra —
-// js/wanted.js will happily count to five and the third car is not written.
+// WHAT IT DOES NOW (round 7). The stars buy cars and the cars do things:
 //
-// The reason for slicing it there is not laziness, it is that every one of
-// those four features needs something this build has not got: a roadblock
-// needs to reserve a junction and un-reserve it (traffic.js owns junctions), a
-// bust needs a state the player can be IN (there is no jail, no fee, no
-// respawn-to-station), and a helicopter needs a second flight AI. A pursuit
-// that merely follows you is the one piece that is complete on its own — you
-// can be chased, you can be caught up with, and you can lose them — and it is
-// worth shipping alone.
+//   1 star   one patrol. It follows; if you stop, it pulls up and the officer
+//            gets out, takes cover behind the car and draws a pistol.
+//   2 stars  two patrols, and the tail car may RAM you (telegraphed: it lines
+//            up behind you, sounds its horn, then commits).
+//   3 stars  three, and the third aims AHEAD of you so it comes down a
+//            parallel street and blocks the road; the tail cars may PIT you.
+//   4, 5     four and five cars, a higher ceiling speed and shorter reactions.
+//
+// The numbers per star are js/policetune.js. The last thirty metres (follow,
+// ram, PIT, pull up, block) are js/policeram.js: there a unit leaves its rail
+// and drives at you as a free body, and every contact is vehicles.js's own
+// car-to-car solver. The officers on foot are js/policecops.js and their
+// rounds js/copfire.js: real traces that can miss, hit the car or hit you,
+// through vitals.damage(), so dying to them is the ordinary death card, the
+// hospital, the fee and the fine. Units are real patrol cars (traffic.js's
+// livery and light bar): an ambient patrol is commandeered when one is near,
+// otherwise one is called in on a road out of your sight.
+//
+// The sections below are the pursuit as first written (the rail chase, the
+// rubber band, losing them); they still describe how a unit drives until it
+// is close.
 //
 // ---- THE ONE MEASURED PROBLEM: THEY CANNOT CATCH YOU ----------------------
 //
@@ -281,9 +289,13 @@ import { TRAFFIC, LAYER_Y } from './config.js';
 import { distPointToSegment, roadGradeY, bridgeDeckHeight } from './geo.js';
 import { sfxAt } from './audio.js';
 import { worldT } from './worldclock.js';
+import { tierFor, MAX_UNITS } from './policetune.js';
+import { wantsFree, enterFree, freeStep, rejoin, BLEND } from './policeram.js';
+import { Officers } from './policecops.js';
+import { Gunfire } from './copfire.js';
+import * as VITALS from './vitals.js';
 
 // ---- how many, and when --------------------------------------------------
-const MAX_UNITS = 2;            // 1 star → 1, 2 stars → 2, above → not yet
 // …and two more RECORDS than that, because a unit that has given up does not
 // vanish, it drives away (see _letGo). Without the spare slots a chase that
 // lost one car would have to wait out the whole RELEASE_T before it could draft
@@ -305,6 +317,17 @@ const PICK_MAX = 340;           // m — further out it would arrive too late to
                                 // the reason you are worried.
 const KIND_PEN = 25;            // m of "distance" a non-Octavia costs, so the
                                 // Czech default wins a close-run thing.
+// A real patrol car first: an ambient one (traffic.js, livery and light bar)
+// nearer than this is commandeered; otherwise one is called in on a road
+// SPAWN_MIN to SPAWN_MAX from you, out of your sight when there is a choice.
+const PATROL_R = 420;
+const SPAWN_MIN = 170, SPAWN_MAX = 330, SPAWN_IDEAL = 230;
+const SPAWN_SEEN_PEN = 90;      // m of score a road you can see costs
+const DEPLOY_R = 26;            // m: a unit stopped this near a stopped player parks
+const DEPLOY_SLOW_T = 0.8;      // s the player must have been stopped first
+const FOOT_DEPLOY_R = 120;      // m: on foot off the road, the crew walks from this far
+const FOOT_STALL_T = 2.5;       // s of not closing before a unit gives up on the lane
+const LEAVE_T = 1.5;            // s a parked unit waits after its crew is back in
 
 // ---- the rubber band, argued in the header -------------------------------
 const COP_VK = 1.15;
@@ -502,6 +525,37 @@ export class Police {
     this._lastX = 0;             // where somebody last had you
     this._lastZ = 0;
     this._hasLast = false;
+
+    // ---- round 7: escalation, rams, officers, gunfire ----
+    this.rnd = typeof opts.rnd === 'function' ? opts.rnd : Math.random;
+    this.vitals = opts.vitals ?? VITALS;
+    /** The star tier in force (js/policetune.js), null at zero stars. */
+    this.tier = null;
+    /** Counters for tests and the dev overlay. Never reset by the chase. */
+    this.stats = { recruits: 0, commandeered: 0, spawned: 0, civilian: 0, deploys: 0,
+      contacts: 0, rams: 0, ramTries: 0, pits: 0, pitTries: 0 };
+    /** Where the player is, how fast and which way: one record, rewritten. */
+    this.P = { x: 0, z: 0, y: 0, car: null, onFoot: true, heading: 0, speed: 0,
+      fx: 0, fz: -1, rx: 1, rz: 0, slow: true, slowSince: 0, valid: false };
+    const city = this.city;
+    this._groundAt = city && typeof city.walkY === 'function' ? (x, z) => city.walkY(x, z)
+      : (city?.footing?.heightAt ? (x, z) => city.footing.heightAt(x, z) : null);
+    this.gunfire = new Gunfire({ scene: this.scene, city, vitals: this.vitals, rnd: this.rnd });
+    this.officers = new Officers({
+      scene: this.scene, gunfire: this.gunfire, groundAt: this._groundAt,
+      los: (ax, az, bx, bz, d) => d <= SEE_NEAR * 0.5 || this._los(ax, az, bx, bz, d),
+      blocked: (x, z) => this._blocked(x, z),
+      makeBody: opts.makeBody, say: opts.say ?? null, wanted: this.wanted, rnd: this.rnd,
+    });
+    this._ramGateAt = 0;          // the force-wide gap between two shunts
+    /** Standing hulls for traffic.blockers (main.js): a stopped unit and the
+     *  officers on foot, so the traffic waits behind them instead of driving
+     *  through. Records are pooled and rewritten in _sync. */
+    this.blockers = [];
+    this._blk = [];
+    for (let i = 0; i < POOL_N + 12; i++) this._blk.push({ x: 0, z: 0, half: 0 });
+    this._notOurs = (c) => !!(c.ai && c.ai.edge && c.ai.edge.pts);
+    this._copCtx = { t: 0, px: 0, pz: 0, py: 0, pcar: null, onFoot: true, pspeed: 0, tier: null, down: false };
   }
 
   _now() { return this.clock ? this.clock() : worldT(); }
@@ -512,6 +566,11 @@ export class Police {
       x: 0, z: 0, y: 0, heading: 0, speed: 0, laneOff: 0,
       sees: false, seenAt: -1e9, sightAt: 0, stuckT: 0,
       release: false, releaseAt: 0,
+      // round 7
+      mode: 'rail', sub: '', subAt: 0, role: 0, freeAt: 0, blindAt: 0, wallT: 0,
+      contactAt: -1e9, ramCdAt: 0, pitSide: 1, bx: 0, bz: 0, blendNew: false,
+      parkedAt: 0, warned: false, spawned: false, dead: false,
+      bestD: Infinity, bestAt: 0, stall: false,
     };
   }
 
@@ -530,12 +589,16 @@ export class Police {
     const px = Number.isFinite(ctx.x) ? ctx.x : 0;
     const pz = Number.isFinite(ctx.z) ? ctx.z : 0;
     const pcar = ctx.car ?? null;
-    const onFoot = !pcar;
+    // On foot unless in a car; a caller that knows (main.js passes it) can say
+    // "neither" for the helicopter and the jet, which nobody shoots at.
+    const onFoot = pcar ? false : (ctx.onFoot !== undefined ? !!ctx.onFoot : true);
 
-    // How many cars this heat level is worth. Above two stars we do not add a
-    // third — the header says so out loud rather than silently capping.
+    // How many cars this heat level is worth, and how they behave: the tier.
     const stars = this._stars();
-    const want = stars <= 0 ? 0 : stars === 1 ? 1 : MAX_UNITS;
+    const tier = tierFor(stars);
+    this.tier = tier;
+    const want = tier ? tier.units : 0;
+    const P = this._player(px, pz, pcar, onFoot, ctx, step);
 
     // Sight first: it decides where everybody drives this step, and it decides
     // whether the pursuit is still warm.
@@ -544,14 +607,13 @@ export class Police {
     // The aim point. While somebody has you it leads your own velocity, so a
     // unit at a junction picks the street you turned into rather than the one
     // you were in when it got there. While nobody has you it is the last place
-    // anybody did — that stale target is the whole feel of a break.
-    let tx = px, tz = pz;
+    // anybody did; that stale target is the whole feel of a break.
+    let tx = px, tz = pz, lead = 0;
     if (this.sees) {
       if (pcar) {
-        const v = Math.abs(pcar.speed ?? 0);
-        const lead = Math.min(LEAD_MAX, v * LEAD_T);
-        tx = px - Math.sin(pcar.heading ?? 0) * lead;
-        tz = pz - Math.cos(pcar.heading ?? 0) * lead;
+        lead = Math.min(LEAD_MAX, P.speed * LEAD_T);
+        tx = px + P.fx * lead;
+        tz = pz + P.fz * lead;
       }
       this._lastX = px; this._lastZ = pz; this._hasLast = true;
       this._coldAt = this._t + LOSE_T;
@@ -560,15 +622,9 @@ export class Police {
     }
 
     // THE COLD RULE, and the ordering matters. "Cold" means no unit has had you
-    // for LOSE_T, and the answer to that is to give the cars back — a unit
-    // driving for ever at a target it last saw a minute ago is not searching,
-    // it is lost. What replaces the search is the draft: two seconds later a
-    // patrol that is actually NEAR you gets pulled out of the flow, which is
-    // both cheaper and more frightening than a car quartering the district. So
-    // going cold must NOT stop the recruiter — an earlier draft of this file
-    // made "release everything" and "draft one" two arms of the same `if`, and
-    // once the pursuit went cold with no live unit the condition stayed true
-    // for ever and the police never came back at all.
+    // for LOSE_T, and the answer to that is to give the cars back. Going cold
+    // must NOT stop the recruiter: two seconds later a patrol that is actually
+    // NEAR you is drafted, which is the manhunt (see LOSING THEM above).
     if (want <= 0) {
       for (let i = 0; i < this._pool.length; i++) this._letGo(this._pool[i]);
       this._hasLast = false;
@@ -588,22 +644,87 @@ export class Police {
         this._recruit(px, pz);
       }
     }
-
-    // "Slow" is the whole of what a unit needs to know about your motion: on
-    // foot you are always slow, and a car under ARRIVE_V is stopped as far as
-    // a pursuit is concerned.
-    const slow = onFoot || Math.abs(pcar?.speed ?? 0) < ARRIVE_V;
+    this._roles();
 
     for (let i = 0; i < this._pool.length; i++) {
       const u = this._pool[i];
       if (u.free) continue;
-      this._drive(u, step, tx, tz, px, pz, onFoot, slow);
+      // Each unit its own aim (the box): the first follows your lead, the
+      // second leads you twice as far, the third and later aim well AHEAD and
+      // to one side, so the greedy router brings them in from in front.
+      let ax = tx, az = tz;
+      if (this.sees && pcar && !u.release) {
+        if (u.role === 1) { ax = px + P.fx * lead * 2; az = pz + P.fz * lead * 2; }
+        else if (u.role >= 2 && tier && tier.box) {
+          const ahead = Math.min(160, 30 + P.speed * 5);
+          const side = (u.role & 1) ? 22 : -22;
+          ax = px + P.fx * ahead + P.rx * side;
+          az = pz + P.fz * ahead + P.rz * side;
+        }
+      }
+      this._drive(u, step, ax, az, px, pz, onFoot, P.slow, tier);
       if (u.release && (this._t >= u.releaseAt
         || dist(u.x - px, u.z - pz) > RELEASE_R)) this._drop(u);
     }
 
+    // The officers on foot, and their rounds.
+    const cc = this._copCtx;
+    cc.t = this._t; cc.px = px; cc.pz = pz; cc.py = P.y; cc.pcar = pcar;
+    cc.onFoot = onFoot; cc.pspeed = P.speed; cc.tier = tier;
+    cc.down = typeof this.vitals?.down === 'function' ? !!this.vitals.down() : false;
+    this.officers.update(step, cc);
+    this.gunfire.update(step);
+    // An officer on foot who has you is the unit having you: wanted.js reads
+    // the units' flags, and a man being shot at is not "unseen".
+    const out = this.officers.out;
+    for (let i = 0; i < out.length; i++) {
+      const r = out[i];
+      if (r.sees && r.state !== 'down' && r.unit && !r.unit.release) {
+        r.unit.sees = true; r.unit.seenAt = this._t; this.sees = true;
+        this._lastX = px; this._lastZ = pz; this._hasLast = true;
+        this._coldAt = this._t + LOSE_T;
+      }
+    }
+
     this._siren(px, pz);
     this._sync();
+  }
+
+  // The player record every unit and officer reads: where, which way, how
+  // fast (a car's own speed, or the distance the feet covered), and whether he
+  // has STOPPED, which is what turns a chase into officers on foot.
+  _player(px, pz, pcar, onFoot, ctx, step) {
+    const P = this.P;
+    let h = P.heading, v = 0;
+    if (pcar) { h = Number.isFinite(pcar.heading) ? pcar.heading : h; v = Math.abs(pcar.speed ?? 0); }
+    else if (P.valid && step > 0) {
+      const dx = px - P.x, dz = pz - P.z, d = dist(dx, dz);
+      if (d < 20) {                               // a teleport is not a sprint
+        v = d / step;
+        if (d > 0.02) h = Math.atan2(-dx, -dz);
+      }
+    }
+    P.x = px; P.z = pz; P.car = pcar; P.onFoot = onFoot; P.valid = true;
+    P.heading = h; P.speed = v;
+    P.fx = -Math.sin(h); P.fz = -Math.cos(h); P.rx = -P.fz; P.rz = P.fx;
+    if (Number.isFinite(ctx.y)) P.y = ctx.y;
+    else if (pcar && Number.isFinite(pcar.y)) P.y = pcar.y;
+    else if (this._groundAt) { const g = this._groundAt(px, pz); if (Number.isFinite(g)) P.y = g; }
+    const slow = onFoot || (!!pcar && v < ARRIVE_V);
+    if (slow && !P.slow) P.slowSince = this._t;
+    P.slow = slow;
+    return P;
+  }
+
+  // Box roles, by pool order among the live units: 0 tails, 1 leads, 2+ head
+  // you off. Stable, because the pool order is.
+  _roles() {
+    let r = 0;
+    for (let i = 0; i < this._pool.length; i++) {
+      const u = this._pool[i];
+      if (u.free || u.release) continue;
+      u.role = r++;
+    }
   }
 
   // Rebuild the two public lists in place — length = 0 and push, so a caller
@@ -611,11 +732,27 @@ export class Police {
   _sync() {
     this.units.length = 0;
     this.cars.length = 0;
+    this.blockers.length = 0;
+    let nb = 0;
+    const blk = this._blk;
     for (let i = 0; i < this._pool.length; i++) {
       const u = this._pool[i];
       if (u.free) continue;
-      if (u.car) this.cars.push(u.car);
+      if (u.car) {
+        this.cars.push(u.car);
+        if (Math.abs(u.speed) < 1 && nb < blk.length) {
+          const b = blk[nb++];
+          b.x = u.car.x; b.z = u.car.z; b.half = (u.car.len ?? 4.4) / 2 + 0.35;
+          this.blockers.push(b);
+        }
+      }
       if (!u.release) this.units.push(u);
+    }
+    const out = this.officers?.out;
+    if (out) for (let i = 0; i < out.length && nb < blk.length; i++) {
+      const b = blk[nb++];
+      b.x = out[i].x; b.z = out[i].z; b.half = 0.9;
+      this.blockers.push(b);
     }
   }
 
@@ -652,56 +789,129 @@ export class Police {
    * that arrives with the livery, and nothing is guessed at.
    */
   _recruit(px, pz) {
-    const cars = this.traffic.cars;
-    if (!cars || !cars.size) return;
-    let best = null, bestScore = Infinity;
-    for (const car of cars) {
-      const p = car.ai;
-      if (!p || !p.edge || !p.edge.pts) continue;   // not traffic's to lend
-      if (!PATROL_KINDS.has(car.kind)) continue;
-      const d = dist(car.x - px, car.z - pz);
-      if (d > PICK_MAX) continue;
-      let score = d;
-      if (d < PICK_MIN) score += (PICK_MIN - d) * 2.5;
-      if (car.kind !== 'octavia') score += KIND_PEN;
-      if (score < bestScore) { bestScore = score; best = car; }
-    }
-    if (!best) return;                              // no patrol, no pursuit
-
     let u = null;
     for (let i = 0; i < this._pool.length && !u; i++)
       if (this._pool[i].free) u = this._pool[i];
     if (!u) return;
-    const p = best.ai;
-    // Copy the rail state BEFORE the steal — steal() nulls car.ai, and `p` is
-    // the only place the edge, the arc and the lane offset live.
-    u.edge = p.edge; u.s = p.s; u.seg = p.seg;
-    u.laneOff = p.laneOff ?? 0;
-    u.x = best.x; u.z = best.z; u.y = best.y ?? 0;
-    u.heading = best.heading; u.speed = Math.max(0, best.speed ?? 0);
+    const tr = this.traffic;
+    let car = null, spawned = false;
+
+    // 1. A real patrol already on the road near you: it keeps its livery and
+    //    its bar, and the transformation is just its blues coming on.
+    if (typeof tr.nearestPatrol === 'function') {
+      const c = tr.nearestPatrol(px, pz, PATROL_R, this._notOurs);
+      if (c && c.ai && c.ai.edge && c.ai.edge.pts) {
+        const p = c.ai;
+        u.edge = p.edge; u.s = p.s; u.seg = p.seg; u.laneOff = p.laneOff ?? 0;
+        u.x = c.x; u.z = c.z; u.y = c.y ?? 0;
+        u.heading = c.heading; u.speed = Math.max(0, c.speed ?? 0);
+        tr.steal(c);
+        car = c;
+        this.stats.commandeered++;
+      }
+    }
+    // 2. Called in: a patrol built on a road out of your sight, driving your way.
+    if (!car && typeof tr.spawnPatrol === 'function') {
+      const e = this._spawnRail(px, pz);
+      if (e) {
+        const s = Math.min(e.len - 2, Math.max(2, e.len * 0.5));
+        const pose = poseOn(e, s, 0);
+        const heading = Math.atan2(-pose.dx, -pose.dz);
+        const off = Math.min(TRAFFIC.laneOffsetK * (e.road?.w ?? 6), TRAFFIC.laneOffsetMax);
+        u.edge = e; u.s = s; u.seg = pose.seg; u.laneOff = off;
+        u.heading = heading;
+        u.x = pose.x - pose.dz * off; u.z = pose.z + pose.dx * off;
+        u.y = this._roadY(u);
+        u.speed = Math.min(e.speed, 12);
+        car = tr.spawnPatrol(u.x, u.z, heading);
+        if (car) {
+          car.y = u.y;
+          if (car.mesh) { car.mesh.position.set(u.x, u.y, u.z); car.mesh.rotation.y = heading; }
+          spawned = true;
+          this.stats.spawned++;
+        }
+      }
+    }
+    // 3. The first slice's fallback, for a traffic without patrols (a bare
+    //    fixture): the nearest car a patrol would be in, out of the flow.
+    if (!car) {
+      const cars = tr.cars;
+      if (!cars || !cars.size) return;
+      let best = null, bestScore = Infinity;
+      for (const c of cars) {
+        const p = c.ai;
+        if (!p || !p.edge || !p.edge.pts) continue;   // not traffic's to lend
+        if (!PATROL_KINDS.has(c.kind)) continue;
+        const d = dist(c.x - px, c.z - pz);
+        if (d > PICK_MAX) continue;
+        let score = d;
+        if (d < PICK_MIN) score += (PICK_MIN - d) * 2.5;
+        if (c.kind !== 'octavia') score += KIND_PEN;
+        if (score < bestScore) { bestScore = score; best = c; }
+      }
+      if (!best) return;                              // no patrol, no pursuit
+      const p = best.ai;
+      // Copy the rail state BEFORE the steal: steal() nulls car.ai.
+      u.edge = p.edge; u.s = p.s; u.seg = p.seg;
+      u.laneOff = p.laneOff ?? 0;
+      u.x = best.x; u.z = best.z; u.y = best.y ?? 0;
+      u.heading = best.heading; u.speed = Math.max(0, best.speed ?? 0);
+      // THE one door out of the schedule. See the header: _toGhost would let
+      // _scanCells re-mint this exact slot two lines later.
+      tr.steal(best);
+      car = best;
+      this.stats.civilian++;
+    }
     u.sees = false; u.seenAt = -1e9; u.sightAt = 0; u.stuckT = 0;
     u.release = false; u.releaseAt = 0;
+    u.mode = 'rail'; u.sub = ''; u.bx = 0; u.bz = 0; u.blendNew = false;
+    u.contactAt = -1e9; u.ramCdAt = 0; u.warned = false; u.dead = false;
+    u.bestD = Infinity; u.bestAt = this._t; u.stall = false;
+    u.spawned = spawned;
     u.free = false;
-    // THE one door out of the schedule. See the header: _toGhost would let
-    // _scanCells re-mint this exact slot two lines later.
-    this.traffic.steal(best);
-    // steal() nulls car.ai, and vehicles.update() reads a car with no `ai` and
-    // no `_grounded` as an abandoned one that has never been put on the ground:
-    // it would write car.y from surfaceY() once, on whichever frame it runs
-    // before us, and drop the car off its embankment for that frame. We put
-    // this car on the road ourselves every step, so claim the flag now.
-    best._grounded = true;
-    u.car = best;
+    // vehicles.update() reads a car with no `ai` and no `_grounded` as an
+    // abandoned one and would re-seat it on the terrain once, dropping it off
+    // its embankment for a frame. We put this car on the road every step.
+    car._grounded = true;
+    car.police = true;
+    car._rammedT = 0;
+    u.car = car;
+    try { tr.setSiren?.(car, true); } catch (err) { /* a fixture without bars */ }
+    this.stats.recruits++;
     this._sirenAt = this._t;                        // wail on the next update
     // A fresh pursuit starts WARM, and it stays warm for as long as this car
-    // plausibly needs to arrive. Without the first term the unit is drafted
-    // with no sight of you, `_coldAt` is still in the past, and the very next
-    // update releases the car it just took; without the second the same thing
-    // happens nine seconds later, while it is still closing. Both were real:
-    // see the note on APPROACH_V.
-    const away = dist(best.x - px, best.z - pz);
+    // plausibly needs to arrive (see the note on APPROACH_V).
+    const away = dist(u.x - px, u.z - pz);
     this._coldAt = Math.max(this._coldAt,
       this._t + LOSE_T + Math.min(APPROACH_MAX, away / APPROACH_V));
+  }
+
+  // A road to call a unit in on: SPAWN_MIN to SPAWN_MAX away, a real street
+  // (long and fast enough to be one), running TOWARDS you, and preferably one
+  // you cannot see from where you stand. A linear walk of traffic.edges, run at
+  // most once per RECRUIT_CD; the sight test runs only for a candidate that
+  // already beats the best, so it is a handful of samples, not thousands.
+  _spawnRail(px, pz) {
+    const edges = this.traffic?.edges;
+    if (!edges || !edges.length) return null;
+    let best = null, bestScore = Infinity;
+    const r0 = SPAWN_MIN * SPAWN_MIN, r1 = SPAWN_MAX * SPAWN_MAX;
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i];
+      if (!e.pts || e.pts.length < 2 || !(e.len >= 20) || !(e.speed >= 7)) continue;
+      if (e.road?.br) continue;                       // never born on a bridge deck
+      const mx = e.mx ?? e.pts[0][0], mz = e.mz ?? e.pts[0][1];
+      const dx = px - mx, dz = pz - mz, d2 = dx * dx + dz * dz;
+      if (d2 < r0 || d2 > r1) continue;
+      const d = Math.sqrt(d2);
+      const toward = (e.fdx * dx + e.fdz * dz) / d;   // running at you?
+      if (toward < 0.2) continue;
+      let score = Math.abs(d - SPAWN_IDEAL) + (1 - toward) * 60;
+      if (score >= bestScore) continue;
+      if (this._los(mx, mz, px, pz, d) && d < SEE_R + 40) score += SPAWN_SEEN_PEN;
+      if (score < bestScore) { bestScore = score; best = e; }
+    }
+    return best;
   }
 
   // ---------------------------------------------------------- releasing ----
@@ -712,15 +922,21 @@ export class Police {
   _letGo(u) {
     if (u.free || u.release) return;
     u.release = true;
-    u.releaseAt = this._t + RELEASE_T;
+    u.releaseAt = u.dead ? Infinity : this._t + RELEASE_T;
     u.sees = false;
+    this.officers.recall(u);
+    try { this.traffic?.setSiren?.(u.car, false); } catch (err) { /* fixture */ }
   }
 
   // The mesh goes. There is no way to hand a car back to traffic.js (see the
   // header), so this is a deletion — deferred as long as we can afford, which
   // is the same trade traffic.js makes for its own ghosts.
   _drop(u) {
-    if (u.car) this.vehicles?.remove(u.car);
+    this.officers.dropUnit(u);
+    if (u.car) {
+      try { this.traffic?.setSiren?.(u.car, false); } catch (err) { /* fixture */ }
+      this.vehicles?.remove(u.car);
+    }
     u.car = null; u.edge = null;
     u.free = true; u.release = false; u.sees = false;
   }
@@ -797,10 +1013,28 @@ export class Police {
 
   // ------------------------------------------------------------- driving ----
 
-  _drive(u, dt, tx, tz, px, pz, onFoot, slow) {
+  _drive(u, dt, tx, tz, px, pz, onFoot, slow, tier) {
     const car = u.car;
-    if (!car || !u.edge) { u.stuckT += dt; return; }
+    if (!car) { u.stuckT += dt; return; }
     if (dt <= 0) return;
+
+    // ---- round 7: parked with its crew out, or off the rail near you ------
+    if (u.mode === 'parked') { this._parked(u, dt); return; }
+    if (u.mode === 'free') {
+      if (!u.release && freeStep(this, u, dt, this.P, tier)) {
+        this._maybeDeploy(u, tier);
+        return;
+      }
+      if (!rejoin(this, u)) {
+        // no lane in reach: a released car simply goes, a chasing one waits
+        // for the stuck valve
+        if (u.release) { this._drop(u); return; }
+        u.stuckT += dt;
+        if (u.stuckT > STUCK_T) this._letGo(u);
+        return;
+      }
+    }
+    if (!u.edge) { u.stuckT += dt; return; }
 
     // The player rammed us. vehicles.js has already rewritten car.speed,
     // car.heading and car.x/z through its collision solver, so for the next
@@ -815,11 +1049,14 @@ export class Police {
     const dPlayer = dist(u.x - px, u.z - pz);
 
     // ---- the rubber band, and nothing else, is the cheat -----------------
+    // The tier widens the band and lifts the ceiling from four stars up.
+    const bandMax = tier ? tier.band : BAND_MAX;
+    const near = tier ? tier.near : BAND_NEAR;
     const band = chase
-      ? 1 + (BAND_MAX - 1) * clamp01((dPlayer - BAND_NEAR) / (BAND_FAR - BAND_NEAR))
+      ? 1 + (bandMax - 1) * clamp01((dPlayer - near) / (BAND_FAR - near))
       : 1;
     const vk = chase ? COP_VK : IDLE_VK;
-    let tgt = Math.min(e.speed * vk * band, COP_VMAX);
+    let tgt = Math.min(e.speed * vk * band, tier ? tier.vmax : COP_VMAX);
 
     // ---- corners, on traffic.js's own braking envelope -------------------
     // v² = vc² + 2·b·d, so speed bleeds off on the approach instead of at the
@@ -859,7 +1096,15 @@ export class Police {
     let hard = _lim.hard;
 
     // ---- arrived: there is nothing left to chase --------------------------
-    const arrived = chase && slow && dPlayer < ARRIVE_R;
+    let arrived = chase && slow && dPlayer < ARRIVE_R;
+    // A man on foot off the carriageway (a forecourt, a park, a yard): the
+    // lane never gets nearer than it is. Once a unit that can see him has
+    // stopped closing for FOOT_STALL_T it pulls up where it is and the crew
+    // goes the rest of the way on foot.
+    if (chase && onFoot && u.sees && dPlayer < FOOT_DEPLOY_R) {
+      if (dPlayer < u.bestD - 2) { u.bestD = dPlayer; u.bestAt = this._t; }
+      else if (this._t - u.bestAt > FOOT_STALL_T) { arrived = true; u.stall = true; }
+    } else { u.bestD = Infinity; u.bestAt = this._t; u.stall = false; }
     if (arrived) { tgt = 0; hard = true; }
 
     // ---- integrate -------------------------------------------------------
@@ -890,6 +1135,70 @@ export class Police {
     if (!(u.s >= 0)) u.s = 0;
 
     this._place(u, dt);
+
+    // Close, in sight, something on the ground to drive at: off the rail.
+    if (chase && tier && wantsFree(u, this.P, dist(u.x - px, u.z - pz))) {
+      enterFree(u, this.P, this._t, tier);
+      return;
+    }
+    if (arrived) this._maybeDeploy(u, tier);
+  }
+
+  // A unit that has pulled up near a stopped player parks and puts its crew
+  // out. Once: a unit with officers out is 'parked' until they are back in.
+  _maybeDeploy(u, tier) {
+    const P = this.P;
+    if (u.release || !tier || !P.slow || !u.sees) return;
+    if (this._t - P.slowSince < DEPLOY_SLOW_T) return;
+    if (Math.abs(u.speed) > 0.7) return;
+    if (!P.car && !P.onFoot) return;
+    if (dist(u.x - P.x, u.z - P.z) > (u.stall ? FOOT_DEPLOY_R : DEPLOY_R)) return;
+    u.mode = 'parked'; u.sub = ''; u.parkedAt = this._t; u.warned = false;
+    u.speed = 0;
+    if (u.car) { u.car.speed = 0; u.car._lat = 0; }
+    this.officers.deploy(u, tier.cops);
+    this.stats.deploys++;
+  }
+
+  // Parked: the car is a solid, still thing (the solver may shove it, and we
+  // keep what it did). When the crew is back in it leaves: back to the lane.
+  _parked(u, dt) {
+    const car = u.car;
+    u.x = car.x; u.z = car.z; u.heading = car.heading;
+    const s = car.speed ?? 0;
+    car.speed = s > 0 ? Math.max(0, s - 8 * dt) : Math.min(0, s + 8 * dt);
+    car.x += -Math.sin(car.heading) * car.speed * dt;
+    car.z += -Math.cos(car.heading) * car.speed * dt;
+    u.x = car.x; u.z = car.z; u.speed = car.speed;
+    if ((car._rammedT ?? 0) > 0) car._rammedT = Math.max(0, car._rammedT - dt);
+    if (car.mesh) { car.mesh.position.set(car.x, car.y, car.z); car.mesh.rotation.y = car.heading; }
+    const O = this.officers;
+    if (O.allDown(u)) {
+      // nobody left to drive it: it stands where it is until you are far away
+      if (!u.dead) { u.dead = true; this._letGo(u); u.releaseAt = Infinity; }
+      return;
+    }
+    if (!O.allIn(u)) { u.parkedAt = this._t; return; }
+    if (this._t - u.parkedAt < LEAVE_T) return;
+    if (!rejoin(this, u)) { u.mode = 'free'; enterFree(u, this.P, this._t, this.tier); }
+  }
+
+  // Free-mode height: the player's own height carried over the terrain
+  // difference, so a unit beside you on a bridge deck is on the deck too.
+  _freeY(u, P) {
+    const g = this._groundAt;
+    const ref = P.car ? P.car.y : P.y;
+    if (!Number.isFinite(ref)) return u.y;
+    if (!g) return ref;
+    const gp = g(P.x, P.z), gu = g(u.x, u.z);
+    if (!Number.isFinite(gp) || !Number.isFinite(gu)) return ref;
+    return Math.abs(ref - gp) < 1.2 ? gu + (ref - gp) + (P.car ? 0 : LAYER_Y.road) : ref;
+  }
+
+  _blocked(x, z) {
+    const city = this.city;
+    if (this._losOff || !city || typeof city.buildingAt !== 'function') return false;
+    try { return !!city.buildingAt(x, z); } catch (err) { this._losOff = true; return false; }
   }
 
   // Nearest thing ahead in our corridor caps the speed. Every other car in the
@@ -980,8 +1289,22 @@ export class Police {
       offTgt = Math.max(0, Math.min(offTgt, e.road.w / 2 - tr.kerbIntrudes - 0.35 - (u.car?.wid ?? 1.81) / 2));
     u.laneOff += (offTgt - u.laneOff) * Math.min(1, 3 * dt);
     const hx = -Math.sin(u.heading), hz = -Math.cos(u.heading);
-    u.x = pose.x - hz * u.laneOff;                 // right of heading = (−hz, hx)
-    u.z = pose.z + hx * u.laneOff;
+    const rx = pose.x - hz * u.laneOff;            // right of heading = (−hz, hx)
+    const rz = pose.z + hx * u.laneOff;
+    // Coming back from free driving (or a shunt) the car is where the physics
+    // left it, not on the lane: carry the difference and let it decay, so it
+    // steers back over a second instead of popping sideways.
+    if (u.blendNew) { u.bx = u.x - rx; u.bz = u.z - rz; u.blendNew = false; }
+    // `|| 0`: a record built by hand (a test, an old pool) has no blend at all
+    if (!u.bx) u.bx = 0;
+    if (!u.bz) u.bz = 0;
+    if (u.bx !== 0 || u.bz !== 0) {
+      const k = Math.exp(-BLEND * dt);
+      u.bx *= k; u.bz *= k;
+      if (Math.abs(u.bx) + Math.abs(u.bz) < 0.02) { u.bx = 0; u.bz = 0; }
+    }
+    u.x = rx + u.bx;
+    u.z = rz + u.bz;
     u.y = this._roadY(u);
     this._write(u, dt);
   }
@@ -1047,6 +1370,7 @@ export class Police {
     }
     u.s = bs; u.seg = bseg;
     u.speed = Math.max(0, car.speed);
+    u.x = car.x; u.z = car.z; u.blendNew = true;    // steer back, do not snap
   }
 
   // --------------------------------------------------------------- admin ----
@@ -1060,16 +1384,21 @@ export class Police {
     for (let i = 0; i < this._pool.length; i++) this._drop(this._pool[i]);
     this.units.length = 0;
     this.cars.length = 0;
+    this.blockers.length = 0;
     this.sees = false;
     this._t = this._now();
     this._recruitAt = 0;
     this._sirenAt = 0;
     this._coldAt = 0;
     this._hasLast = false;
+    this.officers.reset();
+    this.P.valid = false;
   }
 
   dispose() {
     this.reset();
+    this.officers.dispose();
+    this.gunfire.dispose();
     this.traffic = null;
     this.vehicles = null;
     this.wanted = null;

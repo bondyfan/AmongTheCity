@@ -12,6 +12,8 @@
 import { CHUNK, BRIDGE_Y, BRIDGE_RAMP } from './config.js';
 import { junctionOutline, indexBays, computeVerge, finishJunction, roadRank } from './streets.js';
 import { bayAt, WALK_W } from './streets.js';
+import { stitchStructures, deckNodeLevel } from './underpass.js';
+import { applyDip, underCap } from './dipchain.js';
 
 // how far ahead of the focus a tile starts loading. View streams ±600 m, so
 // 2600 m of headroom means even 130 km/h driving gives a fetch ~55 s before
@@ -22,9 +24,9 @@ const TILE_REACH = 2600;
 // building of every one of them would be about a gigabyte of live objects on a
 // machine that also has to render. So a tile that falls this far behind goes
 // SLIM — its buildings and trees are dropped and re-fetched if you come back,
-// while its roads, rails, water and green stay resident forever because the
-// world map draws them, the traffic graph is built from them, and they are a
-// third of the weight for all of the memory of where you have been.
+// and once its whole footprint is that far away the rest goes too (evictDeep in
+// loadCity), all but the ways, rails, pois, signals and car parks, which the
+// session's graphs hold for good.
 const EVICT_REACH = 9000;
 // Feature ids must survive that round trip unchanged: _id seeds the tree size
 // jitter, the lamp stagger and which shed is a fast-food franchise, so a
@@ -143,6 +145,94 @@ const PIN_TAPER = 30;        // m a junction's agreed height is blended in over
 const BRIDGE_FILL = 12;      // m of embankment a bridge abutment may demand
 const JUNCTION_R = 8;        // m — radius the shared junction height averages over
 
+// ---- vertical curves ---------------------------------------------------------
+// Where a grade changes, a real road does not fold: it bends through a
+// parabola (a crest or a sag) long enough that a car at the design speed feels
+// a gentle lift and nothing more. Every change of grade this module makes on
+// purpose (an abutment's bank, a deck's ramp, an underpass) goes through these
+// three, so none of them can leave a corner for a wheel to hit.
+//
+// The radius comes from the road's own speed: the vertical acceleration a
+// crest or a sag asks of a car is v²/R, and CURVE_A keeps that a small
+// fraction of gravity at the speed the road is signed for (386 m at 50 km/h,
+// 756 m at 70), never under CURVE_MIN.
+const CURVE_A = 0.5;          // m/s² over a crest or through a sag at design speed
+const CURVE_MIN = 250;        // m, the tightest vertical curve anything here lays
+const SMAX_K = 1.0;           // m over which two grades are blended into one
+const DECK_K = 0.3;           // …and on a deck, between its line and its cones
+const ABUT_HOLD = 20;         // m of an approach held at its bank's level (levelWay)
+const FLOOR_STEEP = 0.2;      // the steepest a deck may climb over ground rising under it
+/** The vertical curve radius for a way signed `v` km/h. */
+export function curveR(v) {
+  const ms = Math.max(30, v || 50) / 3.6;
+  return Math.max(CURVE_MIN, ms * ms / CURVE_A);
+}
+/**
+ * How far a bank falls `x` metres from its crest when it falls at grade `g`
+ * with the crest rounded to radius `R`: a parabola, tangent to the level at the
+ * crest and to the grade where it meets it, so the slope never jumps.
+ */
+export function crestFall(x, g, R) {
+  const xt = g * R;
+  return x <= xt ? x * x / (2 * R) : g * (x - xt / 2);
+}
+/**
+ * The higher of two levels with the corner between them rounded: equal to
+ * max(a, b) once they are SMAX_K apart, C1 where they cross (a polynomial
+ * smooth maximum). Where an embankment's grade meets the road it lifts, this
+ * is the sag at its foot.
+ */
+export function smax(a, b, k = SMAX_K) {
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return (a > b ? a : b) + h * h * k / 4;
+}
+/**
+ * The bank of every abutment along a way at arclength sAt: the deck's own
+ * cones (crossCones) carried on past the end of the structure, so the bank
+ * leaves the deck on the very curve the deck arrives on. The one function
+ * levelWay and junctionY share.
+ */
+function bankAt(hardPins, sAt, g) {
+  let E = -Infinity;
+  for (const h of hardPins) {
+    const x = Math.abs(sAt - h.s);
+    for (const c of h.cones) {
+      const e = c.y - crestFall(x + c.d, g, c.R);
+      E = E === -Infinity ? e : smax(E, e);
+    }
+  }
+  return E;
+}
+// Lay the abutments' bank under a levelled way: at each one the deck's height,
+// rounded over a crest of the road's own radius, falling at BRIDGE_GRADE, and
+// met by the road through a sag (smax). Capped like the old taper at
+// BRIDGE_FILL over the survey: a bank taller than that is a viaduct somebody
+// did not tag, not an embankment.
+function hardFloor(y, ground, ds, hardPins, keep) {
+  for (const h of hardPins) h.s = h.i * ds;
+  for (let j = 0; j < y.length; j++) {
+    let E = bankAt(hardPins, j * ds, BRIDGE_GRADE);
+    const cap = ground[j] + BRIDGE_FILL;
+    if (E > cap) E = cap;
+    if (E > y[j] - SMAX_K) y[j] = smax(y[j], E);
+  }
+  // The blend lifts a level that sits right on the bank by up to SMAX_K/4,
+  // and at a junction on the bank the other arms are not lifted with it: the
+  // node is put back on its one height, the difference tapered out over
+  // KEEP_TAPER metres either side so it leaves no corner.
+  const r = Math.max(1, Math.round(KEEP_TAPER / ds));
+  for (const k of keep) {
+    const d = k.J - y[k.i];
+    if (!(Math.abs(d) > 1e-4)) continue;
+    for (let j = -r; j <= r; j++) {
+      const q = k.i + j;
+      if (q < 0 || q >= y.length) continue;
+      y[q] += d * (0.5 + 0.5 * Math.cos(Math.PI * Math.abs(j) / r));
+    }
+  }
+}
+const KEEP_TAPER = 10;        // m
+
 /** One Gaussian pass over a 1-D profile, reflecting at the ends. */
 function blurPass(y, out, sigma, ds) {
   const n = y.length, r = Math.max(1, Math.round((sigma * 2) / ds));
@@ -193,10 +283,15 @@ export function junctionY(node, terrain) {
   // provisional value, so the cache gate is satisfied UNTIL the real answer
   // (and the real readiness) replace it at the end
   node._nyOk = true;
+  node._cones = null;
   node._ny = terrain.heightAt(node.x, node.z);
   let a = 0, n = 0, allReady = true;
+  // (a deck is not levelled like a road, and its draped line pulled the
+  // approach down into a dip at the very abutment: the roads decide)
+  const onlyDeck = node.arms.every((arm) => arm.r.br);
   for (const arm of node.arms) {
-    const prof = levelWay(arm.r, terrain, null);
+    if (arm.r.br && !onlyDeck) continue;
+    const prof = levelWay(arm.r, terrain, null, true);
     if (!prof) continue;
     if (!prof.ready) allReady = false;
     a += sampleProfile(prof, arm.s);
@@ -208,10 +303,53 @@ export function junctionY(node, terrain) {
   // it — which is what a real road over a railway is: a bridge and two banks.
   // Nothing else in the data says the deck belongs above the rails, so this is
   // where the height enters the world.
+  // The node owes the deck what the deck needs HERE: each crossing's headroom
+  // less the fall of the structure's grade between the crossing and this end
+  // (one cone per crossing, crestFall). Asking for the highest headroom
+  // anywhere along it, as this did, banked the approach of a 300 m flyover
+  // up to the height it needs over the railway in its middle.
+  let abut = false;
   for (const arm of node.arms) {
     if (!arm.r.br) continue;
-    const need = bridgeClearance(arm.r, terrain);
-    if (need !== null && need > node._ny) { node._ny = need; node._hard = true; }
+    abut = true;
+    if (!arm.r._cross && !arm.r._chain) continue;
+    const cones = crossCones(arm.r, terrain);
+    if (!cones.length) continue;
+    const { at } = structEnd(arm.r, arm.i);
+    const R = curveR(arm.r.v);
+    for (const c of cones) {
+      const d = Math.abs(c.s - at);
+      const need = c.y - crestFall(d, BRIDGE_GRADE, R);
+      if (need > node._ny - SMAX_K) {
+        (node._cones ??= []).push({ y: c.y, d, R });
+        if (need > node._ny) node._ny = need;
+        node._hard = true;
+      }
+    }
+  }
+  // A junction ON an abutment's bank (a side road joining the ramp up to an
+  // overpass) stands on the bank: the same function the way lays it with
+  // (levelWay's hardFloor), read at this node, so the bank's way and the side
+  // road both land on one height here instead of the bank being clipped short
+  // of the junction.
+  // (a real node only: the overlap links of a ramp and the street at its foot
+  // are not a junction, and lifting them banked the street up the ramp)
+  if (!abut && node.arms.every((a) => a.i >= 0)) {
+    for (const arm of node.arms) {
+      const pins = arm.r._pins;
+      if (!pins || pins.length < 2) continue;
+      let hard = null;
+      for (const p of pins) {
+        if (p.node === node || !p.node.arms.some((a) => a.r.br && (a.r._cross || a.r._chain))) continue;
+        junctionY(p.node, terrain);
+        if (p.node._hard === true && p.node._cones) (hard ??= []).push({ s: p.s, cones: p.node._cones });
+      }
+      if (!hard) continue;
+      let E = bankAt(hard, arm.s, BRIDGE_GRADE);
+      const g0 = terrain.heightAt(node.x, node.z) + BRIDGE_FILL;
+      if (E > g0) E = g0;
+      if (E > node._ny - SMAX_K) { node._ny = smax(node._ny, E); node._bank = true; }
+    }
   }
   // A height measured on ground that had not arrived yet must not outlive
   // the ground's arrival — but it must also not be recomputed on every ask,
@@ -281,7 +419,19 @@ export function roadProfile(way, terrain) {
  * Level one way, with or without its junction pins. Called twice per way: once
  * unpinned so the nodes can agree on a height, once pinned to those.
  */
-function levelWay(way, terrain, pinList) {
+function levelWay(way, terrain, pinList, noDip = false) {
+  const base = levelWayBase(way, terrain, pinList);
+  // An UNDERPASS (js/underpass.js): the street dips under a railway or a
+  // road bridge on one shared grade line for its whole run of ways. Laid on
+  // top of the levelled way, never inside it: the unpinned line a junction
+  // averages (junctionY) is the street as if nothing crossed it, and the dip
+  // reaches the side roads through their pins instead.
+  if (noDip || !base || !way._dipChain) return base;
+  const y = Float32Array.from(base.y);
+  const ok = applyDip(way, y, base.ds, terrain);
+  return { ...base, y, ready: base.ready && ok };
+}
+function levelWayBase(way, terrain, pinList) {
   const rc = way._raw;
   if (!pinList && rc && rc.terrain === terrain
     && (rc.ready || rc.loads === (terrain._loads ?? 0))) return rc;
@@ -326,6 +476,20 @@ function levelWay(way, terrain, pinList) {
     }
     top[i] = hi;
   }
+  // AT AN ABUTMENT the ground the road answers to is the bank, not the dell
+  // the bridge spans. The survey falls away under the last metres of every
+  // approach (the abutment stands at the top of the slope down to the river
+  // or the railway), and a road levelled to it sagged into the joint: 20 cm
+  // down in the last 3 m, then the deck rising off it (the ring road by
+  // Palackého). So over ABUT_HOLD metres from each end that meets a deck the
+  // ground is held at the level it has ABUT_HOLD metres in.
+  if (way._abut) {
+    const h = Math.min(n - 1, Math.round(ABUT_HOLD / ds));
+    for (const a of way._abut) {
+      if (a < ds) { for (let i = 0; i < h; i++) if (y[i] < y[h]) y[i] = y[h]; }
+      else if (a > total - ds) { const e = n - 1 - h; for (let i = n - 1; i > e; i--) if (y[i] < y[e]) y[i] = y[e]; }
+    }
+  }
   const ground = Float32Array.from(y);
 
   // The floor never outranks the ceiling. `top` is the highest ground a sample
@@ -337,6 +501,10 @@ function levelWay(way, terrain, pinList) {
   const lo = new Float32Array(n), hi = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     hi[i] = ground[i] + GRADE_FILL;
+    // ground a stamp DUG (a moat, js/terrainstamps.js) is not a hollow for
+    // the levelling to fill: the road across the chateau's moat floor rode
+    // over it on a 1.6 m bank and the bank's shoulders filled the moat back in
+    if (terrain.stampDelta && terrain.stampDelta(gx[i], gz[i]) < -0.25) hi[i] = ground[i] + 0.1;
     lo[i] = Math.min(top[i] - GRADE_CUT, hi[i]);
   }
 
@@ -369,31 +537,47 @@ function levelWay(way, terrain, pinList) {
     const idx = pinList.map((pin) => Math.max(0, Math.min(n - 1, Math.round(pin.s / ds))));
     const order = idx.map((_, k) => k).sort((p, q) => idx[p] - idx[q]);
     const reach = Math.max(1, Math.round(PIN_TAPER / ds));
+    const hardPins = [], keepPins = [];
     for (let o = 0; o < order.length; o++) {
       const k = order[o], i = idx[k], node = pinList[k].node;
-      const d = junctionY(node, terrain) - y[i];
-      if (!Number.isFinite(d) || Math.abs(d) < 1e-4) continue;
+      let J = junctionY(node, terrain);
+      // a side road meeting a street inside its underpass meets it down there
+      if (node._dipChain && way._dipChain !== node._dipChain) J = underCap(node._dipChain, node._dipU, J, terrain);
       // A HARD pin is a bridge abutment: the deck has to clear a railway, so
-      // this road is the embankment that gets it up there. It may therefore
-      // break the fill cap — the cap exists to stop the levelling INVENTING an
-      // embankment, and this one is not invented, it is holding up a bridge —
-      // and it takes as long as a road climbing at BRIDGE_GRADE needs.
-      const hard = node._hard === true;
-      const rise = Math.abs(d);
-      const span = hard ? Math.max(reach, Math.round(rise / BRIDGE_GRADE / ds)) : reach;
+      // this road is the embankment that gets it up there. It used to be one
+      // more taper in this loop, and a taper is clipped at half the distance
+      // to the next pin: an approach with a side road joining 12 m short of
+      // the abutment climbed its whole 3 m in those 12 m (the ring road
+      // overpass by Palackého: 47 % up to the deck, 6.4 m down off it in
+      // 8 m), which is the "you hit into the road" report. So an abutment is
+      // a FLOOR now, laid after the junction tapers and blind to them
+      // (hardFloor below), and the junctions inside its reach are lifted onto
+      // the same bank by junctionY, so they still land exactly.
+      // (every arm still lands on the node's one height first, the bank then
+      // lies under them all alike)
+      const hardNode = node._hard === true && !!node._cones;
+      if (hardNode) hardPins.push({ i, J, cones: node._cones });
+      else if (node._bank === true) keepPins.push({ i, J });
+      const d = J - y[i];
+      if (!Number.isFinite(d) || Math.abs(d) < 1e-4) continue;
       // never reach past a neighbouring pin, or past the end of the road
       const prev = o > 0 ? idx[order[o - 1]] : -Infinity;
       const next = o < order.length - 1 ? idx[order[o + 1]] : Infinity;
+      // (a side road meeting a bank climbs onto it at a ramp's grade, and may
+      // be filled as high as the bank is)
+      const bank = node._bank === true || hardNode;
+      const span = bank ? Math.max(reach, Math.round(Math.abs(d) / BRIDGE_GRADE / ds)) : reach;
       const back = Math.min(span, i, Math.floor((i - prev) / 2));
       const fwd = Math.min(span, n - 1 - i, Math.floor((next - i) / 2));
       for (let j = -back; j <= fwd; j++) {
         const w = j === 0 ? 1
           : 0.5 + 0.5 * Math.cos(Math.PI * Math.min(1, Math.abs(j) / (j < 0 ? back : fwd)));
         const v = y[i + j] + d * w;
-        const cap = hard ? ground[i + j] + BRIDGE_FILL : hi[i + j];
+        const cap = bank ? ground[i + j] + BRIDGE_FILL : hi[i + j];
         y[i + j] = v < lo[i + j] ? lo[i + j] : v > cap ? cap : v;
       }
     }
+    if (hardPins.length) hardFloor(y, ground, ds, hardPins, keepPins);
   }
   const prof = { terrain, ds, n, y, ground, gx, gz, total, ready,
     loads: terrain._loads ?? 0 };
@@ -657,36 +841,21 @@ export function bridgeDeckHeight(way, dist, terrain) {
         const link = end === 0 ? w._ap0 : w._ap1;
         const y = link && roadGradeY(link.road, link.at, terrain);
         if (y !== null && y !== undefined) return y;
+        const yn = link ? null : deckNodeLevel(w, end, terrain);
+        if (yn !== null) return yn;
         const p = w.p[end === 0 ? 0 : w.p.length - 1];
         return terrain.heightAt(p[0], p[1]);
       };
-      const A = anchor(ch.headWay, ch.headEnd === 0 ? 0 : 1);
-      const B = anchor(ch.tailWay, ch.tailEnd === 0 ? 0 : 1);
+      const hasA = (ch.headEnd === 0 ? ch.headWay._ap0 : ch.headWay._ap1) || deckNodeLevel(ch.headWay, ch.headEnd === 0 ? 0 : 1, terrain) !== null;
+      const hasB = (ch.tailEnd === 0 ? ch.tailWay._ap0 : ch.tailWay._ap1) || deckNodeLevel(ch.tailWay, ch.tailEnd === 0 ? 0 : 1, terrain) !== null;
+      let A = anchor(ch.headWay, ch.headEnd === 0 ? 0 : 1);
+      let B = anchor(ch.tailWay, ch.tailEnd === 0 ? 0 : 1);
+      // (one end on a road and the other on nothing: the deck holds the road's level)
+      if (hasA && !hasB && way.d) B = A; else if (hasB && !hasA && way.d) A = B;
       const cones = [];
       let samplesReady = true;
       const rdy = (x, z) => { if (terrain.ready && !terrain.ready(x, z)) samplesReady = false; };
-      for (const m of ch.members) {
-        for (const c of m._cross ?? []) {
-          // arclength of the crossing along the chain
-          let along = 0, sAt = 0, bestD = Infinity;
-          for (let k = 0; k < m.p.length - 1; k++) {
-            const [ax, az] = m.p[k], [bx, bz] = m.p[k + 1];
-            const dx = bx - ax, dz = bz - az;
-            const L2 = dx * dx + dz * dz || 1e-9;
-            let t = ((c.x - ax) * dx + (c.z - az) * dz) / L2;
-            t = t < 0 ? 0 : t > 1 ? 1 : t;
-            const px2 = ax + dx * t, pz2 = az + dz * t;
-            const d2 = (c.x - px2) ** 2 + (c.z - pz2) ** 2;
-            const seg = Math.sqrt(L2);
-            if (d2 < bestD) { bestD = d2; sAt = along + seg * t; }
-            along += seg;
-          }
-          const mLen = m._len ?? polylineLength(m.p);
-          const local = m._chainRev ? mLen - sAt : sAt;
-          rdy(c.x, c.z);
-          cones.push([m._chainOff + local, terrain.heightAt(c.x, c.z) + c.clear, 1]);
-        }
-      }
+      for (const c of crossCones(way, terrain)) { rdy(c.x, c.z); cones.push([c.s, c.y, 1]); }
       // ---- the terrain along the chain is a FLOOR --------------------------
       // A bridge is the thing that is above the ground along its whole line;
       // the profile so far only knew the ground at its crossings, so a smooth
@@ -719,18 +888,28 @@ export function bridgeDeckHeight(way, dist, terrain) {
       // just enough slope to fall back to each anchor, up to a 20 % worst
       // case; only past that is the height itself shaved. Terrain floors are
       // aesthetic, so they yield at the ruling grade.
-      const STEEP = 0.2;
+      // The cones are crests now (crestFall, the road's own radius), and the
+      // approaches are banked on the same curve (junctionY), so a crossing
+      // near an end no longer steepens its cone to fall back to the anchor
+      // inside the span: the bank carries the fall on, and the cap below only
+      // bites where the bank could not be built (BRIDGE_FILL, a road too short).
+      // A terrain floor near an end may steepen (up to FLOOR_STEEP) and
+      // tighten its crest to fall back to the anchor in time: ground rising
+      // at 9 % into the abutment would otherwise come up through the deck.
+      const R0 = curveR(way.v);
       for (const c of cones) {
-        const [cs, , hard] = c;
-        let g = BRIDGE_GRADE;
-        if (hard) {
-          g = Math.max(g, (c[1] - A) / Math.max(cs, 1e-6),
-            (c[1] - B) / Math.max(ch.total - cs, 1e-6));
-          if (g > STEEP) g = STEEP;
+        const [cs, cy, hard] = c;
+        let g = BRIDGE_GRADE, R = R0;
+        if (!hard) {
+          const dA = Math.max(cs, 1e-3), dB = Math.max(ch.total - cs, 1e-3);
+          // (with the crest a quarter of the run, the fall over the run is
+          // 7/8 of the straight grade's: hence the 0.875)
+          g = Math.min(FLOOR_STEEP, Math.max(g, (cy - A) / (0.875 * dA), (cy - B) / (0.875 * dB)));
+          R = Math.min(R0, Math.max(20, Math.min(dA, dB) / (4 * g)));
         }
-        const cap = Math.min(A + cs * g, B + (ch.total - cs) * g);
+        const cap = Math.min(A + crestFall(cs, g, R), B + crestFall(ch.total - cs, g, R));
         if (c[1] > cap) c[1] = cap;
-        c[2] = g;
+        c[3] = R; c[4] = g;
       }
       // …and readiness means EVERY sampled point, not the two ends: a chain
       // crossing three tiles used to cache a profile whose middle was measured
@@ -750,9 +929,16 @@ export function bridgeDeckHeight(way, dist, terrain) {
       : Math.max(0, Math.min(total, dist));
     const s = way._chainOff + local;
     let y = prof.A + (prof.B - prof.A) * (s / prof.total);
-    for (const [cs, cy, cg] of prof.cones) {
-      const v = cy - Math.abs(s - cs) * cg;
-      if (v > y) y = v;
+    // (the blend narrows to nothing at the two ends, where the deck must be
+    // exactly what its approach is)
+    // The blend between the line and a cone is narrow (DECK_K: a 10 m round
+    // where 6 % meets the line) and fades out over the last 10 m to each end,
+    // so its lift grows from nothing instead of putting a step at the joint.
+    const e = Math.min(1, Math.min(s, prof.total - s) / 10);
+    const k = DECK_K * e * e * (3 - 2 * e);
+    for (const [cs, cy, , R, g] of prof.cones) {
+      const v = cy - crestFall(Math.abs(s - cs), g, R);
+      y = k > 1e-3 ? smax(y, v, k) : v > y ? v : y;
     }
     return y;
   }
@@ -770,13 +956,30 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // The height the road that CONTINUES is actually built at, right where the
     // two meet. roadProfile has already put the embankment under it, so this is
     // the crest without having to go looking for one.
-    const reach = (link, fb) => {
+    const reach = (link, fb, end) => {
       const y = link && roadGradeY(link.road, link.at, terrain);
-      return y === null || y === undefined ? terrain.heightAt(fb[0], fb[1]) : y;
+      if (y !== null && y !== undefined) return y;
+      const yn = deckNodeLevel(way, end, terrain);
+      return yn !== null ? yn : terrain.heightAt(fb[0], fb[1]);
     };
     const first = way.p[0], last = way.p[way.p.length - 1];
-    const start = reach(way._ap0, first);
-    const end = reach(way._ap1, last);
+    // (a drivable deck with a road at one end only holds that road's level:
+    // the survey under its other end is the dell, and the ramp down into it
+    // was a 25 % wall on nábřeží Václava Havla)
+    const a0 = way._ap0 ?? (way.d && way._ap1), a1 = way._ap1 ?? (way.d && way._ap0);
+    const start = reach(a0, first, 0);
+    const end = reach(a1, last, 1);
+    // the grade each approach arrives with, along the deck (the ramps leave it on that)
+    const slope = (link, sign) => {
+      if (!link) return 0;
+      const L = link.road._len ?? polylineLength(link.road.p);
+      const away = link.at < L / 2 ? 1 : -1;
+      const y0 = roadGradeY(link.road, link.at, terrain), y1 = roadGradeY(link.road, link.at + 2 * away, terrain);
+      if (y0 === null || y1 === null || y0 === undefined || y1 === undefined) return 0;
+      const m = sign * (y1 - y0) / 2;
+      return m > 0.08 ? 0.08 : m < -0.08 ? -0.08 : m;
+    };
+    const m0 = way._ap0 ? slope(way._ap0, -1) : 0, m1 = way._ap1 ? slope(way._ap1, 1) : 0;
     // The deck sits at the height of the HIGHER road it joins, and nothing on
     // top of that. BRIDGE_Y's 0.85 m used to be added here, and it is a fossil:
     // it dates from a flat world, where a deck had to be lifted off the plane to
@@ -818,10 +1021,19 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // Pardubice flyover. Stairs are ~50 %: short steep ends, long flat deck,
     // which is what a footbridge is.
     const foot = FOOT_BRIDGE.has(way.t);
+    // Ground rising through the span (a deck slanting over a hill shoulder)
+    // is the chain's case: one grade over the floor of the whole span, its
+    // crests rounded, instead of a level at the knoll's top and two ramps.
+    if (!foot && deck > Math.max(start, end) + 0.3) {
+      const L = way._len ?? polylineLength(way.p);
+      way._chain = { total: L, members: [way], headWay: way, headEnd: 0, tailWay: way, tailEnd: way.p.length - 1 };
+      way._chainOff = 0; way._chainRev = false;
+      return bridgeDeckHeight(way, dist, terrain);
+    }
     const rampFor = (rise) => (foot
       ? Math.min(total * 0.3, Math.max(3, Math.abs(rise) / 0.5))
       : Math.min(total * 0.4, Math.max(BRIDGE_RAMP, Math.abs(rise) / BRIDGE_GRADE)));
-    profile = { terrain, start, end, deck,
+    profile = { terrain, start, end, deck, m0, m1,
       r0: rampFor(deck - start), r1: rampFor(deck - end) };
     // A foot RAMP is a ramp along its whole length. The spiral serving the
     // Pardubice footbridge connects the ground to the deck five metres up, and
@@ -830,6 +1042,12 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // ground — the tall black C. When a foot way's two ends differ by more
     // than a storey's worth, the whole way IS the climb.
     if (foot && Math.abs(end - start) > 1.5) profile.linear = true;
+    // A SHORT deck between banks a little apart is one grade, not a level
+    // and a ramp: held to the higher bank, a 14 m span 0.9 m out of level
+    // came down 18 % in its last 5 m. One cubic from bank to bank, on the
+    // grades the approaches arrive with, where nothing under it asks for more.
+    else if (!foot && deck <= Math.max(start, end) + 0.01 && Math.abs(end - start) > 0.05
+      && Math.abs(end - start) / BRIDGE_GRADE > total * 0.4 && Math.abs(end - start) <= 0.12 * total) profile.whole = true;
     // Terrain answers 0 while a height tile is still on the way. Remember the
     // profile only after both approaches are authoritative; the arriving tile
     // then rebuilds the chunk and gets a fresh, correct level.
@@ -842,14 +1060,21 @@ export function bridgeDeckHeight(way, dist, terrain) {
 
   const d = Math.max(0, Math.min(total, dist));
   if (profile.linear) return profile.start + (profile.end - profile.start) * (d / total);
-  if (d < profile.r0 && profile.r0 > 0) {
-    return profile.start + (profile.deck - profile.start) * (d / profile.r0);
-  }
+  if (profile.whole) return hermite(profile.start, profile.m0 ?? 0, profile.end, profile.m1 ?? 0, total, d);
+  // The ramps are cubic (Hermite): they leave the bank on the grade the
+  // approach arrives with and meet the deck level, so neither end of a ramp
+  // is a fold. A straight ramp put two corners of up to 18 % into every
+  // bridge whose banks differ (Na Haldě, Prokopův most).
+  if (d < profile.r0 && profile.r0 > 0) return hermite(profile.start, profile.m0 ?? 0, profile.deck, 0, profile.r0, d);
   const back = total - d;
-  if (back < profile.r1 && profile.r1 > 0) {
-    return profile.end + (profile.deck - profile.end) * (back / profile.r1);
-  }
+  if (back < profile.r1 && profile.r1 > 0) return hermite(profile.end, -(profile.m1 ?? 0), profile.deck, 0, profile.r1, back);
   return profile.deck;
+}
+
+/** Cubic from (0, y0) leaving at slope m0 to (L, y1) arriving at slope m1, read at x. */
+function hermite(y0, m0, y1, m1, L, x) {
+  const t = x / L, t2 = t * t, t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * y0 + (t3 - 2 * t2 + t) * L * m0 + (-2 * t3 + 3 * t2) * y1 + (t3 - t2) * L * m1;
 }
 
 // ---- roads are curves, and OSM stores them as corners ----------------------
@@ -1117,6 +1342,13 @@ export function indexJunctions(roads) {
       for (let i = 0; i < road.i; i++) at += Math.hypot(q[i + 1][0] - q[i][0], q[i + 1][1] - q[i][1]);
       const link = { road: road.r, at };
       if (a.i === 0) a.r._ap0 = link; else a.r._ap1 = link;
+      // every road leaving the deck's end stands on its bank (levelWay)
+      for (const o of e.arms) {
+        if (o.r.br || o.r === a.r) continue;
+        let oa = 0;
+        for (let i = 0; i < o.i; i++) oa += Math.hypot(o.r.p[i + 1][0] - o.r.p[i][0], o.r.p[i + 1][1] - o.r.p[i][1]);
+        (o.r._abut ??= []).push(oa);
+      }
     }
     // A way that ENDS where nothing else arrives is a dead end, and a kerbed
     // street closes its kerb round it (meshes.roadRibbon). Remembered on the
@@ -1610,6 +1842,56 @@ export function indexBridgeCrossings(roads, rails) {
     }
     if (found.length) b._cross = found;
   }
+  // A lone span that crosses something reads its grade the way a viaduct
+  // does (cones from its crossings, anchored on its approaches): a chain of
+  // one. Its flat deck at the highest headroom was a flyover with no grade
+  // on it at all, and the whole climb pushed onto approaches that are often
+  // a 40 m way ending at a junction.
+  for (const b of bridges) {
+    if (b._chain || !b._cross) continue;
+    const L = b._len ?? polylineLength(b.p);
+    b._chain = { total: L, members: [b], headWay: b, headEnd: 0, tailWay: b, tailEnd: b.p.length - 1 };
+    b._chainOff = 0; b._chainRev = false;
+  }
+}
+
+/**
+ * Every headroom a structure owes, as cones along it: `s` the crossing's
+ * arclength along the chain (or the lone bridge), `y` the deck height there.
+ * One list, read by the deck (bridgeDeckHeight) and by the banks of its
+ * approaches (junctionY, levelWay), so the two lay the same curve.
+ */
+export function crossCones(way, terrain) {
+  const ch = way._chain;
+  const members = ch ? ch.members : [way];
+  const out = [];
+  for (const m of members) {
+    for (const c of m._cross ?? []) {
+      let along = 0, sAt = 0, bestD = Infinity;
+      for (let k = 0; k < m.p.length - 1; k++) {
+        const [ax, az] = m.p[k], [bx, bz] = m.p[k + 1];
+        const dx = bx - ax, dz = bz - az;
+        const L2 = dx * dx + dz * dz || 1e-9;
+        let t = ((c.x - ax) * dx + (c.z - az) * dz) / L2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const d2 = (c.x - ax - dx * t) ** 2 + (c.z - az - dz * t) ** 2;
+        const seg = Math.sqrt(L2);
+        if (d2 < bestD) { bestD = d2; sAt = along + seg * t; }
+        along += seg;
+      }
+      const mLen = m._len ?? polylineLength(m.p);
+      const local = ch ? (m._chainRev ? mLen - sAt : sAt) : sAt;
+      out.push({ s: (ch ? m._chainOff : 0) + local, y: terrain.heightAt(c.x, c.z) + c.clear, x: c.x, z: c.z });
+    }
+  }
+  return out;
+}
+/** Where along its structure (chain or lone span) a bridge member's end `i` lies, and the structure's length. */
+function structEnd(way, i) {
+  const L = way._len ?? polylineLength(way.p);
+  const local = i === 0 ? 0 : L;
+  if (!way._chain) return { at: local, total: L };
+  return { at: way._chainOff + (way._chainRev ? L - local : local), total: way._chain.total };
 }
 
 /**
@@ -1906,6 +2188,7 @@ const NONE = Object.freeze([]);
 const newCell = () => ({ buildings: NONE, roads: NONE, rails: NONE, water: NONE, green: NONE,
   paved: NONE, trees: NONE, signs: NONE, crossings: NONE, power: NONE, furniture: NONE,
   calming: NONE, barriers: NONE, venues: NONE });
+const CELL_KINDS = Object.keys(newCell());
 function cellPut(index, key, kind, f, touched) {
   let cell = index.get(key);
   if (!cell) index.set(key, cell = newCell());
@@ -1999,7 +2282,7 @@ function pave(r) {
 }
 
 // roads and polygons never left, so re-indexing them would double them.
-function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
+function indexPayload(city, data, touched, slot = 0, heavyOnly = false, kept = null) {
   let next = slot * IDS_PER_TILE;
   const stamp = (list) => { for (const f of list ?? []) f._id = ++next; return list ?? []; };
   const buildings = stamp(data.buildings);
@@ -2013,28 +2296,41 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   if (heavyOnly) return { roads: [], signals: [], heavy };
 
   // ids for the resident layers continue past the heavy ones in the same slot
-  const roads = stamp(data.roads), rails = stamp(data.rails),
-    water = stamp(data.water), green = stamp(data.green), paved = stamp(data.paved);
-  for (const r of roads) { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); pave(r); }
-  for (const r of rails) r.p = smoothBends(r.p, r.br);
-  indexJunctions(roads);
-  indexBridgeCrossings(roads, rails);
-  indexRoundabouts(roads);
+  let roads = stamp(data.roads), rails = stamp(data.rails), paved = stamp(data.paved);
+  const water = stamp(data.water), green = stamp(data.green);
+  if (kept) {
+    // A tile coming back from DEEP eviction (evictDeep below): its ways never
+    // left, because the traffic, route and walker graphs hold them, so the
+    // ones just parsed only advanced the id counter and are dropped again. The
+    // kept objects carry their smoothing, widths, junctions and bays already.
+    roads = kept.roads; rails = kept.rails;
+    paved = paved.map((f) => kept.lots.get(f._id) ?? f);
+  } else {
+    for (const r of roads) { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); pave(r); }
+    for (const r of rails) r.p = smoothBends(r.p, r.br);
+    indexJunctions(roads);
+    indexBridgeCrossings(roads, rails);
+    indexRoundabouts(roads);
+  }
   bucketize(city.chunkIndex, roads, 'roads', touched);
   bucketize(city.chunkIndex, rails, 'rails', touched);
+  // bridge ends that meet a way of another tile, rail decks, underpasses
+  stitchStructures(city, roads, rails);
   bucketize(city.chunkIndex, water, 'water', touched);
   bucketize(city.chunkIndex, green, 'green', touched);
   bucketize(city.chunkIndex, paved, 'paved', touched);
   // lay-bys: the kerb steps out around them (js/streets.js)
-  indexBays(city, data.pois);
-  appendAll(city.roads, roads);
-  appendAll(city.rails, rails);
+  if (!kept) indexBays(city, data.pois);
+  // (what deep eviction keeps never left the flat arrays: roads, rails, the
+  // car parks, the pois and the signals; see evictDeep)
+  if (!kept) appendAll(city.roads, roads);
+  if (!kept) appendAll(city.rails, rails);
   appendAll(city.water, water);
   appendAll(city.green, green);
-  appendAll(city.paved, paved);
+  appendAll(city.paved, kept ? paved.filter((f) => !kept.lots.has(f._id)) : paved);
   appendAll(city.waterways, data.waterways ?? []); // not bucketized — minimap-only
-  appendAll(city.pois, data.pois ?? []);           // not bucketized — HUD/labels
-  const signals = data.signals ?? [];              // [[x,z],…] — traffic lights v3
+  if (!kept) appendAll(city.pois, data.pois ?? []); // (not bucketized: HUD, labels)
+  const signals = kept ? [] : data.signals ?? [];  // [[x,z],...]: traffic lights v3
   appendAll(city.signals, signals);
   // road signs — typed {p:[x,z], k:'give_way'|'stop'|'priority'}; wrapped like
   // trees so bucketize can hand each chunk its own posts
@@ -2064,8 +2360,8 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   // absorbed — the other four tenants of a block, the units inside a gallery,
   // a stall on a market square. Bucketized like the signs rather than kept in a
   // flat list: the only question anyone asks of it is "what stands HERE", and
-  // this list never shrinks (evictFar gives back buildings and trees, nothing
-  // else), so a linear scan would grow for as long as the session runs.
+  // the flat list holds every tile not yet deep-evicted (evictDeep), so a
+  // linear scan would be the size of everywhere the session has been lately.
   const venues = (data.venues ?? []).map((v) => ({ p: [v.p], t: v.t, n: v.n, b: v.b, _id: ++next }));
   bucketize(city.chunkIndex, venues, 'venues', touched);
   appendAll(city.venues, venues);
@@ -2073,7 +2369,10 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false) {
   const barriers = stamp(data.barriers);
   bucketize(city.chunkIndex, barriers, 'barriers', touched);
   appendAll(city.barriers, barriers);
-  return { roads, signals, heavy };
+  // everything this tile filed outside its heavy half, for evictDeep
+  const res = { roads, rails, water, green, paved, signs, crossings, power, furniture,
+    calming, venues, barriers, waterways: data.waterways ?? [] };
+  return { roads: kept ? [] : roads, signals, heavy, res };
 }
 
 const _resolved = Promise.resolve(); // ensureTiles' no-work answer, allocated once
@@ -2125,6 +2424,10 @@ export async function loadCity(url) {
   // A building the player has wrecked must not be evicted out from under the
   // wreck; interiors installs this guard.
   city.keepAlive = null;
+  // Where else this client is looking from, beside the point ensureTiles is
+  // called with: each fn(out) pushes x, z pairs (the player, co-op peers). No
+  // tile within EVICT_REACH of any of them is evicted.
+  city.evictHolds = [];
 
   if (!data.tiles) { // legacy single-city file — index it all right now
     indexPayload(city, data);
@@ -2142,7 +2445,10 @@ export async function loadCity(url) {
   const tiles = data.tiles.map((t, i) => ({
     tx: t.tx, tz: t.tz, f: t.f, wb: t.wb, rt: t.rt,
     state: 0, slot: i + 1, heavy: null,
+    res: null, cells: null, ext: null, kept: null,   // see evictDeep
   }));
+  const tileBy = new Map();
+  for (const t of tiles) tileBy.set(t.tx + ',' + t.tz, t);
   // The world map needs the region's EXTENT before any of it has streamed —
   // fitting to the loaded arrays alone showed Pardubice and hid 400 villages.
   city.manifestTiles = tiles;
@@ -2186,7 +2492,8 @@ export async function loadCity(url) {
       // never one while the renderer is trying to present.
       await indexGate();
       const touched = new Set();
-      const { roads, signals, heavy } = indexPayload(city, payload, touched, t.slot, back === 3);
+      const kept = back === 0 ? t.kept : null;
+      const { roads, signals, heavy, res: filed } = indexPayload(city, payload, touched, t.slot, back === 3, kept);
       // A LOADED TILE OWNS ITS CELLS. A chunk with no cell is "outside the
       // mapped city" and is not meshed at all (meshes.buildChunkMeshesGen), so
       // whether open country had ground used to hang on some feature's
@@ -2204,11 +2511,16 @@ export async function loadCity(url) {
       }
       t.heavy = heavy;
       t.state = 2;
+      // what deep eviction has to find again: every cell this tile filed
+      // anything in, and the box they span
+      if (back !== 3) { t.res = filed; t.cells = touched; t.ext = cellsBox(touched); t.kept = null; }
+      else if (t.cells) for (const k of touched) t.cells.add(k);
       // `pois` rides along too: the pump and police-station indexes (main.js)
       // and the map's fuel marks (career.js) all read t.pois, and without it
       // they only ever knew the tiles that were loaded at boot. A tile coming
-      // back from slim re-indexes its heavy half only, so it brings none.
-      for (const cb of listeners) cb({ roads, signals, pois: back === 3 ? [] : payload.pois ?? [], tx: t.tx, tz: t.tz, cells: touched });
+      // back from slim re-indexes its heavy half only, so it brings none, and
+      // nor does one coming back from deep eviction (its pois never left).
+      for (const cb of listeners) cb({ roads, signals, pois: back === 3 || kept ? [] : payload.pois ?? [], tx: t.tx, tz: t.tz, cells: touched });
     } catch (err) {
       t.state = back;
       throw err;
@@ -2280,6 +2592,120 @@ export async function loadCity(url) {
       // seconds and nothing is ever more than a tile or two over budget.
       return;
     }
+    // (nothing went slim this call: the next stage, one tile at most)
+    for (const t of tiles) {
+      if (t.state !== 3 || !t.res || !t.ext || !t.cells) continue;
+      if (!farFromAll(t.ext, x, z)) continue;
+      evictDeep(t);
+      return;
+    }
+  }
+
+  // ---- DEEP EVICTION: the rest of a tile's data, not only its houses -------
+  // Going slim gives back the buildings and trees, and that used to be all:
+  // a teleport tour of six places (13 Nov 2026, headless, city data only) ended
+  // at 588 MB, of which the chunk index of the tiles left behind was 143 MB,
+  // their green, water and paved polygons most of 83 MB and their fences,
+  // venues, power lines and street furniture most of 56 MB. Nothing near the
+  // player reads any of it, and a long drive only ever added more.
+  //
+  // So a slim tile whose WHOLE footprint (every cell any of its features is
+  // filed in, not only its rectangle: a river or a long road overhangs into its
+  // neighbours) is EVICT_REACH from the focus, from the player and from every
+  // co-op peer this client knows of (city.evictHolds) gives back the rest too,
+  // and goes back to state 0 so it is fetched again when it comes in reach.
+  //
+  // What does NOT go, and why: the roads and rails, the pois, the signals and
+  // the car parks. The traffic, navigation, cyclist and walker graphs and the
+  // trains hold the way objects for the whole session (traffic.js _growGraph,
+  // navigation.js, cyclists.js, pedestrians.js, trains.js), the bus stop and
+  // station readers walk city.pois by a cursor that assumes it only grows, the
+  // signals are traffic's, and the stalls of a car park are remembered by the
+  // lot object itself (parkinglots.js): a stall the player took a car from must
+  // stay empty. Dropping any of them would give the session a second copy when
+  // the tile came back. They are kept (`t.kept`) and stay in the flat arrays;
+  // only their chunk-index entries go, and they are filed again on return. The
+  // junction and bridge records hang off the kept ways, so they stay too.
+  //
+  // Coming back, the tile's file is fetched and indexed as on its first visit
+  // with the kept objects standing in for the ones just parsed, so every id
+  // (slot-derived, see IDS_PER_TILE) and every chunk built from it is the one
+  // it was.
+  const holdPts = [];
+  function farFromAll(b, x, z) {
+    const R2 = EVICT_REACH * EVICT_REACH;
+    if (distSqToBounds(b, x, z) <= R2) return false;
+    holdPts.length = 0;
+    for (const fn of city.evictHolds) fn(holdPts);
+    for (let i = 0; i + 1 < holdPts.length; i += 2)
+      if (distSqToBounds(b, holdPts[i], holdPts[i + 1]) <= R2) return false;
+    return true;
+  }
+  // a cell outlives the tile being evicted while a tile that OWNS it (its
+  // rectangle holds the cell) is still indexed: see "a loaded tile owns its cells"
+  function ownerResident(key, gone) {
+    const i = key.indexOf(',');
+    const cx = +key.slice(0, i), cz = +key.slice(i + 1);
+    const o = tileBy.get(Math.floor((cx * CHUNK + 1e-3) / T) + ',' + Math.floor((cz * CHUNK + 1e-3) / T));
+    return !!o && o !== gone && (o.state === 2 || o.state === 3);
+  }
+  function evictDeep(t) {
+    const r = t.res;
+    const mine = new Set();
+    for (const kind in r) if (kind !== 'waterways') for (const f of r[kind]) mine.add(f);
+    // (its rectangle too: a cell some neighbour's feature made first was not
+    // this tile's to record, but it is this tile's to own)
+    const visit = new Set(t.cells);
+    const c0 = Math.floor((t.tx * T) / CHUNK), c1 = Math.floor(((t.tx + 1) * T - 1e-6) / CHUNK);
+    const d0 = Math.floor((t.tz * T) / CHUNK), d1 = Math.floor(((t.tz + 1) * T - 1e-6) / CHUNK);
+    for (let cx = c0; cx <= c1; cx++) for (let cz = d0; cz <= d1; cz++) visit.add(cx + ',' + cz);
+    for (const key of visit) {
+      const cell = city.chunkIndex.get(key);
+      if (!cell) continue;
+      let empty = true;
+      for (const kind of CELL_KINDS) {
+        const list = cell[kind];
+        if (list === NONE) continue;
+        const left = list.filter((f) => !mine.has(f));
+        cell[kind] = left.length ? left : NONE;
+        if (left.length) empty = false;
+      }
+      if (empty && !ownerResident(key, t)) city.chunkIndex.delete(key);
+    }
+    const lots = new Map();
+    for (const f of r.paved) if (f.t === 'parking') lots.set(f._id, f);
+    // what leaves the flat arrays: everything filed above but the kept kinds
+    const gone = new Set();
+    for (const kind in r) {
+      if (kind === 'roads' || kind === 'rails') continue;
+      for (const f of r[kind]) if (!(kind === 'paved' && lots.has(f._id))) gone.add(f);
+    }
+    // in place: every consumer holds these arrays by reference, forever
+    const compact = (arr) => {
+      let w = 0;
+      for (let i = 0; i < arr.length; i++) if (!gone.has(arr[i])) arr[w++] = arr[i];
+      arr.length = w;
+    };
+    for (const arr of [city.water, city.green, city.paved, city.power, city.venues, city.barriers, city.waterways])
+      compact(arr);
+    if (r.waterways.length) delete city._wwChunks;   // meshes.js rebuilds it from city.waterways
+    const cells = visit;
+    t.kept = { roads: r.roads, rails: r.rails, lots };
+    t.res = null; t.cells = null; t.ext = null; t.heavy = null;
+    t.state = 0;
+    for (const cb of unloadListeners) cb({ tx: t.tx, tz: t.tz, cells, deep: true });
   }
   return city;
+}
+
+// The box, in metres, of a set of chunk keys.
+function cellsBox(keys) {
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const key of keys) {
+    const i = key.indexOf(',');
+    const cx = +key.slice(0, i), cz = +key.slice(i + 1);
+    if (cx < x0) x0 = cx; if (cx > x1) x1 = cx;
+    if (cz < z0) z0 = cz; if (cz > z1) z1 = cz;
+  }
+  return x0 > x1 ? null : [x0 * CHUNK, z0 * CHUNK, (x1 + 1) * CHUNK, (z1 + 1) * CHUNK];
 }

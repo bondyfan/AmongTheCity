@@ -28,12 +28,14 @@ import { Pedestrians } from './pedestrians.js';
 import { Chatter, voiceOf } from './chatter.js';
 import * as wallet from './wallet.js';
 import * as vitals from './vitals.js';
+import { shouldEject, launchDamage, impactDamage } from './ejection.js';
 import * as fuel from './fuel.js';
 import * as statusbar from './statusbar.js';
 import { PRICE, pumpBrand, pumpPrice, kc2 } from './prices.js';
 import { Combat } from './combat.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
+import { toast as policeToast } from './toasts.js';
 import { Ambulance } from './ambulance.js';
 import { ChatBubbles } from './chatbubbles.js';
 import { PostFX, gradeFor } from './postfx.js';
@@ -131,9 +133,14 @@ const HOSPITAL = { x: 2291, z: 295 };
 
 // Reused across every stepGame — see the note at its use site.
 const _vitCtx = { car: null, heli: null, jet: null, player: null, onFoot: true };
+// The car the driver just went through the windscreen of: it keeps rolling on
+// its own for a moment (driveStep with nobody at the wheel) instead of
+// freezing mid-bounce. js/ejection.js decides when a crash is an ejection.
+let _ejCar = null, _ejT = 0;
+const _ejIdle = { gas: 0, steer: 0, brake: 0 };
 const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null };
 const _wntCtx = { x: 0, z: 0, onFoot: true, car: null, police: null };
-const _polCtx = { x: 0, z: 0, car: null };
+const _polCtx = { x: 0, z: 0, car: null, onFoot: true, y: NaN };
 let _stationT = 0;
 
 let combat = null;       // fists, and what falls out of people — js/combat.js
@@ -465,7 +472,7 @@ function updateCamera(dt) {
     fov = BASE_FOV + speedK * 10;
   } else {
     wantYaw = player.heading;
-    dist = camDist;
+    dist = camDist + (player.ragdoll ? 3 : 0);   // thrown: pull back and watch it fly
     height = 2.1;
     // player.y, NOT mesh.position.y: once boarding parents the mesh to a
     // vehicle its position is SEAT-LOCAL, and a passenger riding over a bridge
@@ -989,6 +996,7 @@ function applyParkVisibility() {
 
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
+  if (player.ragdoll) return;      // flying through the air is not a door
   let jetNear = null;              // set by the fighter branch's own test
   if (trains?.riding) {
     // only with the doors open — stepping off at 140 km/h is not a feature
@@ -1668,6 +1676,7 @@ function updateBlockers() {
     if (inKerbStall(c)) continue;   // at the kerb, out of the lane: traffic steers round (traffic.kerbOf)
     _blockers.push({ x: c.x, z: c.z, half: (c.len ?? 4.4) / 2 + 0.35 });
   }
+  if (police) for (const b of police.blockers) _blockers.push(b);   // a stopped unit, officers on foot
   return _blockers;
 }
 const _blockers = [];
@@ -2535,6 +2544,12 @@ async function boot() {
   // "the blue one is me" used to be true on four screens at once.
   player = new Player(scene, SPAWN.x, SPAWN.z, SPAWN.heading, localUid());
   await career.spawn(player, city);   // "Pokračovat": stand where the save left you
+  // The ground under the spawn is asked for NOW, the same tiles the streamer's
+  // first pass would ask for (city.js update), so they download while the
+  // systems below are built: see the wait before the warm-up.
+  world.terrain.ensure(player.pos.x, player.pos.z, 6000);
+  world.canopy.ensure(player.pos.x, player.pos.z, 2000);
+  world.ground.ensure(player.pos.x, player.pos.z, 2000);
   vehicles = new Vehicles(scene);
   // Immediately, not later: every car built from here on — parked, spawned by
   // the dev tools, or a peer's — asks this for the height of the road it is
@@ -2549,7 +2564,8 @@ async function boot() {
     _hulls.length = 0;
     const px = player.pos.x, pz = player.pos.z;
     const push = (c) => {
-      if (!c || c === game.car || c === player.inCar || c === player.boarding?.veh) return;
+      if (!c || c === game.car || c === player.inCar || c === player.boarding?.veh
+        || c === player.ragdoll?.car) return;   // thrown out of it: the body leaves through the glass
       const dx = c.x - px, dz = c.z - pz;
       if (dx * dx + dz * dz > 900) return;                    // 30 m is plenty on foot
       _hulls.push(c);
@@ -2595,6 +2611,8 @@ async function boot() {
   indexPumps(city.pois);
   indexStations(city.pois);
   city.onTileLoaded?.((t) => { indexPumps(t.pois); indexStations(t.pois); });
+  // no tile's data is given back near a co-op peer either (geo.js evictDeep)
+  city.evictHolds?.push((out) => { if (net) for (const r of net.remotes.values()) if (r.state) out.push(r.x, r.z); });
 
   peds = new Pedestrians(scene, city, world.footing ?? world.terrain);   // feet on the pavement, not under it
   cityLife = wireCityLife({ city, traffic, peds, vehicles, world, parked });
@@ -2736,6 +2754,18 @@ async function boot() {
   // ceiling that means minutes, not the gate.
   let warmFrames = 0;
   const label = $id('enter-label');
+  // ...and the warm-up waits for them (4 s at most). Started at once, it took
+  // the thread in long slices and every height map's arrival queued behind
+  // one: measured 13 Nov 2026, sixteen 116 KB maps whose headers were in at
+  // 2.3 s landed one a slice from 4.8 to 6.9 s, every chunk built before them
+  // stood on guessed ground and was built again, and no earthworks could start.
+  const rasters = [world.terrain, world.canopy, world.ground];
+  await new Promise((resolve) => {
+    const t0 = performance.now();
+    const wait = () => (rasters.every((r) => !r._pending?.size) || performance.now() - t0 > 4000
+      ? resolve() : setTimeout(wait, 16));
+    wait();
+  });
   await new Promise((resolve, reject) => {
     const warm = () => {
       try {
@@ -2761,7 +2791,8 @@ async function boot() {
     // file already, so the shouting comes for free.
     peds.panic(x, z, 18);
   });
-  police = new Police({ traffic, vehicles, wanted, city, scene });
+  police = new Police({ traffic, vehicles, wanted, city, scene,
+    say: (t) => policeToast(t, { icon: '🚓', kind: 'warn', ms: 3500 }) });
   ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL });
 
   // ---- the body, the wallet and the tank ----
@@ -2801,6 +2832,7 @@ async function boot() {
     // keep driving `pos` after the respawn has moved it.
     player.boarding = null;
     player.exiting = null;
+    if (player.ragdoll) player.ragdoll.stay = true;   // killed by the landing: stays down
     if (player.inCar) player.setInCar(null);
     // …and a train hides the avatar outright (trains.js:1004) rather than
     // parenting it, so that one is a visibility flag and not a seat.
@@ -2810,6 +2842,7 @@ async function boot() {
     hideCarName();
     setTimeout(() => {
       if (game.mode !== 'play') return;
+      player.endRagdoll();
       player.pos.x = HOSPITAL.x;
       player.pos.z = HOSPITAL.z;
       player.y = world?.terrain?.heightAt?.(HOSPITAL.x, HOSPITAL.z) ?? player.y;
@@ -2969,6 +3002,29 @@ function engineLoad(car, gas) {
   return 0;
 }
 
+// Through the windscreen. Lets go of the car exactly as the E key does (the
+// same handover lines), then throws the body: the glass is billed now and the
+// landing when it happens, both through vitals.damage, so a fatal one ends in
+// the ordinary SEJMUT path with the body lying where it came down.
+function ejectDriver(c) {
+  const v = Math.hypot(c.impactVx ?? 0, c.impactVz ?? 0);
+  c.ctl = null;
+  game.car = null;
+  fpView = false;
+  parked.includes(c) || parked.push(c);
+  claimParked(c, false);
+  $id('speedo').classList.add('hidden');
+  hideCarName();
+  engineStop();
+  carAudioStop();
+  sfx('glass_break', 1.0);
+  world.crashDebris?.(c.x - Math.sin(c.heading) * c.len * 0.2, (c.y ?? 0) + 1.0,
+    c.z - Math.cos(c.heading) * c.len * 0.2, 0xc9d6dc, 8, v * 0.4);
+  player.eject(c, { onHit: (u) => vitals.damage(impactDamage(u), 'havárie') });
+  vitals.damage(launchDamage(v), 'havárie');
+  _ejCar = c; _ejT = 2.5;
+}
+
 function stepGame(dt) {
   if (game.mode !== 'play') return;
 
@@ -3089,8 +3145,13 @@ function stepGame(dt) {
     // …and the tyres letting go. driveStep measured the actual contact-patch
     // scrub; audio.js turns it into a squeal on tarmac or a spray on dirt.
     skidSet(game.car.slip01 ?? 0, game.car.offroad ?? 0);
+    if (shouldEject(game.car)) ejectDriver(game.car);
   } else {
     player.update(dt, { input, camYaw, world });
+  }
+  if (_ejCar) {
+    if (_ejCar !== game.car && (_ejT -= dt) > 0) driveStep(_ejCar, _ejIdle, dt, world, _crashList());
+    else _ejCar = null;
   }
   // WHERE THE EARS ARE. Positioned one-shots (horns, crashes, debris, screams)
   // attenuate against this, and it must be set every frame from something that
@@ -3257,7 +3318,7 @@ function stepGame(dt) {
   vitals.update(dt, _vitCtx);
   // Fists first: a swing that lands this step is a crime the wanted level
   // should already know about when it runs two lines below.
-  _cbtCtx.player = player; _cbtCtx.onFoot = _vitCtx.onFoot;
+  _cbtCtx.player = player; _cbtCtx.onFoot = _vitCtx.onFoot && !player.ragdoll;
   _cbtCtx.camYaw = camYaw; _cbtCtx.input = input;
   combat?.update(dt, _cbtCtx);
   const _eyes = game.car ?? player.pos;
@@ -3265,6 +3326,7 @@ function stepGame(dt) {
   _wntCtx.onFoot = _vitCtx.onFoot; _wntCtx.car = game.car; _wntCtx.police = police;
   wanted.update(dt, _wntCtx);
   _polCtx.x = _eyes.x; _polCtx.z = _eyes.z; _polCtx.car = game.car;
+  _polCtx.onFoot = _vitCtx.onFoot; _polCtx.y = game.car ? NaN : player.y;
   police?.update(dt, _polCtx);
   ambulance?.update(dt, _polCtx);
   combatInput(dt);

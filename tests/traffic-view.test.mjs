@@ -359,7 +359,13 @@ test('two clients looking in opposite directions still share the schedule', () =
 
 test('ghosts never enter the shared world and never pile up', () => {
   const A = client({ maxCars: 240 });
-  A.run(240, 20, stand, lookEast);
+  // (on the corner of the junction, not on its centre. Since v11 the cars are
+  // bodies that take the inside of a left turn, which passes within two
+  // metres of somebody standing on the crown of the junction, and the follow
+  // rule stops for a person there: that is a blocked street, not the leak this
+  // test is about, and GHOST_MAX is what ends it.)
+  const kerb = { x: 7, y: 0, z: 7 };
+  A.run(240, 20, kerb, () => ({ x: 7, z: 7, dirX: 1, dirZ: 0 }));
   const snapKeys = new Set(A.t.snapshot(0, 0, 700).map((o) => o.key));
   for (const p of A.t._ghosts) {
     assert.equal(snapKeys.has(p.key), false, 'a ghost turned up in snapshot()');
