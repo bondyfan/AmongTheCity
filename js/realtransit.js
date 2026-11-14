@@ -65,7 +65,9 @@ export class RealLines {
     this._wt = NaN;                   // the shared second of the last scan
     this._budget = 0;
     this.onLines = null;              // () => a file arrived (js/buses.js re-derives round it)
+    this.onTramRoute = null;          // (file, route) => a tram route arrived (js/trams.js)
     city.onTileLoaded?.(() => { this._gen++; });
+    city.onTileReleased?.((t) => this.releaseTile(t));
   }
 
   now() { return this.clock ? this.clock() : worldT(); }
@@ -94,12 +96,16 @@ export class RealLines {
       () => { this.files.set(url, 'failed'); });       // asked for again on a later pass
   }
 
-  /** One route file, decoded into lines. Trams are not ours (they have rails). */
+  /**
+   * One route file, decoded into lines. Trams are not ours (they have rails):
+   * they are handed to onTramRoute (js/trams.js), which runs them on the rail.
+   */
   addFile(url, file) {
     this.files.set(url, 'ok');
     if (file) FILES.set(url, file);
     for (const r of file?.routes ?? []) {
-      if (r.m === MODE_TRAM || this._byId.has(r.id) || !r.s || r.s.length < 2) continue;
+      if (r.m === MODE_TRAM) { this.onTramRoute?.(file, r); continue; }
+      if (this._byId.has(r.id) || !r.s || r.s.length < 2) continue;
       const calls = routeStops(file, r);
       const stops = calls.map((c) => ({ x: c.px, z: c.pz, n: c.n, d: c.d, f: c.f }));
       const last = stops[stops.length - 1];
@@ -316,5 +322,24 @@ export class RealLines {
         if (spec) this.traffic.addFixed(spec);
       }
     }
+  }
+
+  // A far tile's ways left the traffic graph (geo.js RELEASE_GRAPHS): a line
+  // laid over any of them is laid again over what is left, as for a line
+  // whose tiles have not streamed yet (its trips are all near a viewer, the
+  // tile is not, so only the far end of a long line changes).
+  releaseTile(t) {
+    const gone = new Set(t?.roads ?? []);
+    if (!gone.size) return;
+    for (const line of this.lines) {
+      if (!line.chains) continue;
+      let hit = false;
+      for (const c of line.chains) {
+        for (const st of c.steps ?? []) if (st.e && gone.has(st.e.road)) { hit = true; break; }
+        if (hit) break;
+      }
+      if (hit) { line.chains = null; line.gen = -1; line.whole = false; }
+    }
+    this._gen++;
   }
 }

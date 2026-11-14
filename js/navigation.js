@@ -13,9 +13,9 @@
 //
 //   · The graph GROWS. city.onTileLoaded hands us one 4.8 km tile's roads at
 //     a time and we ingest only those — nothing is ever rebuilt from scratch,
-//     and a way stamped `_ng` can never be ingested twice. (Roads are the one
-//     layer geo.js never evicts, so the graph only ever gets bigger, which is
-//     also why nothing here has to handle a node disappearing.)
+//     and a way stamped `_ng` can never be ingested twice. A tile geo.js
+//     deep-evicts takes its part of the graph back (releaseTile, see
+//     geo.js RELEASE_GRAPHS) and hands the same ways over again on return.
 //   · A* runs on an ADMISSIBLE heuristic and stops the instant optimality is
 //     proven, with a hard cap on expansions so a hopeless search cannot eat a
 //     frame. See _search for why straight-line ÷ fastest-edge-speed can never
@@ -234,6 +234,7 @@ export class Navigation {
     this._indeg = [];           // in-degree per node, kept live by _addSeg — the
                                 // weld pass needs "nothing leads here" in O(1)
     this._touched = new Set();  // nodes this ingest batch created or joined
+    this._ukeys = new WeakMap(); // way → the usage keys it counted (releaseTile)
     this._usage = new Map();    // keyOf → { n, last }: PERSISTENT, so a side street
                                 // arriving three tiles later still turns an existing
                                 // way's interior point into a junction
@@ -266,6 +267,7 @@ export class Navigation {
     // whatever already streamed in, then every tile after us
     this._growGraph(city.roads ?? []);
     city.onTileLoaded?.((t) => this._growGraph(t.roads ?? []));
+    city.onTileReleased?.((t) => this.releaseTile(t));
   }
 
   // ======================= graph construction ==============================
@@ -282,14 +284,16 @@ export class Navigation {
       if (r.d !== 1 || !r.p || r.p.length < 2 || r._ng) continue;
       r._ng = 1;                                 // traffic.js owns `_tg`; this is ours
       fresh.push(r);
+      const mine = [];                           // the counts this way adds (releaseTile)
       for (const [x, z] of r.p) {
         const k = keyOf(x, z);
         const u = this._usage.get(k);
         // a point may repeat inside one way (loops) — comparing the last way
         // keeps that from inflating the count into a phantom junction
-        if (!u) this._usage.set(k, { n: 1, last: r });
-        else if (u.last !== r) { u.n++; u.last = r; }
+        if (!u) { this._usage.set(k, { n: 1, last: r }); mine.push(k); }
+        else if (u.last !== r) { u.n++; u.last = r; mine.push(k); }
       }
+      this._ukeys.set(r, mine);
     }
     for (const r of fresh) {
       const p = r.p;
@@ -316,10 +320,18 @@ export class Navigation {
     const k = keyOf(x, z);
     let i = this._nodeIx.get(k);
     if (i === undefined) {
-      i = this.nodes.length;
-      this.nodes.push({ x, z, out: [] });
+      // a slot a released tile gave back first (releaseTile), so the A*
+      // arrays stay the size of what is resident rather than of the tour
+      if (this._free?.length) {
+        i = this._free.pop();
+        this.nodes[i] = { x, z, out: [] };
+        this._indeg[i] = 0;
+      } else {
+        i = this.nodes.length;
+        this.nodes.push({ x, z, out: [] });
+        this._indeg.push(0);
+      }
       this._nodeIx.set(k, i);
-      this._indeg.push(0);
     }
     this._touched.add(i);
     return i;
@@ -463,7 +475,7 @@ export class Navigation {
         lastK = k;
         let a = g.get(k);
         if (!a) g.set(k, a = []);
-        if (a[a.length - 1] !== seg && !a.includes(seg)) a.push(seg);
+        if (a[a.length - 1] !== seg && !a.includes(seg)) { a.push(seg); (seg._gks ??= []).push(k); }
       }
     }
   }
@@ -883,6 +895,65 @@ export class Navigation {
       this._turn.street = J[j].street;
       this.nextTurn = this._turn;
     } else this.nextTurn = null;
+  }
+
+  // ======================= a far tile goes ==================================
+  // geo.js deep-evicted a tile and its ways leave the graph (see the header):
+  // their segments out of the node lists and the snap grid, nodes nothing
+  // reaches any more onto the free list, their share of the usage census.
+  // The way objects stay with geo.js; clearing `_ng` lets the tile's next
+  // arrival build them again. Local only (GPS), no co-op contract: a route
+  // planned over the far tile simply becomes the best-so-far route until the
+  // tile is back, as for any part of the region not streamed yet.
+  releaseTile(t) {
+    const gone = new Set();
+    for (const r of t?.roads ?? []) if (r._ng) gone.add(r);
+    if (!gone.size) return;
+    const drop = (arr, f) => { let k = 0; for (let i = 0; i < arr.length; i++) if (!f(arr[i])) arr[k++] = arr[i]; arr.length = k; };
+    const ends = new Set();
+    const dead = new Set();
+    for (const seg of this._segs) {
+      if (!gone.has(seg.road)) continue;
+      dead.add(seg);
+      if (!seg.dead) {            // a welded-away piece is unhooked already
+        ends.add(seg.f.a); ends.add(seg.f.b);
+        this._indeg[seg.f.b]--;
+        if (seg.r) this._indeg[seg.f.a]--;
+      }
+      seg.dead = 1;
+    }
+    drop(this._segs, (seg) => dead.has(seg));
+    for (const i of ends) {
+      const n = this.nodes[i];
+      drop(n.out, (e) => dead.has(e.seg));
+      if (!n.out.length && this._indeg[i] <= 0) {
+        this._nodeIx.delete(keyOf(n.x, n.z));
+        this.nodes[i] = { x: n.x, z: n.z, out: [] };
+        this._indeg[i] = 0;
+        (this._free ??= []).push(i);
+      }
+    }
+    // the snap cells _gridAdd filed those segments in, and no others
+    const keys = new Set();
+    for (const seg of dead) for (const k of seg._gks ?? []) keys.add(k);
+    for (const k of keys) {
+      const a = this._grid.get(k);
+      if (!a) continue;
+      drop(a, (seg) => dead.has(seg));
+      if (!a.length) this._grid.delete(k);
+    }
+    for (const r of gone) {
+      for (const k of this._ukeys.get(r) ?? []) {
+        const u = this._usage.get(k);
+        if (!u) continue;
+        if (--u.n <= 0) this._usage.delete(k);
+        else if (u.last === r) u.last = null;
+      }
+      this._ukeys.delete(r);
+      r._ng = 0;
+    }
+    this.stats.nodes = this.nodes.length - (this._free?.length ?? 0);
+    this.stats.edges = this._segs.length;
   }
 }
 

@@ -1,5 +1,6 @@
-// The hand-made landmarks of Pardubice (js/landmarks*.js), against the REAL
-// tile they are meant for: public/data/tiles/0_-1.json. Three things can go
+// The hand-made landmarks (js/landmarks*.js), each against the REAL tile it is
+// meant for: public/data/tiles/0_-1.json for Pardubice, the tile its `at`
+// lies in for Prague (round 7: every entry loads its own). Three things can go
 // wrong with a model pinned to a footprint and none of them shows in a
 // screenshot taken today:
 //   · a tile rebuild reorders or nudges the footprints and the model lands on
@@ -26,27 +27,45 @@ const { decode, MAX_ERR } = await import('../js/geomcodec.js');
 const { JUNCTIONS, CLUSTERS, setStreetCity } = await import('../js/geo.js');
 const { pointInPolygon } = await import('../js/geo.js');
 
-const tile = JSON.parse(readFileSync(new URL('../public/data/tiles/0_-1.json', import.meta.url), 'utf8'));
+const TILES = new Map();
+/** The shipped tile a world point lies in (4800 m tiles), parsed once. */
+function tileAt(x, z) {
+  const k = Math.floor(x / 4800) + '_' + Math.floor(z / 4800);
+  if (!TILES.has(k)) TILES.set(k, JSON.parse(readFileSync(new URL(`../public/data/tiles/${k}.json`, import.meta.url), 'utf8')));
+  return TILES.get(k);
+}
+const tileOf = (l) => tileAt(l.at[0], l.at[1]);
+const tile = tileAt(1500, -700);                     // Pardubice, 0_-1
+// The founding height each model is built on: one per region, near its real ground
+const GROUND_OF = { pardubice: 221, praha: 192 };
+const groundOf = (l) => GROUND_OF[l.region ?? 'pardubice'];
 const GROUND = 221;
 const copy = (f) => JSON.parse(JSON.stringify(f));
-/** The footprint each entry matches in the tile as shipped. */
-const found = new Map();
-for (const f of tile.buildings) for (const l of LANDMARKS) if (matches(l, f)) {
+/** Entries that build a model (a `hide` entry only takes generic footprints out). */
+const MODELS = LANDMARKS.filter((l) => !l.hide);
+const WIDE_IDS = new Set((await import('../js/landmarks-hrad.js')).LANDMARKS_WIDE.map((l) => l.id));
+/** The footprint each entry matches in its own tile as shipped (a `hide` entry: all of them). */
+const found = new Map(), hidden = new Map();
+for (const l of LANDMARKS) for (const f of tileOf(l).buildings) if (matches(l, f)) {
+  if (l.hide) { if (!hidden.has(l.id)) hidden.set(l.id, []); hidden.get(l.id).push(f); continue; }
   assert.ok(!found.has(l.id), `${l.id} matches two footprints`);
   found.set(l.id, f);
 }
 
 test('every landmark finds exactly one footprint in the shipped tile, and no footprint two', () => {
-  for (const l of LANDMARKS) assert.ok(found.has(l.id), `${l.id} matches nothing in tile 0_-1`);
-  for (const f of tile.buildings) {
-    const n = LANDMARKS.filter((l) => matches(l, f)).length;
+  for (const l of MODELS) assert.ok(found.has(l.id), `${l.id} matches nothing in its tile`);
+  for (const l of LANDMARKS) if (l.hide) assert.ok(hidden.get(l.id)?.length, `${l.id} hides nothing`);
+  for (const t of TILES.values()) for (const f of t.buildings) {
+    const n = MODELS.filter((l) => matches(l, f)).length;
     assert.ok(n <= 1, `one footprint is ${n} landmarks`);
   }
   assert.ok(LANDMARKS.length >= 8, 'fewer than eight landmarks registered');
+  // a region is one box: no Prague entry is found by the Pardubice prefilter or the other way round
+  for (const l of MODELS) assert.equal(landmarkOf(copy(found.get(l.id))), l, `${l.id}: the prefilter refuses its own footprint`);
 });
 
 test('a landmark is found by where and how big it is, not by its place in the tile', () => {
-  for (const l of LANDMARKS) {
+  for (const l of MODELS) {
     const f = copy(found.get(l.id));
     // what a rebuild does: the ring starts elsewhere, runs the other way, every
     // vertex lands up to 40 cm off, and the name may be gone
@@ -78,17 +97,22 @@ const BY = (id) => LANDMARKS.find((l) => l.id === id);
 /** One landmark built alone, as plain arrays. */
 function build(l, f) {
   const b = new LandmarkBatch();
-  b.add(l, f, GROUND);
+  b.add(l, f, groundOf(l));
   return b.sink;
 }
 
+// Per region, all its models together. Prague holds two packages' landmarks
+// (the old town and the wide set), so its cap is the larger.
+const REGION_CAP = { pardubice: 60000, praha: 160000 };
+// and per model: Prague's castle is one footprint 400 m long (js/landmarks-hrad.js)
+const MODEL_CAP = { pardubice: 12000, praha: 20000 };
 test('each model stands on its own footprint, on the ground, and is sound geometry', () => {
-  let total = 0;
-  for (const l of LANDMARKS) {
-    const f = found.get(l.id), s = build(l, f);
+  const total = {};
+  for (const l of MODELS) {
+    const f = found.get(l.id), s = build(l, f), GROUND = groundOf(l), reg = l.region ?? 'pardubice';
     assert.ok(s.tris > 100, `${l.id} is only ${s.tris} triangles`);
-    assert.ok(s.tris < 12000, `${l.id} is ${s.tris} triangles: over budget`);
-    total += s.tris;
+    assert.ok(s.tris < MODEL_CAP[reg], `${l.id} is ${s.tris} triangles: over budget`);
+    total[reg] = (total[reg] ?? 0) + s.tris;
     let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, y0 = Infinity, y1 = -Infinity;
     for (let i = 0; i < s.pos.length; i += 3) {
       const x = s.pos[i], y = s.pos[i + 1], z = s.pos[i + 2];
@@ -105,7 +129,7 @@ test('each model stands on its own footprint, on the ground, and is sound geomet
     // eaves, buttresses and a balcony (3.5 m)
     let fx0 = Infinity, fx1 = -Infinity, fz0 = Infinity, fz1 = -Infinity;
     for (const [x, z] of f.o) { fx0 = Math.min(fx0, x); fx1 = Math.max(fx1, x); fz0 = Math.min(fz0, z); fz1 = Math.max(fz1, z); }
-    const slack = 3.5;
+    const slack = Math.max(3.5, l.reach ?? 0);   // (a declared reach: the theatre's porch)
     assert.ok(x0 > fx0 - slack && x1 < fx1 + slack && z0 > fz0 - slack && z1 < fz1 + slack,
       `${l.id} overhangs its footprint: model ${[x0, x1, z0, z1].map((v) => v.toFixed(1))} footprint ${[fx0, fx1, fz0, fz1].map((v) => v.toFixed(1))}`);
     assert.ok(x0 < fx0 + slack + 2 && x1 > fx1 - slack - 2 && z0 < fz0 + slack + 2 && z1 > fz1 - slack - 2,
@@ -115,17 +139,19 @@ test('each model stands on its own footprint, on the ground, and is sound geomet
     // palace's footprint falls three metres to the north and both passages
     // climb, so a wall founded at one height would float over the low side
     // and a passage wall would leave a slot under it. Everything else starts
-    // at its ground.)
-    else if (l.id.startsWith('zamek')) assert.ok(y0 - GROUND > -1.85 && y0 - GROUND < 0.01, `${l.id} starts ${(y0 - GROUND).toFixed(2)} m off its ground`);
+    // at its ground. Prague's wide set the same: the castle's wings are founded
+    // edge by edge on a hill, the museum's steps and the towers on Petřín and
+    // at the Dancing House reach into their slope, js/landmarks-hrad.js.)
+    else if (l.id.startsWith('zamek') || WIDE_IDS.has(l.id)) assert.ok(y0 - GROUND > -1.85 && y0 - GROUND < 0.01, `${l.id} starts ${(y0 - GROUND).toFixed(2)} m off its ground`);
     else assert.ok(Math.abs(y0 - GROUND) < 0.01, `${l.id} starts ${(y0 - GROUND).toFixed(2)} m off its ground`);
     assert.ok(y1 - GROUND > 8, `${l.id} is only ${(y1 - GROUND).toFixed(1)} m tall`);
     if (l.id === 'zelena-brana') assert.ok(Math.abs(y1 - GROUND - 59) < 1, `Zelená brána is 59 m, the model ${(y1 - GROUND).toFixed(1)}`);
   }
-  assert.ok(total < 60000, `the landmarks are ${total} triangles in all`);
+  for (const [reg, n] of Object.entries(total)) assert.ok(n < REGION_CAP[reg], `the landmarks of ${reg} are ${n} triangles in all`);
 });
 
 test('the same footprint gives the same model, whichever vertex the ring starts at', () => {
-  for (const l of LANDMARKS) {
+  for (const l of MODELS) {
     const f = found.get(l.id);
     const a = build(l, f), b = build(l, copy(f));
     assert.deepEqual(a.pos, b.pos, `${l.id} is not deterministic`);
@@ -199,10 +225,10 @@ test('the passages are paved: no gate leaves the aerial photo of its own roof fo
 
 test('a landmark is solid as high as its model stands, not as high as the tile guessed', () => {
   const at = (id, x, z, y) => landmarkSolids(found.get(id)).some((s) => y >= s.bot && y <= s.top && solidHas(s, x, z));
-  for (const l of LANDMARKS) {
+  for (const l of MODELS) {
     const f = found.get(l.id), sink = build(l, f);
     let top = 0;
-    for (let i = 1; i < sink.pos.length; i += 3) top = Math.max(top, sink.pos[i] - GROUND);
+    for (let i = 1; i < sink.pos.length; i += 3) top = Math.max(top, sink.pos[i] - groundOf(l));
     const all = landmarkSolids(f);
     assert.ok(all.length >= 1, `${l.id} has no solid`);
     let fx0 = Infinity, fx1 = -Infinity, fz0 = Infinity, fz1 = -Infinity;
@@ -210,7 +236,8 @@ test('a landmark is solid as high as its model stands, not as high as the tile g
     for (const s of all) {
       assert.ok(s.ring.length >= 3 && s.top > s.bot, `${l.id}: a solid of no size`);
       assert.ok(s.top <= top + 0.01, `${l.id} is solid to ${s.top} m, the model only stands ${top.toFixed(1)}`);
-      for (const [x, z] of s.ring) assert.ok(x > fx0 - 1 && x < fx1 + 1 && z > fz0 - 1 && z < fz1 + 1, `${l.id}: a solid outside its footprint`);
+      const r = l.reach ?? 1;
+      for (const [x, z] of s.ring) assert.ok(x > fx0 - r && x < fx1 + r && z > fz0 - r && z < fz1 + r, `${l.id}: a solid outside its footprint`);
     }
     // nothing invisible above the model (above), and its walls are there: only
     // roofs and spires rise over the solid, as on every other building
@@ -260,6 +287,10 @@ const homeOf = (f) => Math.floor(f.o[0][0] / CHUNK) + ',' + Math.floor(f.o[0][1]
 function worldFor(key) {
   JUNCTIONS.clear(); CLUSTERS.clear();
   let id = 0;
+  // the shipped tile the chunk lies in, and the region's ground
+  const [kx, kz] = key.split(',').map(Number);
+  const tx = Math.floor(kx * CHUNK / 4800), tz = Math.floor(kz * CHUNK / 4800);
+  const tile = tileAt(kx * CHUNK + 1, kz * CHUNK + 1), GROUND = tx < -10 ? GROUND_OF.praha : GROUND_OF.pardubice;
   const buildings = tile.buildings.filter((f) => homeOf(f) === key).map((f) => {
     const g = copy(f); g._id = ++id; g._home = key; return g;
   });
@@ -272,7 +303,7 @@ function worldFor(key) {
   const g = new Int16Array(terrain.n * terrain.n);
   for (let j = 0; j < terrain.n; j++) for (let i = 0; i < terrain.n; i++)
     g[j * terrain.n + i] = Math.round((GROUND + Math.sin(i * 0.31) * 1.4 + Math.cos(j * 0.23) * 1.1) * 10);
-  terrain.grids.set('0,-1', g);
+  terrain.grids.set(tx + ',' + tz, g);
   terrain._loads = 1;
   const mats = makeMaterials();
   mats.terrain = terrain; mats.canopy = null; mats.ground = null; mats.ortho = null;
@@ -284,7 +315,7 @@ function worldFor(key) {
 }
 
 test('a chunk with a landmark comes back from the worker the same as it is built here', () => {
-  const keys = [...new Set(LANDMARKS.map((l) => homeOf(found.get(l.id))))];
+  const keys = [...new Set(MODELS.map((l) => homeOf(found.get(l.id))))];
   let compared = 0, worst = 0, meshes = 0;
   const p = new THREE.Vector3(), q = new THREE.Vector3();
   for (const key of keys) {
@@ -332,7 +363,7 @@ test('a chunk with a landmark comes back from the worker the same as it is built
     assert.equal(count(back), count(sync), `chunk ${key}: the two paths built a different set of meshes`);
     meshes++;
   }
-  assert.ok(meshes >= 6, `only ${meshes} chunks compared`);
+  assert.ok(meshes >= 12, `only ${meshes} chunks compared`);
   assert.ok(compared > 60000, `only ${compared} landmark vertices compared`);
   assert.ok(worst < MAX_ERR, `${(worst * 1000).toFixed(2)} mm between the two paths`);
 });

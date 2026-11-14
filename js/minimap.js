@@ -15,7 +15,7 @@
 // last render center. The px/m scale never changes after boot, so the blit
 // math in update() is untouched — only minX/minZ slide.
 
-import { COLORS } from './config.js';
+import { COLORS, CHUNK } from './config.js';
 import { forEachChunkInRadius } from './geo.js';
 import { drawMark, drawRimMark } from './mapmarks.js';
 
@@ -24,6 +24,43 @@ import { drawMark, drawRimMark } from './mapmarks.js';
 const AERO_CLASS = /^(runway|taxiway|taxilane|airstrip)$/;
 
 const OFF_PX = 2048;     // offscreen city bitmap resolution
+
+// The features of the chunk cells under a window, each once, per kind, in id
+// order (ids are slot * 2^20 + n, so this is the flat arrays' own order within
+// a tile, and a fixed one across tiles). A tour of Prague leaves a quarter of
+// a million kept ways in city.roads; the index holds only what is resident.
+// Without a chunk index (bare fixtures) the flat arrays as they are.
+const MM_KINDS = ['green', 'paved', 'water', 'buildings', 'rails', 'roads'];
+let _mmStamp = 0;
+function mmGather(city, x1, z1, x2, z2) {
+  const idx = city.chunkIndex;
+  const out = {};
+  if (!idx || !idx.size) {
+    for (const k of MM_KINDS) out[k] = city[k] ?? [];
+    return out;
+  }
+  for (const k of MM_KINDS) out[k] = [];
+  const st = ++_mmStamp;
+  const c0 = Math.floor(x1 / CHUNK), c1 = Math.floor(x2 / CHUNK);
+  const d0 = Math.floor(z1 / CHUNK), d1 = Math.floor(z2 / CHUNK);
+  for (let cx = c0; cx <= c1; cx++) for (let cz = d0; cz <= d1; cz++) {
+    const cell = idx.get(cx + ',' + cz);
+    if (!cell) continue;
+    for (const k of MM_KINDS) {
+      const a = cell[k];
+      if (!a) continue;
+      const o = out[k];
+      for (let i = 0; i < a.length; i++) {
+        const f = a[i];
+        if (f._mmS === st) continue;
+        f._mmS = st;
+        o.push(f);
+      }
+    }
+  }
+  for (const k of MM_KINDS) out[k].sort((a, b) => (a._id ?? 0) - (b._id ?? 0));
+  return out;
+}
 const VIEW_R = 110;      // meters of world from the center to the rim
 const RECENTER_M = 1500; // player drift from render center that forces a redraw
 const TAU = Math.PI * 2;
@@ -234,9 +271,12 @@ export class Minimap {
     g.fillStyle = this._bg;
     g.fillRect(0, 0, OFF_PX, OFF_PX);
     g.lineJoin = g.lineCap = 'round';
-    for (const f of city.green ?? []) if (vis(f, f.o)) poly(f, css(COLORS.green[f.t] ?? COLORS.green.grass, 0.9));
-    for (const f of city.paved ?? []) if (vis(f, f.o)) poly(f, css(COLORS.paved[f.t] ?? COLORS.paved.parking));
-    for (const f of city.water ?? []) if (vis(f, f.o)) poly(f, css(COLORS.water, 0.85));
+    // what is drawn comes out of the chunk cells under the window, not out of
+    // the flat arrays, which keep every way of every tile the session saw
+    const L = mmGather(city, x1, z1, x2, z2);
+    for (const f of L.green) if (vis(f, f.o)) poly(f, css(COLORS.green[f.t] ?? COLORS.green.grass, 0.9));
+    for (const f of L.paved) if (vis(f, f.o)) poly(f, css(COLORS.paved[f.t] ?? COLORS.paved.parking));
+    for (const f of L.water) if (vis(f, f.o)) poly(f, css(COLORS.water, 0.85));
     // waterway polylines (the Chrudimka arms, mill races) at their real width
     g.strokeStyle = css(COLORS.water, 0.85);
     for (const f of city.waterways ?? []) {
@@ -246,13 +286,13 @@ export class Minimap {
     }
     // buildings: outer ring only — at 0.4 px/m courtyard holes are sub-pixel
     g.fillStyle = '#c6c2b8';
-    for (const f of city.buildings ?? []) { if (!vis(f, f.o)) continue; g.beginPath(); ring(f.o); g.fill(); }
+    for (const f of L.buildings) { if (!vis(f, f.o)) continue; g.beginPath(); ring(f.o); g.fill(); }
     // rails: a thin dark thread so the station corridor reads on the map
     g.strokeStyle = css(COLORS.rail, 1.6);
     g.lineWidth = 1.1;
-    for (const f of city.rails ?? []) if (vis(f, f.p)) line(f.p);
+    for (const f of L.rails) if (vis(f, f.p)) line(f.p);
     // roads in two passes: faint footpaths under, lifted drivable web on top
-    for (const f of city.roads ?? []) {
+    for (const f of L.roads) {
       if (f.d || !vis(f, f.p)) continue;
       // A runway rides the road layer with d:0 so no car ever queues for
       // take-off — but it is 45 m of concrete, not a footpath, and drawing it
@@ -262,7 +302,7 @@ export class Minimap {
       g.lineWidth = aero ? Math.max((f.w ?? 20) * s, 1.6) : 0.9;
       line(f.p);
     }
-    for (const f of city.roads ?? []) {
+    for (const f of L.roads) {
       if (!f.d || !vis(f, f.p)) continue;
       g.strokeStyle = css(COLORS.road[f.t] ?? COLORS.road.residential, 1.55);
       g.lineWidth = Math.max((f.w ?? 6) * s, 2.2);

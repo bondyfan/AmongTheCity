@@ -10,6 +10,8 @@
 
 import { polygonArea } from './geo.js';
 import { shapeOf, roofFurniture, roofPin, PIN_U, PIN_V } from './typology.js';
+import { roofCapHoled, hasCourtyard } from './roofholes.js';
+import { roofGrammar, insetRingVar, capFactors } from './roofgrammar.js';
 
 const lin = (v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
 /** 0xrrggbb (sRGB) -> [r, g, b] in linear light, what a vertex colour holds */
@@ -80,7 +82,12 @@ export function ringSelfIntersects(ring) {
 // `tag` is the tagged geometry of typology.roofOf, when there is any: `rise`
 // (roof:height), `attic` storeys under the roof, `low`, and `steep` for a
 // mansard, whose slope stands up instead of leaning in.
-export function roofCap(sink, ring, topY, area, r, g, b, ov = 0, soffit = false, tag = null) {
+// `k` (roofgrammar.capFactors) holds a slope back on the walls shared with a
+// neighbour: there the roof stands up as a plaster gable in `wall`'s colour,
+// so a street of capped houses is one roofline, not a row of hips with a
+// valley between every two of them.
+export function roofCap(sink, ring, topY, area, r, g, b, ov = 0, soffit = false, tag = null,
+  k = null, wall = null) {
   const n = ring.length;
   if (n < 3 || n > ROOF_MAX_N) return 0;
   const sgn = polygonArea(ring) > 0 ? 1 : -1;   // which side of an edge is inside
@@ -99,7 +106,7 @@ export function roofCap(sink, ring, topY, area, r, g, b, ov = 0, soffit = false,
   let inner = null, d = 0;
   for (const f of ROOF_STEPS) {
     d = d0 * f;
-    const cand = insetRing(ring, d, sgn);
+    const cand = k ? insetRingVar(ring, d, sgn, k) : insetRing(ring, d, sgn);
     if (!cand) continue;
     const ia = polygonArea(cand);
     if (!(ia * sgn > 0) || Math.abs(ia) < area * 0.06 || Math.abs(ia) > area) continue;
@@ -116,15 +123,17 @@ export function roofCap(sink, ring, topY, area, r, g, b, ov = 0, soffit = false,
   if (want) rise = Math.max(0.5, Math.min(want, d * 3.2));
   else if (tag?.steep) rise = Math.min(4.2, Math.max(rise, d * 2));
   else if (tag?.low) rise = Math.max(0.5, rise * 0.55);
+  else if (tag?.old) rise = Math.min(6, Math.max(rise, d * 1.5));   // the old town's steep clay
   const ry = topY + rise;
-  let late = null;
+  let late = null, gables = null;
   // the eave: the same slope carried `ov` outward, so it ends below the wall top
   let eave = ring, ey = topY;
   if (ov > 0.05) {
-    const out = insetRing(ring, -ov, sgn);
+    const out = k ? insetRingVar(ring, -ov, sgn, k) : insetRing(ring, -ov, sgn);
     if (out) { eave = out; ey = topY - ov * rise / d; }
   }
   for (let i = 0; i < n; i++) {
+    if (k && !k[i]) { (gables ??= []).push(i); continue; }
     const [ax, az] = eave[i], [bx, bz] = eave[(i + 1) % n];
     const [cx2, cz2] = inner[(i + 1) % n], [dx2, dz2] = inner[i];
     // outward-and-up normal of the slope, from the eave edge and the rise
@@ -155,6 +164,20 @@ export function roofCap(sink, ring, topY, area, r, g, b, ov = 0, soffit = false,
   for (let i = 1; i < n - 1; i++)
     sink.triFacing(inner[0][0], ry, inner[0][1], inner[i][0], ry, inner[i][1],
       inner[i + 1][0], ry, inner[i + 1][1], 0, 1, 0, r, g, b);
+  if (gables) {
+    // the shared walls, carried up to the top of the roof as plain plaster
+    sink.pinTo?.(PIN_U, PIN_V);
+    const [wr, wg, wb] = wall ?? [r, g, b];
+    for (const i of gables) {
+      const [ax, az] = eave[i], [bx, bz] = eave[(i + 1) % n];
+      const [cx2, cz2] = inner[(i + 1) % n], [dx2, dz2] = inner[i];
+      const ex = ring[(i + 1) % n][0] - ring[i][0], ez = ring[(i + 1) % n][1] - ring[i][1];
+      const el = Math.hypot(ex, ez) || 1;
+      const ox = ez / el * sgn, oz = -ex / el * sgn;
+      sink.triFacing(ax, ey, az, bx, ey, bz, cx2, ry, cz2, ox, 0, oz, wr, wg, wb);
+      sink.triFacing(ax, ey, az, cx2, ry, cz2, dx2, ry, dz2, ox, 0, oz, wr, wg, wb);
+    }
+  }
   if (late) for (const a of late) skylights(sink, ...a);
   return rise;
 }
@@ -200,7 +223,10 @@ function ridgeRoof(sink, S, topY, q, ov, rr, wall, pyramid, soffit, tag) {
   const hl = (along ? S.L : S.W) / 2, hw = (along ? S.W : S.L) / 2;
   const cx = S.ux * S.cu + S.vx * S.cv, cz = S.uz * S.cu + S.vz * S.cv;
   if (hl < 0.5 || hw < 0.5) return null;
-  let rise = Math.min(5, Math.max(1.0, hw * (q >= 1 ? 0.7 : 0.78)));
+  // (the old town of Prague: about 50 degrees and up to 8 m, the medieval
+  // and baroque roof that towers over its own facade)
+  let rise = tag?.old ? Math.min(8, Math.max(1.2, hw * 1.2))
+    : Math.min(5, Math.max(1.0, hw * (q >= 1 ? 0.7 : 0.78)));
   // tagged: the surveyed height; an attic storey needs about 45 degrees and
   // three metres to stand up in; a roof over nothing is a low one
   if (tag?.rise) rise = Math.max(0.3, tag.rise);
@@ -351,6 +377,8 @@ export function parapetInto(sink, ring, topY, h, t, wall) {
  * eaves and caps the chimneys, detail only the near shell is ever close enough
  * to show (the far mesh saves about a tenth of its triangles without it); opts.bare
  * leaves the furniture off (the far shell ring, seen from an aircraft).
+ * opts.tri(outer, holes) is an ear clipper (index triples): only a courtyard
+ * roof needs one, and without it a courtyard block keeps its flat deck.
  * Returns true when a pitched roof now covers the building.
  */
 export function roofInto(sink, f, typ, roof, topY, wallRGB, storeys, opts) {
@@ -359,9 +387,18 @@ export function roofInto(sink, f, typ, roof, topY, wallRGB, storeys, opts) {
   const pin = roofPin(roof.style);
   sink.pinTo?.(pin[0], pin[1]);
   // the tagged geometry, when the tile carries any (typology.roofOf)
-  const tag = roof.rise || roof.attic || roof.low || roof.swap || roof.flip || roof.steep ? roof : null;
+  const tag = roof.rise || roof.attic || roof.low || roof.swap || roof.flip || roof.steep || roof.old
+    ? roof : null;
   if (roof.shape === 'cap') {
-    capRise = roofCap(sink, f.o, topY, S.area, rr[0], rr[1], rr[2], roof.ov, !!opts?.soffit, tag);
+    // a block with holes: one slope per ring, the yard left open (roofholes.js)
+    if (f.i?.length)
+      capRise = roofCapHoled(sink, f.o, f.i, topY, rr[0], rr[1], rr[2], roof.ov, !!opts?.soffit,
+        tag, opts?.tri, roof.old ? 1.2 : 0.78);
+    // a light well may sit under the plain cap; a courtyard falls back flat,
+    // where the caller's deck leaves it open
+    if (!capRise && !hasCourtyard(f))
+      capRise = roofCap(sink, f.o, topY, S.area, rr[0], rr[1], rr[2], roof.ov, !!opts?.soffit, tag,
+        capFactors(f), wallRGB);
   } else if (roof.shape === 'mono') {
     fr = monoRoof(sink, S, topY, roof.ov, rr, wallRGB, tag);
   } else if (roof.shape !== 'flat') {
@@ -372,6 +409,8 @@ export function roofInto(sink, f, typ, roof, topY, wallRGB, storeys, opts) {
   sink.pinTo?.(PIN_U, PIN_V);
   const pitched = roof.shape !== 'flat';
   const built = pitched && !!(fr || capRise);
+  // the Prague tenement's cornice, dormers and corner turret (roofgrammar.js)
+  if (!opts?.bare) roofGrammar(sink, f, typ, roof, topY, wallRGB, built ? fr : null, rr, storeys);
   // a pitched roof that could not be built leaves the caller's flat deck showing
   if ((pitched && !built) || opts?.bare) return built;
   for (const it of roofFurniture(f, typ, roof, storeys)) {

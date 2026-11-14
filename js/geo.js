@@ -9,6 +9,7 @@
 // polygon, segment distance, bridge ramps) live here too — meshes, traffic
 // and player all share one geometry truth.
 
+import { stampPartyWalls } from './partywalls.js';
 import { CHUNK, BRIDGE_Y, BRIDGE_RAMP } from './config.js';
 import { junctionOutline, indexBays, computeVerge, finishJunction, roadRank } from './streets.js';
 import { bayAt, WALK_W } from './streets.js';
@@ -28,6 +29,18 @@ const TILE_REACH = 2600;
 // loadCity), all but the ways, rails, pois, signals and car parks, which the
 // session's graphs hold for good.
 const EVICT_REACH = 9000;
+// A deep-evicted tile also takes back what the session's GRAPHS built from its
+// ways (city.onTileReleased): the traffic edges, nodes and lights, the route
+// planner's graph, the cycle net, the walkers' paths and sites. Those were 323
+// of the 433 MB four central Prague tiles left behind (survey, 14 Nov 2026).
+// The ways themselves, the rails, pois, signals and car parks stay kept as
+// before, so ids, junction pads and bridge links never change; on return the
+// tile hands its kept ways and lights to the graphs again (`again` in the
+// onTileLoaded payload). Safe because a tile is only deep-evicted when its
+// whole footprint is EVICT_REACH from the player and every co-op peer: no car,
+// walker, rider or route schedule is on those ways (all of them live within
+// two kilometres of a viewer). false = the round-6 behaviour.
+export const RELEASE_GRAPHS = true;
 // Feature ids must survive that round trip unchanged: _id seeds the tree size
 // jitter, the lamp stagger and which shed is a fast-food franchise, so a
 // building that came back with a new id would come back as a different
@@ -957,7 +970,9 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // two meet. roadProfile has already put the embankment under it, so this is
     // the crest without having to go looking for one.
     const reach = (link, fb, end) => {
-      const y = link && roadGradeY(link.road, link.at, terrain);
+      // (only a link OBJECT is a link: a footbridge's d is 0, and `0 && ...`
+      // once handed back the number 0, a ramp down to sea level)
+      const y = link && typeof link === 'object' ? roadGradeY(link.road, link.at, terrain) : null;
       if (y !== null && y !== undefined) return y;
       const yn = deckNodeLevel(way, end, terrain);
       return yn !== null ? yn : terrain.heightAt(fb[0], fb[1]);
@@ -966,7 +981,7 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // (a drivable deck with a road at one end only holds that road's level:
     // the survey under its other end is the dell, and the ramp down into it
     // was a 25 % wall on nábřeží Václava Havla)
-    const a0 = way._ap0 ?? (way.d && way._ap1), a1 = way._ap1 ?? (way.d && way._ap0);
+    const a0 = way._ap0 ?? (way.d ? way._ap1 : undefined), a1 = way._ap1 ?? (way.d ? way._ap0 : undefined);
     const start = reach(a0, first, 0);
     const end = reach(a1, last, 1);
     // the grade each approach arrives with, along the deck (the ramps leave it on that)
@@ -2286,6 +2301,7 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false, kept = n
   let next = slot * IDS_PER_TILE;
   const stamp = (list) => { for (const f of list ?? []) f._id = ++next; return list ?? []; };
   const buildings = stamp(data.buildings);
+  stampPartyWalls(buildings);   // f._pw: shared walls, this tile only (partywalls.js)
   // trees are bare [x,z] pairs — wrap so they can carry _home/_id like the rest
   const trees = (data.trees ?? []).map(t => ({ p: [t], _id: ++next }));
   bucketize(city.chunkIndex, buildings, 'buildings', touched);
@@ -2372,6 +2388,9 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false, kept = n
   // everything this tile filed outside its heavy half, for evictDeep
   const res = { roads, rails, water, green, paved, signs, crossings, power, furniture,
     calming, venues, barriers, waterways: data.waterways ?? [] };
+  // (not filed in the index, so not a kind evictDeep visits: what the graphs
+  // built from this tile's lights is released with them, see RELEASE_GRAPHS)
+  Object.defineProperty(res, 'signals', { value: kept ? (kept.signals ?? []) : signals, enumerable: false });
   return { roads: kept ? [] : roads, signals, heavy, res };
 }
 
@@ -2421,6 +2440,16 @@ export async function loadCity(url) {
   // …and the other direction: cb({cells}) after a tile went slim, so built
   // chunk groups holding its buildings can be dropped.
   city.onTileUnloaded = (cb) => { unloadListeners.push(cb); };
+  // …and the graphs' side of a deep eviction: cb({ tx, tz, rect, roads, rails,
+  // signals, venues, cells, ids: [lo, hi] }), one listener per frame AFTER
+  // evictDeep has emptied the tile's cells (so a listener works from the
+  // lists in the event, never from city.chunkIndex), so every graph built
+  // from those ways (traffic, navigation, cyclists, walkers) can drop what it
+  // derived from them. See RELEASE_GRAPHS.
+  const releaseListeners = [];
+  city.onTileReleased = (cb) => { releaseListeners.push(cb); };
+  city.releaseGraphs = RELEASE_GRAPHS;
+  city.releasing = 0;              // release slices still queued (tests wait on it)
   // A building the player has wrecked must not be evicted out from under the
   // wreck; interiors installs this guard.
   city.keepAlive = null;
@@ -2520,7 +2549,13 @@ export async function loadCity(url) {
       // they only ever knew the tiles that were loaded at boot. A tile coming
       // back from slim re-indexes its heavy half only, so it brings none, and
       // nor does one coming back from deep eviction (its pois never left).
-      for (const cb of listeners) cb({ roads, signals, pois: back === 3 || kept ? [] : payload.pois ?? [], tx: t.tx, tz: t.tz, cells: touched });
+      // A tile whose graphs were RELEASED (evictDeep) hands its kept ways and
+      // lights over again, exactly as on a first visit: every graph that holds
+      // ways let go of this tile's, and builds them again from these.
+      const again = kept && t.released;
+      t.released = false;
+      for (const cb of listeners) cb({ roads: again ? kept.roads : roads, signals: again ? kept.signals ?? [] : signals,
+        pois: back === 3 || kept ? [] : payload.pois ?? [], tx: t.tx, tz: t.tz, cells: touched, again });
     } catch (err) {
       t.state = back;
       throw err;
@@ -2651,6 +2686,24 @@ export async function loadCity(url) {
   }
   function evictDeep(t) {
     const r = t.res;
+    // the graphs' release is queued first; it runs on later frames, after the
+    // cells below are emptied, from the tile's own lists in `ev`
+    const release = city.releaseGraphs && releaseListeners.length > 0;
+    if (release) {
+      const ev = { tx: t.tx, tz: t.tz, rect: [t.tx * T, t.tz * T, (t.tx + 1) * T, (t.tz + 1) * T],
+        roads: r.roads, rails: r.rails, signals: r.signals ?? [], venues: r.venues, cells: t.cells,
+        ids: [t.slot * IDS_PER_TILE, (t.slot + 1) * IDS_PER_TILE] };
+      // one graph per frame, on the same gate the tile indexing waits at:
+      // together they cost about what indexing the tile did, and a tile that
+      // comes straight back queues its indexing behind its own release
+      for (const cb of releaseListeners) {
+        city.releasing++;
+        indexGate().then(() => {
+          try { cb(ev); } catch (err) { console.error('tile release', err); }
+          city.releasing--;
+        });
+      }
+    }
     const mine = new Set();
     for (const kind in r) if (kind !== 'waterways') for (const f of r[kind]) mine.add(f);
     // (its rectangle too: a cell some neighbour's feature made first was not
@@ -2690,7 +2743,8 @@ export async function loadCity(url) {
       compact(arr);
     if (r.waterways.length) delete city._wwChunks;   // meshes.js rebuilds it from city.waterways
     const cells = visit;
-    t.kept = { roads: r.roads, rails: r.rails, lots };
+    t.kept = { roads: r.roads, rails: r.rails, lots, signals: r.signals ?? [] };
+    t.released = release;
     t.res = null; t.cells = null; t.ext = null; t.heavy = null;
     t.state = 0;
     for (const cb of unloadListeners) cb({ tx: t.tx, tz: t.tz, cells, deep: true });

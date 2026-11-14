@@ -81,6 +81,10 @@ function town() {
   }
   cell(10, 60).roads.push(main); cell(130, 60).roads.push(main);
   const lot = { t: 'parking', o: [[300, 0], [340, 0], [340, 30], [300, 30]] };
+  // filed in its cell as geo.js files every polygon: since round 7 the car
+  // parks are found through the chunk index around the player (parkinglots.js
+  // lotsNear), not by scanning every lot the session ever loaded
+  cell(300, 0).paved.push(lot);
   const city = { chunkIndex, tile: 4800, pois: [], waterways: [], signals: [], paved: [lot] };
   indexJunctions([main]); indexBays(city, []); setStreetCity(city);
   return city;

@@ -40,17 +40,18 @@ import { setObjective } from './tracker.js';
 import { toast } from './toasts.js';
 import { fmtDist } from './jobmath.js';
 import { discover, contextTips, payAwards, food, foodScan } from './careertips.js';
+import { startPoint as pickStart, nearestHospital } from './startplace.js';
 
 const SAVE_EVERY = 20;         // s between autosaves
-// Where main.js stands you up after the death card (its own HOSPITAL,
-// transcribed the way js/ambulance.js transcribes it: main.js is never
-// imported from here). Only the save written as you go down needs it.
-const HOSPITAL = { x: 2291, z: 295 };
+// Where main.js stands you up after the death card is the hospital nearest
+// to where you fell (config.js HOSPITALS, js/startplace.js nearestHospital,
+// the same call main.js makes). Only the save written as you go down needs it.
 const store = browserStore();
 
 let h = null;                  // main.js's host (see careerHost there)
 let state = blank();           // the loaded save, until attach() has applied it
 let loadNote = null;           // 'corrupt' | 'newer' | null, said once in play
+let startPick = null;          // the menu's START_PLACES id, or null
 let solo = true;
 let progress = null, onb = null, jobs = null, garage = null;
 let statsPanel = null, foodPanel = null, carPanel = null;
@@ -69,9 +70,20 @@ const onbCtx = { dt: 0, x: 0, z: 0, onFoot: false, inCar: false, walkedM: 0, boa
 /** After the menu. A fresh game has had its save cleared by the menu already. */
 export function choose(choice) {
   solo = choice?.mode !== 'server';
+  startPick = typeof choice?.start === 'string' ? choice.start : null;
   const res = store.load();
   state = res.state;
   loadNote = res.reason === 'corrupt' || res.reason === 'newer' ? res.reason : null;
+}
+
+/** Where boot begins, before the world exists: the save's spot when it is in
+ *  the city the menu shows, else that city's square (js/startplace.js).
+ *  { x, z, heading, place, saved }. A start in the other city drops the
+ *  saved position, so spawn() below does not walk the player back to it. */
+export function startPoint() {
+  const sp = pickStart(startPick, state.pos);
+  if (!sp.saved && state.pos) state = { ...state, pos: null };
+  return sp;
 }
 
 /** Stand the player where the save left them. The tile under that spot is
@@ -171,7 +183,9 @@ export function attach(host) {
   vitals.onDown(() => {
     if (!applied || !h) return;
     const snap = snapshot();
-    snap.pos = { x: HOSPITAL.x, z: HOSPITAL.z, h: lastSafe?.h ?? 0 };
+    const px = h.player?.pos?.x ?? lastSafe?.x, pz = h.player?.pos?.z ?? lastSafe?.z;
+    const hosp = nearestHospital(px, pz);
+    snap.pos = { x: hosp.x, z: hosp.z, h: lastSafe?.h ?? 0 };
     snap.vitals = { hp: vitals.hpMax(), armour: 0, energy: vitals.energy() };
     snap.jobs = { ...snap.jobs, active: null };
     snap.owed = { stars: wanted.stars() };

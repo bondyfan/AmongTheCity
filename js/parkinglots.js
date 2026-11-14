@@ -14,7 +14,7 @@
 // Cars materialise and vanish only OUTSIDE noticeR of the player, so the lot
 // never performs its magic on camera.
 
-import { CAR_COLORS } from './config.js';
+import { CAR_COLORS, CHUNK } from './config.js';
 import { strHash } from './identity.js';
 
 const KINDS = ['sedan', 'hatch', 'kombi', 'suv', 'van'];
@@ -61,11 +61,19 @@ function inPoly(x, z, ring) {
 // three.js Group: js/chunkspec.js walks every feature of a cell to copy it to
 // the mesh workers and refuses a cell with a class instance in it ("_stalls[]
 // .car.mesh is a Group"), so every cell with a live car park in it silently
-// built on the main thread instead. A WeakMap keeps the live objects out of
-// what the spec walks and still dies with the feature.
-const _stallsOf = new WeakMap();
+// built on the main thread instead. A Map keeps the live objects out of what
+// the spec walks.
+//
+// Keyed by the lot's _id (slot-derived, geo.js IDS_PER_TILE), not by the
+// object: a tile released far away and loaded again brings a NEW polygon with
+// the same id, and the stall the player took a car from must still be empty.
+// Entries with nothing to remember (no car standing, no stall burned) are
+// dropped when the lot drains, so the map holds what matters, not every lot
+// the session drove past. A fixture lot without an id is its own key.
+const _stallsOf = new Map();
+const lotKey = (lot) => lot._id ?? lot;
 function stallsFor(lot) {
-  const have = _stallsOf.get(lot);
+  const have = _stallsOf.get(lotKey(lot));
   if (have) return have;
   const ring = lot.o;
   let bx = 0, bz = 0, bl = 0;
@@ -74,7 +82,7 @@ function stallsFor(lot) {
     const L = Math.hypot(cx - ax, cz - az);
     if (L > bl) { bl = L; bx = (cx - ax) / L; bz = (cz - az) / L; }
   }
-  if (!bl) { const none = []; _stallsOf.set(lot, none); return none; }
+  if (!bl) { const none = []; _stallsOf.set(lotKey(lot), none); return none; }
   const px = -bz, pz = bx;
   let u0 = 1e9, u1 = -1e9, v0 = 1e9, v1 = -1e9;
   for (const [x, z] of ring) {
@@ -93,7 +101,34 @@ function stallsFor(lot) {
       out.push({ x, z, h: head + (rnd(x, z, 'j') - 0.5) * 0.1, car: null, burned: false });
     }
   }
-  _stallsOf.set(lot, out);
+  _stallsOf.set(lotKey(lot), out);
+  return out;
+}
+
+// Car parks within `r` of (x, z): out of the chunk cells under that square
+// (each lot once, in id order, so a capped sweep fills the same lots on every
+// client), or the whole flat array for a fixture without a chunk index.
+function lotsNear(city, x, z, r, seen, out) {
+  out.length = 0;
+  const idx = city.chunkIndex;
+  if (!idx) {
+    for (const lot of city.paved ?? []) if (lot.t === 'parking' && lot.o?.length) out.push(lot);
+    return out;
+  }
+  seen.clear();
+  const c0 = Math.floor((x - r) / CHUNK), c1 = Math.floor((x + r) / CHUNK);
+  const d0 = Math.floor((z - r) / CHUNK), d1 = Math.floor((z + r) / CHUNK);
+  for (let cx = c0; cx <= c1; cx++) for (let cz = d0; cz <= d1; cz++) {
+    const a = idx.get(cx + ',' + cz)?.paved;
+    if (!a) continue;
+    for (let i = 0; i < a.length; i++) {
+      const lot = a[i];
+      if (lot.t !== 'parking' || !lot.o?.length || seen.has(lot)) continue;
+      seen.add(lot);
+      out.push(lot);
+    }
+  }
+  out.sort((a, b) => (a._id ?? 0) - (b._id ?? 0));
   return out;
 }
 
@@ -141,6 +176,9 @@ export class ParkingLots {
     this._count = 0;
     this._virgin = true;      // first sweep fills freely — it runs under the
                               // boot overlay's fade, before anyone can watch
+    this._live = new Set();   // lots that may have cars standing (to drain)
+    this._near = [];          // scratch: the lots of this sweep
+    this._seen = new Set();
   }
 
   update(dt, pos, t01) {
@@ -151,12 +189,19 @@ export class ParkingLots {
     const virgin = this._virgin;
     this._virgin = false;
     const owned = ownedIn(this.parked);
-    for (const lot of this.city.paved) {
-      if (lot.t !== 'parking' || !lot.o?.length) continue;
+    // a lot that held cars and is now far past reach gives them back
+    for (const lot of this._live) {
+      const [fx, fz] = lot.o[0];
+      if (Math.hypot(fx - pos.x, fz - pos.z) <= REACH + 150) continue;
+      this._drain(lot, pos, true);
+      if (!this._holds(lot)) this._live.delete(lot);
+    }
+    for (const lot of lotsNear(this.city, pos.x, pos.z, REACH + CHUNK, this._seen, this._near)) {
       const [fx, fz] = lot.o[0];
       const d = Math.hypot(fx - pos.x, fz - pos.z);
       if (d > REACH + 150) { this._drain(lot, pos, true); continue; }
       if (d > REACH) continue;
+      this._live.add(lot);
       for (const st of stallsFor(lot)) {
         if (st.burned) continue;
         // a stall car somebody drove away never comes back this session, and
@@ -195,12 +240,25 @@ export class ParkingLots {
   // far past reach the lot gives its cars back (unless the player is somehow
   // still close — teleports exist), so the world's car count stays bounded
   _drain(lot, pos, far) {
-    const stalls = _stallsOf.get(lot);
+    const stalls = _stallsOf.get(lotKey(lot));
     if (!stalls) return;
+    let keep = false;
     for (const st of stalls) {
-      if (!st.car) continue;
-      if (st.car.owned || !this.parked.includes(st.car)) { st.car = null; st.burned = true; continue; }
-      if (far && Math.hypot(st.x - pos.x, st.z - pos.z) > NOTICE_R) this._remove(st);
+      if (st.car) {
+        if (st.car.owned || !this.parked.includes(st.car)) { st.car = null; st.burned = true; }
+        else if (far && Math.hypot(st.x - pos.x, st.z - pos.z) > NOTICE_R) this._remove(st);
+      }
+      if (st.car || st.burned) keep = true;
     }
+    // nothing standing and nothing to remember: the stalls are recomputed
+    // (identically, they are a pure function of the ring) if it comes back
+    if (!keep) _stallsOf.delete(lotKey(lot));
+  }
+
+  // does any stall of this lot still hold a car?
+  _holds(lot) {
+    const stalls = _stallsOf.get(lotKey(lot));
+    if (stalls) for (const st of stalls) if (st.car) return true;
+    return false;
   }
 }

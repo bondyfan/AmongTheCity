@@ -23,7 +23,7 @@
 
 import { CHUNK, LAYER_Y } from './config.js';
 import { chunkKey, roadGradeY, polylineLength, streetOf } from './geo.js';
-import { sealedGrid, SEAL_RES } from './sealed.js';
+import { sealedGrid, SEAL_RES, isHardWay } from './sealed.js';
 
 const RES = 1;                        // m per mask cell
 const N = CHUNK / RES;                // 120 cells a side
@@ -173,6 +173,16 @@ export class GrassMask {
         }
       }
     }
+    // …and a Prague square is wider than any closing. The Old Town Square is
+    // a hundred metres of sett with a handful of named pedestrian ways across
+    // it and no area at all, so the closing above left it a field with tufts
+    // all over it. In Prague a hard pedestrian way NAMED as a square (náměstí)
+    // paves the unmapped ground for SQUARE_REACH round it; a mapped lawn still wins.
+    if (x0 < PRAHA_X1 && x0 > PRAHA_X0) {
+      for (const r of cell.roads) {
+        if (r.t === 'pedestrian' && isHardWay(r) && r.n && SQUARE_NAME.test(r.n)) stampLine(m, x0, z0, r.p, SQUARE_REACH, UNMAPPED);
+      }
+    }
     // …and the classifier's sealed ground says none too. The raster is 4 m
     // cells; asking at each mask metre keeps its edges where it drew them.
     if (this.ground) {
@@ -264,7 +274,12 @@ function crossings(ring, zc, out) {
 }
 
 /** Stamp a corridor of half-width `hw` around a polyline. */
-function stampLine(m, x0, z0, pts, hw) {
+// Prague's old town, by x: the only place the square rule above runs
+const PRAHA_X0 = -110000, PRAHA_X1 = -85000;
+const SQUARE_NAME = /náměstí/i, SQUARE_REACH = 45;
+
+/** Clear the cells within hw of a polyline (only those holding `only`, when given). */
+function stampLine(m, x0, z0, pts, hw, only = -1) {
   if (!pts || pts.length < 2) return;
   const hw2 = hw * hw;
   for (let k = 0; k < pts.length - 1; k++) {
@@ -283,7 +298,7 @@ function stampLine(m, x0, z0, pts, hw) {
         let t = ((px - ax) * dx + (pz - az) * dz) / len2;
         if (t < 0) t = 0; else if (t > 1) t = 1;
         const ex = px - (ax + dx * t), ez = pz - (az + dz * t);
-        if (ex * ex + ez * ez <= hw2) m[j * N + i] = 0;
+        if (ex * ex + ez * ez <= hw2 && (only < 0 || m[j * N + i] === only)) m[j * N + i] = 0;
       }
     }
   }

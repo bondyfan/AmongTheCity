@@ -138,8 +138,29 @@ function footTest(plan) {
       const a = ring[i], b = ring[(i + 1) % ring.length];
       if (distPointToSegment(x, z, a[0], a[1], b[0], b[1], _probe) < margin) return false;
     }
+    // ...and the courtyard walls are walls too: with the yard no longer roofed
+    // over (roofholes.js), slabs that sailed past them into the yard showed
+    if (holes) for (const h of holes) {
+      if (h.length < 3 || h.length > 120) continue;
+      for (let i = 0; i < h.length; i++) {
+        const a = h[i], b = h[(i + 1) % h.length];
+        if (distPointToSegment(x, z, a[0], a[1], b[0], b[1], _probe) < margin) return false;
+      }
+    }
     return true;
   };
+}
+
+// Is (x, z) within `m` of a courtyard wall? (the hole rings of the footprint)
+function nearYard(holes, x, z, m) {
+  for (const h of holes) {
+    if (h.length < 3 || h.length > 120) continue;
+    for (let i = 0; i < h.length; i++) {
+      const a = h[i], b = h[(i + 1) % h.length];
+      if (distPointToSegment(x, z, a[0], a[1], b[0], b[1], _probe) < m) return true;
+    }
+  }
+  return false;
 }
 
 // ---- emit helpers --------------------------------------------------------
@@ -271,6 +292,12 @@ function* emitSlabGen(out, plan, top, voids, tile, col, kind, dark, split, thick
       if (!cut && split !== false) {
         planToWorld(fr, u, v, _w);
         cut = !test(_w.x, _w.z, Math.hypot(tu, tv) / 2);     // crosses the wall
+      } else if (!cut && plan.holes?.length) {
+        // an un-split lid (a roof deck, a ceiling) may overhang the street
+        // wall by an eave's depth, but not a courtyard wall: its yard is open
+        // now (roofholes.js), and a 7 m deck tile sailed 3 m out over it
+        planToWorld(fr, u, v, _w);
+        cut = nearYard(plan.holes, _w.x, _w.z, Math.hypot(tu, tv) / 2);
       }
       if (!cut) { emit(u, v, tu / 2, tv / 2); continue; }
       const su = tu / SUB, sv = tv / SUB;

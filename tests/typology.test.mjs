@@ -17,6 +17,7 @@ const THREE = await import('three');
 const T = await import('../js/typology.js');
 const { buildingPlan, classify, hasInterior, storeyPlan } = await import('../js/interiors.js');
 const { shellPieces } = await import('../js/pieces.js');
+const { hasCourtyard } = await import('../js/roofholes.js');
 const { buildBuildingsMesh, roofGeometry } = await import('../js/meshes.js');
 
 // A real tile, as the game streams it: central Pardubice with the old town,
@@ -107,7 +108,9 @@ test('pitched roofs get a pitched shape, and a Czech colour', () => {
     // gap 1: small hipped, half-hipped and pyramidal roofs used to fall flat
     if (S.area < 300 && /^(hipped|half-hipped|pyramidal)$/.test(b.r)) small++;
     // gap 2: a big rectangular gabled house used to be handed a hip
-    if (S.area >= 300 && b.r === 'gabled' && S.fill > 0.8 && S.short <= 24) {
+    // (round a real courtyard the roof follows the yard instead, on purpose:
+    // a ridge over the hole roofed the yard over, see js/roofholes.js)
+    if (S.area >= 300 && b.r === 'gabled' && S.fill > 0.8 && S.short <= 24 && !hasCourtyard(b)) {
       assert.equal(roof.shape, 'gable', 'a large rectangular gabled house lost its gable');
       bigGable++;
     }

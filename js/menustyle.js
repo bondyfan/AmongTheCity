@@ -142,6 +142,20 @@ export const MENU_CSS = `
   background: #7d7f8f; vertical-align: 1px;
 }
 .atc-menu-btn.online .atc-mp-status::before { background: #5ee08a; box-shadow: 0 0 8px #5ee08a; animation: atc-blink 1.6s ease-in-out infinite; }
+/* where the game begins: two places on one pill, the picked one lit */
+.atc-place { display: flex; align-items: center; gap: 10px; margin: 2px 0 8px; }
+.atc-place-label { flex: none; font-size: 11px; letter-spacing: 2.5px; text-transform: uppercase; color: #c9b9a4; margin-left: 4px; }
+.atc-place-pill { flex: 1; display: flex; padding: 3px; border-radius: 999px;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); }
+.atc-place-opt {
+  flex: 1; appearance: none; border: 0; cursor: pointer; font: inherit; font-size: 14px; font-weight: 600;
+  letter-spacing: 0.5px; color: #e6dccd; padding: 7px 10px; border-radius: 999px; background: none;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.atc-place-opt:hover { color: #fff3e0; background: rgba(255,255,255,0.08); }
+.atc-place-opt[aria-checked="true"] { color: #2a140c; background: linear-gradient(135deg, #ffd59a, #ffb067);
+  box-shadow: 0 2px 10px rgba(255,150,80,0.35); }
+.atc-place-opt:focus-visible { outline: 2px solid #ffc27a; outline-offset: 2px; }
 .atc-menu-new {
   appearance: none; background: none; border: 0; cursor: pointer; font: inherit;
   font-size: 13px; color: #c9b9a4; padding: 4px 10px; margin: -2px 0 2px;

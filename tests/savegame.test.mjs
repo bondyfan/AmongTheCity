@@ -49,7 +49,9 @@ test('a played game round-trips through the store', () => {
   assert.deepEqual(s.jobs.done, ['c1', 't2']);
   assert.deepEqual(s.onb, { step: 2, done: false, tips: { fuel: 1 } });
   assert.equal(store.has(), true);
-  assert.deepEqual(store.summary(), { money: 8450, played: 4321, savedAt: 1234567, car: 'fabia', jobs: 4 });
+  // (pos added in round 7: the menu's Pardubice / Praha toggle shows the save's city)
+  assert.deepEqual(store.summary(), { money: 8450, played: 4321, savedAt: 1234567, car: 'fabia', jobs: 4,
+    pos: { x: 1690, z: -780.3, h: 1.235 } });
   // and saving what was loaded changes nothing
   assert.equal(serialize(s), st.m.get(SAVE_KEY));
   store.clear();

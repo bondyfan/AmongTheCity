@@ -14,6 +14,10 @@
 
 import { polygonArea, pointInPolygon } from './geo.js';
 import { roofFromData, ridgeTurn, wallFamily, photoSaysTiled, dataBacksPitch } from './roofdata.js';
+import { hasCourtyard } from './roofholes.js';
+import { praguePlace, inOldTown } from './praguezone.js';
+import { blockCorner } from './partywalls.js';
+import { pragueRoof } from './roofgrammar.js';
 
 // deterministic per-feature jitter, the same generator meshes.js and pieces.js use
 export function rnd(id, salt) {
@@ -187,6 +191,12 @@ export function typologyOf(f, use) {
     // roof on an irregular plot, or around a courtyard, is a city block (the
     // whole of central Prague), and it must not grow loggias.
     if (lv >= 9 || (lv >= 5 && !pitched && S.rect && !(f.i?.length))) return 'panel';
+    // Prague's slabs of five to eight storeys are drawn with a jog or two in
+    // the outline (stair towers, a staggered section), so they missed the
+    // rectangle test and became city blocks: a slab is still long, narrow,
+    // nearly full and flat (433 in the centre, 2 201 in the estates, measured)
+    if (lv >= 5 && !pitched && !(f.i?.length) && S.fill >= 0.9 && f.o.length <= 12
+        && S.long >= 2.2 * S.short && S.short <= 16 && praguePlace(f)) return 'panel';
     if (pitched && lv >= 2) {
       // An old-town house is an irregular plot; a 1950s block is a ruler-drawn
       // rectangle. Five storeys under a pitched roof is a tenement either way.
@@ -199,8 +209,17 @@ export function typologyOf(f, use) {
   switch (use) {
     case 'flats': t = f._nova ? 'nova' : housing(); break;
     case 'hotel': t = housing(); break;
-    case 'house': t = 'house'; break;
-    case 'office': t = 'office'; break;
+    // A narrow Prague town house of three storeys under its pitched roof, or
+    // one built wall to wall between two neighbours, is a town house, not a
+    // villa with an overhang and one chimney (230 in the centre, measured)
+    case 'house': {
+      const party = f._pw && f._pw.length === f.o.length ? f._pw.filter((h) => h > 0).length : 0;
+      t = (lv >= 3 && pitched || party >= 2 && lv >= 2) && praguePlace(f) ? housing() : 'house';
+      break;
+    }
+    // An office in a Prague town house under its surveyed pitched roof is a
+    // Gruenderzeit or baroque house let to offices, not a curtain wall.
+    case 'office': t = pitched && lv <= 8 && praguePlace(f) ? housing() : 'office'; break;
     case 'school': case 'hospital': case 'civic': t = 'civic'; break;
     case 'church': t = 'church'; break;
     case 'garage': t = 'garage'; break;
@@ -296,6 +315,8 @@ export function facadeRows(f, use, office) {
     balc: famName === 'panel' ? PANEL_BALC[(v % F.mid)] : null,
     // bays with no window at all (family houses)
     blank: famName === 'house' ? HOUSE_BLANK[v % F.mid] : null,
+    // the walls shared with a neighbour (js/partywalls.js), per outer edge
+    party: f._pw && f._pw.length === f.o.length ? f._pw : null,
     // which trim band the parapet or frieze wears
     trim: typ === 'tenement' || typ === 'civic' || typ === 'church' ? TRIM_BANDS.cornice
       : typ === 'hall' || typ === 'retail' || typ === 'pavilion' || typ === 'office'
@@ -303,7 +324,18 @@ export function facadeRows(f, use, office) {
       : typ === 'house' || typ === 'barn' || typ === 'garage' ? TRIM_BANDS.eave
       : TRIM_BANDS.coping,
   };
-  if (hasShopfront(f, use)) {
+  // The Prague corner shop: where a tenement block turns a street corner,
+  // half of them keep a potraviny or a pub in the ground floor, glazed on both
+  // corner walls, whether or not the map names it (salt 140).
+  let corner = -1;
+  if (!hasShopfront(f, use) && typ === 'tenement' && levelsOf(f) >= 4 && rnd(f._id, 140) < 0.5
+      && praguePlace(f)) corner = blockCorner(f);
+  if (corner >= 0) {
+    const n = f.o.length;
+    rows.store = row(CELL_OF.store.mid[v % 2], FAMILIES.store);
+    rows.front = 'corner';
+    rows.corner = [(corner - 1 + n) % n, corner];
+  } else if (hasShopfront(f, use)) {
     const S = CELL_OF.store.mid;
     // big boxes glaze their entrance front, small shops the whole ground floor
     const big = typ === 'retail' && use !== 'mall';
@@ -322,22 +354,28 @@ const PLAIN_ROW = { cell: [0, 0], uv: cellRect(0, 0), band: null, frac: 0, solid
   store: false, plain: true };
 
 // Edge roles, shared by both tiers: 0 windowed wall, 1 shopfront, 2 blank gable,
-// 3 the garage-door front, 4 a stub too short for a window.
+// 3 the garage-door front, 4 a stub too short for a window, 5 a party wall
+// (shared with the house next door: blank plaster, never a front).
+export const PARTY_ROLE = 5;
 export function edgeRoles(ring, rows, entI) {
   const n = ring.length, out = new Uint8Array(n);
+  const party = rows.party && rows.party.length === n ? rows.party : null;
   let longest = 0;
   const len = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const a = ring[i], b = ring[(i + 1) % n];
     len[i] = Math.hypot(b[0] - a[0], b[1] - a[1]);
-    if (len[i] > longest) longest = len[i];
+    // (the street front is the longest wall that is not a neighbour's)
+    if (len[i] > longest && !(party && party[i] > 0)) longest = len[i];
   }
   const hasEnt = entI !== undefined && entI !== null && entI >= 0;
   for (let i = 0; i < n; i++) {
     if (len[i] < STUB_EDGE) { out[i] = 4; continue; }
+    if (party && party[i] > 0) { out[i] = PARTY_ROLE; continue; }
     if (rows.front) {
       let fr;
       if (rows.front === 'all') fr = len[i] >= 2.2;
+      else if (rows.front === 'corner') fr = i === rows.corner[0] || i === rows.corner[1];
       else if (hasEnt) {
         const d = Math.min((i - entI + n) % n, (entI - i + n) % n);
         fr = d === 0 || (rows.front === 'ent3' && d === 1);
@@ -353,7 +391,7 @@ export function edgeRoles(ring, rows, entI) {
 
 /** The row a wall run samples: storey `s` of `storeys`, on an edge of `role`. */
 export function rowFor(rows, s, storeys, role) {
-  if (role === 4) return PLAIN_ROW;
+  if (role === 4 || role === PARTY_ROLE) return PLAIN_ROW;
   if (role === 2 && rows.gable) return rows.gable;
   if (s === 0) {
     if (role === 1 && rows.store) return rows.store;
@@ -405,8 +443,13 @@ export function roofOf(f, typ) {
   // (a new-build or a pavilion is flat by default, but those two stamps come
   // partly from a hash: where the tile backs its roof shape with a second
   // witness, roofdata.dataBacksPitch, the mapped roof wins)
-  const forceFlat = typ === 'panel' || typ === 'retail' || typ === 'parking' || typ === 'office'
-    || ((typ === 'nova' || typ === 'pavilion') && !dataBacksPitch(f));
+  // Prague's roof shapes are IPR's survey (strecha), not a builder's guess, so
+  // inside the city a pitched tag is its own witness (praguezone.js; the tile
+  // carries no "surveyed" mark, the place is the only evidence at run time).
+  const flatType = typ === 'retail' || typ === 'office';
+  const hashFlat = (typ === 'nova' || typ === 'pavilion') && !dataBacksPitch(f);
+  const forceFlat = typ === 'panel' || typ === 'parking'
+    || ((flatType || hashFlat) && !praguePlace(f));
   if (r && r !== 'flat' && !forceFlat) {
     // a ridge needs something like a rectangle under it, and a span a real
     // truss could cross; everything else follows its own outline
@@ -418,6 +461,10 @@ export function roofOf(f, typ) {
     else if (r === 'hipped' || r === 'side_hipped') shape = S.long < S.short * 1.25 ? 'pyramid' : 'hip';
     else if (r === 'half-hipped' || r === 'side_half-hipped') shape = 'halfhip';
     else shape = 'gable';                  // gabled, saltbox, anything unnamed
+    // A ridge or a lean-to over a block with a real courtyard would roof the
+    // yard over; only the offset roof can follow the yard's own ring
+    // (roofholes.js). Small light wells stay under the ridge.
+    if (shape !== 'cap' && hasCourtyard(f)) shape = 'cap';
   } else if (!r && !forceFlat && PHOTO_PITCH.has(typ) && S.area <= 2500 && photoSaysTiled(f)) {
     // No shape in the tile (the builder leaves commercial types and five
     // storeys and up flat), but the roof is fired-clay red from the air, and
@@ -443,7 +490,10 @@ export function roofOf(f, typ) {
     hex = METAL_HEX[Math.floor(rnd(id, 62) * METAL_HEX.length) % METAL_HEX.length];
   } else {
     // weighted pick: the zone decides how red this part of town is
-    const red = 0.5 + (zoneRnd(f, 5) - 0.5) * 0.5 + (typ === 'tenement' ? 0.12 : 0);
+    // (the old town of Prague is all clay from the castle: nearly nothing
+    // there was ever re-roofed in concrete or eternit)
+    const red = praguePlace(f) && inOldTown(f) ? 0.9
+      : 0.5 + (zoneRnd(f, 5) - 0.5) * 0.5 + (typ === 'tenement' ? 0.12 : 0);
     const k = rnd(id, 61);
     const i = k < red ? Math.floor(rnd(id, 62) * 7)
       : k < red + (1 - red) * 0.42 ? 7 + Math.floor(rnd(id, 62) * 3)
@@ -461,6 +511,7 @@ export function roofOf(f, typ) {
   const ov = shape === 'flat' ? 0 : typ === 'house' || typ === 'barn' ? 0.45
     : typ === 'hall' || typ === 'garage' ? 0.25 : 0.32;
   const roof = { shape, style, hex, ov, src };
+  if (shape !== 'flat') pragueRoof(f, typ, roof, S);
   if (shape !== 'flat') {
     // roof:height. The walls keep the height they have (the storey grid and
     // the near shell stand on it), so a tag that says the building is mostly

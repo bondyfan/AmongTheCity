@@ -234,13 +234,14 @@ export function makeStore(storage, key = SAVE_KEY) {
       del(key + '-probe');
       return ok;
     },
-    /** Three facts for the menu's "Pokračovat" line, or null. */
+    /** The facts for the menu's "Pokračovat" line (and where it was), or null. */
     summary() {
       const res = parse(get(key));
       if (!res.ok) return null;
       const s = res.state;
+      // pos: which city the save is in, so the menu's place toggle can show it
       return { money: s.money, played: s.played, savedAt: s.savedAt, car: s.car?.kind ?? null,
-        jobs: fin(s.stats.jobsCourier, 0) + fin(s.stats.jobsTaxi, 0) };
+        jobs: fin(s.stats.jobsCourier, 0) + fin(s.stats.jobsTaxi, 0), pos: s.pos };
     },
   };
 }

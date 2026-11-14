@@ -2038,10 +2038,12 @@ export class CityWorld {
     // on one was pushed straight off the edge.
     const above = opts?.aboveY;
     for (const b of cell.buildings) {
-      if (b.y > 0.5) continue; // skyway/arch — walk under it
       // A hand-made landmark is solid where its MODEL is and as high as its
       // walls stand, not to the tile's height tag: the Green Gate only beside
-      // its passage (a piece with `bot` is the masonry over one).
+      // its passage (a piece with `bot` is the masonry over one). Asked BEFORE
+      // the skyway test: a gate the tile lifts over its passage (Prašná brána,
+      // y 10) stands on the ground in its model, beside the passage; a real
+      // skyway's solids all start up in the air and are skipped by `bot`.
       const lm = landmarkSolids(b);
       if (lm) {
         const g = above !== undefined ? this._base(b) : 0;
@@ -2051,6 +2053,7 @@ export class CityWorld {
         }
         continue;
       }
+      if (b.y > 0.5) continue; // skyway/arch: walk under it
       if (above !== undefined && this._top(b) <= above) continue;
       if (walker && this.interiors.isActive(b)) continue;   // its boxes did it
       pushed = this._pushOutOfPoly(pos, radius, b.o, b.i, true) || pushed;

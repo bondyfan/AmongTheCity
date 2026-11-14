@@ -20,11 +20,16 @@ const { WALKS, landmarkWalks } = await import('../js/landmarks-walks.js');
 const { zamekAxis } = await import('../js/landmarks-zamek.js');
 const { zamekBranaAxis } = await import('../js/landmarks-zamekbrana.js');
 
-const tile = JSON.parse(readFileSync(new URL('../public/data/tiles/0_-1.json', import.meta.url), 'utf8'));
+const load = (k) => JSON.parse(readFileSync(new URL(`../public/data/tiles/${k}.json`, import.meta.url), 'utf8'));
+const tile = load('0_-1');
+// Prague (round 7): the links through the Charles Bridge towers anchor in -21_-2
+const praha = load('-21_-2');
 const found = new Map();
-for (const f of tile.buildings) for (const l of LANDMARKS) if (matches(l, f)) found.set(l.id, f);
+for (const t of [tile, praha]) for (const f of t.buildings) for (const l of LANDMARKS) if (!l.hide && matches(l, f)) found.set(l.id, f);
 const footEnds = [];
-for (const r of tile.roads) if (!r.d && r.t === 'footway' && r.p.length >= 2) footEnds.push(r.p[0], r.p[r.p.length - 1]);
+// (a pedestrian way is walked like a footway: Charles Bridge and Mostecká are pedestrian)
+for (const t of [tile, praha]) for (const r of t.roads)
+  if (!r.d && (r.t === 'footway' || r.t === 'pedestrian') && r.p.length >= 2) footEnds.push(r.p[0], r.p[r.p.length - 1]);
 const isFootEnd = (q) => footEnds.some((p) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 0.6);
 
 // every ground-level solid of every landmark (the masonry over a passage is walked under)
@@ -101,15 +106,16 @@ test('a player walks from the outer court through the portal into the courtyard'
 
 test('the links arrive with the tile that holds their anchor, whatever the order', () => {
   const ids = (roads) => landmarkWalks(roads).map((w) => w._id).sort();
-  const all = ids(tile.roads);
+  const roads = tile.roads.concat(praha.roads);
+  const all = ids(roads);
   assert.deepEqual([...new Set(all)], WALKS.map((w) => w.way._id).sort(), 'not every link found its anchor');
   // shuffled (deterministically): the same links, the same objects
-  const sh = tile.roads.map((r, i) => [((i * 2654435761) >>> 0) % 1009, r]).sort((p, q) => p[0] - q[0]).map((p) => p[1]);
+  const sh = roads.map((r, i) => [((i * 2654435761) >>> 0) % 1009, r]).sort((p, q) => p[0] - q[0]).map((p) => p[1]);
   assert.deepEqual(ids(sh), all);
-  const once = landmarkWalks(tile.roads), twice = landmarkWalks(sh);
+  const once = landmarkWalks(roads), twice = landmarkWalks(sh);
   for (const w of once) assert.ok(twice.includes(w), 'a link is a new object on the second batch');
   // a batch without the anchors brings nothing, and nothing breaks on none
-  assert.deepEqual(landmarkWalks(tile.roads.filter((r) => r.d)), []);
+  assert.deepEqual(landmarkWalks(roads.filter((r) => r.d)), []);
   assert.deepEqual(landmarkWalks(null), []);
 });
 

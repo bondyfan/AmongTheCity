@@ -6,7 +6,8 @@
 // drives the AI cars, vehicles.js does car physics, sky.js does the light.
 
 import * as THREE from 'three';
-import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR } from './config.js';
+import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR, START_PLACES, FLEET_STRIDE, HOSPITALS } from './config.js';
+import { arriveText, nearestHospital, tilesReady } from './startplace.js';
 import { loadCity, chunkKey, venueAt, forEachChunkInRadius } from './geo.js';
 import { CityWorld } from './city.js';
 import { planRings } from './streamplan.js';
@@ -42,6 +43,7 @@ import { PostFX, gradeFor } from './postfx.js';
 import { setCoverage } from './coverage.js';
 import { shadowDue } from './shadowpace.js';
 import { LightPools, nightBeams, nightLevels } from './lightpools.js';
+import { FarSkyline } from './landmarksfar.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
 import { Grass } from './grass.js';
 import { Trees } from './trees.js';
@@ -70,6 +72,7 @@ import { Cyclists } from './cyclists.js';
 import { inKerbStall } from './kerbparking.js';
 import { parkSpots } from './parkspot.js';
 import { localUid, strHash } from './identity.js';
+import { hash32 } from './jobgen.js';
 import { makeGhostCars } from './netvehicles.js';
 import { makeNetUI } from './netui.js';
 // jobs, ownership, stats, the save: the whole gameplay layer hangs off this one
@@ -151,6 +154,7 @@ let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
 let clouds = null;                // the sky to fly the machines through
 let lightPools = null;            // what the street lamps do to the street
+let farSkyline = null;            // Prague's tall landmarks beyond the streamed ring (js/landmarksfar.js)
 const _earDir = new THREE.Vector3();
 const _voiceCars = [];            // reused every frame — the pool never keeps it
 const VOICE_SCAN2 = 140 * 140;    // m² — wider than the pool's own 95 m cutoff,
@@ -952,7 +956,10 @@ function claimParked(car, on) {
 }
 
 function setParkClaim(uid, i, on) {
-  if (!Number.isInteger(i) || i < 0 || i >= parkedFleet.length) return;
+  // (bounded by the key blocks, not by parkedFleet.length: a peer's claim on a
+  // car of the city this client has not parked yet is kept, and placeFleets
+  // hides that car the moment it is parked)
+  if (!Number.isInteger(i) || i < 0 || i >= START_PLACES.length * FLEET_STRIDE) return;
   const car = parkedFleet[i];
   if (on) _parkClaims.set(uid, i);
   else if (_parkClaims.get(uid) === i) {
@@ -981,6 +988,7 @@ function setParkClaim(uid, i, on) {
 function applyParkVisibility() {
   for (let i = 0; i < parkedFleet.length; i++) {
     const car = parkedFleet[i];
+    if (!car) continue;       // a place whose fleet is not parked yet (placeFleets)
     // "ours" is three states, not one: driving it, riding in it, and WALKING UP
     // to it — boardVehicle has already written us into veh.seats by then, so
     // hiding it out from under the animation would leave us sliding into a car
@@ -1517,23 +1525,52 @@ const PARK_KINDS = ['sedan', 'hatch', 'kombi', 'suv', 'van'];
 function spotRnd(x, z, salt) {
   return strHash(salt + ':' + Math.round(x * 10) + ',' + Math.round(z * 10)) / 4294967296;
 }
-function placeParkedCars(city) {
+// ONE FLEET PER START PLACE (config.js START_PLACES), parked the first time
+// every tile within 400 m of the place is fully indexed: at boot for the city
+// you begin in, on the tile arrival that completes the other city when you
+// get there. Its claim keys are the block place index * FLEET_STRIDE + i, so
+// parkedFleet[64] is the first Prague car on every client whatever order the
+// two cities streamed in (parkedFleet has holes until both are parked).
+const _fleetDone = new Set();
+function placeFleets(city) {
+  for (let pi = 0; pi < START_PLACES.length; pi++) {
+    const place = START_PLACES[pi];
+    if (_fleetDone.has(place.id) || !tilesReady(city, place.x, place.z)) continue;
+    _fleetDone.add(place.id);
+    placeParkedCars(city, place, pi * FLEET_STRIDE);
+    // a peer may already have claimed one of these cars (its key arrived
+    // before the cars did): hide it now rather than at the next re-announce
+    if (_parkClaims.size) applyParkVisibility();
+  }
+}
+function placeParkedCars(city, spawn = SPAWN, base = 0) {
   // WHERE is js/parkspot.js's answer: the two by the spawn and one in each
   // nearby car park, every one on a footprint clear of walls, props, trees and
   // lanes (a 1.2 m disc pushed out of a wall was not a car: the first one stood
   // with its nose in a kiosk). (kx, kz) is the spot as the map gave it.
-  for (const { x: px, z: pz, h, kx: x, kz: z } of parkSpots(city, SPAWN)) {
+  const spots = parkSpots(city, spawn).slice(0, FLEET_STRIDE);
+  for (let i = 0; i < spots.length; i++) {
+    const { x: px, z: pz, h, kx: x, kz: z } = spots[i];
     const pos = { x: px, z: pz };
     // hashed off the SPOT, not off the cleared position: a client whose
     // building tile has not streamed in yet would clear it differently and
     // repaint the car.
     const kind = PARK_KINDS[(spotRnd(x, z, 'k') * PARK_KINDS.length) | 0];
     const color = CAR_COLORS[(spotRnd(x, z, 'c') * CAR_COLORS.length) | 0];
+    const k = base + i;
+    // A fleet parked late (the second city) may meet the player's OWN copy of
+    // one of its cars: js/garage.js restored it from the save at boot, before
+    // this fleet existed, as a plain car carrying the fleet car's price seed.
+    // That car IS this one; it takes the key instead of getting a twin.
+    const seed = hash32('fleet|' + k + '|' + kind);
+    const own = parked.find((c) => c.owned && !Number.isInteger(c.parkIdx) && c._buySeed === seed)
+      ?? (game.car?.owned && !Number.isInteger(game.car.parkIdx) && game.car._buySeed === seed ? game.car : null);
+    if (own) { own.parkIdx = k; parkedFleet[k] = own; continue; }
     const car = vehicles.add(kind, pos.x, pos.z, h, color);
     // The claim key. Stamped at spawn and never renumbered, because `parked`
     // is spliced all session while parkedFleet is not — see the declaration.
-    car.parkIdx = parkedFleet.length;
-    parkedFleet.push(car);
+    car.parkIdx = k;
+    parkedFleet[k] = car;
     parked.push(car);
   }
 }
@@ -1552,6 +1589,7 @@ function _crashList() {
   // most obvious lie either system could tell.
   if (ambulance) for (const c of ambulance.cars) out.push(c);
   if (police) for (const u of police.units) if (u.car) out.push(u.car);
+  cityLife?.trams?.crashInto(out, player.pos.x, player.pos.z);   // a tram is a wall that moves (js/trams.js)
   return out;
 }
 
@@ -2518,13 +2556,30 @@ async function boot() {
   // fallback — ALSO when the manifest exists but its download hasn't reached
   // the spawn yet (the region fetcher writes tiles spawn-first, but a fresh
   // clone mid-download must still boot into a full Pardubice).
+  // Where: the save, or the square of the city the menu shows (career.js
+  // startPoint). Only THAT place's tiles are asked for, so a Prague game no
+  // longer loads (and pins) six Pardubice tiles first.
+  let sp = career.startPoint();
+  const label0 = $id('enter-label');
+  if (label0) label0.textContent = arriveText(sp.place);
   let city = await loadCity('data/manifest.json').catch(() => null);
   if (city) {
-    await city.ensureTiles(SPAWN.x, SPAWN.z);
-    const cell = city.chunkIndex.get(chunkKey(SPAWN.x, SPAWN.z));
-    if (!cell || !cell.roads.length) city = null; // manifest too young — legacy
+    await city.ensureTiles(sp.x, sp.z);
+    const cell = city.chunkIndex.get(chunkKey(sp.x, sp.z));
+    // (a saved spot in open country may have no road in its cell; a start
+    // square always has, and is what tells a manifest that is still filling)
+    if (!cell || (!sp.saved && !cell.roads.length)) city = null; // manifest too young: legacy
   }
-  if (!city) city = await loadCity(CITY_DATA_URL);
+  // the legacy single file is Pardubice: whatever was picked, it starts there
+  let legacy = false;
+  if (!city) {
+    city = await loadCity(CITY_DATA_URL); legacy = true;
+    if (sp.place !== START_PLACES[0]) {
+      console.warn('Region data unavailable, starting in Pardubice instead of', sp.place.name);
+      sp = { ...START_PLACES[0], place: START_PLACES[0], saved: false };
+      if (label0) label0.textContent = arriveText(sp.place);
+    }
+  }
   world = new CityWorld(scene, city);
   grass = new Grass(scene, world, city);
   // A region tile landing changes what the ground under us is MADE of — a car
@@ -2537,13 +2592,17 @@ async function boot() {
   trees.setQuality(getSettings());
   sky = makeSky(scene, renderer);
   lightPools = new LightPools(scene);
+  farSkyline = new FarSkyline(scene, world);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
   // because it is the whole identity contract in one line: this same string
   // picks our jacket here, picks the dot in the co-op HUD, and is what every
   // other client hashes to dress our avatar. One function, one uid, one look —
   // "the blue one is me" used to be true on four screens at once.
-  player = new Player(scene, SPAWN.x, SPAWN.z, SPAWN.heading, localUid());
-  await career.spawn(player, city);   // "Pokračovat": stand where the save left you
+  player = new Player(scene, sp.x, sp.z, sp.heading, localUid());
+  // "Pokračovat": stand where the save left you (a no-op for a fresh start,
+  // and skipped when the region data was missing and Pardubice stood in)
+  if (!legacy || sp.saved) await career.spawn(player, city);
+  camYaw = player.heading;
   // The ground under the spawn is asked for NOW, the same tiles the streamer's
   // first pass would ask for (city.js update), so they download while the
   // systems below are built: see the wait before the warm-up.
@@ -2572,6 +2631,7 @@ async function boot() {
     };
     for (const c of parked) push(c);
     if (traffic) for (const c of traffic.cars) push(c);
+    cityLife?.trams?.crashInto(_hulls, px, pz);                // nobody walks through a tram either
     return _hulls;
   };
   // Settlement factor for traffic density: buildings within the cell's 3×3
@@ -2732,7 +2792,9 @@ async function boot() {
   // focus so only machines near the player breathe visible puffs
   vehicles.dust = world.interiors.dust;
 
-  placeParkedCars(city);
+  placeFleets(city);
+  // …and the other city's, the moment its tiles are all in (js/startplace.js)
+  city.onTileLoaded?.(() => { if (_fleetDone.size < START_PLACES.length) placeFleets(city); });
   // …and every OTHER parking lot in the country: stalls that fill at night
   // and empty by mid-morning, streamed around the player (js/parkinglots.js)
   parkingLots = new ParkingLots(city, vehicles, world, parked);
@@ -2772,7 +2834,7 @@ async function boot() {
         for (let i = 0; i < 6; i++) world.update(1 / 60, player.pos);
         if (label && (warmFrames & 7) === 0) {
           const { built, total } = world.bootProgress(player.pos);
-          label.textContent = `Přijíždíte do Pardubic… ${Math.min(99, Math.round(built / total * 100))} %`;
+          label.textContent = `${arriveText(sp.place)} ${Math.min(99, Math.round(built / total * 100))} %`;
         }
         if (world.readyFull(player.pos) || ++warmFrames > 1500) resolve();
         else setTimeout(warm, 0); // setTimeout, not rAF — hidden tabs still boot
@@ -2793,7 +2855,7 @@ async function boot() {
   });
   police = new Police({ traffic, vehicles, wanted, city, scene,
     say: (t) => policeToast(t, { icon: '🚓', kind: 'warn', ms: 3500 }) });
-  ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL });
+  ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL, hospitals: HOSPITALS });
 
   // ---- the body, the wallet and the tank ----
   statusbar.init();
@@ -2843,9 +2905,11 @@ async function boot() {
     setTimeout(() => {
       if (game.mode !== 'play') return;
       player.endRagdoll();
-      player.pos.x = HOSPITAL.x;
-      player.pos.z = HOSPITAL.z;
-      player.y = world?.terrain?.heightAt?.(HOSPITAL.x, HOSPITAL.z) ?? player.y;
+      // the hospital of the city you fell in (config.js HOSPITALS)
+      const hosp = nearestHospital(player.pos.x, player.pos.z);
+      player.pos.x = hosp.x;
+      player.pos.z = hosp.z;
+      player.y = world?.terrain?.heightAt?.(hosp.x, hosp.z) ?? player.y;
       // The fee is charged even when you cannot afford it — pay() is atomic and
       // refuses, so a broke player wakes up owing nothing rather than in debt.
       // Being unable to pay is not a reason to be kept dead.
@@ -3054,6 +3118,7 @@ function stepGame(dt) {
   // in a bare circle at any speed.
   grass?.update(focus.x, focus.z, dt);
   trees?.update(camera, dt, sky?.nightK ?? 0);
+  farSkyline?.update(camera, scene.fog?.far);
 
   if (game.jet) {
     // Same hands as the helicopter, and the same hands GTA trained everyone's
@@ -3196,6 +3261,7 @@ function stepGame(dt) {
   traffic.actors = updateActors();
   traffic.blockers = updateBlockers();
   cyclists?.blockInto(traffic.blockers);   // riders out in a lane are hulls the traffic waits behind
+  cityLife?.trams?.blockInto(traffic.blockers);   // …and so is a tram, on its rail or in the street (js/tramyield.js)
   traffic.update(dt, player.pos, game.car);
   parkingLots?.update(dt, player.pos, tod());
   cityLife?.update(dt, player.pos, tod());

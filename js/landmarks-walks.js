@@ -32,7 +32,15 @@ export const WALKS = [
   { anchor: [1499.4, -1057.1], way: way('zamek-dvur', [[1499.4, -1057.1], [1497.4, -1060.4], [1479.0, -1068.3], [1476.7, -1066.4]]) },
   // ...and through the portal, under the north wing, into the courtyard
   { anchor: [1470.3, -1053.2], way: way('zamek-prujezd', [[1470.3, -1053.2], [1469.32, -1049.22], [1462.7, -1030.35], [1462.1, -1026.7]]) },
+  // Prague: Charles Bridge through the Old Town Bridge Tower to Křižovnické
+  // náměstí, and Mostecká through the gate between the Lesser Town towers
+  // (js/landmarks-mostecke.js; both passages' ways are missing from the tile)
+  { anchor: [-96192.0, -6059.6], way: way('otbt', [[-96192.0, -6059.6], [-96186.7, -6058.35], [-96181.4, -6057.1]]) },
+  { anchor: [-96676.0, -6175.7], way: way('mlst-brana', [[-96676.0, -6175.7], [-96671.05, -6175.45], [-96666.1, -6175.2]]) },
 ];
+// the boxes every anchor lies in (Pardubice old town, Prague old town): a
+// compare or two refuses the rest of the world
+const BOXES = [[1400, -1100, 1650, -650], [-96800, -6300, -95000, -5900]];
 
 const near = (p, q) => Math.abs(p[0] - q[0]) < 0.6 && Math.abs(p[1] - q[1]) < 0.6;
 
@@ -48,8 +56,8 @@ export function landmarkWalks(roads) {
     const p = r.p;
     if (r.d || !p || p.length < 2) continue;
     const a = p[0], b = p[p.length - 1];
-    // every anchor lies in the old town: one compare refuses the rest of the world
-    if (a[0] < 1400 || a[0] > 1650 || a[1] < -1100 || a[1] > -650) continue;
+    // every anchor lies in an old town: a compare or two refuses the rest of the world
+    if (!BOXES.some((q) => a[0] > q[0] && a[0] < q[2] && a[1] > q[1] && a[1] < q[3])) continue;
     for (const w of WALKS) if (near(a, w.anchor) || near(b, w.anchor)) out.push(w.way);
   }
   return out;

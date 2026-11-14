@@ -35,6 +35,7 @@ import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKe
   clustersIn, clusterHull, clusterDeckY, streetOf,
   GRADE_CUT } from './geo.js';
 import { JUNCTIONS, CLUSTERS, railGradeY } from './geo.js';
+import { WIRE_H } from './trambody.js';
 import { KERB_H, KERB_W, FOOT_LIFT, vergeAt, vergeLift, inZone, bayAt, roadRank, cornerLift } from './streets.js';
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
@@ -51,16 +52,21 @@ import { sealedRects } from './sealed.js';
 import { entranceOf, brandOf, signBrandOf, classify, storeyPlan } from './interiors.js';
 import { INTERIOR } from './config.js';
 import { ATLAS_N, BAYS, WIN_W, cellRect, PIN_U, PIN_V, typologyOf, roofOf, facadeRows,
-  edgeRoles, rowFor, trimRect, TYPO_WALLS, litOf, litRow, litStart, LIT_N, signBand,
+  edgeRoles, rowFor, trimRect, TYPO_WALLS, PARTY_ROLE, litOf, litRow, litStart, LIT_N, signBand,
   signOverGround, roofPin, hasParapet, PARAPET_H } from './typology.js';
 import { roofInto, roofCap, parapetInto, linRGB } from './roofs.js';
+import { praguePlace, praguePlaster, PRAGUE_WALLS } from './praguezone.js';
 import { wallTone } from './roofdata.js';
 import { facadeAtlas, buildFacadeMaterial, facadeNight } from './facadeatlas.js';
 import { landmarkOf, LandmarkBatch, landmarkBarrier, landmarkClear, SWITCH as LANDMARK_SWITCH } from './landmarks.js';
+import { landmarkExtras, landmarkBridge, inLandmark } from './landmarks.js';
 import { landmarkMaterial, landmarkNight } from './landmarksmat.js';
 import { farTemplates, treeSpec, treeMatrices, crownColor, barkColor, mappedTree } from './treeshapes.js';
 import { farTreeMaterials } from './treeshader.js';
 import { treePitsInto } from './treepits.js';
+import { riverLevelAt, isPooled, isCulvert } from './riverpools.js';
+import { quayPiece, embankmentNear, QUAY_MIN } from './quaywall.js';
+import { refineNearWeirs, paintFlow, weirSillsInto } from './weirs.js';
 
 // geometry dimensions (meters) — construction sizes, not art direction
 const CAP_SEGS = 8;                                  // endpoint disc fan
@@ -161,10 +167,14 @@ function makeWaterMaterial() {
     ]),
     fog: true,
     side: THREE.DoubleSide,
+    // the colour attribute is not a colour here: weirs.js paintFlow packs the
+    // downstream direction into r, g and the weir foam into b
+    vertexColors: true,
     vertexShader: `
       uniform float uTime;
       varying vec3 vWorld;
       varying vec3 vWaveNormal;
+      varying vec3 vFlow;
       #include <fog_pars_vertex>
 
       void main() {
@@ -192,6 +202,11 @@ function makeWaterMaterial() {
         float dz = cos(a) * 0.011 * 0.071 + cos(b) * 0.007 * 0.132;
         vWaveNormal = normalize(mat3(modelMatrix) * vec3(-dx, 1.0, -dz));
 
+        #ifdef USE_COLOR
+          vFlow = vec3(color.rg * 2.0 - 1.0, color.b);
+        #else
+          vFlow = vec3(0.0);
+        #endif
         vec4 world = modelMatrix * vec4(p, 1.0);
         vWorld = world.xyz;
         vec4 mvPosition = viewMatrix * world;
@@ -206,35 +221,60 @@ function makeWaterMaterial() {
       uniform vec3 uSky;
       varying vec3 vWorld;
       varying vec3 vWaveNormal;
+      varying vec3 vFlow;
       #include <fog_pars_fragment>
       #ifdef ENVMAP_TYPE_CUBE_UV
         uniform sampler2D envMap;
       #endif
       #include <cube_uv_reflection_fragment>
 
-      // The ripples, per PIXEL. Three crossing wavelets at roughly 7 m, 3.5 m
-      // and 1.6 m — the scales a river actually has, and all of them far below
-      // what the 8 m mesh could ever carry as geometry. Only the SLOPE is
-      // wanted, so the analytic derivative goes straight into the normal and no
-      // height is displaced at all.
-      vec3 rippleNormal(vec2 p, float t) {
-        vec2 k1 = vec2(0.72, 0.43);
-        vec2 k2 = vec2(-0.51, 1.02);
-        vec2 k3 = vec2(1.85, -1.31);
-        float p1 = dot(p, k1) + t * 1.45;
-        float p2 = dot(p, k2) - t * 1.02;
-        // the third is warped by the first, so the three do not beat into a
-        // regular grid of dots the way plain crossed sines do
-        float p3 = dot(p, k3) + t * 2.60 + sin(p1) * 0.6;
-        float a1 = 0.052, a2 = 0.034, a3 = 0.019;
-        float dx = cos(p1) * a1 * k1.x + cos(p2) * a2 * k2.x + cos(p3) * a3 * k3.x;
-        float dz = cos(p1) * a1 * k1.y + cos(p2) * a2 * k2.y + cos(p3) * a3 * k3.y;
-        return vec3(-dx, 1.0, -dz);
+      // The ripples, per PIXEL, and SMALL. This used to be three crossing
+      // wavelets of 7 m, 5.5 m and 2.8 m with a slope of 4 % each: on the
+      // Vltava, seen from Charles Bridge, that is a sea swell rolling under the
+      // arches. A river in a town is a mirror broken by fine ripples: catspaws
+      // a metre or less across, drifting downstream, in patches where a breeze
+      // touches the surface and glassy in between. Only the SLOPE is wanted, so
+      // the analytic derivative goes straight into the normal; each octave fades
+      // out once a pixel covers its wavelength (it would only alias).
+      float hash21(vec2 q) { return fract(sin(dot(q, vec2(127.1, 311.7))) * 43758.5453); }
+      float vnoise(vec2 q) {
+        vec2 i = floor(q), f = fract(q);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), u.x),
+                   mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), u.x), u.y);
+      }
+      vec2 wavelet(vec2 p, vec2 k, float w, float a, float px) {
+        float lam = 6.2832 / length(k);
+        float fade = 1.0 - smoothstep(lam * 0.35, lam * 1.1, px);
+        return cos(dot(p, k) + w) * a * k * fade;
+      }
+      vec3 rippleNormal(vec2 p, vec2 flow, float t, float px) {
+        // drift: ripples ride the current (0.35 m/s, a pooled Vltava's pace)
+        vec2 q = p - flow * t * 0.35;
+        // patches of breeze and glassy calm, drifting with the water
+        float gust = smoothstep(0.25, 0.85, vnoise(q * 0.045 + vec2(t * 0.02, -t * 0.015)));
+        float amp = 0.35 + 0.65 * gust;
+        // 2.9 m, 2.1 m, 1.2 m and 0.7 m; the fifth is a long slow undulation
+        // that is NOT a swell: 1 cm over 9.5 m, just enough to bend
+        // reflections the way a current does
+        vec2 k1 = vec2(1.9, 1.1);
+        vec2 k2 = vec2(-1.4, 2.6);
+        vec2 k3 = vec2(4.3, -3.1);
+        vec2 k4 = vec2(-6.8, -5.2);
+        vec2 k5 = vec2(0.52, 0.41);
+        vec2 d = vec2(0.0);
+        d += wavelet(q, k1, t * 2.1, 0.0060, px);
+        d += wavelet(q, k2, -t * 2.6, 0.0042, px);
+        d += wavelet(q, k3, t * 3.9 + sin(q.x * 0.7) * 0.8, 0.0019, px);
+        d += wavelet(q, k4, t * 5.1, 0.0011, px);
+        d += wavelet(q, k5, t * 0.6, 0.010, px);
+        return vec3(-d.x * amp, 1.0, -d.y * amp);
       }
 
       void main() {
         vec3 base = normalize(gl_FrontFacing ? vWaveNormal : -vWaveNormal);
-        vec3 rip = rippleNormal(vWorld.xz, uTime);
+        float px = max(length(fwidth(vWorld.xz)), 1e-3);
+        vec3 rip = rippleNormal(vWorld.xz, vFlow.xy, uTime, px);
         vec3 n = normalize(base + vec3(rip.x, 0.0, rip.z));
         vec3 viewDir = normalize(cameraPosition - vWorld);
 
@@ -244,8 +284,9 @@ function makeWaterMaterial() {
         // over white sand, and it read as a lit sign rather than a river.
         float bands = sin(vWorld.x * 0.061 + vWorld.z * 0.043 + uTime * 0.31)
           * sin(vWorld.x * -0.037 + vWorld.z * 0.052 - uTime * 0.22);
-        vec3 deep = vec3(0.019, 0.028, 0.025);
-        vec3 body = vec3(0.052, 0.074, 0.061);
+        // (and greener-browner still: the Vltava carries peat from the Šumava)
+        vec3 deep = vec3(0.020, 0.026, 0.019);
+        vec3 body = vec3(0.056, 0.071, 0.048);
         vec3 colour = mix(deep, body, 0.55 + bands * 0.14);
 
         // EVERYTHING water shows is borrowed. Its own body darkens with the
@@ -271,6 +312,14 @@ function makeWaterMaterial() {
         #else
           vec3 skyRefl = uSky;
         #endif
+        // THE BANKS IN THE WATER. A ray that leaves the surface almost level
+        // does not reach the sky at all: it hits the far bank, its trees and
+        // its houses. Reflecting the pale horizon there instead is what made
+        // the far shore dissolve into one white haze with the river. There is
+        // no mirror pass, so the low band reflects a dim shore tone (the sky's
+        // own colour, darkened and greened, so it follows the time of day).
+        vec3 shore = skyRefl * vec3(0.30, 0.34, 0.28);
+        skyRefl = mix(shore, skyRefl, smoothstep(0.035, 0.20, refl.y));
         colour = mix(colour, skyRefl, clamp(0.03 + fresnel * 0.97, 0.0, 0.88));
 
         // the sun, and only while there is one above the horizon
@@ -280,6 +329,20 @@ function makeWaterMaterial() {
           + pow(max(dot(n, halfDir), 0.0), 30.0) * 0.05;
         colour += vec3(1.0, 0.93, 0.74) * glint * above;
         colour += vec3(0.022, 0.032, 0.027) * max(dot(n, uSun), 0.0) * above;
+
+        // white water below a weir: churned foam, broken into flecks that
+        // stream away downstream, lit by the sky (dim at night)
+        if (vFlow.z > 0.01) {
+          vec2 q = vWorld.xz - vFlow.xy * uTime * 1.1;
+          float fleck = vnoise(q * 1.7) * 0.6 + vnoise(q * 4.3 + 7.0) * 0.4;
+          float cover = smoothstep(0.75 - 0.75 * vFlow.z, 0.95 - 0.6 * vFlow.z, fleck);
+          // far off the flecks are smaller than a pixel: show their average,
+          // so the weir still reads as a white line from the next bridge
+          cover = mix(cover, smoothstep(0.1, 0.8, vFlow.z), smoothstep(0.25, 1.2, px));
+          cover *= smoothstep(0.0, 0.2, vFlow.z);
+          vec3 foamCol = vec3(0.80, 0.82, 0.80) * (0.06 + 0.94 * day) + uSky * 0.08;
+          colour = mix(colour, foamCol, cover * 0.92);
+        }
 
         // and at night the moon does the same trick, faintly, from the other
         // side of the sky — the one thing that should still catch the eye on
@@ -1194,6 +1257,9 @@ function waterSamples(f, terrain) {
 const _wsHit = [];       // scratch: sample offsets in reach of one query
 function waterLevelAt(f, x, z, terrain) {
   if (!terrain) return WATER_Y;
+  // the Prague Vltava is a staircase of weir-held pools, authored (riverpools.js)
+  const pooled = riverLevelAt(f, x, z);
+  if (pooled !== null) return pooled;
   const { s, grid } = waterSamples(f, terrain);
   if (!s.length) return 0 - 0.35;
   // widen until something is in reach — a chunk in the middle of a lake can be
@@ -1230,7 +1296,7 @@ function waterLevelAt(f, x, z, terrain) {
   }
 }
 
-function skirtRing(sink, ring, key, inward, r, g, b, terrain, wyAt) {
+function skirtRing(sink, ring, key, inward, r, g, b, terrain, wyAt, quayRoads) {
   const sgn = (polygonArea(ring) > 0 ? 1 : -1) * (inward ? 1 : -1);
   // The ring is the WHOLE body — the Labe carries 1 447 vertices running for
   // kilometres — and every chunk it touches used to subdivide all of them just
@@ -1265,10 +1331,30 @@ function skirtRing(sink, ring, key, inward, r, g, b, terrain, wyAt) {
         const wy = wyAt((p0x + p1x) / 2, (p0z + p1z) / 2);
         const t0 = Math.max(terrain.heightAt(p0x, p0z) + BANK_TOP, wy + 0.05);
         const t1 = Math.max(terrain.heightAt(p1x, p1z) + BANK_TOP, wy + 0.05);
-        wallQuad2(sink, p0x, p0z, p1x, p1z, t0, t1, wy - 0.4, fx, fz, r, g, b);
+        // a pooled Prague body's high bank is a built quay (quaywall.js)
+        if (quayRoads && Math.max(t0, t1) - wy > QUAY_MIN) {
+          const par = embankmentNear(quayRoads, (p0x + p1x) / 2, (p0z + p1z) / 2,
+            Math.max(t0, t1), (x, z) => terrain.heightAt(x, z));
+          sink.at(SURF.paving);
+          quayPiece(sink, p0x, p0z, p1x, p1z, t0, t1, wy, fx, fz, par);
+          sink.at(SURF.dirt);
+        } else wallQuad2(sink, p0x, p0z, p1x, p1z, t0, t1, wy - 0.4, fx, fz, r, g, b);
       } else wallQuad(sink, p0x, p0z, p1x, p1z, BANK_TOP, BANK_DEPTH, fx, fz, r, g, b);
     }
   }
+}
+
+// every road of the 3x3 chunk neighbourhood: an embankment street can run
+// just across the border from the bank it owns
+function nearRoads(city, cell, cx, cz) {
+  // (a Set, in insertion order: a dense Prague neighbourhood is a thousand
+  // roads, and an includes() per road was a million compares per river chunk)
+  const out = new Set();
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const c2 = dx === 0 && dz === 0 ? cell : city.chunkIndex.get((cx + dx) + ',' + (cz + dz));
+    if (c2) for (const r of c2.roads) out.add(r);
+  }
+  return [...out];
 }
 
 function inWater(x, z, waters) {
@@ -1284,7 +1370,7 @@ function wwBuckets(city) {
   if (m) return m;
   m = city._wwChunks = new Map();
   for (const f of city.waterways ?? []) {
-    if (!f.p || f.p.length < 2) continue;
+    if (!f.p || f.p.length < 2 || isCulvert(f)) continue;   // underground, not a trench
     const r = (f.w ?? 2) / 2 + 1;
     let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
     for (const [x, z] of f.p) {
@@ -1786,6 +1872,21 @@ function standingOn(cell, key, terrain) {
 // piers, spaced like a girder bridge's, set clear of whatever road or railway
 // the bridge is there to cross (geo.indexBridgeCrossings found those).
 const PIER_STEP = 22, PIER_OPEN = 2.4;
+// What a pier stands on. In a pooled Prague body that is the riverbed under
+// the flat pool, not the DMR, which over water records a surface up to 5 m
+// above the pool: piers standing on it would end in mid air over the water.
+function supportFloor(cell, x, z, terrain) {
+  const g = terrain.heightAt(x, z);
+  if (!cell?.water) return g;
+  for (const w of cell.water) {
+    if (!w.o || !isPooled(w)) continue;
+    const lv = riverLevelAt(w, x, z);
+    if (lv === null || !pointInPolygon(x, z, w.o) || (w.i ?? []).some((h) => pointInPolygon(x, z, h))) continue;
+    return Math.min(g, lv - 1.5);
+  }
+  return g;
+}
+
 function bridgeSupports(sink, f, fr, ys, hw, cell, terrain, slim) {
   if (!terrain) return;
   const { q, per, along, len } = fr;
@@ -1794,7 +1895,7 @@ function bridgeSupports(sink, f, fr, ys, hw, cell, terrain, slim) {
   const cr = _c.r, cg = _c.g, cb = _c.b;
   const drop = slim ? 0.25 : FASCIA;
   const clear = new Float32Array(n), gnd = new Float32Array(n);
-  for (let i = 0; i < n; i++) { gnd[i] = terrain.heightAt(q[i][0], q[i][1]); clear[i] = ys[i] - drop - gnd[i]; }
+  for (let i = 0; i < n; i++) { gnd[i] = supportFloor(cell, q[i][0], q[i][1], terrain); clear[i] = ys[i] - drop - gnd[i]; }
   sink.at(SURF.concrete);
   // abutments: the low ends are walled in, both faces, and closed off across
   // the deck where the open span begins
@@ -1854,7 +1955,7 @@ function bridgeSupports(sink, f, fr, ys, hw, cell, terrain, slim) {
           while (j < n - 2 && along[j + 1] < s) j++;
           const t = (s - along[j]) / ((along[j + 1] - along[j]) || 1);
           const top = ys[j] + (ys[j + 1] - ys[j]) * t - drop + 0.02;
-          const base = terrain.heightAt(_WA.x, _WA.z) - 1.2;
+          const base = supportFloor(cell, _WA.x, _WA.z, terrain) - 1.2;
           const ux = _WA.dx * pt, uz = _WA.dz * pt, px = _WA.dz * pw, pz = -_WA.dx * pw;
           const c0 = [_WA.x - ux - px, _WA.z - uz - pz], c1 = [_WA.x + ux - px, _WA.z + uz - pz];
           const c2 = [_WA.x + ux + px, _WA.z + uz + pz], c3 = [_WA.x - ux + px, _WA.z - uz + pz];
@@ -2359,7 +2460,8 @@ function roadRibbon(sink, f, terrain, cell, key, city) {
     // the river sunk below it, so v1's deep girder curtains are gone. A short
     // fascia below the deck edge and a 0.9 m parapet above, both double-sided
     // (seen from the bank AND from the deck), along the entire bridge way.
-    if (f.br) {
+    // (Not on a bridge a landmark models itself: js/landmarks.js landmarkBridge.)
+    if (f.br && !landmarkBridge(f)) {
       // A footbridge is not a motorway viaduct. Its girder face is a fraction
       // of a road bridge's, and its parapet is CONCRETE, not near-black steel
       // — the black was what turned the spiral ramp by the Pardubice flyover
@@ -2386,7 +2488,7 @@ function roadRibbon(sink, f, terrain, cell, key, city) {
   const capOff = (i) => foot && !f.br && onDeck(fcell, f, q[i][0], q[i][1], 0.3);
   if (!capOff(0)) capDisc(sink, q[0][0], ys[0], q[0][1], hw, cr, cg, cb);
   if (!capOff(q.length - 1)) capDisc(sink, q[q.length - 1][0], ys[q.length - 1], q[q.length - 1][1], hw, cr, cg, cb);
-  if (bridge) bridgeSupports(sink, f, fr, ys, hw, cell, terrain, isFoot);
+  if (bridge && !landmarkBridge(f)) bridgeSupports(sink, f, fr, ys, hw, cell, terrain, isFoot);
   if (f._isl && graded) roundIslandInto(sink, f._isl[0], f._isl[1], f._isl[2], ys[0], terrain);
   // The deck at a distance along the frame, read off the ribbon's OWN stations.
   // The levelled profile is a curve and the ribbon is its chords: in a sag the
@@ -3026,6 +3128,7 @@ function taxiPaint(sink, fr, yAt) {
 // The rail HEAD stays at LAYER_Y.rail + 0.04: trains.js stands its wheels there.
 const BED_HW = 1.35, BED_FOOT = 2.25;          // ballast: half width of the top, of the foot
 const TRAM_HW = 1.2, TRAM_UP = 0.03;           // tram panel: half width, lift over the road deck
+const TRAM_WIRE_H = WIRE_H;                    // contact wire over the panel (js/trambody.js)
 function railWay(sink, f, terrain, cell) {
   const railBridge = !!f.br && !!terrain;
   const fr = ribbonFrame(f.br ? bridgeResample(f.p) : terrainResample(f.p, terrain));
@@ -3081,6 +3184,24 @@ function railWay(sink, f, terrain, cell) {
     // chamfered edges down under the asphalt either side
     strip(-TRAM_HW - 0.22, LAYER_Y.road - 0.03, -TRAM_HW, base, br2 * 0.8, bg2 * 0.8, bb2 * 0.8, false);
     strip(TRAM_HW, base, TRAM_HW + 0.22, LAYER_Y.road - 0.03, br2 * 0.8, bg2 * 0.8, bb2 * 0.8, false);
+    // the contact wire (trolejové vedení): one 600 V wire over the middle of
+    // the track, TRAM_WIRE_H over the panel, which is exactly where the
+    // pantographs of js/trammesh.js reach. Absolute heights only (railMark):
+    // a relative wire would be draped onto the ground under it.
+    if (railMark >= 0) {
+      // (steel, with the rail heads: the concrete layer is the panel's alone)
+      sink.at(SURF.paint);
+      _c.setHex(0x2a2c30);
+      const cr = _c.r, cg = _c.g, cb = _c.b;
+      for (let i = 0; i < n - 1; i++) {
+        const ax = q[i][0], az = q[i][1], bx = q[i + 1][0], bz = q[i + 1][1];
+        const ya = g[i] + base + TRAM_WIRE_H, yb = g[i + 1] + base + TRAM_WIRE_H;
+        // a thin double-sided ribbon, as the trolleybus wire (trolleyInto)
+        sink.quad(ax, ya - 0.03, az, bx, yb - 0.03, bz, bx, yb + 0.03, bz, ax, ya + 0.03, az, cr, cg, cb);
+        sink.quad(ax, ya + 0.03, az, bx, yb + 0.03, bz, bx, yb - 0.03, bz, ax, ya - 0.03, az, cr, cg, cb);
+      }
+    }
+    if (railMark >= 0 && cell) tramMastsInto(sink, f, fr, g, base, terrain, cell);
   } else if (f.br) {
     // A rail bridge had no deck at all: sleepers and steel crossing the Labe
     // on nothing. A concrete trough under the track, a girder face down each
@@ -3154,6 +3275,54 @@ function railWay(sink, f, terrain, cell) {
   if (railMark >= 0) sink.fixFrom(railMark);
 }
 
+// The masts that carry a tram's contact wire. OSM maps 36 of the network's
+// thousands, so they are placed: one every TRAM_MAST_STEP along each tram rail
+// (from the way's first vertex, drawn whole from its home chunk with its wire),
+// on whichever side has room. Room means: not on a carriageway (a street-running
+// track has its masts at the kerb, on a longer arm), not on another tram track
+// (the other direction usually runs 3 m away), not inside a house. Where neither
+// side has room within TRAM_MAST_REACH there is no mast and the wire spans the
+// gap, as it does over a junction. Absolute heights, inside railWay's fixFrom.
+const TRAM_MAST_STEP = 34, TRAM_MAST_OFFS = [2.6, 3.6, 5, 6.5, 8];
+function tramMastsInto(sink, f, fr, g, base, terrain, cell) {
+  const { q, per, along, len } = fr;
+  _c.setHex(0x6f7378);
+  const mr = _c.r, mg = _c.g, mb = _c.b;
+  const others = (cell.rails ?? []).filter((o) => o !== f && o.t === 'tram' && o.p?.length > 1);
+  const onRail = (x, z) => others.some((o) => {
+    for (let k = 0; k < o.p.length - 1; k++) {
+      if (distPointToSegment(x, z, o.p[k][0], o.p[k][1], o.p[k + 1][0], o.p[k + 1][1], null) < 2.0) return true;
+    }
+    return false;
+  });
+  let i = 0;
+  for (let s = TRAM_MAST_STEP * 0.5 + (f._id ?? 0) % 9; s < len - 4; s += TRAM_MAST_STEP) {
+    while (i < q.length - 2 && along[i + 1] < s) i++;
+    const L = along[i + 1] - along[i] || 1, u = (s - along[i]) / L;
+    const cx = q[i][0] + (q[i + 1][0] - q[i][0]) * u, cz = q[i][1] + (q[i + 1][1] - q[i][1]) * u;
+    const wy = g[i] + (g[i + 1] - g[i]) * u + base + TRAM_WIRE_H;
+    const px = per[i][0], pz = per[i][1], pl = Math.hypot(px, pz) || 1;
+    const first = ((f._id ?? 0) + Math.round(s / TRAM_MAST_STEP)) & 1 ? 1 : -1;
+    let mx = 0, mz = 0, ok = false;
+    find: for (const off of TRAM_MAST_OFFS) {
+      for (const side of [first, -first]) {
+        mx = cx + px / pl * off * side; mz = cz + pz / pl * off * side;
+        if (onCarriageway(cell, null, mx, mz, 0.4) || onRail(mx, mz) || lampInHouse(cell.buildings ?? [], mx, mz)) continue;
+        ok = true; break find;
+      }
+    }
+    if (!ok) continue;
+    const gy = Math.min(terrain.heightAt(mx, mz), g[i] + base) - 0.1, top = wy + 0.75;
+    kitDrum(sink, mx, mz, gy, gy + 0.05, 0.19, 0.19, 8, mr * 0.8, mg * 0.8, mb * 0.8, 1);
+    kitDrum(sink, mx, mz, gy + 0.05, top, 0.1, 0.075, 8, mr, mg, mb, 1);
+    // the bracket over the track, its stay, and the dropper to the wire
+    const ay = wy + 0.42, ex = cx - (mx - cx) * 0.06, ez = cz - (mz - cz) * 0.06;
+    kitBar(sink, mx, ay, mz, ex, ay, ez, 0.045, mr, mg, mb);
+    kitBar(sink, mx, top - 0.05, mz, mx + (ex - mx) * 0.6, ay + 0.03, mz + (ez - mz) * 0.6, 0.025, mr, mg, mb);
+    kitBar(sink, cx, ay, cz, cx, wy + 0.03, cz, 0.02, mr, mg, mb);
+  }
+}
+
 // ---- buildings ----
 
 // ---- buildings ----
@@ -3224,6 +3393,19 @@ function ringFacade(sink, ring, isHole, P, edgeBase = 0) {
     const cols = Math.max(1, Math.round(L / WIN_W)), bayT = 1 / cols;
     const role = isHole ? 0 : P.roles[i];
     const edge = edgeBase + i;
+    // A party wall (js/partywalls.js): the blank firewall over a lower house,
+    // one plain quad from foot to coping. It is built even behind a taller
+    // neighbour: each house stands on its own footprint's ground, so on a
+    // slope a "taller" neighbour downhill can still top out lower, and a
+    // skipped wall was a see-through hole into the house (Mala Strana and
+    // Hradcany, measured). Two triangles is all the cull ever saved.
+    if (role === PARTY_ROLE) {
+      const yT = P.top + P.parapet;
+      sink.wallLit(ax, az, bx, bz, P.y0, yT, fx, fz, PIN_U, PIN_V, PIN_U, PIN_V,
+        P.wr * ao(P.y0), P.wg * ao(P.y0), P.wb * ao(P.y0), P.wr, P.wg, P.wb,
+        LIT_PIN, LIT_PIN, LIT_PIN);
+      continue;
+    }
     // v5: the street door. Its span is skipped on the ground storey and a
     // header emitted over it, so the facade grows a REAL opening at exactly
     // the place interiors.js told pieces.js to leave a gap in the lining.
@@ -3422,10 +3604,18 @@ export function buildingWallHex(f) {
   const pal = TYPO_WALLS[typ] ?? BUILDING_PALETTES[f.t] ?? BUILDING_PALETTES.default;
   // ...then what the wall is MADE of where a mapper wrote it down (the tile's
   // `bm`: brick, concrete, glass, wood, stone, metal), and only then the palette.
+  // In Prague the old houses wear Prague's pastels (praguezone.js), and keep
+  // their saturation: the jitter's greying is what made the city read beige.
+  const prague = !f.c && praguePlaster(typ, !!f.r && f.r !== 'flat') && praguePlace(f);
+  const pal2 = prague ? PRAGUE_WALLS : pal;
+  // (the sections of one panel slab share one colour: js/partywalls.js names
+  // the slab, and its name is what the pick and the jitter are hashed from)
+  const cid = typ === 'panel' && f._slab ? f._slab : f._id;
   const hex = f.c ? parseInt(f.c.slice(1), 16)
-    : wallTone(f, rnd(f._id, 0)) ?? pal[Math.floor(rnd(f._id, 0) * pal.length)];
+    : wallTone(f, rnd(cid, 0)) ?? pal2[Math.floor(rnd(cid, 0) * pal2.length)];
   _c.setHex(hex);
-  if (!f.n) _c.offsetHSL((rnd(f._id, 1) - 0.5) * 0.02, -0.06 * rnd(f._id, 2), (rnd(f._id, 3) - 0.5) * 0.07);
+  if (!f.n) _c.offsetHSL((rnd(cid, 1) - 0.5) * 0.02, prague ? 0 : -0.06 * rnd(cid, 2),
+    (rnd(cid, 3) - 0.5) * 0.07);
   return (f._wallHex = _c.getHex());
 }
 
@@ -3694,6 +3884,13 @@ function brandSignage(f, y0, top, brand, cell, trim, sign, marks, sH = 0, over =
   markWall(mk, W0[0], W0[1], W1[0], W1[1], panelY - hm / 2, panelY + hm / 2, fx, fz);
 }
 
+// The ear clipper roofs.js needs for a courtyard roof's top (it is three-free
+// and cannot cut a polygon with holes itself). Index triples into
+// outer.concat(...holes), the convention THREE.ShapeUtils already uses.
+const _v2 = (r) => r.map(([x, z]) => new THREE.Vector2(x, z));
+const roofTri = (outer, holes) => THREE.ShapeUtils.triangulateShape(_v2(outer), holes.map(_v2));
+const ROOF_FULL = { tri: roofTri }, ROOF_BARE = { bare: true, tri: roofTri };
+
 function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain, lite = false) {
   if (!f.o || f.o.length < 3) return;
   // WHERE THE BUILDING STANDS. On flat ground this was zero and there was
@@ -3830,7 +4027,7 @@ function buildingInto(f, geos, sink, facades, cell, trim, sign, marks, terrain, 
   // block, and the furniture standing on it. The same call builds the near
   // shell's roof (roofGeometry below), so the two tiers cannot disagree.
   const covered = roofInto(sink, f, typ, roof, top, [wr, wg, wb], sp.storeys,
-    lite ? { bare: true } : null);
+    lite ? ROOF_BARE : ROOF_FULL);
   if (facades) {
     // the deck: only where no pitched roof covers it (a ridge closes its own
     // ends, so the cap underneath was 120 000 triangles a tile nobody could see)
@@ -3863,7 +4060,7 @@ export function roofGeometry(f, topY, wallHex) {
   _c.setHex(wallHex ?? buildingWallHex(f));
   const sink = new BuildingSink();             // a roof is a building, not ground
   roofInto(sink, f, typ, roof, topY, [_c.r, _c.g, _c.b], storeyPlan(f, use).storeys,
-    { soffit: true });
+    { soffit: true, tri: roofTri });
   return sink.geo();
 }
 // the cap roof lives in roofs.js now; kept importable from here
@@ -4023,6 +4220,10 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
     buildingInto(f, bGeos, bSink, facades, cell, trim, sign, marks, mats.terrain,
       !!mats.shellLod);
   }
+  // the landmarks with no footprint of their own (a monument, Charles Bridge):
+  // whatever pieces of them this chunk owns
+  for (const e of landmarkExtras(cx, cz, CHUNK))
+    (lmBatch ??= new LandmarkBatch()).extra(e, { key, cx, cz, roads: cell.roads, terrain: mats.terrain ?? null, chunkOf: chunkKey });
   const pg = bSink.geo();
   if (pg) bGeos.push(pg);
   const lmGeo = lmBatch?.geo() ?? null;
@@ -4814,6 +5015,18 @@ const BARRIER_SPEC = {
   jersey:    { h: 0.9, col: 0xb4b0a6, post: null,     step: 0 },
   handrail:  { h: 1.0, col: 0x9298a0, post: 0x6f757b, step: 2.0 },
 };
+// Bottom and top of a retaining wall at (x, z), its line's normal (nx, nz):
+// the ground 1.5 m either side decides. A real step (over 0.4 m) gets the
+// wall from the low side up to 0.9 m over the high side (a parapet); on level
+// ground the tagged height stands, capped 1.4 m over the higher side.
+const RETAIN_PROBE = 1.5;
+function retainSpan(terrain, x, z, nx, nz, H, g) {
+  const a = terrain.heightAt(x + nx * RETAIN_PROBE, z + nz * RETAIN_PROBE);
+  const b = terrain.heightAt(x - nx * RETAIN_PROBE, z - nz * RETAIN_PROBE);
+  const lo = Math.min(a, b, g), hi = Math.max(a, b);
+  if (hi - lo >= 0.4) return [lo - 0.1, hi + 0.9];
+  return [g - 0.1, Math.min(g - 0.1 + H, hi + 1.4)];
+}
 function barrierInto(sink, f, terrain) {
   const spec = BARRIER_SPEC[f.k];
   if (!spec || !f.p || f.p.length < 2 || !terrain) return;
@@ -4834,17 +5047,27 @@ function barrierInto(sink, f, terrain) {
       const t0 = k / n, t1 = (k + 1) / n;
       const x0 = ax + (bx - ax) * t0, z0 = az + (bz - az) * t0;
       const x1 = ax + (bx - ax) * t1, z1 = az + (bz - az) * t1;
-      const g0 = terrain.heightAt(x0, z0) - 0.1, g1 = terrain.heightAt(x1, z1) - 0.1;
+      let g0 = terrain.heightAt(x0, z0) - 0.1, g1 = terrain.heightAt(x1, z1) - 0.1;
+      let h0 = g0 + H, h1 = g1 + H;
+      // A RETAINING wall holds ground up: it stands from the low side's
+      // ground to just over the high side's. Drawn standing UP from the line
+      // like a garden wall, the two h=8 quay walls under Rašínovo nábřeží
+      // towered 8 m over the street; sampled either side, they are the 5 m
+      // face of the embankment with a parapet on top.
+      if (f.k === 'retaining') {
+        [g0, h0] = retainSpan(terrain, x0, z0, -uz, ux, H, g0 + 0.1);
+        [g1, h1] = retainSpan(terrain, x1, z1, -uz, ux, H, g1 + 0.1);
+      }
       // both faces, so a fence reads from the garden as well as from the street
       for (const e of [1, -1]) {
         sink.quad(x0 + px2 * e, g0, z0 + pz2 * e, x1 + px2 * e, g1, z1 + pz2 * e,
-          x1 + px2 * e, g1 + H, z1 + pz2 * e, x0 + px2 * e, g0 + H, z0 + pz2 * e, r, g, b);
-        sink.quad(x0 + px2 * e, g0 + H, z0 + pz2 * e, x1 + px2 * e, g1 + H, z1 + pz2 * e,
+          x1 + px2 * e, h1, z1 + pz2 * e, x0 + px2 * e, h0, z0 + pz2 * e, r, g, b);
+        sink.quad(x0 + px2 * e, h0, z0 + pz2 * e, x1 + px2 * e, h1, z1 + pz2 * e,
           x1 + px2 * e, g1, z1 + pz2 * e, x0 + px2 * e, g0, z0 + pz2 * e, r, g, b);
       }
       // and a cap, so the top is not a paper edge seen from above
-      sink.quad(x0 - px2, g0 + H, z0 - pz2, x1 - px2, g1 + H, z1 - pz2,
-        x1 + px2, g1 + H, z1 + pz2, x0 + px2, g0 + H, z0 + pz2, r, g, b);
+      sink.quad(x0 - px2, h0, z0 - pz2, x1 - px2, h1, z1 - pz2,
+        x1 + px2, h1, z1 + pz2, x0 + px2, h0, z0 + pz2, r, g, b);
     }
     // posts, on the kinds that have them
     if (spec.post && spec.step) {
@@ -5142,6 +5365,9 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
   for (let m = 0; m < mapped.length; m += 2) {
     const x = mapped[m], z = mapped[m + 1];
     if (chunkKey(x, z) !== key) continue;
+    // Charles Bridge carries its own lanterns (js/landmarks-karluv.js): the
+    // tile's lamps there stood on the riverbed under the arches
+    if (inLandmark(null, x, z)) continue;
     let bd = LAMP_REACH, qx = 0, qz = 0, bh = 0, br = null, bs = 0, bex = 0, bez = 0;
     for (const r of near) {
       if ((r.w ?? 0) < 4.4) continue;
@@ -5707,6 +5933,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   const kr = _c.r, kg = _c.g, kb = _c.b;
   sink.at(SURF.dirt);                 // riverbanks and trench walls are earth
   const bankMark = sink.mark();
+  let quayRoads = null;                         // the 3x3 road list, for quay parapets
   for (const f of cell.water) {
     if (!f.o || f.o.length < 3) continue;
     // WHERE THE WATER SITS. On a flat world every surface was WATER_Y, a metre
@@ -5726,11 +5953,14 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       wet.push({ o: clip, i: iClip, wy });
       // tessellated first, then every vertex lifted onto the level field — the
       // surface is a gentle ramp down the valley instead of one flat lid
-      const surf = terrainTess(shapePoly(clip, iClip, wy, COLORS.water), 8);
+      // (finer near a Prague weir crest, so the face and its foam can show)
+      const surf = refineNearWeirs(terrainTess(shapePoly(clip, iClip, wy, COLORS.water), 8),
+        f, x0, z0, x1, z1);
       if (surf) {
         const a = surf.attributes.position.array;
         for (let i = 0; i < a.length; i += 3) a[i + 1] = wyAt(a[i], a[i + 2]);
         surf.attributes.position.needsUpdate = true;
+        paintFlow(surf, f).userData.flow = true;  // downstream drift and foam for the shader
         water.push(surf);
       }
       // islands are land: give them a lid just under the green-fill layer,
@@ -5742,10 +5972,16 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     }
     // skirts ride the ORIGINAL rings — the clipped ones grew artificial edges
     // along the cell border that would dam the river with earth walls
-    skirtRing(sink, f.o, key, true, kr, kg, kb, mats.terrain, wyAt);
+    const qr = isPooled(f) ? (quayRoads ??= nearRoads(city, cell, cx, cz)) : null;
+    skirtRing(sink, f.o, key, true, kr, kg, kb, mats.terrain, wyAt, qr);
     for (const h of f.i ?? []) if (h.length >= 3)
-      skirtRing(sink, h, key, false, kr, kg, kb, mats.terrain, wyAt);
+      skirtRing(sink, h, key, false, kr, kg, kb, mats.terrain, wyAt, qr);
     yield;
+  }
+  if (mats.terrain && cell.water.some(isPooled)) {
+    sink.at(SURF.paving);
+    weirSillsInto(sink, x0, z0, x1, z1);       // the Prague weir crests, in stone
+    sink.at(SURF.dirt);
   }
   if (mats.terrain) sink.fixFrom(bankMark);   // bank skirts resolved absolutely
   const ww = wwBuckets(city).get(key);
@@ -6118,6 +6354,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     group.add(terraceMesh);
   }
   if (water.length) {
+    for (const g of water) if (!g.userData.flow) paintFlow(g, null);   // still water
     const waterMesh = new THREE.Mesh(mergeSurfaceGeometries(water), mats.water);
     waterMesh.receiveShadow = true;
     waterMesh.onBeforeRender = () => {

@@ -586,6 +586,7 @@ export class Pedestrians {
       this._ingest(t.roads); this._ingest(landmarkWalks(t.roads)); this._ingestCells(t.cells); this._ingestPois();
       this._dud.clear();           // more map, so a beat that had nowhere to go may have somewhere now
     });
+    city.onTileReleased?.((t) => this.releaseTile(t));
   }
 
   now() { return this.clock ? this.clock() : worldT(); }
@@ -623,6 +624,64 @@ export class Pedestrians {
       this._endAdd(r, 0);
       this._endAdd(r, n - 1);
     }
+  }
+
+  // A far tile geo.js deep-evicted (RELEASE_GRAPHS) takes back what the crowd
+  // built from it: its footways out of the paths, squares and junction ends,
+  // its carriageways out of the crossing index, the benches, zebras and shop
+  // fronts made from its features (by their slot-derived ids, `t.ids`), and
+  // its food places out of the evening count. Bus stops stay: they come from
+  // the pois geo.js keeps, which are never read twice. Everything the crowd
+  // walks is within PHANTOM_R of a viewer; the tile is EVICT_REACH from all.
+  releaseTile(t) {
+    const roads = t?.roads ?? [];
+    const gone = new Set(), drv = [];
+    for (const r of roads) {
+      if (r._pedDrv) { r._pedDrv = 0; drv.push(r); continue; }
+      if (r.d || !FOOT.has(r.t) || !this._seenIds.has(r._id)) continue;
+      this._seenIds.delete(r._id);
+      r._pedCum = null;            // (a cache of r.p, made again on the way back)
+      gone.add(r);
+    }
+    if (drv.length) this.drive.remove(drv);
+    if (gone.size) {
+      const keep = (a) => { let n = 0; for (let i = 0; i < a.length; i++) if (!gone.has(a[i])) a[n++] = a[i]; a.length = n; return n; };
+      keep(this.paths);
+      const cks = new Set(), eks = new Set();
+      for (const r of gone) {
+        if (r._pmx !== undefined) cks.add(Math.floor(r._pmx / PCELL) + ',' + Math.floor(r._pmz / PCELL));
+        for (const q of [r.p[0], r.p[r.p.length - 1]]) eks.add(Math.floor(q[0] / JOIN_R) + ',' + Math.floor(q[1] / JOIN_R));
+      }
+      for (const k of cks) {
+        const c = this._cells.get(k);
+        if (!c) continue;
+        const n0 = c.paths.length;
+        if (keep(c.paths) === n0) continue;
+        if (!c.paths.length) { this._cells.delete(k); continue; }
+        let len = 0;
+        for (const r of c.paths) len += r._plen;     // in arrival order, as _cellAdd summed it
+        c.len = len; c.sorted = null;
+      }
+      for (const k of eks) {
+        const b = this._ends.get(k);
+        if (!b) continue;
+        let n = 0;
+        for (let i = 0; i < b.length; i++) if (!gone.has(b[i].r)) b[n++] = b[i];
+        if (n === b.length) continue;
+        b.length = n;
+        if (!n) this._ends.delete(k);
+      }
+    }
+    if (t?.ids) this.sites.removeIds(t.ids[0], t.ids[1]);
+    for (const v of t?.venues ?? []) {
+      if (!v._pedV) continue;
+      const q = v.p[0];
+      const fk = Math.floor(q[0] / PCELL) + ',' + Math.floor(q[1] / PCELL);
+      const n = (this._food.get(fk) ?? 1) - 1;
+      if (n > 0) this._food.set(fk, n); else this._food.delete(fk);
+      this._foodRev++;
+    }
+    this._dud.clear();
   }
 
   // Benches, zebras and shop fronts, from the chunk cells a tile touched. A cell

@@ -17,7 +17,8 @@
 // menu (main.js brings initSettings up before showMenu for exactly this).
 // The #enter-overlay boot cover lives at z-40 and would blanket the menu, so
 // it is stashed (visibility) while the menu is up and restored on the pick:
-// the familiar "Přijíždíte do Pardubic…" spinner then covers the boot.
+// the familiar "Přijíždíte do Pardubic…" spinner then covers the boot
+// (main.js renames it "…do Prahy…" when the game begins in Prague).
 //
 // The nickname field is the one thing the server run REQUIRES: a nameplate
 // over a stranger's head is what turns "another citizen" into "someone".
@@ -31,6 +32,8 @@ import { confirmPanel } from './panel.js';
 import { kc } from './prices.js';
 import { MENU_CSS } from './menustyle.js';
 import { startMenuScene } from './menubg.js';
+import { START_PLACES } from './config.js';
+import { placeOf, placeById } from './startplace.js';
 
 const el = (tag, cls, html) => {
   const e = document.createElement(tag);
@@ -88,6 +91,17 @@ function saveName(n) {
   try { localStorage.setItem(NAME_KEY, n); } catch {}
 }
 
+// The city the game begins in (the Pardubice / Praha pill), remembered like
+// the name. Only a fresh game reads it: a save starts in its own city unless
+// the player taps the other one.
+export const START_KEY = 'atc-start';
+function loadStart() {
+  try { return placeById(localStorage.getItem(START_KEY))?.id ?? null; } catch { return null; }
+}
+function saveStart(id) {
+  try { localStorage.setItem(START_KEY, id); } catch {}
+}
+
 // The stylesheet lives in js/menustyle.js and the painted town behind the
 // menu in js/menubg.js; this file keeps the behaviour.
 
@@ -119,9 +133,10 @@ const NOTE_IDLE = 'Uvidí ji ostatní hráči · na server bez ní nelze';
 const NOTE_MISS = 'Nejdřív si zvolte přezdívku';
 
 /**
- * showMenu() → Promise<{ mode: 'single' | 'server', name: string }>
+ * showMenu() → Promise<{ mode: 'single' | 'server', name: string, start: string }>
  * `name` is already sanitized and is '' only when the player went single
- * player without typing one. Builds the menu, polls the server health while
+ * player without typing one. `start` is the START_PLACES id the pill shows
+ * (js/startplace.js startPoint turns it and the save into a spawn point). Builds the menu, polls the server health while
  * it's open, resolves on the player's pick and removes itself (restoring the
  * boot spinner underneath).
  */
@@ -194,6 +209,11 @@ export function showMenu() {
     // asks first, because it throws that save away. The save is the local
     // player's in either mode, so the multiplayer button continues it too.
     const store = browserStore();
+    // the save's own city is the default: "Pokračovat" continues where you
+    // were. Without a save, the city picked last time.
+    const sum0 = store.summary();
+    const savedAt = sum0?.pos ? placeOf(sum0.pos.x, sum0.pos.z).id : null;
+    let start = savedAt ?? loadStart() ?? START_PLACES[0].id;
     const single = el('button', 'atc-menu-btn primary');
     const fresh = el('button', 'atc-menu-new', 'Nová hra');
     fresh.type = 'button';
@@ -203,12 +223,40 @@ export function showMenu() {
       // built from text nodes: the summary is numbers, but it came out of
       // localStorage and nothing from there goes through innerHTML
       single.append(sum ? '▶ Pokračovat' : '▶ Hrát');
+      // a save in the OTHER city than the pill shows keeps its career but
+      // starts on this city's square, and the line says so
+      const here = sum?.pos ? placeOf(sum.pos.x, sum.pos.z).id : null;
+      const move = sum && here && here !== start ? ' · nový start ' + placeById(start).at : '';
       single.appendChild(el('small', '', undefined)).textContent = sum
         ? kc(sum.money) + ' · odehráno ' + fmtPlayed(sum.played)
-          + (sum.jobs ? ' · zakázek ' + sum.jobs : '')
+          + (sum.jobs ? ' · zakázek ' + sum.jobs : '') + move
         : 'sám ve městě';
       fresh.style.display = sum ? '' : 'none';
     };
+    // Pardubice | Praha: a two-option radio group as one pill
+    const place = el('div', 'atc-place');
+    place.appendChild(el('span', 'atc-place-label', 'Začít'));
+    const pill = el('div', 'atc-place-pill');
+    pill.setAttribute('role', 'radiogroup');
+    pill.setAttribute('aria-label', 'Kde začít');
+    const opts = START_PLACES.map((p) => {
+      const b = el('button', 'atc-place-opt');
+      b.type = 'button';
+      b.textContent = p.name;
+      b.setAttribute('role', 'radio');
+      b.addEventListener('click', () => {
+        if (closed) return;
+        start = p.id;
+        saveStart(start);
+        paintPlace();
+        paintSingle();
+      });
+      pill.appendChild(b);
+      return b;
+    });
+    const paintPlace = () => opts.forEach((b, i) => b.setAttribute('aria-checked', String(START_PLACES[i].id === start)));
+    place.appendChild(pill);
+    paintPlace();
     paintSingle();
     fresh.addEventListener('click', async () => {
       const yes = await confirmPanel({ title: 'NOVÁ HRA',
@@ -221,7 +269,7 @@ export function showMenu() {
     const multi = el('button', 'atc-menu-btn',
       '🌐 Multiplayer (server)<small class="atc-mp-status">hledám server…</small>');
     multi.disabled = true;
-    card.append(single, fresh, multi);
+    card.append(single, place, fresh, multi);
     inner.appendChild(card);
     overlay.appendChild(inner);
 
@@ -300,7 +348,7 @@ export function showMenu() {
       if (cover) cover.style.visibility = coverVis;   // spinner covers the boot
       overlay.classList.add('atc-menu-out');        // the town rushes towards you
       setTimeout(() => { stopScene(); overlay.remove(); }, 900);
-      resolve({ mode, name: sanitizeName(nameIn.value) });
+      resolve({ mode, name: sanitizeName(nameIn.value), start });
     };
     // single player never blocks on a name, you are alone, but if one is
     // typed it still rides along, so there is only ever one identity

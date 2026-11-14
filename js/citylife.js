@@ -18,6 +18,11 @@ import { SITE } from './crowdsites.js';
 import { TransitDress } from './transitdress.js';
 import { StopNames } from './stopnames.js';
 import { TrolleyMasts } from './trolleymasts.js';
+import { Trams } from './trams.js';
+import { TramDraw } from './tramdraw.js';
+import { nightKOf } from './sky.js';
+import { tramGround } from './tramground.js';
+import { TramStops } from './tramstops.js';
 
 /**
  * Tie the crowd to the traffic. Every argument is something main.js already
@@ -62,10 +67,29 @@ export function wireCityLife({ city, traffic, peds, vehicles = null, world = nul
     ? new StopNames({ scene: vehicles.scene, city, nearEdges: buses.real._near,
       standY: world?.walkY ? (x, z) => world.walkY(x, z) : null })
     : null;
+  // Prague's trams on their rails (js/trams.js): the route files reach them
+  // through the real lines' fetcher, the traffic and the crowd give way to them
+  const ground = tramGround(city, world?.terrain ?? null, world?.walkY ? (x, z) => world.walkY(x, z) : null);
+  const trams = buses ? new Trams({
+    draw: (vehicles?.scene?.add && typeof document !== 'undefined') ? new TramDraw(vehicles.scene) : null,
+    groundY: ground.groundY, loadedAt: ground.loadedAt,
+    traffic, clock: () => worldT(), nightK: (t01) => nightKOf(t01 ?? 0.5),
+  }) : null;
+  if (trams) buses.real.onTramRoute = (file, r) => trams.addRoute(file, r);
+  if (trams && peds?.roadBusy) {
+    const busy = peds.roadBusy;
+    peds.roadBusy = (cx, cz, hw, need, stops) => busy(cx, cz, hw, need, stops) || trams.threatens(cx, cz, hw);
+  }
+  // …and their stops wear a post with the tram plate and the name
+  const tramStops = trams?.draw ? new TramStops({ scene: vehicles.scene, trams,
+    standY: world?.walkY ? (x, z) => world.walkY(x, z) : null }) : null;
+  if (trams && typeof window !== 'undefined') window.trams = trams;     // for checks in the console
   return {
-    buses, kerb, dress, names, masts,
+    buses, kerb, dress, names, masts, trams,
     update(dt, pos, t01) {
       buses?.update(dt, pos);
+      trams?.update(dt, pos, t01);
+      tramStops?.update(dt, pos);
       masts?.update(dt, pos);
       dress?.update(dt, t01);
       names?.update(dt, pos);

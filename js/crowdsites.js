@@ -81,7 +81,8 @@ export function facingOf(cell, x, z, fallback = 0) {
 export class SiteIndex {
   constructor() {
     this.m = new Map();
-    this._seen = new Set();
+    this._seen = new Map();        // "kind:id" -> the site (a Map, so removeIds can find it)
+    this._ids = new WeakMap();     // site -> the feature _id it was made from
     this.count = 0;
   }
 
@@ -90,16 +91,37 @@ export class SiteIndex {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
     const sid = kind + ':' + (id ?? (q10(x) + ',' + q10(z)));
     if (this._seen.has(sid)) return null;
-    this._seen.add(sid);
     // the identity every hash about this site is drawn from: its kind and its
     // 10 cm position, never its arrival order
     const s = { kind, x, z, sid: hash32(kind, q10(x), q10(z)), ...extra };
+    this._seen.set(sid, s);
+    if (id != null) this._ids.set(s, id);
     const k = key(Math.floor(x / G), Math.floor(z / G));
     let a = this.m.get(k);
     if (!a) this.m.set(k, a = []);
     a.push(s);
     this.count++;
     return s;
+  }
+
+  /** Forget every site made from a feature with lo < _id <= hi (one released
+   *  tile's id block, geo.js IDS_PER_TILE). Sites without an id (bus stops,
+   *  from the pois geo.js keeps) stay. Returns how many went. */
+  removeIds(lo, hi) {
+    let n = 0;
+    for (const [sk, s] of this._seen) {
+      const id = this._ids.get(s);
+      if (!(id > lo && id <= hi)) continue;
+      this._seen.delete(sk);
+      const k = key(Math.floor(s.x / G), Math.floor(s.z / G));
+      const a = this.m.get(k);
+      const i = a ? a.indexOf(s) : -1;
+      if (i >= 0) a.splice(i, 1);
+      if (a && !a.length) this.m.delete(k);
+      this.count--;
+      n++;
+    }
+    return n;
   }
 
   /** Every site within r of (x, z), into `out` (unsorted). */
@@ -175,6 +197,32 @@ export class RoadIndex {
         if (!a) this.m.set(k, a = []);
         a.push(seg);
       }
+    }
+  }
+
+  /** Take these ways out again (a tile geo.js released). */
+  remove(roads) {
+    const gone = new Set(roads);
+    if (!gone.size) return;
+    // the cells add() filed each segment in, and no others
+    const keys = new Set();
+    for (const r of gone) {
+      const p = r.p, m = (r.w ?? 3) / 2 + 1;
+      for (let i = 0; i < p.length - 1; i++) {
+        const ax = p[i][0], az = p[i][1], bx = p[i + 1][0], bz = p[i + 1][1];
+        const i0 = Math.floor((Math.min(ax, bx) - m) / G), i1 = Math.floor((Math.max(ax, bx) + m) / G);
+        const j0 = Math.floor((Math.min(az, bz) - m) / G), j1 = Math.floor((Math.max(az, bz) + m) / G);
+        for (let gi = i0; gi <= i1; gi++) for (let gj = j0; gj <= j1; gj++) keys.add(key(gi, gj));
+      }
+    }
+    for (const k of keys) {
+      const a = this.m.get(k);
+      if (!a) continue;
+      let n = 0;
+      for (let i = 0; i < a.length; i++) if (!gone.has(a[i].r)) a[n++] = a[i];
+      if (n === a.length) continue;
+      a.length = n;
+      if (!n) this.m.delete(k);
     }
   }
 

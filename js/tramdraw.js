@@ -1,0 +1,145 @@
+// ---- tramdraw.js: the trams on screen -------------------------------------------
+// js/trams.js decides where every tram's nose is (a pure function of the
+// timetable, js/tramlines.js); this module stands the bodies there. Each
+// section rides on its two bogies, so a 15T's three sections follow the rail
+// through a curve and the joints between them never open, and every section of
+// every tram is one instance of its type's InstancedMesh (js/trammesh.js):
+// four section types, three materials, twelve draws for the whole fleet in
+// sight, plus one for all their displays (js/tramsign.js).
+//
+// Night: the glass is lit from inside (a warm emissive), the head and tail
+// lamps are turned up. No per-frame allocation: every matrix and point is
+// scratch reused.
+
+import * as THREE from 'three';
+import { TRAM_BODY, consistOf } from './trambody.js';
+import { sectionGeometry, signFrames, SECTION_TYPES, MAT_PAINT, MAT_GLASS, MAT_LAMP } from './trammesh.js';
+import { TramSigns, SIGN_NUM_U } from './tramsign.js';
+import { pathAtExt } from './tramlines.js';
+
+const MAX_PER_TYPE = 160;
+const _m = new THREE.Matrix4(), _sm = new THREE.Matrix4();
+const _x = new THREE.Vector3(), _y = new THREE.Vector3(), _z = new THREE.Vector3();
+const _q = new THREE.Quaternion(), _e = new THREE.Euler();
+const _at = { x: 0, z: 0, dx: 0, dz: 0 };
+const UP = new THREE.Vector3(0, 1, 0);
+const TYPE_INDEX = { A: 0, B: 1, C: 2, T: 3 };
+const PARTS = ['front', 'side', 'rear'];      // (hoisted: pose() runs per section per frame)
+
+export class TramDraw {
+  constructor(scene) {
+    this.scene = scene;
+    this.paint = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0.12, envMapIntensity: 0.9 });
+    this.glass = new THREE.MeshStandardMaterial({ color: 0x1b2329, roughness: 0.06, metalness: 0.75, envMapIntensity: 1.6,
+      emissive: 0xffc982, emissiveIntensity: 0 });
+    this.lamp = new THREE.MeshBasicMaterial({ vertexColors: true });
+    const mats = [];
+    mats[MAT_PAINT] = this.paint; mats[MAT_GLASS] = this.glass; mats[MAT_LAMP] = this.lamp;
+    this.meshes = SECTION_TYPES.map((t) => {
+      const im = new THREE.InstancedMesh(sectionGeometry(t), mats, MAX_PER_TYPE);
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      im.count = 0;
+      im.castShadow = true; im.receiveShadow = true;
+      im.frustumCulled = false;          // the instances are spread over a kilometre; see the header
+      im.name = 'tram-' + t;
+      scene.add(im);
+      return im;
+    });
+    this.signs = new TramSigns();
+    scene.add(this.signs.mesh);
+    // the display frames of each body, as local matrices of their section
+    this._signs = {};
+    for (const body of Object.keys(TRAM_BODY)) {
+      const f = signFrames(body), out = {};
+      for (const part of ['front', 'side', 'rear']) {
+        const s = f[part];
+        _e.set(s.rx, s.ry, 0, 'YXZ');
+        _q.setFromEuler(_e);
+        out[part] = { sec: s.sec, m: new THREE.Matrix4().compose(new THREE.Vector3(s.x, s.y, s.z), _q.clone(), new THREE.Vector3(s.w, s.h, 1)) };
+      }
+      this._signs[body] = out;
+    }
+    this._n = new Int32Array(SECTION_TYPES.length);
+    // the bogie points of the consist being posed: x, y, z per bogie
+    this._bog = new Float32Array(3 * 8);
+    this.visible = true;
+  }
+
+  begin() {
+    this._n.fill(0);
+    this.signs.begin();
+  }
+
+  /**
+   * Stand one tram: `s` the arc of its nose on `line`, `yAt(line, a)` the rail
+   * panel height at arc a. Writes every section and display; returns the
+   * number of sections drawn.
+   */
+  pose(line, kind, s, yAt, row) {
+    const P = line.P, bog = this._bog;
+    let drawn = 0;
+    for (const car of consistOf(kind)) {
+      const B = TRAM_BODY[car.body];
+      const nb = B.bogies.length;
+      for (let b = 0; b < nb; b++) {
+        const a = s - car.off - B.bogies[b];
+        pathAtExt(P, a, _at);
+        bog[b * 3] = _at.x; bog[b * 3 + 1] = yAt(line, a); bog[b * 3 + 2] = _at.z;
+      }
+      const signs = this._signs[car.body];
+      for (let k = 0; k < B.sections.length; k++) {
+        const sec = B.sections[k];
+        const ti = TYPE_INDEX[sec.type], im = this.meshes[ti];
+        if (this._n[ti] >= MAX_PER_TYPE) continue;
+        const i0 = sec.b0 * 3, i1 = sec.b1 * 3;
+        // forward is from the rear bogie to the front one; local +z points back
+        _z.set(bog[i1] - bog[i0], bog[i1 + 1] - bog[i0 + 1], bog[i1 + 2] - bog[i0 + 2]);
+        if (_z.lengthSq() < 1e-8) _z.set(0, 0, 1);
+        _z.normalize();
+        _x.crossVectors(UP, _z).normalize();
+        _y.crossVectors(_z, _x);
+        _m.makeBasis(_x, _y, _z);
+        _m.setPosition((bog[i0] + bog[i1]) / 2, (bog[i0 + 1] + bog[i1 + 1]) / 2, (bog[i0 + 2] + bog[i1 + 2]) / 2);
+        _m.toArray(im.instanceMatrix.array, this._n[ti] * 16);
+        this._n[ti]++;
+        drawn++;
+        // the displays this section carries
+        if (row >= 0) {
+          for (const part of PARTS) {
+            const sg = signs[part];
+            if (sg.sec !== k) continue;
+            // the tail display of the leading car of a pair is against the coupler: not shown
+            if (part === 'rear' && car.off === 0 && consistOf(kind).length > 1) continue;
+            if (part !== 'rear' && car.off > 0) continue;
+            _sm.multiplyMatrices(_m, sg.m);
+            this.signs.push(_sm, row, part === 'rear' ? SIGN_NUM_U : 1);
+          }
+        }
+      }
+    }
+    return drawn;
+  }
+
+  end(nightK) {
+    for (let i = 0; i < this.meshes.length; i++) {
+      const im = this.meshes[i];
+      im.count = this.visible ? this._n[i] : 0;
+      im.instanceMatrix.needsUpdate = true;
+    }
+    this.signs.end(nightK);
+    if (!this.visible) this.signs.mesh.count = 0;
+    // lit from inside after dusk; the lamps burn by day too (dipped), brighter at night
+    const k = nightK < 0 ? 0 : nightK > 1 ? 1 : nightK;
+    // (the night exposure opens nearly three times, js/sky.js: a little goes a
+    // long way. At 0.06 the glow clipped to the cream of a T3's body and its
+    // windows vanished into the paint; at 0.03 they stay warm amber glass)
+    this.glass.emissiveIntensity = 0.03 * k;
+    const l = 0.75 + 1.6 * k;
+    if (Math.abs(this.lamp.color.r - l) > 0.01) this.lamp.color.setScalar(l);
+  }
+
+  dispose() {
+    for (const im of this.meshes) { this.scene.remove(im); im.geometry.dispose(); }
+    this.scene.remove(this.signs.mesh);
+  }
+}

@@ -20,7 +20,7 @@
 import { SURF } from './surfaces.js';
 import { at, box, part, drum, post, bar } from './propkit.js';
 import { AD_COUNT } from './signfaces.js';
-import { inLandmark } from './landmarks.js';
+import { inLandmark, landmarkProp } from './landmarks.js';
 
 // Colours are held as hex and unpacked through the caller's THREE.Color
 // scratch, so this module needs no three.js import of its own.
@@ -336,6 +336,7 @@ export function furnitureInto(sink, cell, key, terrain, col, rndAt, chunkOf, dec
     const draw = PROPS[f.k];
     if (!draw) continue;
     if (inLandmark(cell.buildings, x, z)) continue;   // it would stand in the gate's passage
+    if (landmarkProp(x, z)) continue;                 // a landmark built there without a footprint
     const y = terrain.heightAt(x, z);
     draw(sink, x, y, z, propFacing(cell, f), col, deco, (i) => rndAt(x, z, i));
   }

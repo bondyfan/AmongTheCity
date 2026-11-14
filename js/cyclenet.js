@@ -123,6 +123,32 @@ export class CycleNet {
     return fresh;
   }
 
+  /** Let a batch of road features go again (a tile geo.js released). Returns
+   *  the way records that left, so the caller can drop them from its cells. */
+  remove(roads) {
+    const out = [];
+    for (const r of roads ?? []) {
+      const w = this.ways.get(r);
+      if (!w) continue;
+      this.ways.delete(r);
+      if (r._id != null) this._seen.delete(r._id);
+      const p = r.p;
+      for (let i = 0; i < w.n; i++) {
+        const key = nodeKey(p[i][0], p[i][1]);
+        const a = this.nodes.get(key);
+        if (!a) continue;
+        let k = 0;
+        for (let j = 0; j < a.length; j += 2) if (a[j] !== w) { a[k++] = a[j]; a[k++] = a[j + 1]; }
+        a.length = k;
+        if (!k) this.nodes.delete(key);
+      }
+      this.count--;
+      out.push(w);
+    }
+    if (out.length) this.rev++;
+    return out;
+  }
+
   /** May a rider travel along way `w` in direction d (+1 with its vertices, -1 against)? */
   rideable(w, d) {
     if (w.r.ow && d < 0) return false;            // one-way, for bicycles too

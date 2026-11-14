@@ -24,10 +24,13 @@
 // build, and per shell of every falling piece of debris. It is four array reads
 // and three lerps, with no allocation.
 
-import { STAMPS, stampHeight, stampsBox } from './terrainstamps.js';
+import { STAMPS, STAMP_REGIONS, stampHeight } from './terrainstamps.js';
+import { riverbedInto } from './riverbed.js';
 
 const TERRAIN_URL = (tx, tz) => `data/terrain/${tx}_${tz}.bin`;
-const STAMP_BOX = stampsBox(STAMPS);
+// one box per city's stamps (Pardubice, Prague): the hot path is one compare per box
+const REGIONS = STAMP_REGIONS;
+const REGION_N = REGIONS.length;
 const NO_DATA = -32768;
 const _crRows = new Float64Array(4);   // heightAt's scratch — it is HOT
 
@@ -99,7 +102,10 @@ export class Terrain {
           .then((ab) => {
             const want = this.n * this.n * 2;
             if (ab.byteLength < want) throw new Error(`short: ${ab.byteLength} < ${want}`);
-            this.grids.set(key, new Int16Array(ab, 0, this.n * this.n));
+            const g = new Int16Array(ab, 0, this.n * this.n);
+            // the Vltava's bed under its flat pools (js/riverbed.js)
+            riverbedInto(g, tx, tz, this.n, this.res, this.tile);
+            this.grids.set(key, g);
             this._loads = (this._loads ?? 0) + 1;
             this._pending.delete(key);
             this._nearMemo?.clear();          // a miss may now have a better answer
@@ -133,16 +139,26 @@ export class Terrain {
    */
   heightAt(x, z) {
     const h = this._gridAt(x, z);
-    // (one compare for the whole world outside the stamps' box)
-    if (!this.stamps || x < STAMP_BOX.x0 || x > STAMP_BOX.x1 || z < STAMP_BOX.z0 || z > STAMP_BOX.z1) return h;
-    return stampHeight(this.stamps, x, z, h);
+    // (one compare per city for the whole world outside the stamps' boxes)
+    if (!this.stamps) return h;
+    for (let i = 0; i < REGION_N; i++) {
+      const b = REGIONS[i].box;
+      if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue;
+      return stampHeight(REGIONS[i].stamps, x, z, h);
+    }
+    return h;
   }
 
   /** How far the stamps move the ground at (x, z): negative where they dig. 0 almost everywhere. */
   stampDelta(x, z) {
-    if (!this.stamps || x < STAMP_BOX.x0 || x > STAMP_BOX.x1 || z < STAMP_BOX.z0 || z > STAMP_BOX.z1) return 0;
-    const h = this._gridAt(x, z);
-    return stampHeight(this.stamps, x, z, h) - h;
+    if (!this.stamps) return 0;
+    for (let i = 0; i < REGION_N; i++) {
+      const b = REGIONS[i].box;
+      if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue;
+      const h = this._gridAt(x, z);
+      return stampHeight(REGIONS[i].stamps, x, z, h) - h;
+    }
+    return 0;
   }
 
   /** The height grid alone, with no stamp on it: what heightAt answered before stamps. */

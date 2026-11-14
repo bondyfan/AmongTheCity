@@ -30,6 +30,7 @@
 // pass and the stamps share a surface without knowing about each other.
 
 import { VALY, VALY_FLOOR } from './valyring.js';
+import { NAPLAVKY } from './naplavky.js';
 
 const CELL = 8;              // m, the bucket grid that finds a stamp's nearby segments
 
@@ -183,7 +184,7 @@ const CAUSEWAY = [
   // the embankment on to the gate and the passage through the rampart
   { pts: [[1561.3, -1028.4], [1546.0, -1038.0], [1532.0, -1041.4], [1516.0, -1048.0]], hw: 3.2, fall: 5 },
 ];
-export const STAMPS = [
+const PARDUBICE = [
   makeStamp({ pts: VALY, closed: true, base: VALY_FLOOR, mode: 'dig', holes: CAUSEWAY,
     prof: [[-0.001, 0, 0], [0, 0, 1], [10, 0, 1], [22, 0, 0]] }),
   makeStamp({ pts: VALY, closed: true, base: VALY_FLOOR, mode: 'set', holes: CAUSEWAY,
@@ -197,6 +198,16 @@ export const STAMPS = [
     closed: true, base: 215.8, mode: 'dig', holes: CAUSEWAY,
     prof: [[-400, 0, 1], [-0.001, 0, 1], [6, 0, 0]] }),
 ];
+// PRAGUE: the lower quays of the Vltava (js/naplavky.js)
+const PRAHA = NAPLAVKY.map(makeStamp);
+
+// Each city's stamps with their own box, so the hot path in Terrain.heightAt
+// stays one compare per region everywhere outside them (two cities, 100 km
+// apart: one shared box would cover everything between them).
+export const STAMP_REGIONS = [PARDUBICE, PRAHA].map((stamps) => ({ stamps, box: stampsBox(stamps) }));
+// every stamp, in order (the regions never overlap, so order within a region
+// is all that matters)
+export const STAMPS = [...PARDUBICE, ...PRAHA];
 
 /** Every stamp, in order, applied to the height h at (x, z). */
 export function stampHeight(stamps, x, z, h) {

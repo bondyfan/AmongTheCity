@@ -832,6 +832,10 @@ export class Ambulance {
    *             rather than conjured when a call comes in.
    *   hospital  { x, z } — pass main.js's own HOSPITAL and the duplicate below
    *             stops being a duplicate.
+   *   hospitals [{ x, z }, ...]: one per city (config.js HOSPITALS). The van
+   *             drives to the one nearest the player, re-picked every step and
+   *             on every call: every van lives within KEEP_R of the player,
+   *             and the cities are 96 km apart, so one shared target is right.
    */
   constructor(opts = {}) {
     this.traffic = opts.traffic ?? null;
@@ -842,6 +846,8 @@ export class Ambulance {
     const h = opts.hospital ?? null;
     this.hx = Number.isFinite(h?.x) ? h.x : HOSPITAL_X;
     this.hz = Number.isFinite(h?.z) ? h.z : HOSPITAL_Z;
+    this._hosps = Array.isArray(opts.hospitals)
+      ? opts.hospitals.filter((q) => Number.isFinite(q?.x) && Number.isFinite(q?.z)) : [];
 
     // The pool. Four records, allocated here, rewritten in place for ever.
     this._pool = [];
@@ -903,6 +909,7 @@ export class Ambulance {
 
     const px = Number.isFinite(ctx.x) ? ctx.x : 0;
     const pz = Number.isFinite(ctx.z) ? ctx.z : 0;
+    this._pickHospital(px, pz);
     const pcar = ctx.car ?? null;
 
     for (let i = 0; i < POOL_N; i++) {
@@ -954,6 +961,18 @@ export class Ambulance {
     }
   }
 
+  // The hospital of the city (x, z) is in: hx/hz become the nearest of
+  // opts.hospitals. Two entries, no allocation; a no-op without a list.
+  _pickHospital(x, z) {
+    const L = this._hosps;
+    if (!L.length) return;
+    let bd = Infinity;
+    for (let i = 0; i < L.length; i++) {
+      const d = dist(L[i].x - x, L[i].z - z);
+      if (d < bd) { bd = d; this.hx = L[i].x; this.hz = L[i].z; }
+    }
+  }
+
   // ------------------------------------------------------------- calls ----
 
   /**
@@ -971,6 +990,7 @@ export class Ambulance {
   call(x, z) {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
     if (!this.traffic || !this.vehicles) return false;
+    this._pickHospital(x, z);
     const t = this._now();
 
     // 1. ALREADY BEING ANSWERED. A car crash leaves five bodies inside twenty

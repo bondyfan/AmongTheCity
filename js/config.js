@@ -7,6 +7,26 @@
 // facing the hall (heading π = facing +z in this frame).
 export const SPAWN = { x: 25, z: -122, heading: Math.PI };
 export const CITY_DATA_URL = 'data/pardubice.json';
+// Where a game can begin, in menu order. The ORDER is a wire fact: a place's
+// index times FLEET_STRIDE is the first claim key of its parked fleet
+// (main.js placeFleet), so append only. `to` is the boot cover's
+// "Přijíždíte …" phrase, `at` the menu's "… v Praze". Praha: the west half of the Old Town Square, 21 m
+// clear of every wall and 47 m from the nearest drivable way (measured on
+// tile -20_-2), facing east (-π/2) at the Týn church across the square.
+export const START_PLACES = [
+  { id: 'pardubice', name: 'Pardubice', to: 'do Pardubic', at: 'v Pardubicích', ...SPAWN },
+  { id: 'praha', name: 'Praha', to: 'do Prahy', at: 'v Praze', x: -95668, z: -6192, heading: -Math.PI / 2 },
+];
+export const FLEET_STRIDE = 64;
+// Where you wake up after the death card: the nearest of these. Pardubice is
+// main.js's original forecourt (see HOSPITAL there). Praha is the Dušní side
+// of Nemocnice Na Františku, the hospital of the Old Town: picked offline with
+// the same test the Pardubice one passed, 11.7 m from the kerb of Dušní,
+// 6.7 m from the nearest wall, 5.8 m from the nearest prop, in no building.
+export const HOSPITALS = [
+  { x: 2291, z: 295, name: 'Pardubická nemocnice' },
+  { x: -95701, z: -6742, name: 'Nemocnice Na Františku' },
+];
 
 // streaming
 export const CHUNK = 120;        // meters per streaming cell

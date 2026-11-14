@@ -33,6 +33,7 @@
 import { polygonArea, distPointToSegment, pointInPolygon } from './geo.js';
 import { INTERIOR, INTERIOR_PALETTES } from './config.js';
 import { typologyOf, roofOf, facadeRows, litOf } from './typology.js';
+import { praguePlace } from './praguezone.js';
 
 const I = INTERIOR;
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -248,7 +249,7 @@ export function classify(f) {
   if (f._use) return f._use;
   const area = Math.abs(f._area ??= polygonArea(f.o));
   const lv = f.lv ?? Math.max(1, Math.round((f.h ?? 6) / 3.1));
-  let use = null;
+  let use = null, eatHouse = false;
 
   // `u` is the shop=*/amenity=* value the pipeline now carries — either off the
   // building way itself or off the OSM node standing in its footprint
@@ -273,7 +274,16 @@ export function classify(f) {
     else if (/^(parking|parking_space)$/.test(f.u)) use = 'parking';
     // the eateries, which are a use class of their own: one open volume, tills
     // along one wall, seating in front of them
-    else if (/^(fast_food|restaurant|cafe|bar|pub|food_court|ice_cream)$/.test(f.u)) use = 'restaurant';
+    // ...unless the eatery is the ground floor of a town house: a cafe under
+    // three storeys of flats is not one 15 m tall dining room (281 such
+    // pavilions in central Prague, measured). The house keeps the use its type
+    // says, or flats; `u` still opens the shopfront and signs the fascia.
+    else if (/^(fast_food|restaurant|cafe|bar|pub|food_court|ice_cream)$/.test(f.u)) {
+      const tu = TYPE_USE[f.t];
+      use = lv >= 3 || (f.h ?? 0) >= 9.5
+        ? (tu && tu !== 'garage' && tu !== 'house' && tu !== 'industrial' ? tu : 'flats') : 'restaurant';
+      if (use !== 'restaurant') eatHouse = true;
+    }
     else if (/^(office|bank|post_office)$/.test(f.u)) use = 'office';
     else if (/^(townhall|library|theatre|cinema|museum|marketplace)$/.test(f.u)) use = 'civic';
     else use = 'shop';
@@ -310,12 +320,16 @@ export function classify(f) {
   // identity stamps (see the NOVA_WALLS block above): mutate f.c only when the
   // data gave none and the building is unnamed — named landmarks keep their own
   // face, and a real OSM colour always wins over an invented one
-  if (use === 'flats' && !f.n && f.t !== 'panel' && lv >= 3 && lv <= 5
+  // (not in Prague under a surveyed pitched roof, where it painted a flat white
+  // new-build every few doors of a Gruenderzeit street, and not a town house
+  // that only lost its cafe use above)
+  if (use === 'flats' && !f.n && f.t !== 'panel' && lv >= 3 && lv <= 5 && !eatHouse
+      && !(f.r && f.r !== 'flat' && praguePlace(f))
       && rnd(f._id, 77) < 0.3) {
     f._nova = true;
     if (!f.c) f.c = NOVA_WALLS[Math.floor(rnd(f._id, 78) * NOVA_WALLS.length) % NOVA_WALLS.length];
   }
-  if (use === 'office' && !f.n && !f.c)
+  if (use === 'office' && !f.n && !f.c && !(f.r && f.r !== 'flat' && praguePlace(f)))
     f.c = OFFICE_WALLS[Math.floor(rnd(f._id, 79) * OFFICE_WALLS.length) % OFFICE_WALLS.length];
   return (f._use = use);
 }

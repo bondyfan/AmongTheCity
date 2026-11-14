@@ -132,6 +132,7 @@ export class Cyclists {
     this._ingest(city.roads);
     // (…and a trip routed before these roads were there is minted again: js/cyclistmint.js regraph)
     city.onTileLoaded?.((t) => { this._ingest(t.roads); this._dud.clear(); regraph(this._pool, t.roads); });
+    city.onTileReleased?.((t) => this.releaseTile(t));
   }
 
   now() { return this.clock ? this.clock() : worldT(); }
@@ -391,6 +392,34 @@ export class Cyclists {
   dispose() {
     this.clear();
     this.fleet.dispose();
+  }
+
+  // A far tile geo.js deep-evicted (RELEASE_GRAPHS): its ways leave the net,
+  // the squares and, without a crowd, our own carriageway index. Every rider
+  // and schedule is within PHANTOM_R of a viewer, far from them; one routed
+  // across that tile still holds its plan, and the sweep retires it.
+  releaseTile(t) {
+    const roads = t?.roads;
+    if (!roads?.length) return;
+    const gone = new Set(this.net.remove(roads));
+    if (this._ownDrive) {
+      const drv = [];
+      for (const r of roads) if (this._drv.has(r)) { this._drv.delete(r); drv.push(r); }
+      if (drv.length) this.drive.remove?.(drv);
+    }
+    if (!gone.size) return;
+    const keys = new Set();
+    for (const w of gone) keys.add(Math.floor(w.mx / PCELL) + ',' + Math.floor(w.mz / PCELL));
+    for (const k of keys) {
+      const c = this._cells.get(k);
+      if (!c) continue;
+      const n0 = c.ways.length;
+      c.ways = c.ways.filter((w) => !gone.has(w));
+      if (c.ways.length === n0) continue;
+      c.sorted = null;
+      if (!c.ways.length) { this._cells.delete(k); this._order = null; }
+    }
+    this._dud.clear();
   }
 
   // ------------------------------------------------------------ snapshot ----

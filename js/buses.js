@@ -68,6 +68,7 @@ export class Buses {
     this._t = 0;
     this._dirty = true;
     city.onTileLoaded?.(() => { this._dirty = true; this._gen++; });
+    city.onTileReleased?.((t) => this.releaseTile(t));
     // the real network (js/realtransit.js); a route file arriving is, for a
     // region that was waiting for it, what a tile arriving is
     this.real = new RealLines(city, traffic);
@@ -357,5 +358,35 @@ export class Buses {
         if (!this.traffic.hasSlot(key)) this.traffic.addFixed(this._spec(line, k));
       }
     }
+  }
+
+  // A far tile geo.js deep-evicted (RELEASE_GRAPHS): every region whose box
+  // reaches into it is forgotten with its lines, which were drawn over edges
+  // the traffic graph no longer has. The region is derived again once its
+  // tiles are all back, exactly as on a client that never had it. Its lines
+  // run no trip near anyone: their stops are inside a box EVICT_REACH from
+  // every viewer.
+  releaseTile(t) {
+    const rect = t?.rect;
+    if (!rect) return;
+    const out = new Set();
+    for (const [key, lines] of this._regions) {
+      const i = key.indexOf(',');
+      const rx = +key.slice(0, i), rz = +key.slice(i + 1);
+      const x0 = rx * REGION - HALO, x1 = (rx + 1) * REGION + HALO;
+      const z0 = rz * REGION - HALO, z1 = (rz + 1) * REGION + HALO;
+      if (x1 <= rect[0] || x0 >= rect[2] || z1 <= rect[1] || z0 >= rect[3]) continue;
+      this._regions.delete(key);
+      for (const l of lines ?? []) out.add(l);
+    }
+    if (!out.size) return;
+    const keep = (a, f) => { let n = 0; for (let i = 0; i < a.length; i++) if (f(a[i])) a[n++] = a[i]; a.length = n; return n; };
+    keep(this.lines, (l) => !out.has(l));
+    for (const [k, l] of this._byStop) if (!keep(l, (e) => !out.has(e.line))) this._byStop.delete(k);
+    for (const [k, l] of this._hops) if (!keep(l, (o) => !out.has(o))) this._hops.delete(k);
+    const ids = new Set();
+    for (const l of out) ids.add(String(l.id));
+    for (const k of [...this._times.keys()]) if (ids.has(k.slice(0, k.indexOf(':')))) this._times.delete(k);
+    this._dirty = true; this._gen++;
   }
 }

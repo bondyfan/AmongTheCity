@@ -1504,3 +1504,52 @@ slide, settle flat) plus walls and the bonnet of the car it left, then lie
 1.6 s and get up. HP go through `vitals.damage` from two curves (glass, and each
 ground or wall arrival). The abandoned car's hull is excluded from the body's
 collisions (main.js carHulls), or the body is "hit" by the seat it left.
+
+# v15 contract: Prague
+
+The ask: *"lets go na kolo 7"* on the plan for Prague: trams on the real lines,
+hand-built landmarks, the Vltava with its quays, tenement blocks, memory for
+the density, and a start in Prague. Six packages were built in parallel copies
+and merged; these are the rules they agreed on.
+
+* **Landmark regions** (`js/landmarks.js`). Every Prague entry carries
+  `region: 'praha'` (none means Pardubice) and the prefilter is one box per
+  region, also for `landmarkClear` and the walks. Optional fields: `lifted`
+  (a gate over its passage, matched although the tile lifts it), `kind` (must
+  equal `f.t`), `hide` (takes generic footprints out, builds nothing, solids
+  `[]`), `reach` (how far model and solids may stand beyond the footprint box,
+  checked by the tests). Footprint-less pieces (Charles Bridge, the Hus
+  monument) are `EXTRAS`: each piece is built only by the chunk holding its
+  anchor point, so a piece exists once whatever order tiles arrive in. The old
+  town lives in `js/landmarks-praha.js` and its builders, the castle and the
+  wide set in `js/landmarks-hrad.js`. K surface kinds stayed untouched (11 was
+  reserved for the old town, 12 for the wide set; neither was needed).
+* **Far skyline** (`js/landmarksfar.js`, main thread). Low-poly silhouettes of
+  the castle, St Vitus, Žižkov, Petřín, the museum dome, Vyšehrad, Týn and the
+  Old Town Hall tower, drawn beyond the streamed ring up to about 4 km and
+  cross-faded with the near models. Only the silhouettes bend the haze (after
+  220 m it counts 6 %), streamed chunks and Pardubice keep their fog.
+* **One water level** (`js/riverpools.js`, worker safe). The Prague Vltava is
+  four flat pools held by weir lines with a 7 m ramp: A 187.1, B 185.4,
+  C 184.5, D 180.3. Every consumer asks `riverLevelAt` / `poolLevelAt`: water
+  mesh, quay walls, náplavky stamps, bridge supports, the riverbed. Anything
+  that builds over the river (Charles Bridge piers go to y 182) must not depend
+  on a level of its own. The Labe is unchanged.
+* **Trams** (`js/trams.js`, `js/tramlines.js`). A tram's position is a pure
+  function of route id, trip number and the shared clock: no state that two
+  co-op clients could disagree on, no Math.random. A tram yields to a car on its
+  rail only on this screen; the shared timetable is never changed.
+  `traffic.railCross` makes cars wait short of a crossing a tram is due at.
+* **Party walls** (`js/partywalls.js`). `stampPartyWalls` writes `f._pw` per
+  tile when it is indexed (same tile only, plain data, carried to the worker);
+  `edgeRoles` reports them as `PARTY_ROLE` and a party edge is always drawn as
+  one blank firewall quad (skipping it opened holes on slopes).
+* **Start places and the release stage.** `config.js START_PLACES` (Pardubice,
+  Praha) decides where a game boots and which tiles it asks for first; each
+  place has its own parked fleet with claim keys `place * FLEET_STRIDE + i`, so
+  old Pardubice saves keep keys 0 and up. Death respawns at the nearest of
+  `HOSPITALS`. With `geo.js RELEASE_GRAPHS` on, a deep-evicted tile is released
+  from the traffic, walker, cycle and route-planner graphs, one graph per frame,
+  and its ways come back when it returns; tests/tile-release.test.mjs pins that
+  release then return builds the same graphs as a fresh load. Geo's own roads,
+  pois and signals of far tiles are still kept.

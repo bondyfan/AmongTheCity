@@ -1402,6 +1402,9 @@ export class Traffic {
     // a car LAG its schedule; the walkers themselves are shared, so two clients
     // looking at the same zebra hold the same queue.
     this.walkers = null;
+    // level crossings a tram is about to take (js/tramyield.js): records shaped
+    // like a walker crosser plus `clr`, the metres short of the rail to stop
+    this.railCross = null;
     // (road) -> which side of it has cars parked at the kerb (streets.js `e`,
     // +1 / -1) or 0, and how far into the carriageway they reach. Wired by
     // js/citylife.js; without it nobody parks at a kerb and nothing changes.
@@ -1427,8 +1430,12 @@ export class Traffic {
     this._nodes = new Map();        // keyOf(x,z) → { x, z, out: [] }
     this._usage = new Map();        // keyOf → {n, last}: PERSISTENT so later tiles
                                     // can still detect junctions against earlier ways
+    this._ukeys = new WeakMap();    // way → the points it counted in _usage (releaseTile)
     this._junctions = [];           // traffic-light controllers (grow with tiles)
     this._jgrid = new Buckets();    // …indexed by position (see Buckets above)
+    this._sigLive = [];             // …those in render range (_cullSignals)
+    this._sigNext = [];             // (its double buffer, no per-cull allocation)
+    this._sigMark = 0;
     this._egrid = new Buckets();    // every edge, in every cell its polyline crosses
     this._cells = new Map();        // CELL key → { ci, cj, edges, len, sorted } — the
                                     // shared population lives on this, not on _near
@@ -1458,9 +1465,13 @@ export class Traffic {
     // optional chaining because bare test fixtures pass {roads:[…]} without it
     this.addTile({ roads: city.roads ?? [], signals: city.signals ?? [] });
     city.onTileLoaded?.((t) => this.addTile(t));
+    city.onTileReleased?.((t) => this.releaseTile(t));
     // a pole placed before its height map landed guessed its ground; the road
     // conform then moves that ground again. Re-seat them whenever either lands.
-    world?.terrain?.onTileLoaded?.(() => this._regroundSignals());
+    // Only the poles on the tile that landed (plus a margin, the height
+    // spline reads a sample or two past a tile's edge): walkY per pole over
+    // every junction ever loaded was a hitch on each tile arrival in Prague.
+    world?.terrain?.onTileLoaded?.((t) => this._regroundSignals(t));
   }
 
   now() { return this.clock ? this.clock() : worldT(); }
@@ -1684,12 +1695,15 @@ export class Traffic {
     // junction points the tile build simplified away (see stitchWays)
     const stitched = stitchWays(drivable);
     for (const r of drivable) {
+      // every count this way adds, so releaseTile can take exactly those back
+      const mine = this._ukeys ? [] : null;
       for (const [x, z] of stitched.get(r) ?? r.p) {
         const k = keyOf(x, z);
         const u = this._usage.get(k);
-        if (!u) this._usage.set(k, { n: 1, last: r });
-        else if (u.last !== r) { u.n++; u.last = r; }
+        if (!u) { this._usage.set(k, { n: 1, last: r }); mine?.push(k); }
+        else if (u.last !== r) { u.n++; u.last = r; mine?.push(k); }
       }
+      if (mine) this._ukeys.set(r, mine);
     }
     // pass 2 — split each way at nodes: both ends, plus interior points that
     // another drivable way also uses (that's where junctions live in OSM).
@@ -1805,6 +1819,7 @@ export class Traffic {
       fdx: (pts[1][0] - pts[0][0]) / Lf,  fdz: (pts[1][1] - pts[0][1]) / Lf,
       ldx: (pts[n - 1][0] - pts[n - 2][0]) / Ll, ldz: (pts[n - 1][1] - pts[n - 2][1]) / Ll,
       vertAng, mx: m[0], mz: m[1], twin: null,
+      _gks: null,       // the edge-grid keys it is filed under (releaseTile)
       // traffic-light governance, bound later: the junction at our far node,
       // its distance (nearest wins), our phase bucket, and where to hold
       sig: null, sigD: 1e9, sigPh: 0, sigStop: 0,
@@ -1818,7 +1833,7 @@ export class Traffic {
     e.a.outS = null;
     e.b.inn.push(e);   // incoming list: where a synthetic junction plants its poles
     this.edges.push(e);
-    this._egrid.addLine(pts, e);
+    e._gks = [...this._egrid.addLine(pts, e)];
     this._cellAdd(e);
     return e;
   }
@@ -1922,6 +1937,8 @@ export class Traffic {
         this.vehicles.scene?.add(jn.group);
         this._junctions.push(jn);
         jn._gk = this._jgrid.add(x, z, jn);
+        jn.group.visible = false;   // until _cullSignals finds it in range,
+        this._cullT = 0;            // which it does on the very next update
       }
       // duplicate guard — a re-delivered tile must not sprout twin poles
       let dup = false;
@@ -2411,9 +2428,11 @@ export class Traffic {
   }
 
   // advance lamp visuals — pure arithmetic per junction per frame, material
-  // swaps only on the ~11 s state flips, and only on ≤3 meshes per pole
+  // swaps only on the ~11 s state flips, and only on ≤3 meshes per pole.
+  // Only the junctions _cullSignals left visible: a pole nobody can see has
+  // no lamp to light (Prague alone brings 700 controllers per four tiles).
   _tickSignals(wt) {
-    for (const jn of this._junctions) {
+    for (const jn of this._sigLive) {
       const s0 = this._phase(jn, 0, wt), s1 = this._phase(jn, 1, wt);
       if (s0 === jn.st0 && s1 === jn.st1) continue;
       jn.st0 = s0; jn.st1 = s1;
@@ -3332,7 +3351,7 @@ export class Traffic {
     this._t = (this._t ?? 0) + dt;      // monotonic seconds, for _heldVisible
     if (!this.edges.length || !playerPos) return;
     const wt = this._wt = this.now();
-    if (this._junctions.length) this._tickSignals(wt);
+    if (this._junctions.length) { this._cullSignals(dt, playerPos.x, playerPos.z); this._tickSignals(wt); }
     if (this._sirens.size) this._tickSirens(wt);
 
     const px = this._px = playerPos.x, pz = this._pz = playerPos.z;
@@ -3365,16 +3384,7 @@ export class Traffic {
       this._scanCells(wt, px, pz);
       if (this._ghosts.size) this._ghostSweep(since);
     }
-    // distant pole meshes stop rendering entirely — cheap, and unrelated to
-    // the simulation, so it rides its own lazy timer
-    this._cullT -= dt;
-    if (this._cullT <= 0) {
-      this._cullT = 2.0;
-      for (const jn of this._junctions) {
-        const dx = jn.x - px, dz = jn.z - pz;
-        jn.group.visible = dx * dx + dz * dz < SIG_VIS2;
-      }
-    }
+    // (distant pole meshes stop rendering: _cullSignals, before the tick)
     // hard cap as a SAFETY VALVE only. With matching settings the cell budget
     // already lands near maxCars, so this should never bind; when it does (a
     // freak stretch of six-lane interchange, or a settings change mid-drive)
@@ -4057,6 +4067,31 @@ export class Traffic {
     } else if (p.yieldT > 0 && !creeping) p.yieldT = Math.max(0, p.yieldT - dt * 1.5);
     if (p.yieldOut && p.yieldT <= 0) p.yieldOut = 0;
 
+    // ---- trams. A tram never gives way (its arc is the shared timetable,
+    // js/tramlines.js), so where its rail crosses this car's route and a tram
+    // is due there, js/tramyield.js has put a record in `railCross`, and the
+    // driver stands short of the track until it is gone. The walker loop above
+    // without its patience: nobody creeps onto a level crossing because they
+    // have waited long enough. A nose already over the rail clears it.
+    const RC = this.railCross;
+    if (RC && RC.length) {
+      const reach = Math.max(TRAFFIC.lookAhead, car.speed * car.speed / (2 * BRAKE) + 12);
+      const r2 = (reach + 12) * (reach + 12);
+      for (let i = 0; i < RC.length; i++) {
+        const w = RC[i];
+        const wx = w.cx - p.sx, wz = w.cz - p.sz;
+        if (wx * wx + wz * wz > r2) continue;
+        const fwd = this._pathTo(p, w.cx, w.cz, w.hw + 1.0, reach);
+        if (fwd < 0) continue;
+        const gap = fwd - w.clr - half;
+        if (gap <= 0) continue;
+        const yv = yieldSpeed(gap, car.speed, true, BRAKE, 4.5, BRAKE_HARD * 1.1);
+        if (yv < 0 || yv >= tgt) continue;
+        tgt = yv; blocked = true;
+        if (needsHardBrake(gap, car.speed, BRAKE_SOFT)) hard = true;
+      }
+    }
+
     // ---- the junction ahead. Where streets.js found a give-way or a stop sign
     // on this approach (the same classification the triangles and stop lines
     // on the asphalt are drawn from), the driver obeys it: stand at a stop
@@ -4382,8 +4417,15 @@ export class Traffic {
   // Poles freeze their matrix (hundreds of static meshes render for free that
   // way), so re-seating one means writing position.y AND updating the matrix
   // by hand — a plain assignment would move nothing on screen.
-  _regroundSignals() {
+  // `t` = { tx, tz } of the height map that landed: only the junctions on that
+  // tile (with a 100 m margin) are re-seated. Without it, all of them.
+  _regroundSignals(t) {
+    const T = this.world?.terrain?.tile;
+    const box = t && Number.isFinite(t.tx) && T > 0;
+    const x0 = box ? t.tx * T - 100 : 0, x1 = box ? (t.tx + 1) * T + 100 : 0;
+    const z0 = box ? t.tz * T - 100 : 0, z1 = box ? (t.tz + 1) * T + 100 : 0;
     for (const jn of this._junctions) {
+      if (box && (jn.x < x0 || jn.x > x1 || jn.z < z0 || jn.z > z1)) continue;
       for (const s of jn.sigs) {
         const m = s.mesh;
         if (!m) continue;
@@ -4391,6 +4433,39 @@ export class Traffic {
         if (Math.abs(y - m.position.y) > 0.05) { m.position.y = y; m.updateMatrix(); }
       }
     }
+  }
+
+  // Which pole groups render, and so which ones _tickSignals lights: every
+  // 2 s (and at once after new poles), the junctions in _jgrid cells within
+  // SIG_VIS2 of the player. Walking the grid around the player instead of
+  // every controller ever loaded keeps this flat however much of Prague the
+  // session has seen. A junction coming back into range has stale lamps, so
+  // its state is reset and the tick relights it in the same frame.
+  _cullSignals(dt, px, pz) {
+    this._cullT -= dt;
+    if (this._cullT > 0) return;
+    this._cullT = 2.0;
+    const prev = this._sigLive, next = this._sigNext;
+    next.length = 0;
+    const mark = ++this._sigMark;
+    const R = Math.sqrt(SIG_VIS2) + GRID;
+    const c0 = Math.floor((px - R) / GRID), c1 = Math.floor((px + R) / GRID);
+    const d0 = Math.floor((pz - R) / GRID), d1 = Math.floor((pz + R) / GRID);
+    const m = this._jgrid.m;
+    for (let cx = c0; cx <= c1; cx++) for (let cz = d0; cz <= d1; cz++) {
+      const a = m.get(cx + ',' + cz);
+      if (!a) continue;
+      for (let i = 0; i < a.length; i++) {
+        const jn = a[i];
+        const dx = jn.x - px, dz = jn.z - pz;
+        if (dx * dx + dz * dz >= SIG_VIS2 || jn._sigMark === mark) continue;
+        jn._sigMark = mark;
+        if (!jn.group.visible) { jn.group.visible = true; jn.st0 = jn.st1 = -1; }
+        next.push(jn);
+      }
+    }
+    for (let i = 0; i < prev.length; i++) if (prev[i]._sigMark !== mark) prev[i].group.visible = false;
+    this._sigLive = next; this._sigNext = prev;
   }
 
   // ---- diagnostics / test seams ------------------------------------------
@@ -4417,5 +4492,99 @@ export class Traffic {
     }
     out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return out;
+  }
+
+  // ---- a far tile gives its graph back (geo.js RELEASE_GRAPHS) -------------
+  // `t` = { roads, signals, rect }: the ways of a deep-evicted tile, every one
+  // EVICT_REACH from every player. Everything built from them goes: their
+  // edges out of the node lists, the edge grid and the population cells, the
+  // nodes nothing else uses, their share of the usage census, and the signal
+  // controllers standing in the tile's rectangle (poles off the scene, every
+  // edge they governed unbound). The way objects stay with geo.js and come
+  // back in the payload of the tile's next arrival; their _tg stamp is
+  // cleared so addTile takes them in again, which then is exactly a tile
+  // arriving after its neighbours, the case two co-op clients that streamed
+  // in a different order already agree on (tests/tile-eviction.test.mjs).
+  // A cell keeps its surviving edges in arrival order and its lengths are
+  // summed again in that order, so they carry the bits a client that never
+  // had the tile would hold.
+  releaseTile(t) {
+    const gone = new Set();
+    for (const r of t?.roads ?? []) if (r._tg) gone.add(r);
+    const rect = t?.rect;
+    const inRect = rect ? (x, z) => x >= rect[0] && x < rect[2] && z >= rect[1] && z < rect[3] : () => false;
+    let junctions = false;
+    for (const jn of this._junctions) if (inRect(jn.x, jn.z)) { junctions = true; break; }
+    if (!gone.size && !junctions) return;
+    // 1. edges
+    const dead = new Set(), nodes = new Set();
+    let w = 0;
+    for (let i = 0; i < this.edges.length; i++) {
+      const e = this.edges[i];
+      if (gone.has(e.road)) { dead.add(e); nodes.add(e.a); nodes.add(e.b); } else this.edges[w++] = e;
+    }
+    this.edges.length = w;
+    const drop = (arr, f) => { let k = 0; for (let i = 0; i < arr.length; i++) if (!f(arr[i])) arr[k++] = arr[i]; arr.length = k; };
+    for (const e of dead) if (e.offSign === 1) { e.a.deg--; e.b.deg--; }
+    for (const n of nodes) {
+      drop(n.out, (e) => dead.has(e));
+      drop(n.inn, (e) => dead.has(e));
+      n.outS = null;
+      if (n.dirs) drop(n.dirs, (d) => gone.has(d[2]));
+      if (n.ns) for (const r of n.ns) if (gone.has(r)) n.ns.delete(r);
+      if (n.ew) for (const r of n.ew) if (gone.has(r)) n.ew.delete(r);
+      if (!n.out.length && !n.inn.length) this._nodes.delete(keyOf(n.x, n.z));
+    }
+    // 2. the edge grid and the population cells: only the keys the dead edges
+    // were filed under (the same walk Buckets.addLine and _cellAdd made), so
+    // the cost is the tile's and not the session's
+    const gk = new Set(), ck = new Set();
+    for (const e of dead) {
+      if (e._gks) for (const k of e._gks) gk.add(k);
+      ck.add(Math.floor(e.mx / CELL) + ',' + Math.floor(e.mz / CELL));
+    }
+    for (const k of gk) {
+      const a = this._egrid.m.get(k);
+      if (!a) continue;
+      drop(a, (e) => dead.has(e));
+      if (!a.length) this._egrid.m.delete(k);
+    }
+    for (const k of ck) {
+      const c = this._cells.get(k);
+      if (!c) continue;
+      const n0 = c.edges.length;
+      drop(c.edges, (e) => dead.has(e));
+      if (c.edges.length === n0) continue;
+      if (!c.edges.length) { this._cells.delete(k); continue; }
+      let len = 0, major = 0;
+      for (const e of c.edges) { len += e.len; if (MAJOR_RE.test(e.road.t)) major += e.len; }
+      c.len = len; c.lenMajor = major;
+      c.sorted = null; c._u = undefined;
+    }
+    // 3. the usage census, counted back down way by way
+    for (const r of gone) {
+      for (const k of this._ukeys.get(r) ?? []) {
+        const u = this._usage.get(k);
+        if (!u) continue;
+        if (--u.n <= 0) this._usage.delete(k);
+        else if (u.last === r) u.last = null;
+      }
+      this._ukeys.delete(r);
+      r._tg = 0;
+    }
+    // 4. the lights standing on the tile
+    if (junctions) {
+      const off = new Set();
+      for (const jn of this._junctions) if (inRect(jn.x, jn.z)) off.add(jn);
+      drop(this._junctions, (jn) => off.has(jn));
+      drop(this._sigLive, (jn) => off.has(jn));
+      for (const jn of off) {
+        this._jgrid.remove(jn._gk, jn);
+        if (!this._jgrid.m.get(jn._gk)?.length) this._jgrid.m.delete(jn._gk);
+        jn.group.parent?.remove(jn.group);
+      }
+      for (const e of this.edges) if (e.sig && off.has(e.sig)) { e.sig = null; e.sigD = 1e9; }
+    }
+    this._culDirty = true;
   }
 }

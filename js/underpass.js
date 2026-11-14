@@ -112,7 +112,9 @@ function deckNodes(city, w) {
     const k0 = KEY(x, z), links = [];
     let n = 0;
     for (const o of c.roads) {
-      if (!o.br || !o.d || !o.p || o.p.length < 2) continue;
+      // (a drivable deck counts and holds drivable decks only, as it always
+      // did; a footway deck, new here, counts every deck it meets)
+      if (!o.br || (w.d && !o.d) || !o.p || o.p.length < 2) continue;
       const last = o.p.length - 1;
       const at0 = KEY(o.p[0][0], o.p[0][1]) === k0, at1 = KEY(o.p[last][0], o.p[last][1]) === k0;
       if (!at0 && !at1) continue;
@@ -120,10 +122,41 @@ function deckNodes(city, w) {
       const far = at0 ? o._ap1 : o._ap0;
       if (far) links.push(far);
     }
+    // A MID-RIVER JOINT: the branched complexes (Jiráskův and Hlávkův most)
+    // are pieced from footway and carriageway members joined out over the
+    // water, and the members next to a joint often reach no road themselves,
+    // or only the stair down to an island. Falling back to the ground at the
+    // end read the riverbed and the deck dipped under the Vltava; holding the
+    // island stair's foot ramped it 3 m in 15 m. So walk every member joined
+    // end to end from this node and hold the highest approach the whole
+    // complex reaches (on a plain Y of three spans that is the same answer).
+    if (n >= 2) complexLinks(city, w, k0, x, z, links);
     if (n >= 2 && links.length) {
       w[end === 0 ? '_apN0' : '_apN1'] = links;
       w._bridgeProfile = null;
       if (w._chain) w._chain.profile = null;
+    }
+  }
+}
+
+// The road approaches of every bridge member reachable from node (x, z) by
+// walking members that share end nodes (any kind of deck, footways too), into
+// `out`. Bounded, a complex is a few dozen members at most.
+function complexLinks(city, w, k0, x, z, out) {
+  const seen = new Set([w]), queue = [[k0, x, z]], nodes = new Set([k0]);
+  while (queue.length && seen.size < 48) {
+    const [k, nx, nz] = queue.shift();
+    const c = cellAt(city, nx, nz);
+    if (!c) continue;
+    for (const o of c.roads) {
+      if (!o.br || seen.has(o) || !o.p || o.p.length < 2) continue;
+      const last = o.p.length - 1;
+      const at0 = KEY(o.p[0][0], o.p[0][1]) === k, at1 = KEY(o.p[last][0], o.p[last][1]) === k;
+      if (!at0 && !at1) continue;
+      seen.add(o);
+      for (const l of [o._ap0, o._ap1]) if (l && typeof l === 'object' && !out.includes(l)) out.push(l);
+      const fe = at0 ? o.p[last] : o.p[0], fk = KEY(fe[0], fe[1]);
+      if (!nodes.has(fk)) { nodes.add(fk); queue.push([fk, fe[0], fe[1]]); }
     }
   }
 }
@@ -152,7 +185,7 @@ export function stitchStructures(city, roads, rails) {
   // the pieces of one tile): its pieces would each grade themselves and meet
   // at a step (0.8 m mid-span on Generála Svobody).
   for (const b of bridges) if (b.d && !isRail.has(b)) chainAcross(city, b);
-  for (const b of bridges) if (b.d && !isRail.has(b)) deckNodes(city, b);
+  for (const b of bridges) if (!isRail.has(b)) deckNodes(city, b);
   // A railway deck in two pieces has one end on the other piece, where no rail
   // bed is: it holds the level of the end that has one. (Asking the ground
   // there read the street the underpass had just dug, and the deck dived.)
