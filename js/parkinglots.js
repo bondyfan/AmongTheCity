@@ -16,6 +16,7 @@
 
 import { CAR_COLORS, CHUNK } from './config.js';
 import { strHash } from './identity.js';
+import { siteNear } from './d11services.js';
 
 const KINDS = ['sedan', 'hatch', 'kombi', 'suv', 'van'];
 const SCAN_DT = 2.5;          // s between lot sweeps
@@ -38,6 +39,75 @@ export function occAt(t01) {
     if (h >= h0 && h <= h1) return v0 + (v1 - v0) * ((h - h0) / (h1 - h0 || 1));
   }
   return 0.5;
+}
+
+// ---- motorway services (round 8) ----
+// A lot within SERVICE_R of a D11 services side (js/d11services.js, the
+// js/d11.js REST table plus the parking-only bay at exit 35) is not a village
+// car park: its big lots (a long edge of LORRY_EDGE and LORRY_AREA of
+// tarmac) are lorry parks, full at night when the drivers sleep in their cabs
+// and half empty at midday, and its small ones fill with travellers through
+// the day and empty at night. The tiles carry no hgv tag (the build dropped
+// it; only the Bříství lot had one), so size and place decide. Everything is
+// still hashed from stall coordinates: two clients park the same lorries.
+const SERVICE_R = 200;        // m from the services' fuel poi (or the bay)
+const LORRY_EDGE = 40;        // m: the long edge a row of lorries needs
+const LORRY_AREA = 900;       // m^2
+const LORRY_CAP = 16;         // stalls per lorry park
+const LORRY_GLOBAL = 30;      // lorries in the world at once (they are big meshes)
+const LORRY_ACROSS = 4.2;     // m between two lorries side by side
+const LORRY_ALONG = 11.0;     // m row depth (a 7.6 m truck and its apron)
+// The kind a parked lorry is: vehicles.js 'truck' (the cab-over box truck).
+// When the round 8 TRAFFIC package's articulated 'semi' lands, this is the
+// one line to change (the stall pitch above already fits an 8 m tractor).
+export const LORRY_KIND = 'truck';
+const LORRY_COLORS = [0xd8d5ce, 0xbcbfba, 0x8a9096, 0x476b46, 0x3a63a8, 0xd8d5ce];
+// lorry park occupancy by hour: rest-time rules fill it from the evening
+const LORRY_HOURS = [
+  [0, 0.92], [4, 0.9], [6, 0.7], [9, 0.5], [12, 0.45], [15, 0.5],
+  [18, 0.66], [20, 0.82], [22, 0.9], [24, 0.92],
+];
+// travellers' cars at a services: through the day, not the night
+const SERVICE_HOURS = [
+  [0, 0.18], [5, 0.15], [7, 0.35], [10, 0.5], [13, 0.62], [17, 0.58],
+  [20, 0.38], [22, 0.25], [24, 0.18],
+];
+function curveAt(table, t01) {
+  const h = (t01 ?? 0) * 24;
+  for (let i = 0; i < table.length - 1; i++) {
+    const [h0, v0] = table[i], [h1, v1] = table[i + 1];
+    if (h >= h0 && h <= h1) return v0 + (v1 - v0) * ((h - h0) / (h1 - h0 || 1));
+  }
+  return 0.5;
+}
+export const lorryOccAt = (t01) => curveAt(LORRY_HOURS, t01);
+export const serviceOccAt = (t01) => curveAt(SERVICE_HOURS, t01);
+
+/**
+ * What a lot is: 'lorry' (a services lorry park), 'service' (a services car
+ * park) or 'town'. Pure, from its ring: centroid near a services side, then
+ * its size. Exported for the tests.
+ */
+export function lotClass(ring) {
+  if (!ring?.length) return 'town';
+  let cx = 0, cz = 0;
+  for (const q of ring) { cx += q[0]; cz += q[1]; }
+  cx /= ring.length; cz /= ring.length;
+  const site = siteNear(cx, cz, SERVICE_R);
+  if (!site) return 'town';
+  let edge = 0, a = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    edge = Math.max(edge, Math.hypot(ring[i][0] - ring[j][0], ring[i][1] - ring[j][1]));
+    a += (ring[j][0] + ring[i][0]) * (ring[j][1] - ring[i][1]);
+  }
+  return site.trucks && edge >= LORRY_EDGE && Math.abs(a) / 2 >= LORRY_AREA ? 'lorry' : 'service';
+}
+const _classOf = new Map();
+function classOf(lot) {
+  const k = lotKey(lot);
+  let c = _classOf.get(k);
+  if (!c) _classOf.set(k, c = lotClass(lot.o));
+  return c;
 }
 
 function rnd(x, z, salt) {
@@ -92,12 +162,17 @@ function stallsFor(lot) {
   }
   const out = [];
   const head = Math.atan2(px, pz);              // nose across the row
-  for (let v = v0 + 3.2; v <= v1 - 3.2 && out.length < LOT_CAP; v += PITCH_ALONG) {
-    for (let u = u0 + 2.0; u <= u1 - 2.0 && out.length < LOT_CAP; u += PITCH_ACROSS) {
+  // a lorry park lays wider, deeper stalls (and probes a lorry's length)
+  const lorry = classOf(lot) === 'lorry';
+  const cap = lorry ? LORRY_CAP : LOT_CAP;
+  const across = lorry ? LORRY_ACROSS : PITCH_ACROSS, along = lorry ? LORRY_ALONG : PITCH_ALONG;
+  const end = lorry ? 5.6 : 3.2, side = lorry ? 2.6 : 2.0, probe = lorry ? 4.2 : 2.3;
+  for (let v = v0 + end; v <= v1 - end && out.length < cap; v += along) {
+    for (let u = u0 + side; u <= u1 - side && out.length < cap; u += across) {
       const x = bx * u + px * v, z = bz * u + pz * v;
       if (!inPoly(x, z, ring)) continue;
-      if (!inPoly(x + px * 2.3, z + pz * 2.3, ring)) continue;
-      if (!inPoly(x - px * 2.3, z - pz * 2.3, ring)) continue;
+      if (!inPoly(x + px * probe, z + pz * probe, ring)) continue;
+      if (!inPoly(x - px * probe, z - pz * probe, ring)) continue;
       out.push({ x, z, h: head + (rnd(x, z, 'j') - 0.5) * 0.1, car: null, burned: false });
     }
   }
@@ -176,6 +251,7 @@ export class ParkingLots {
     this._count = 0;
     this._virgin = true;      // first sweep fills freely — it runs under the
                               // boot overlay's fade, before anyone can watch
+    this._lorries = 0;        // of _count, how many are lorries (LORRY_GLOBAL)
     this._live = new Set();   // lots that may have cars standing (to drain)
     this._near = [];          // scratch: the lots of this sweep
     this._seen = new Set();
@@ -185,7 +261,7 @@ export class ParkingLots {
     this._t -= dt;
     if (this._t > 0) return;
     this._t = SCAN_DT;
-    const occ = occAt(t01);
+    const occTown = occAt(t01), occLorry = lorryOccAt(t01), occSvc = serviceOccAt(t01);
     const virgin = this._virgin;
     this._virgin = false;
     const owned = ownedIn(this.parked);
@@ -202,6 +278,8 @@ export class ParkingLots {
       if (d > REACH + 150) { this._drain(lot, pos, true); continue; }
       if (d > REACH) continue;
       this._live.add(lot);
+      const cls = classOf(lot), lorry = cls === 'lorry';
+      const occ = lorry ? occLorry : cls === 'service' ? occSvc : occTown;
       for (const st of stallsFor(lot)) {
         if (st.burned) continue;
         // a stall car somebody drove away never comes back this session, and
@@ -215,13 +293,16 @@ export class ParkingLots {
         if (!virgin && dd < NOTICE_R) continue;   // never on camera
         if (want) {
           if (this._count >= GLOBAL_CAP) continue;
+          if (lorry && this._lorries >= LORRY_GLOBAL) continue;
           // the player's own car is standing here (left where it was bought,
           // or parked in a space that was free): nothing arrives on top of it
           if (owned && standsIn(owned.x, owned.z, st.x, st.z, st.h, owned.heading)) { st.burned = true; continue; }
-          const kind = KINDS[(rnd(st.x, st.z, 'k') * KINDS.length) | 0];
-          const color = CAR_COLORS[(rnd(st.x, st.z, 'c') * CAR_COLORS.length) | 0];
+          const kind = lorry ? LORRY_KIND : KINDS[(rnd(st.x, st.z, 'k') * KINDS.length) | 0];
+          const color = lorry ? LORRY_COLORS[(rnd(st.x, st.z, 'c') * LORRY_COLORS.length) | 0]
+            : CAR_COLORS[(rnd(st.x, st.z, 'c') * CAR_COLORS.length) | 0];
           st.car = this.vehicles.add(kind, st.x, st.z, st.h, color);
           st.car._lot = true;
+          if (lorry) { st.car._lorry = true; this._lorries++; }
           this.parked.push(st.car);
           this._count++;
         } else this._remove(st);
@@ -232,6 +313,7 @@ export class ParkingLots {
   _remove(st) {
     const i = this.parked.indexOf(st.car);
     if (i >= 0) this.parked.splice(i, 1);
+    if (st.car._lorry) this._lorries--;
     this.vehicles.remove(st.car);
     st.car = null;
     this._count--;

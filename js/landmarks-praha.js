@@ -62,6 +62,14 @@ export const CLEAR_OLD = [
   [-95195, -6182, -95149, -6170, 4],
   [-96200, -6061.5, -96172, -6055, 3.5],
   [-96684, -6176, -96658, -6175, 3.5],
+  // Mostecká from the gate down to Malostranské náměstí: a street of houses
+  // wall to wall, where the surface model read the gate and the eaves as
+  // crowns and planted limes across the view of the towers
+  // (past the facades: a crown there leans over the street from a stem the
+  // raster put a metre or two inside the house front, 7 to 8 m off the line)
+  [-96676, -6175.7, -96721.1, -6185.8, 8],
+  [-96721.1, -6185.8, -96771.1, -6200, 7.5],
+  [-96771.1, -6200, -96842.5, -6222.9, 5.5],
 ];
 
 /** A way of Charles Bridge (its tile name; only bridge ways are asked). */

@@ -35,6 +35,21 @@ export function courierLimitS(routeM, etaS = null) {
   return clampLimit(base + 40);
 }
 
+// THE LONG HAUL (round 8, js/haul.js): Pardubice to Prague, 118 km of road.
+// Not courierLimitS: its half-hour cap is the town's (tests/jobs.test.mjs
+// pins it), and the run needs the D11. The clock is the road at an average
+// of 30 m/s (108 km/h: 130 on the motorway, the towns at either end slower)
+// plus ten minutes, 45 minutes at the least and two hours at the most. It
+// never waits for navigation: with the far tiles not loaded yet the route is
+// partial and its ETA is not an answer.
+const HAUL_V = 30;           // m/s
+const HAUL_MIN = 2700;       // s
+const HAUL_MAX = 7200;       // s
+export function haulLimitS(routeM) {
+  const s = (Math.max(0, routeM) || 0) / HAUL_V + 600;
+  return Math.round(Math.min(HAUL_MAX, Math.max(HAUL_MIN, s)));
+}
+
 /** How long a fare will sit in the car before getting out. Generous on
  *  purpose: the taxi is the calm job, its skill is smoothness and not haste. */
 export function taxiLimitS(routeM, etaS = null) {
@@ -53,14 +68,17 @@ const PAY_FLOOR = 0.25;      // a delivered parcel always pays something
  * the parcel went through on the way (crashes, the police) comes off the top.
  * Returns the breakdown the result toast prints.
  */
-export function courierPay({ routeM, timeLeftS, limitS, damage = 0, stars = 0 }) {
+export function courierPay({ routeM, timeLeftS, limitS, damage = 0, stars = 0, kind = 'courier' }) {
   const d = PRICE.job.delivery;
+  // a haul is paid at the courier's rate per km (fair against town work: about
+  // 3 700 Kč an hour both ways) with its own, larger bonus for the clock
+  const bonusMax = kind === 'haul' ? PRICE.job.haul.bonus : d.bonus;
   const km = Math.max(0, routeM) / 1000;
   const gross = d.base + d.perKm * km;
   // Full bonus with half the clock still to run: a bonus that only pays for a
   // perfect run is one nobody ever sees.
   const frac = limitS > 0 ? Math.min(1, Math.max(0, timeLeftS) / (limitS * 0.5)) : 0;
-  const bonus = d.bonus * frac;
+  const bonus = bonusMax * frac;
   // a corrupt reading is no damage, not a NaN payout
   const dmg = Number.isFinite(damage) && damage > 0 ? damage : 0;
   const st = Number.isFinite(stars) && stars > 0 ? stars : 0;
@@ -90,8 +108,8 @@ export function taxiPay({ routeM, smooth = 0 }) {
 export function payEstimate(kind, straightM) {
   const routeM = estRouteM(straightM);
   if (kind === 'taxi') return taxiPay({ routeM, smooth: 1 }).total;
-  const limitS = courierLimitS(routeM);
-  return courierPay({ routeM, timeLeftS: limitS, limitS }).total;
+  const limitS = kind === 'haul' ? haulLimitS(routeM) : courierLimitS(routeM);
+  return courierPay({ routeM, timeLeftS: limitS, limitS, kind }).total;
 }
 
 // ---- smooth driving -------------------------------------------------------

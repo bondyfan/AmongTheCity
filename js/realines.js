@@ -330,9 +330,17 @@ export function nominalTimes(arcs) {
   return N;
 }
 
-/** How often a line runs, from nothing but the route record. */
+/**
+ * How often a line runs, from nothing but the route record. Prague's buses
+ * are not 'MHD ...' networks but the integrated PID one, which runs the
+ * suburban and regional lines (300 and up) as well: its CITY lines are the
+ * numbers 100 to 299, and only they are town buses (all 684 PID routes used to
+ * run every half hour).
+ */
 export function headwayOf(route) {
-  const town = /^MHD\b/.test(route.nw ?? '') || route.m === 1;
+  const n = +route.ref;
+  const pidCity = /Pražsk/.test(route.nw ?? '') && n >= 100 && n < 300;
+  const town = /^MHD\b/.test(route.nw ?? '') || route.m === 1 || pidCity;
   if (!town || (route.L ?? 0) > 26000) return 1800;      // a regional coach
   return route.m === 1 ? 600 : 900;                        // trolleybus, town bus
 }

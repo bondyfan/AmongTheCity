@@ -21,6 +21,9 @@ import { JobBoard, jobTitle } from './jobboard.js';
 import { JobBeacon, JobFare } from './jobworld.js';
 import { toast } from './toasts.js';
 import { kc } from './prices.js';
+import { haulOffers, gameDay } from './haul.js';
+import { worldT } from './worldclock.js';
+import { START_TOD, DAY_LENGTH } from './config.js';
 
 const PLACES_R = 6000;        // m of named places gathered round the board
 const MIN_OFFERS = 3;         // fewer than this left and the next shift starts
@@ -78,7 +81,9 @@ export class CareerJobs {
     const today = dayKey();
     if (today !== this.day) { this.day = today; this.shift = 0; this.done.clear(); }
     const cx = Math.floor(p.pos.x / BOARD_CELL), cz = Math.floor(p.pos.z / BOARD_CELL);
-    const key = today + '|' + this.shift + '|' + cx + ',' + cz + '|' + this.done.size;
+    // the game day: a haul to Prague comes once per game day (js/haul.js)
+    const gday = gameDay(worldT(), START_TOD, DAY_LENGTH);
+    const key = today + '|' + this.shift + '|' + cx + ',' + cz + '|' + this.done.size + '|' + gday;
     const size = (city.venues?.length ?? 0) + (city.buildings?.length ?? 0);
     const grew = size !== this._size && this.offers.length < FULL_BOARD;
     if (!force && key === this._key && !grew) return;
@@ -93,8 +98,11 @@ export class CareerJobs {
       this.offers = make();
       // the key carries the shift: restate it, or the next call would see a
       // stale key, rebuild, come up short again and turn the shift once more
-      this._key = today + '|' + this.shift + '|' + cx + ',' + cz + '|' + this.done.size;
+      this._key = today + '|' + this.shift + '|' + cx + ',' + cz + '|' + this.done.size + '|' + gday;
     }
+    // near a depot, the long run heads the list
+    const hauls = haulOffers({ x: p.pos.x, z: p.pos.z, day: gday, done: this.done });
+    if (hauls.length) this.offers = hauls.concat(this.offers);
   }
 
   openBoard() {
@@ -136,7 +144,7 @@ export class CareerJobs {
       this._point(r.target);
       this.beacon.set(r.target, job.kind);
       if (job.kind === 'taxi' && r.state === 'toPickup') this._standFare(job.from, job, 0);
-      toast(jobTitle(job), { icon: job.kind === 'taxi' ? '🚕' : '📦',
+      toast(jobTitle(job), { icon: job.kind === 'taxi' ? '🚕' : job.kind === 'haul' ? '🚚' : '📦',
         sub: (r.state === 'toDrop' ? 'Doruč: ' : 'Vyzvedni: ') + placeLabel(r.target) });
     } else if (type === 'needCar') {
       toast('Na taxi potřebuješ auto', { icon: '🚕', sub: 'Přijeď pro zákazníka vozem' });
@@ -240,7 +248,7 @@ export class CareerJobs {
     const air = Math.hypot(t.x - c.x, t.z - c.z);
     const dist = fmtDist(routed ? Math.max(nav.remainingM, air) : air);
     const taxi = job.kind === 'taxi';
-    const v = { cls: job.kind, icon: taxi ? '🚕' : '📦', dist, urgent: false, time: '', keys: '' };
+    const v = { cls: job.kind, icon: taxi ? '🚕' : job.kind === 'haul' ? '🚚' : '📦', dist, urgent: false, time: '', keys: '' };
     if (r.state !== 'toDrop') {
       v.title = r.state === 'loading' ? job.who + ' nastupuje…'
         : taxi ? 'Nabrat: ' + job.who : 'Vyzvedni: ' + job.what;
@@ -262,7 +270,7 @@ export class CareerJobs {
       v.keys = 'Plynulost ' + Math.round(r.smooth.score * 100) + ' % · zastav u značky';
     } else {
       v.pay = kc(courierPay({ routeM: r.routeM, timeLeftS: left ?? 0, limitS: r.limitS || 1,
-        damage: r._dmg, stars: r._stars }).total);
+        damage: r._dmg, stars: r._stars, kind: job.kind }).total);
       v.keys = 'Zastav u značky · nehody a policie snižují výplatu';
     }
     return v;

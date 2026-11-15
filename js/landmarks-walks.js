@@ -37,6 +37,10 @@ export const WALKS = [
   // (js/landmarks-mostecke.js; both passages' ways are missing from the tile)
   { anchor: [-96192.0, -6059.6], way: way('otbt', [[-96192.0, -6059.6], [-96186.7, -6058.35], [-96181.4, -6057.1]]) },
   { anchor: [-96676.0, -6175.7], way: way('mlst-brana', [[-96676.0, -6175.7], [-96671.05, -6175.45], [-96666.1, -6175.2]]) },
+  // Celetná through the Powder Tower, on the south pavement of the arch (the
+  // lane down the middle is a car road again, js/roadpatches.js): from the
+  // footway crossing Celetná at the west face to the one crossing it at the east
+  { anchor: [-95188.6, -6178.0], way: way('prasna', [[-95188.6, -6178.0], [-95181.6, -6177.1], [-95166.4, -6172.3], [-95154.4, -6168.7]]) },
 ];
 // the boxes every anchor lies in (Pardubice old town, Prague old town): a
 // compare or two refuses the rest of the world
@@ -62,3 +66,4 @@ export function landmarkWalks(roads) {
   }
   return out;
 }
+import { WALKS_WIDE, WALK_BOXES_WIDE } from './landmarks-walkswide.js'; WALKS.push(...WALKS_WIDE); BOXES.push(...WALK_BOXES_WIDE);   // the castle's passages (round 7 polish)

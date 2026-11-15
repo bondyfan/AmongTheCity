@@ -41,11 +41,11 @@ export function blank() {
     v: SAVE_VERSION,
     savedAt: 0,
     money: 2500,
-    pos: null,                 // { x, z, h } or null = the station forecourt
+    pos: null,                 // { x, z, h, y? } or null = the station forecourt
     tod: null,                 // 0..1 time of day (single player only), or null
     played: 0,                 // s
     vitals: { hp: 100, armour: 0, energy: 100 },
-    car: null,                 // { kind, color, x, z, h, fuel, damage, seed, parkIdx }
+    car: null,                 // { kind, color, x, z, h, y?, fuel, damage, seed, parkIdx }
     stats: {},                 // js/progress.js owns the shape
     ach: {},                   // id → unix ms it was earned
     jobs: { day: '', shift: 0, done: [], active: null },
@@ -65,7 +65,14 @@ function sanePos(p) {
   const x = fin(p.x, NaN), z = fin(p.z, NaN);
   if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
   if (Math.abs(x) > WORLD_MAX || Math.abs(z) > WORLD_MAX) return null;
-  return { x: +x.toFixed(1), z: +z.toFixed(1), h: +fin(p.h, 0).toFixed(3) };
+  const out = { x: +x.toFixed(1), z: +z.toFixed(1), h: +fin(p.h, 0).toFixed(3) };
+  // y, the level it was taken on (a bridge deck over a riverbed, the D11 under
+  // an overpass): x and z alone have two answers there (js/savespot.js). Only
+  // when it is a sane altitude; a save without one is an older save and is
+  // stood on the highest floor close above the ground instead.
+  const y = fin(p.y, NaN);
+  if (Number.isFinite(y) && y > -500 && y < 5000) out.y = +y.toFixed(2);
+  return out;
 }
 
 function saneCar(c) {
@@ -74,7 +81,7 @@ function saneCar(c) {
   if (!p) return null;
   return {
     kind: str(c.kind, 24), color: fin(c.color, 0x8a9096) & 0xffffff,
-    x: p.x, z: p.z, h: p.h,
+    x: p.x, z: p.z, h: p.h, ...(p.y !== undefined ? { y: p.y } : {}),
     fuel: c.fuel == null ? null : +pos(c.fuel, 500).toFixed(2),
     damage: +pos(c.damage, 1.2).toFixed(3),
     seed: fin(c.seed, 0) >>> 0,

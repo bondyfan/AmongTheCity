@@ -16,7 +16,7 @@
 // seconds replace the straight-line estimate the board showed. Until then the
 // estimate stands in, so a job is never untimed.
 
-import { courierLimitS, courierPay, taxiLimitS, taxiPay, estRouteM, Smoothness } from './jobmath.js';
+import { courierLimitS, courierPay, taxiLimitS, taxiPay, estRouteM, haulLimitS, Smoothness } from './jobmath.js';
 
 export const ARRIVE_CAR = 13;     // m: a car has reached a marker
 export const ARRIVE_FOOT = 7;     // m: and so has a courier on foot
@@ -92,6 +92,13 @@ export class JobRunner {
   // The clock's length, once: from the route when navigation has one for THIS
   // destination, from the estimate when it has not produced one in time.
   _settleLimit(ctx) {
+    // a haul is timed off the road length at once: 87 km out, the route is
+    // partial and its metres include a straight-line gap (js/jobmath.js)
+    if (this.job.kind === 'haul') {
+      this.limitS = haulLimitS(this.routeM);
+      this._emit('timed', { limitS: this.limitS, routeM: this.routeM, routed: false });
+      return;
+    }
     this._routeT += ctx.dt;
     const to = this.job.to;
     const nd = ctx.navDest;
@@ -174,7 +181,7 @@ export class JobRunner {
     } else {
       const limitS = this.limitS || courierLimitS(this.routeM);
       const pay = courierPay({ routeM: this.routeM, timeLeftS: this.limitS ? left : limitS / 2,
-        limitS, damage: this._dmg, stars: this._stars });
+        limitS, damage: this._dmg, stars: this._stars, kind: job.kind });
       this._end('done', { pay, routeM: this.routeM, timeS: this.elapsed,
         timeLeftS: left, limitS, damage: this._dmg, stars: this._stars });
     }
@@ -218,6 +225,6 @@ const okPlace = (p) => p && typeof p.name === 'string' && Number.isFinite(p.x) &
 
 /** A job read back from storage is player-editable text: check its shape. */
 export function validJob(j) {
-  return !!j && typeof j.id === 'string' && (j.kind === 'courier' || j.kind === 'taxi')
+  return !!j && typeof j.id === 'string' && (j.kind === 'courier' || j.kind === 'taxi' || j.kind === 'haul')
     && okPlace(j.from) && okPlace(j.to) && Number.isFinite(j.distM);
 }

@@ -132,7 +132,7 @@ export class Cyclists {
     this._ingest(city.roads);
     // (…and a trip routed before these roads were there is minted again: js/cyclistmint.js regraph)
     city.onTileLoaded?.((t) => { this._ingest(t.roads); this._dud.clear(); regraph(this._pool, t.roads); });
-    city.onTileReleased?.((t) => this.releaseTile(t));
+    city.onTileReleased?.((t) => this.releaseSteps(t));   // (geo.js runs the steps, a slice a frame)
   }
 
   now() { return this.clock ? this.clock() : worldT(); }
@@ -398,19 +398,28 @@ export class Cyclists {
   // the squares and, without a crowd, our own carriageway index. Every rider
   // and schedule is within PHANTOM_R of a viewer, far from them; one routed
   // across that tile still holds its plan, and the sweep retires it.
-  releaseTile(t) {
+  releaseTile(t) { for (const _ of this.releaseSteps(t)); }
+  // As steps (geo.js queueJob): the net lets its ways go a batch at a time
+  // (each batch leaves it whole), then the squares are cut down.
+  *releaseSteps(t) {
     const roads = t?.roads;
     if (!roads?.length) return;
-    const gone = new Set(this.net.remove(roads));
+    const gone = new Set();
+    for (let i = 0; i < roads.length; i += 200) {
+      for (const w of this.net.remove(roads.slice(i, i + 200))) gone.add(w);
+      yield;
+    }
     if (this._ownDrive) {
       const drv = [];
       for (const r of roads) if (this._drv.has(r)) { this._drv.delete(r); drv.push(r); }
-      if (drv.length) this.drive.remove?.(drv);
+      for (let i = 0; i < drv.length; i += 400) { this.drive.remove?.(drv.slice(i, i + 400)); yield; }
     }
     if (!gone.size) return;
     const keys = new Set();
     for (const w of gone) keys.add(Math.floor(w.mx / PCELL) + ',' + Math.floor(w.mz / PCELL));
+    let step = 0;
     for (const k of keys) {
+      if ((++step & 255) === 0) yield;
       const c = this._cells.get(k);
       if (!c) continue;
       const n0 = c.ways.length;

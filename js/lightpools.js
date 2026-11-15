@@ -55,6 +55,7 @@
 import * as THREE from 'three';
 import { LampMap, SHAPES_GLSL, LAMP_DIRECT_U } from './lampmap.js';
 import { FarLights } from './farlights.js';
+import { addLandmarkLamps } from './landmarklamps.js';
 
 const MAX = 2048;                 // instances; a full ring of the city holds ~1500
 const RANGE = 430;                // m: pools and glows fade out by here
@@ -544,6 +545,8 @@ export class LightPools {
         k++;
       }
     }
+    // the lanterns of the landmark models (Charles Bridge), which are no masts
+    k = addLandmarkLamps(this.pools, this.glows, world, cx, cz, k, MAX, REACH, LIFT);
     this.count = k;
     for (const m of [this.pools, this.glows]) {
       m.count = k;

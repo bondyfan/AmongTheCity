@@ -140,6 +140,14 @@ export const EXPOSURE_DAY = 0.86, EXPOSURE_NIGHT = 2.5;
 // night, where it costs nothing visually (it is the colour of the night) and
 // keeps the number of actors that have to exist down.
 const FOG_DAY_FAR = 900, FOG_NIGHT_FAR = 640;
+// THE OPEN VIEW (round 8, HORIZON). Where js/openness.js finds the view open
+// and the far landscape is drawn (sky.fogOpen, 0..1, from main.js), the wall
+// moves out toward OPEN_FAR and the haze is scaled to OPEN_VIS instead of to
+// the wall: on the D11 at noon 3 % haze at 2 km, a third at 4 km, the wall
+// from 3.6 to 5.5 km over the far land. At fogOpen 0 every number below is
+// exactly what it always was (tests/sky-light.test.mjs).
+const OPEN_DAY_FAR = 5500, OPEN_NIGHT_FAR = 3600;
+const OPEN_DAY_VIS = 6000, OPEN_NIGHT_VIS = 3800;
 
 // ---- the shadow box ----
 // Half-width of the ortho shadow frustum, by map size, so a texel stays near
@@ -331,6 +339,17 @@ function makeSkyDome(radius) {
   mesh.renderOrder = -1000; // always draws first: depth-less, nothing else needs to know
   mesh.frustumCulled = false;
   mesh.matrixAutoUpdate = false; // re-positioned + updateMatrix()ed by updateSky
+  // ...and once more by whatever camera actually draws it. A 45 m dome is only
+  // a sky while the camera is inside it: a camera moved after updateSky (a dev
+  // free camera, a photo pose) stood outside and saw it as a pale glossy ball
+  // by the edge of the view (the round 7 review's "dome artefact" at Žižkov and
+  // Vyšehrad). three computes modelViewMatrix after this hook, and the dome
+  // has no rotation or scale, so moving its world matrix is the whole job.
+  mesh.onBeforeRender = (r, s, cam) => {
+    mesh.position.copy(cam.position);
+    mesh.matrix.setPosition(cam.position);
+    mesh.matrixWorld.setPosition(cam.position);
+  };
   return mesh;
 }
 
@@ -502,13 +521,19 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
     // (flight streams the city much further out). The wall must always sit
     // INSIDE the streamed edge, or you see the world simply stop.
     const fs = sky.fogScale ?? 1;
-    scene.fog.far = (FOG_DAY_FAR + (FOG_NIGHT_FAR - FOG_DAY_FAR) * nightK) * fs;
+    const edge = (FOG_DAY_FAR + (FOG_NIGHT_FAR - FOG_DAY_FAR) * nightK) * fs;
+    // (the streamed edge's own wall, whatever the view: main.js hands it to
+    // the crowd, the traffic and the Prague skyline)
+    sky.edgeFar = edge;
+    const fo = sky.fogOpen ?? 0;
+    scene.fog.far = fo > 0 ? edge + (Math.max(edge, OPEN_DAY_FAR + (OPEN_NIGHT_FAR - OPEN_DAY_FAR) * nightK) - edge) * fo : edge;
+    sky.fogVis = fo > 0 ? edge + (Math.max(edge, OPEN_DAY_VIS + (OPEN_NIGHT_VIS - OPEN_DAY_VIS) * nightK) - edge) * fo : scene.fog.far;
     // near is where the WALL starts now, not where the haze starts: the haze
     // is heightfog.js's exponential and begins at your feet
     scene.fog.near = scene.fog.far * FOG_WALL_START;
   }
   const uDay = 1 - nightK * 0.92;   // sun + bright clouds fade out at night
-  setAirFog(_horC, dir, sky.sunColor, uDay, scene.fog.far ?? FOG_DAY_FAR, groundY, after);
+  setAirFog(_horC, dir, sky.sunColor, uDay, scene.fog.far ?? FOG_DAY_FAR, groundY, after, sky.fogVis ?? scene.fog.far ?? FOG_DAY_FAR);
   // background still matters behind the dome: postfx passes and clears see it,
   // and if main ever hides the dome the scene collapses to a sane flat sky
   if (!scene.background?.isColor) scene.background = new THREE.Color();

@@ -18,6 +18,7 @@ import { footPullW } from './meshes.js';
 import { railGradeY } from './geo.js';
 import { takeMeshPool, prewarmMeshPool } from './meshpool.js';
 import { Poles } from './poles.js';
+import { barrierCollide } from './mwsolid.js';
 import { sweepBrandMats } from './meshes.js';
 import { sweepWordmarks } from './destructible.js';
 import { computeVergeGen } from './streets.js';
@@ -25,8 +26,10 @@ const LAMP_BATCHES = [['lampPosts', 'lampHeads'], ['parkPosts', 'parkHeads']];
 import { Interiors } from './interiorsim.js';
 import { landmarkSolids, solidHas } from './landmarks.js';
 import { Terrain, groundFor } from './terrain.js';
+import { stampShaped, onQuay } from './quayedge.js';
 import { Canopy } from './canopy.js';
 import { GroundClass } from './groundclass.js';
+import { mwCollide } from './mwsolids.js';
 
 // Wake the mesher workers as soon as the page has this module, which is while
 // the menu is still up: see prewarmMeshPool. Nothing happens under node.
@@ -234,7 +237,13 @@ function* conformTileGen(terrain, city, tx, tz, list, st) {
   yield;
   // from here to the marks below is one piece: the grid and its books move together
   if (st) st.applied = true;
-  const moved = applyStamp(g, raw, tBest, hBest, n);
+  const changed = st ? [] : null;
+  const moved = applyStamp(g, raw, tBest, hBest, n, changed);
+  // which cells the ground moved under (round 8, HORIZON): a neighbour's
+  // arrival re-bakes the tile the car is in, and the stamps of the roads it
+  // already had come out the same, so only the cells round the samples that
+  // actually changed are meshed again instead of the whole tile (_dropTileChunks)
+  if (st) st.cells = movedCells(changed, x0, z0, n, res);
   // The grid is mutated IN PLACE, so anything holding a copy of it — a mesher
   // worker's raster mirror — now holds the wrong ground. This counter is how
   // the pool notices: a tile whose version has moved is re-sent.
@@ -308,16 +317,29 @@ function stampWay(r, terrain, x0, z0, n, res, tBest, hBest) {
     along += segLen;
   }
 }
-function applyStamp(g, raw, tBest, hBest, n) {
+function applyStamp(g, raw, tBest, hBest, n, changed) {
   let moved = 0;
   for (let o = 0; o < n * n; o++) {
     if (!tBest[o] || raw[o] === -32768) continue;
     const h0 = raw[o] / 10;
     const h1 = h0 + (hBest[o] - h0) * tBest[o];
     const v = Math.round(h1 * 10);
-    if (v !== g[o]) { g[o] = v; moved++; }
+    if (v !== g[o]) { g[o] = v; moved++; changed?.push(o); }
   }
   return moved;
+}
+// The cells a changed sample can show in: every cell within one sample step
+// of it (a chunk's ground reads its neighbours' samples for its normals and
+// its edge), as chunk keys.
+function movedCells(changed, x0, z0, n, res) {
+  const cells = new Set();
+  for (const o of changed) {
+    const x = x0 + (o % n) * res, z = z0 + Math.floor(o / n) * res;
+    const a0 = Math.floor((x - res) / CHUNK), a1 = Math.floor((x + res) / CHUNK);
+    const b0 = Math.floor((z - res) / CHUNK), b1 = Math.floor((z + res) / CHUNK);
+    for (let a = a0; a <= a1; a++) for (let b = b0; b <= b1; b++) cells.add(a + ',' + b);
+  }
+  return cells;
 }
 function forgetGround(city, cx, z0, T, decks) {
   for (let cz = Math.floor(z0 / CHUNK); cz < Math.floor((z0 + T) / CHUNK); cz++) {
@@ -335,6 +357,27 @@ function forgetGround(city, cx, z0, T, decks) {
       }
     }
   }
+}
+
+// Does a road or rail of tile `t` (its arrival event) lie in, or within a
+// stamp's reach of, tile (nx, nz)? Read off the cells it touched: its own ways
+// are the ones with an id in its block (geo.js stamps ids by slot, ev.ids).
+const REACH_CELLS = 1;        // a stamp reaches CONFORM_FALL + half a motorway: under a cell
+function waysReach(city, t, nx, nz, T) {
+  if (!t.ids || !t.cells) return true;          // (no way to tell: re-bake, as before)
+  const [lo, hi] = t.ids;
+  const c0 = Math.floor((nx * T) / CHUNK) - REACH_CELLS, c1 = Math.floor(((nx + 1) * T - 1e-6) / CHUNK) + REACH_CELLS;
+  const d0 = Math.floor((nz * T) / CHUNK) - REACH_CELLS, d1 = Math.floor(((nz + 1) * T - 1e-6) / CHUNK) + REACH_CELLS;
+  const mine = (f) => typeof f._id === 'number' && f._id > lo && f._id <= hi;
+  for (const key of t.cells) {
+    const i = key.indexOf(','), cx = +key.slice(0, i), cz = +key.slice(i + 1);
+    if (cx < c0 || cx > c1 || cz < d0 || cz > d1) continue;
+    const cell = city.chunkIndex.get(key);
+    if (!cell) continue;
+    for (const r of cell.roads) if (mine(r)) return true;
+    for (const r of cell.rails) if (mine(r)) return true;
+  }
+  return false;
 }
 
 export class CityWorld {
@@ -479,6 +522,9 @@ export class CityWorld {
       this._dataLanded(t);                     // ...and whatever was half way through the old roads starts again
       if (this.terrain._conformed && t.tx !== undefined) {
         for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          // (a neighbour only if a way of this tile reaches into it: on the D11
+          // every arrival re-baked the tile the car was in, round 8 HORIZON)
+          if ((ox || oz) && !waysReach(this.city, t, t.tx + ox, t.tz + oz, this.terrain.tile)) continue;
           this.terrain._conformed.delete((t.tx + ox) + ',' + (t.tz + oz));
           this.terrain._conformTried?.delete((t.tx + ox) + ',' + (t.tz + oz));
         }
@@ -606,6 +652,9 @@ export class CityWorld {
     if (ll > LOOK_MAX) { lx *= LOOK_MAX / ll; lz *= LOOK_MAX / ll; }
     const fx = Math.floor((focus.x + lx) / CHUNK), fz = Math.floor((focus.z + lz) / CHUNK);
     const outer = this.viewChunks + this.shellChunks + this.farChunks;
+    // what is surely in the window: a square of half side edgeR round this
+    // point (main.js dissolves the window's edge there, heightfog.js setFarEdge)
+    this.edgeX = focus.x + lx; this.edgeZ = focus.z + lz; this.edgeR = outer * CHUNK;
     // Sort the window into the two queues, nearest ring first. Cells inside
     // viewChunks want full detail; the ring beyond wants the cheap ground-only
     // tier, and a cell already built at the WRONG level is re-queued so flying
@@ -741,7 +790,7 @@ export class CityWorld {
   _startBake(key, tx, tz, roads) {
     const st = { applied: false };
     if (!((this.conformBudgetMs ?? Infinity) < Infinity)) {
-      if (conformTerrainTile(this.terrain, this.city, tx, tz, st)) this._dropTileChunks(tx, tz);
+      if (conformTerrainTile(this.terrain, this.city, tx, tz, st)) this._dropTileChunks(tx, tz, st.cells);
       if (st.decks) this._requeueCells(st.decks);
       return;
     }
@@ -778,7 +827,7 @@ export class CityWorld {
     finally { holdVerges(-1); }
     if (!it.done) return;
     this._bake = null;
-    if (it.value) this._dropTileChunks(b.tx, b.tz);
+    if (it.value) this._dropTileChunks(b.tx, b.tz, b.st.cells);
     if (b.st.decks) this._requeueCells(b.st.decks);
   }
 
@@ -1465,8 +1514,9 @@ export class CityWorld {
     this._missBy.delete(key);
   }
 
-  /** Drop the built chunks of ONE terrain tile — its ground just moved. */
-  _dropTileChunks(tx, tz) {
+  /** Drop the built chunks of ONE terrain tile: its ground just moved
+   * (only those in `cells`, the bake's own list of where it moved, if given). */
+  _dropTileChunks(tx, tz, cells = null) {
     const T = this.terrain.tile;
     const c0x = Math.floor((tx * T) / CHUNK), c1x = Math.floor(((tx + 1) * T) / CHUNK);
     const c0z = Math.floor((tz * T) / CHUNK), c1z = Math.floor(((tz + 1) * T) / CHUNK);
@@ -1481,6 +1531,7 @@ export class CityWorld {
     for (const key of this.built.keys()) {
       const [cx, cz] = key.split(',').map(Number);
       if (cx < c0x || cx >= c1x || cz < c0z || cz >= c1z) continue;
+      if (cells && !cells.has(key)) continue;
       keys.push(key);
     }
     this._requeueCells(keys);
@@ -1725,7 +1776,10 @@ export class CityWorld {
               if (d < half + 5) {
                 const bank = gy + LAYER_Y.road - 0.45
                   - (d > half ? (d - half) * 0.55 : 0);
-                if (bank > ground) levels.add(bank);
+                // (not over ground a stamp shaped: the mesh draws no bank onto
+                // a Prague lower quay or its stairs, meshes.clampUnderRoadsGen,
+                // and feet at the foot of a quay stair stood on the air 4 m up)
+                if (bank > ground && !stampShaped(this.terrain, x, z)) levels.add(bank);
               }
             }
           }
@@ -1739,7 +1793,10 @@ export class CityWorld {
           const xo = bd - half - bay;
           const v = vg ? vergeAt(r, bs, be > 0 ? 1 : 0) : null;
           // the generated pavement itself
-          if (v && v.u && xo > 0 && v.w > 0.05 && xo <= v.w && !inZone(r, bs)) {
+          // (…but not out over a flight or ramp a stamp cut down to a Prague
+          // lower quay: offered there, the pavement 2 m up was within the
+          // walker's reach on the top half of the stairs and popped them up)
+          if (v && v.u && xo > 0 && v.w > 0.05 && xo <= v.w && !inZone(r, bs) && !stampShaped(this.terrain, x, z)) {
             levels.add(gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo));
           }
         }
@@ -1761,7 +1818,9 @@ export class CityWorld {
     // (2.8 km of path within 2.4 km of the spawn had the grid over 15 cm
     // above its slab). On a path's strip the slab is what is there.
     if (slab === -Infinity || ground <= slab) levels.add(ground);
-    this._padLevels(x, z);
+    // (a junction's pad and corner pavement do not reach down a flight to a
+    // Prague lower quay: the Trojická corner stood 2 m over its stairs)
+    if (!onQuay(x, z)) this._padLevels(x, z);
     return levels.value(ground);
   }
 
@@ -1774,6 +1833,10 @@ export class CityWorld {
   // up on an embankment does not lift the path at the foot of it.
   _footPull(cell, x, z, own) {
     let upW = 0, upT = 0;
+    // (a stair or ramp down to a Prague lower quay stands where its stamp
+    // built it: pulled toward the street over the wall it floated 1.6 m over
+    // its own foot. meshes.roadRibbon draws it the same way.)
+    if (stampShaped(this.terrain, x, z)) { _pull.w = 0; _pull.t = own; return; }
     for (const r of cell.roads) {
       if (!r.d || r.br || !r.p) continue;
       const vg = streetOf(r), half = r.w / 2;
@@ -2025,6 +2088,10 @@ export class CityWorld {
     // A LAMP MAST IS SOLID. It is instanced geometry, so it never went near
     // the footprint tests below — you drove through seven metres of steel.
     pushed = this.poles?.collide(pos, radius) || pushed;
+    // the D11's median barrier and guard rails (js/mwsolid.js, the mesher's own plan)
+    pushed = barrierCollide(this, pos, radius, opts) || pushed;
+    // …and so are the D11 gantry legs and sign posts (js/mwsolids.js), never fellable
+    pushed = mwCollide(pos, radius, opts?.aboveY, this) || pushed;
     const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
     if (!cell) return pushed;
     const walker = !!opts?.interior;

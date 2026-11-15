@@ -25,7 +25,7 @@
 
 import * as THREE from 'three';
 import { LAYER_Y } from './config.js';
-import { bridgeElevation, distPointToSegment } from './geo.js';
+import { bridgeElevation, distPointToSegment, railGradeY, bridgeDeckHeight } from './geo.js';
 import { trainStart, trainStop, trainSet, sfx } from './audio.js';
 
 // ---- chaining + route tunables ----
@@ -267,7 +267,28 @@ function wayCum(w) {
 // relief in Polabí — everything else is the flat deck the rest of the city
 // renders at, so this matches meshes.railWay exactly and the wheels sit ON
 // the steel rather than hovering over it.
-const railY = (w, d, len) => RAILHEAD + (w.br ? bridgeElevation(d, len) : 0);
+//
+// …which was true of a flat world, and has not been since the terrain got its
+// real altitudes (round 8 found every train running at y 0.18, 220 m under
+// Pardubice, invisible). With the terrain handed in (main.js), a vertex sits
+// where meshes.railWay draws the steel: the levelled rail grade
+// (geo.railGradeY), the bridge deck on a bridge, the bare ground otherwise,
+// plus the railhead.
+let _terrain = null;
+const UNREADY_Y = 20;      // m: no rail in the region lies this low (see _reheight)
+const railY = (w, d, len, q) => {
+  if (_terrain) {
+    if (w.br) return bridgeDeckHeight(w, d, _terrain) + RAILHEAD;
+    const gy = railGradeY(w, d, _terrain);
+    return (gy ?? _terrain.heightAt(q[0], q[1])) + RAILHEAD;
+  }
+  return RAILHEAD + (w.br ? bridgeElevation(d, len) : 0);
+};
+/** The railhead height over the ground at (x, z): for track spliced on from
+ *  outside a chain (js/express.js), which has no way to grade along. */
+export function railHeadAt(x, z) {
+  return (_terrain ? _terrain.heightAt(x, z) : 0) + RAILHEAD;
+}
 
 // direction leaving endpoint `end` of way w, INTO the way (unit)
 function endDir(w, end, out) {
@@ -356,7 +377,7 @@ function appendWay(pts, ys, w, rev, skipFirst) {
     const last = pts[pts.length - 1];
     if (last && Math.hypot(q[0] - last[0], q[1] - last[1]) < MIN_STEP) continue;
     pts.push(q);
-    ys.push(railY(w, cum[i], len));
+    ys.push(railY(w, cum[i], len, q));
   }
 }
 
@@ -529,6 +550,7 @@ export class Trains {
     this.opts = opts;
     this.player = opts.player ?? null;
     this.world = opts.world ?? null;
+    if (opts.terrain) _terrain = opts.terrain;   // rails at their real height (railY)
     this.routes = [];
     this.trains = new Set();
     this.riding = null;
@@ -545,6 +567,39 @@ export class Trains {
     // only carries roads/signals — so we just mark ourselves dirty and rescan
     // city.rails / city.pois on the next update, off the fetch's stack.
     city.onTileLoaded?.(() => { this._pending = true; });
+    // A far tile gives its rails back (geo.js RELEASE_DATA) and brings new
+    // objects with the same ids when it returns. A route over them is dropped,
+    // so the returning rails chain again instead of being spliced onto the old
+    // route a second time; which route holds which rail is kept by id. Not a
+    // route a train is running on: a line can run from the far tile to within
+    // a few hundred metres of the player, and its train would vanish in view.
+    this._wids = new Map();                // rail _id -> the route it is part of
+    this._rid = 0;                         // route ids: never reused after a drop
+    city.onTileReleased?.((t) => this.releaseTile(t));
+  }
+
+  /** A released tile's rails: the routes over them go, their other rails chain again. */
+  releaseTile(t) {
+    if (!t.data || !t.rails?.length) return;
+    // (never a route with a train on it, the ridden one included: it stays
+    // whole, and its rails are known by id when they come back; a later
+    // release that finds it without trains drops it)
+    const live = new Set();
+    for (const tr of this.trains) live.add(tr.route);
+    if (this.riding) live.add(this.riding.route);
+    const drop = new Set();
+    for (const w of t.rails) {
+      const R = this._wids.get(w._id);
+      if (R && !live.has(R)) drop.add(R);
+    }
+    if (!drop.size) return;
+    let n = 0;
+    for (const R of this.routes) if (!drop.has(R)) this.routes[n++] = R;
+    this.routes.length = n;
+    for (const [id, R] of this._wids) if (drop.has(R)) this._wids.delete(id);
+    for (const w of this.city.rails) if (w._trDone && !this._wids.has(w._id)) w._trDone = false;
+    this._near.length = 0; this._nearT = 0;
+    this._pending = true;
   }
 
   // ---- ingestion: rails → routes ----------------------------------------
@@ -568,6 +623,7 @@ export class Trains {
     const pool = [];
     for (const w of this.city.rails) {
       if (w.t === 'tram' || w._trDone) continue;   // trams are street furniture
+      if (this._wids.has(w._id)) { w._trDone = true; continue; }   // (back, and its route never left)
       pool.push(w);
     }
     let grew = false;
@@ -576,20 +632,94 @@ export class Trains {
         // a chain that continues an existing route is worth keeping whatever
         // its own length — that IS the tile-border case, and without it every
         // 4.8 km seam would become a train reversing in a field
-        const merged = this._mergeChain(c);       // _append rescans its stops
-        if (merged) { grew = true; }
-        else if (c.len >= MIN_ROUTE) { this._scanStops(this._addRoute(c)); grew = true; }
+        let R = this._mergeChain(c);              // _append rescans its stops
+        if (R) { grew = true; }
+        else if (c.len >= MIN_ROUTE) { R = this._addRoute(c); this._scanStops(R); grew = true; }
         else continue;                             // too short, leave it in the pool
-        for (const w of c.ways) w._trDone = true;
+        for (const w of c.ways) { w._trDone = true; if (w._id !== undefined) this._wids.set(w._id, R); }
       }
     }
     // a NEW station has to be offered to routes that were already finished
     if (stationsGrew) for (const R of this.routes) this._scanStops(R);
+    this._joinRoutes();                            // (cheap: a pass over the route ends)
     if (grew) this._nearT = 0;                     // fresh track joins the spawn pool
   }
 
+  // Track chained before its tile's height map arrived was given the ground
+  // heightAt answers there, 0, i.e. 220 m under Polabí (the real altitudes
+  // are 150 to 400 m, so anything under UNREADY_Y is that). A rider skipping
+  // ahead was put down there and drowned. Once a second, such vertices are
+  // set to the ground now known (plus the railhead; the grade and the bridge
+  // decks of railY are lost there, a small error against 220 m).
+  _reheight() {
+    if (!_terrain) return;
+    for (const R of this.routes) {
+      if (R._flat === 0) continue;
+      let left = 0;
+      for (let i = 0; i < R.ys.length; i++) {
+        if (R.ys[i] > UNREADY_Y) continue;
+        const q = R.pts[i];
+        if (_terrain.ready && !_terrain.ready(q[0], q[1])) { left++; continue; }
+        R.ys[i] = _terrain.heightAt(q[0], q[1]) + RAILHEAD;
+      }
+      R._flat = left;
+    }
+  }
+
+  // Two ROUTES whose ends meet are one line. _mergeChain only splices a new
+  // chain onto a route, so where the line had already been chained from both
+  // sides before the piece between arrived, it stayed two routes meeting end
+  // to end, and every train (the express included, round 8) reversed at the
+  // seam in open country (measured: line 010 west of Pardubice at x -7080).
+  // Joined here the same way: B goes onto A's end, trains on B keep their
+  // place (their arc is rebased), B is dropped.
+  _joinRoutes() {
+    const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= JOIN;
+    const dirAt = (R, end) => {
+      const n = R.pts.length, a = end ? R.pts[n - 2] : R.pts[1], b = end ? R.pts[n - 1] : R.pts[0];
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-6;
+      return [(b[0] - a[0]) / L, (b[1] - a[1]) / L];   // leaving the route at that end
+    };
+    for (let guard = 0; guard < 64; guard++) {
+      let pair = null;
+      search:
+      for (const A of this.routes) for (const B of this.routes) {
+        if (A === B) continue;
+        const ae = A.pts[A.pts.length - 1];
+        let rev;
+        if (near(ae, B.pts[0])) rev = false;
+        else if (near(ae, B.pts[B.pts.length - 1])) rev = true;
+        else continue;
+        // a continuation, not a turnout's stub meeting the line at an angle
+        const da = dirAt(A, true), db = dirAt(B, rev);
+        if (-(da[0] * db[0] + da[1] * db[1]) < JOIN_DOT) continue;
+        pair = { A, B, rev };
+        break search;
+      }
+      if (!pair) return;
+      const { A, B, rev } = pair;
+      const off = A.len, blen = B.len;
+      this._append(A, { pts: B.pts, ys: B.ys }, rev);
+      for (const t of this.trains) {
+        if (t.route !== B) continue;
+        t.route = A;
+        t.s = off + (rev ? blen - t.s : t.s);
+        if (rev) t.dir = -t.dir;
+        t.seg = 0;
+        for (const v of t.cars) { v.segF = 0; v.segR = 0; }
+        // the stop it just left is A's object now (same poi)
+        if (t.departed) t.departed = A.stops.find((st) => st.poi === t.departed.poi) ?? null;
+        if (t.station) t.station = A.stops.find((st) => st.poi === t.station.poi) ?? t.station;
+      }
+      const i = this.routes.indexOf(B);
+      if (i >= 0) this.routes.splice(i, 1);
+      for (const [id, R] of this._wids) if (R === B) this._wids.set(id, A);
+      this._near.length = 0; this._nearT = 0;
+    }
+  }
+
   _addRoute(c) {
-    const R = { id: this.routes.length, pts: c.pts, ys: c.ys, stops: [],
+    const R = { id: this._rid++, pts: c.pts, ys: c.ys, stops: [],
       cum: null, len: 0, vf: null, vr: null,
       minX: 0, maxX: 0, minZ: 0, maxZ: 0 };
     measure(R);
@@ -612,18 +742,31 @@ export class Trains {
   // case by reversing the chain and/or the route first.
   _mergeChain(c) {
     const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= JOIN;
-    const cs = c.pts[0], ce = c.pts[c.pts.length - 1];
+    const cs = c.pts[0], ce = c.pts[c.pts.length - 1], cn = c.pts.length;
+    // A continuation, never a hairpin: the chainer's own JOIN_DOT rule. Without
+    // it a short chain that meets a route's end and runs straight BACK beside
+    // it was spliced on, and every train reversed in open country at the
+    // splice (round 8 review: line 010 at Pečky doubled back 270 m at x
+    // -52881, so the line on toward Prague, a route starting at that very
+    // point, was never joined and the express shuttled back to Kolín).
+    // (o, p): the route's end and the vertex before it; (a, b): the chain's
+    // joint and the vertex after it.
+    const goesOn = (o, p, a, b) => {
+      const ox = o[0] - p[0], oz = o[1] - p[1], ax = b[0] - a[0], az = b[1] - a[1];
+      return (ox * ax + oz * az) / (Math.hypot(ox, oz) * Math.hypot(ax, az) || 1e-9) >= JOIN_DOT;
+    };
     for (const R of this.routes) {
-      const rs = R.pts[0], re = R.pts[R.pts.length - 1];
-      if (near(cs, re)) { this._append(R, c, false); return R; }
-      if (near(ce, re)) { this._append(R, c, true); return R; }
-      if (near(cs, rs)) { this._reverseRoute(R); this._append(R, c, false); return R; }
-      if (near(ce, rs)) { this._reverseRoute(R); this._append(R, c, true); return R; }
+      const n = R.pts.length, rs = R.pts[0], re = R.pts[n - 1];
+      if (near(cs, re) && goesOn(re, R.pts[n - 2], cs, c.pts[1])) { this._append(R, c, false); return R; }
+      if (near(ce, re) && goesOn(re, R.pts[n - 2], ce, c.pts[cn - 2])) { this._append(R, c, true); return R; }
+      if (near(cs, rs) && goesOn(rs, R.pts[1], cs, c.pts[1])) { this._reverseRoute(R); this._append(R, c, false); return R; }
+      if (near(ce, rs) && goesOn(rs, R.pts[1], ce, c.pts[cn - 2])) { this._reverseRoute(R); this._append(R, c, true); return R; }
     }
     return null;
   }
 
   _append(R, c, rev) {
+    R._flat = -1;                                  // new vertices: check their heights
     const n = c.pts.length;
     for (let j = 1; j < n; j++) {                  // j=0 is the shared joint
       const i = rev ? n - 1 - j : j;
@@ -691,6 +834,8 @@ export class Trains {
 
   update(dt, focus) {
     if (this._pending) { this._pending = false; this._ingest(); }
+    this._reheightT = (this._reheightT ?? 0) - dt;
+    if (this._reheightT <= 0) { this._reheightT = 1; this._reheight(); }
     if (!focus) return;
     // Remembered, not copied. main.js builds its focus as `game.car ?? player
     // .pos`, so while you are riding a train the object handed in here IS the
@@ -819,6 +964,8 @@ export class Trains {
   _nextStop(t) {
     let best = null, bd = 1e9;
     for (const st of t.route.stops) {
+      // a fast train calls at its own stations only (js/express.js `only`)
+      if (t.only && !t.only(st.name)) continue;
       const d = (st.s - t.s) * t.dir;
       if (st === t.departed) { if (d < -30) t.departed = null; continue; }
       if (d < -PAST_STOP) continue;
@@ -828,6 +975,8 @@ export class Trains {
   }
 
   _drive(t, dt) {
+    // held by a skip to the next station (js/express.js): it places the train
+    if (t.hold) { t.speed = 0; return; }
     const R = t.route;
     if (t.dwellT > 0) {                       // standing at a platform / turning
       t.dwellT -= dt;

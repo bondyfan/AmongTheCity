@@ -60,6 +60,19 @@ export const TIERS = Object.freeze([
 
 export const MAX_UNITS = 5;
 
+// Round 8, the D11. The tier ceilings above are town numbers (151 to 187
+// km/h), and a player cruising the motorway at 180 could not be caught below
+// five stars. On a carriageway the ceiling rises with the player: a few m/s
+// over what they are doing, up to MW_COP_VMAX (223 km/h, what a Škoda Superb
+// pursuit car does), never under the tier's own.
+export const MW_COP_VMAX = 62;
+export const MW_COP_OVER = 4;
+/** The pursuit ceiling (m/s) on a motorway carriageway, from the tier's and the player's speed. */
+export function motorwayVmax(base, pspeed) {
+  const v = (pspeed > 0 ? pspeed : 0) + MW_COP_OVER;
+  return v > base ? (v < MW_COP_VMAX ? v : MW_COP_VMAX) : base;
+}
+
 /** The tier for a star count, or null at zero. Non-finite reads as zero. */
 export function tierFor(stars) {
   const s = Number.isFinite(stars) ? Math.floor(stars) : 0;

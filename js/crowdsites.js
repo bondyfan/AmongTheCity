@@ -108,8 +108,16 @@ export class SiteIndex {
    *  tile's id block, geo.js IDS_PER_TILE). Sites without an id (bus stops,
    *  from the pois geo.js keeps) stay. Returns how many went. */
   removeIds(lo, hi) {
-    let n = 0;
+    const it = this.removeIdsSteps(lo, hi);
+    let r;
+    do r = it.next(); while (!r.done);
+    return r.value;
+  }
+  /** The same, as steps (geo.js runs a tile's release a slice per frame). */
+  *removeIdsSteps(lo, hi) {
+    let n = 0, step = 0;
     for (const [sk, s] of this._seen) {
+      if ((++step & 2047) === 0) yield;
       const id = this._ids.get(s);
       if (!(id > lo && id <= hi)) continue;
       this._seen.delete(sk);

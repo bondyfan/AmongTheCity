@@ -131,7 +131,11 @@ export function nmSolids(f, l) {
  */
 export function buildVaclav(kit) {
   const [x0, z0] = VACLAV;
-  const S = new Frame(kit, x0, z0, VACLAV_FACE[0], VACLAV_FACE[1], kit.rel(x0, z0));
+  // lathes are not in the frame: their heights take the plinth's ground
+  // themselves (without it the rider's and the saints' heads hung 7 m up in
+  // the air over the statue, seen from the square)
+  const y0 = kit.rel(x0, z0);
+  const S = new Frame(kit, x0, z0, VACLAV_FACE[0], VACLAV_FACE[1], y0);
   const was = kit.floodFn;
   kit.floodFn = (x, y) => 0.9;
   kit.set(0x6d6a66, K.stone);
@@ -154,7 +158,7 @@ export function buildVaclav(kit) {
   S.box(-0.55, 0.55, -0.5, 0.4, 7.5, 8.2);
   S.box(-0.38, 0.38, -0.35, 0.3, 8.2, 9.4);
   const [hx, hz] = S.xz(0, 0);
-  kit.lathe(hx, hz, [[0, 9.4], [0.28, 9.55], [0.3, 9.85], [0.12, 10.15], [0, 10.3]], 6);
+  kit.lathe(hx, hz, [[0, 9.4], [0.28, 9.55], [0.3, 9.85], [0.12, 10.15], [0, 10.3]].map(([r, y]) => [r, y0 + y]), 6);
   const L0 = S.P(0.6, 0.3, 7.6), L1 = S.P(0.75, 0.6, 12.4);
   const [lx, lz] = S.dir(1, 0);
   kit.quad([L0[0] - 0.05, L0[1], L0[2]], [L0[0] + 0.05, L0[1], L0[2]], [L1[0] + 0.05, L1[1], L1[2]], [L1[0] - 0.05, L1[1], L1[2]], lx, 0, lz);
@@ -163,7 +167,7 @@ export function buildVaclav(kit) {
   for (const [u, v] of [[-2.5, -3.8], [2.5, -3.8], [-2.5, 3.8], [2.5, 3.8]]) {
     S.box(u - 0.35, u + 0.35, v - 0.3, v + 0.3, 1.4, 3.3);
     const [px, pz] = S.xz(u, v);
-    kit.lathe(px, pz, [[0, 3.3], [0.24, 3.45], [0.2, 3.75], [0, 3.85]], 6);
+    kit.lathe(px, pz, [[0, 3.3], [0.24, 3.45], [0.2, 3.75], [0, 3.85]].map(([r, y]) => [r, y0 + y]), 6);
   }
   kit.floodFn = was;
 }

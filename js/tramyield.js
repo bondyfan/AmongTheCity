@@ -22,6 +22,7 @@
 
 import { projectOnPath } from './realines.js';
 import { BRAKE, pathAtExt } from './tramlines.js';
+import { spacingHold } from './tramspacing.js';
 
 const HULL_STEP = 5.5, HULL_HALF = 3.0;
 const HULL_R = 420;            // m: no traffic car is further from the player than this
@@ -34,7 +35,6 @@ const HOLD_LAT = 2.2;          // m off the rail a car's centre blocks it
 const HOLD_LAT_CAR = 1.9;      // …an AI car's (one in the lane beside a street-running tram is 2.5 m off)
 const WALK_AHEAD = 40;         // m ahead of a tram a crossing is not walked onto
 
-const FOLLOW_GAP = 4;          // m a tram keeps behind the tail of the one ahead
 const PIN_SLACK = 0.5, PIN_V = 0.5;   // m, m/s: a standing car against the nose (see the hold)
 const PIN_CLEAR = 2.5;         // m round a pinned car's body that the tram's hull leaves free
 const _q = { d: 0, a: 0 }, _pt = { x: 0, z: 0, dx: 0, dz: 0 };
@@ -46,20 +46,6 @@ function cross2(ax, az, bx, bz, cx, cz, dx, dz) {
   if (Math.abs(den) < 1e-9) return -1;
   const t = ((cx - ax) * sz - (cz - az) * sx) / den, u = ((cx - ax) * rz - (cz - az) * rx) / den;
   return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : -1;
-}
-
-// The first arc of `me`'s rail, between its nose and `look` metres ahead,
-// that the body of tram `o` stands on (within a body's width), or Infinity.
-function bodyAhead(o, me, look) {
-  let first = Infinity;
-  for (let d = 0; d <= o.len + 0.01; d += HULL_STEP) {
-    pathAtExt(o.line.P, o.sr - Math.min(d, o.len), _pt);
-    projectOnPath(me.line.P, _pt.x, _pt.z, me.sr - 0.5, me.sr + look, _q);
-    // (a body's width: where two rails converge, the other car is in the way
-    // before its centreline is on mine)
-    if (_q.d < 2.5 && _q.a < first) first = _q.a;
-  }
-  return first;
 }
 
 export class TramYield {
@@ -171,26 +157,9 @@ export class TramYield {
         if (h <= tr.sr + PIN_SLACK && (o === tr.pin || Math.abs(o.speed ?? 0) < PIN_V)) pin = o;
       }
       tr.pin = pin;
-      // ---- the tram ahead on the same rail. Lines share track (Karlovo
-      // náměstí, Lazarská, Jindřišská) and their timetables know nothing of
-      // one another, so a tram can be due where another still stands. It
-      // waits behind it, on this screen only, as a real one does at a busy
-      // stop; the shared arc runs on and the hold lets go when the rail is free.
-      for (const o of trams.list) {
-        if (o === tr || o.hidden) continue;
-        const dx = o.x - tr.x, dz = o.z - tr.z;
-        if (dx * dx + dz * dz > (o.len + look + 10) ** 2 || o.hx * tr.hx + o.hz * tr.hz < 0.5) continue;
-        // where the other one's body lies on my rail ahead of my nose
-        const first = bodyAhead(o, tr, look);
-        if (first === Infinity) continue;
-        // each in the other's way (side by side on one rail, or noses together
-        // where two rails converge): one of them has to go first, and it is
-        // the same one on every screen, by key
-        if (bodyAhead(tr, o, o.v * o.v / (2 * BRAKE) + HOLD_LOOK) < Infinity && tr.key < o.key) continue;
-        // (never backwards: a hold behind where it stands is standing still)
-        const h = first - FOLLOW_GAP;
-        if (h < tr.hold) tr.hold = Math.max(tr.sr, h);
-      }
+      // ---- the other trams: one on a piece of track at a time (js/tramspacing.js)
+      const h = spacingHold(tr, trams.list);
+      if (h < tr.hold) tr.hold = h;
       // ---- the crossings it is due at
       const c = line.cross?.list;
       if (!c || !c.length || (tr.x - pos.x) ** 2 + (tr.z - pos.z) ** 2 > HULL_R * HULL_R) continue;

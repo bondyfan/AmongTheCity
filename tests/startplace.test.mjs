@@ -56,6 +56,20 @@ test('the hospital you wake up in is the one of the city you fell in', () => {
   assert.ok(Math.hypot(h.x + 95636, h.z + 6206) < 3000, 'within reach of the Old Town Square');
 });
 
+test('a death out on the D11 wakes you at the nearest services, not 50 km back', () => {
+  // km 41 between Kluk and Libice: Dobšice (the Shell off exit 50) or Vrbová Lhota
+  const h = SP.nearestHospital(-44000, -9900);
+  assert.ok(/^Odpočívka /.test(h.name), h.name);
+  assert.ok(Math.hypot(h.x + 44000, h.z + 9900) < 12000);
+  // near either city it is still that city's hospital
+  assert.equal(SP.nearestHospital(-90000, -7600), HOSPITALS[1]);
+  assert.equal(SP.nearestHospital(-5000, -5000), HOSPITALS[0]);
+  // Dolní Roveň (D35) has no fuel poi: its point is the slip roads' midpoint,
+  // on the carriageway, so nobody is put down there (round 8 review)
+  const r = SP.nearestHospital(17500, 1700);
+  assert.ok(!/Roveň/.test(r.name ?? ''), r.name);
+});
+
 test('the boot cover names the city', () => {
   assert.equal(SP.arriveText(PARDUBICE), 'Přijíždíte do Pardubic…');
   assert.equal(SP.arriveText(PRAHA), 'Přijíždíte do Prahy…');

@@ -10,12 +10,13 @@ import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR, START_PLACES, FLEET_STRIDE, HOSP
 import { arriveText, nearestHospital, tilesReady } from './startplace.js';
 import { loadCity, chunkKey, venueAt, forEachChunkInRadius } from './geo.js';
 import { CityWorld } from './city.js';
-import { planRings } from './streamplan.js';
+import { planRings, planCarRings } from './streamplan.js';
 import { input } from './input.js';
 import { Player, worldSeatAnchor } from './player.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
   attachCabin, detachCabin, setVehicleEventSink } from './vehicles.js';
 import { Traffic } from './traffic.js';
+import { RoadWorks } from './mwworksmesh.js';
 import { makeSky, updateSky, todClock, EXPOSURE_DAY } from './sky.js';
 import { Minimap } from './minimap.js';
 import { initAudio, sfx, sfxAt, setListener, engineVoices, engineVoicesStop,
@@ -31,8 +32,9 @@ import * as wallet from './wallet.js';
 import * as vitals from './vitals.js';
 import { shouldEject, launchDamage, impactDamage } from './ejection.js';
 import * as fuel from './fuel.js';
+import { indexPumps, pumpAt as pumpAtForecourt } from './pumps.js';
 import * as statusbar from './statusbar.js';
-import { PRICE, pumpBrand, pumpPrice, kc2 } from './prices.js';
+import { PRICE, pumpBrand, pumpPrice, kc2, kc } from './prices.js';
 import { Combat } from './combat.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
@@ -43,7 +45,12 @@ import { PostFX, gradeFor } from './postfx.js';
 import { setCoverage } from './coverage.js';
 import { shadowDue } from './shadowpace.js';
 import { LightPools, nightBeams, nightLevels } from './lightpools.js';
-import { FarSkyline } from './landmarksfar.js';
+import { FarSkyline, inSkyline } from './landmarksfar.js';
+import { FarTerrain } from './farterrain.js';
+import { FarLandLights } from './farlightsland.js';
+import { Openness } from './openness.js';
+import { poolLevelAt } from './riverpools.js';
+import { setFarEdge } from './heightfog.js';
 import { Helicopter, makeHelipad } from './helicopter.js';
 import { Grass } from './grass.js';
 import { Trees } from './trees.js';
@@ -52,6 +59,7 @@ import { Fighter } from './aircraft.js';
 import { Clouds } from './clouds.js';
 import { WorldMap } from './worldmap.js';
 import { Trains } from './trains.js';
+import { Express, screenFade } from './express.js';
 import { Weapons } from './weapons.js';
 import { SpeedStreaks } from './speedfx.js';
 import { SkidMarks } from './skidmarks.js';
@@ -78,6 +86,9 @@ import { makeNetUI } from './netui.js';
 // jobs, ownership, stats, the save: the whole gameplay layer hangs off this one
 // module (js/career.js lists the hooks main.js calls, and why there are so few)
 import * as career from './career.js';
+import { exitHudText, setExitLine } from './mwhud.js';
+import { MwRetro } from './mwretro.js';
+import { setMotorwayAtlasScale } from './mwatlas.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -121,6 +132,7 @@ const game = {
 };
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
+let roadWorks = null;
 let parkingLots = null;
 let cityLife = null;     // crowd, traffic and buses tied together (js/citylife.js)
 let peds = null;
@@ -155,6 +167,12 @@ let postfx = null;   // bloom + god rays — what makes lamps and headlights GLO
 let clouds = null;                // the sky to fly the machines through
 let lightPools = null;            // what the street lamps do to the street
 let farSkyline = null;            // Prague's tall landmarks beyond the streamed ring (js/landmarksfar.js)
+let farTerrain = null;            // the land beyond it everywhere else (js/farterrain.js)
+let farLandLights = null;         // …and its towns' lights at night (js/farlightsland.js)
+const _farEdge = [0, 0, 0, 0];
+// (js/openness.js: a sight line over the Prague Vltava, the pools over the lowered bed)
+const _overVltava = (x, z) => { const l = poolLevelAt(x, z); return l !== null && world.terrain.heightAt(x, z) < l - 0.5; };
+const openness = new Openness();  // how open the view is here (js/openness.js)
 const _earDir = new THREE.Vector3();
 const _voiceCars = [];            // reused every frame — the pool never keeps it
 const VOICE_SCAN2 = 140 * 140;    // m² — wider than the pool's own 95 m cutoff,
@@ -171,6 +189,7 @@ let jetWasAir = false;   // edge detector for touchdown
 let jetBraking = false;  // …and for the brakes, so the sample fires once
 let worldMap = null;   // the full-region map on M, and the waypoint it owns
 let trains = null;     // České dráhy on the real 532 km network
+let express = null;    // the R train Pardubice - Praha on top of them (js/express.js)
 let weapons = null;  // the rocket pod under that machine, and what it does to walls
 let streaks = null;  // the air, showing itself past 100 km/h
 let skids = null;    // …and the road, remembering what was done to it
@@ -644,7 +663,10 @@ function viewerState() {
   // not a constant. updateHorizon() stretches it with the streamed radius
   // (~634 m on the ground, past 3 km from a helicopter) and sky.js pulls it in
   // at night. Both modules clamp it into their own range, so pass it raw.
-  _viewer.fogFar = scene.fog?.far ?? 900;
+  // (round 8: the STREAMED EDGE's wall, sky.edgeFar, not scene.fog.far: an
+  // open view moves the wall out over the far land, and the crowd and the
+  // cars stream to the window as they always did)
+  _viewer.fogFar = sky?.edgeFar ?? scene.fog?.far ?? 900;
   // A camera looking dead vertical has no horizontal bearing and the cone is
   // meaningless. Unreachable today (camPitch tops out at 1.15 rad, fpPitch at
   // 0.75), but say it here rather than letting both modules discover it.
@@ -1002,6 +1024,13 @@ function applyParkVisibility() {
   }
 }
 
+// N on a moving train: skip to the next station (js/express.js). One game
+// hour is one real minute, so the ride to Prague is 50 real minutes without it.
+input.onKey('KeyN', () => {
+  if (game.mode !== 'play' || !trains?.riding || trains.riding.halted) return;
+  express?.skip(screenFade);
+});
+
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
   if (player.ragdoll) return;      // flying through the air is not a door
@@ -1021,6 +1050,11 @@ input.onKey('KeyE', () => {
     // to board it from the seat — riding a train and sitting in a car at once,
     // with two updates fighting over player.pos.
     const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
+    // the express charges a ticket as you board (the random trains stay free)
+    if (t?.express && !wallet.pay(PRICE.train.ticket, 'jízdenka')) {
+      ui_hint('Jízdenka stojí ' + kc(PRICE.train.ticket) + ', tolik nemáš');
+      return;
+    }
     if (trains.board(t)) sfx('train_doors', 0.7);
   } else if (player.boarding) {
     player.cancelBoarding();             // second E aborts the walk-up
@@ -1412,30 +1446,12 @@ function updateStars() {
 }
 
 // ---------- F: the pump ----------
-// Every fuel POI that has streamed in, and nothing else. `city.pois` is a FLAT
-// array that geo.js never bucketizes and never evicts (its own comment says
-// so), so it grows to tens of thousands of entries as you drive the region —
-// scanning it to answer "am I at a pump" would be a linear walk of the whole
-// thing several times a second. Filtering the fuel ones out once, as each tile
-// arrives, leaves at most the 1 178 in the region and in practice a few dozen;
-// scanning THAT is free and needs no spatial index at all.
-let _pumps = [];
-function indexPumps(pois) {
-  for (const p of pois ?? []) if (p.t === 'fuel' && p.p) _pumps.push(p);
-}
-
-// The forecourt is 22 x 16 m (js/meshes.js fuelInto), so 14 m off the node
-// covers standing at any of the four pumps without catching the road outside.
-const PUMP_R2 = 14 * 14;
-function pumpAt(x, z) {
-  let best = null, bd = PUMP_R2;
-  for (const p of _pumps) {
-    const dx = p.p[0] - x, dz = p.p[1] - z;
-    const d = dx * dx + dz * dz;
-    if (d < bd) { bd = d; best = p; }
-  }
-  return best;
-}
+// The index of every fuel poi that has streamed in, and the answer to "am I
+// at a pump", live in js/pumps.js: measured from the forecourt as it is DRAWN
+// (js/forecourt.js, the frame the mesher uses), not from the raw node, which
+// can stand 11 m off a slid-back forecourt (Osice, D11). The fuel shop's food
+// counter reads the same index.
+function pumpAt(x, z) { return pumpAtForecourt(world?.city, x, z); }
 
 // Hold F to fill. Not E: the E chain reaches "step out of the car" long before
 // it could reach a pump verb, so a refuel bound there would never once fire —
@@ -1451,6 +1467,9 @@ function pumpStep(dt) {
     _fuelling = { car, pump, brand, type: fuel.fuelTypeOf(car.kind), spent: 0 };
   }
   const f = _fuelling;
+  // A Tesla charges only where the brand has a fast charger (prices.js BRANDS
+  // `dc`): a Tank ONO is a tank on legs, not a 150 kW hub. The hint says so.
+  if (f.type === 'elektro' && !f.brand.dc) return;
   // Litres per second, not per frame: a fill has to feel like a fill. 0.9 l/s
   // is a real slow pump and puts a dry 45 l Fabia at about fifty seconds —
   // long enough to be a stop, short enough not to be a punishment.
@@ -1603,6 +1622,8 @@ function _blastList() {
   const out = [...traffic.cars, ...parked];
   if (ambulance) for (const c of ambulance.cars) out.push(c);
   if (police) for (const u of police.units) if (u.car) out.push(u.car);
+  // a tram in reach of a rocket in flight is something it hits (js/trams.js crashInto)
+  if (weapons?.live?.length) cityLife?.trams?.crashInto(out, player.pos.x, player.pos.z, 600);
   return out;
 }
 
@@ -1740,6 +1761,15 @@ const _hulls = [];
 // answer depends on SPEED as well as height and has a hard cost ceiling behind
 // it — the arithmetic is long enough to deserve its own file and its own test.
 const GROUND_CHUNKS = 6;
+let _ringCarV = 0;            // a car's speed as the rings see it (updateHorizon)
+let _fogR = -1;               // the ground radius the wall is set from, eased
+let _fogOpen = 0;             // sky.fogOpen, eased (updateHorizon)
+const _fogEye = [0, 0];       // …and where the eye was last frame (a teleport snaps it)
+function easeFogR(r, want, dt) {
+  if (r < 0 || Math.abs(want - r) > 600) return want;     // first frame, a teleport
+  const n = r + (want - r) * (1 - Math.exp(-dt / 1.2));
+  return Math.abs(want - n) < 0.5 ? want : n;
+}
 function updateHorizon(dt) {
   if (!world || !sky) return;
   const gs = getSettings();
@@ -1757,7 +1787,19 @@ function updateHorizon(dt) {
   // detail) which one shared term could never express.
   const speed = game.jet ? game.jet.speed
     : game.heli ? Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) : 0;
-  const rings = planRings(speed, alt, base);
+  // (a car on the ground has its own rule, js/streamplan.js planCarRings; its
+  // speed is eased down so a ring is not dropped and built again at every lift)
+  // An open view (js/openness.js) widens the same band and moves the fog out
+  // over the far land (js/farterrain.js); in a street it is 0 and nothing moves.
+  const carV = game.car && !flier ? Math.abs(game.car.speed ?? 0) : 0;
+  _ringCarV = Math.max(carV, _ringCarV - 4 * dt);
+  const eye = game.car ?? player.pos;
+  // (in Prague one ring at most: the far bank is 300 to 500 m off, and Prague
+  // cells are the heaviest the game builds, js/streamplan.js planCarRings)
+  const praha = inSkyline(eye.x, eye.z);
+  const openK = flier ? 0 : openness.update(dt, world.city.chunkIndex, eye.x, eye.z, praha ? _overVltava : null);
+  const open = praha ? Math.min(openK, 0.6) : openK;
+  const rings = flier ? planRings(speed, alt, base) : planCarRings(_ringCarV, base, open);
   world.viewChunks = rings.view;
   world.shellChunks = rings.shell;
   world.farChunks = rings.far;
@@ -1782,16 +1824,44 @@ function updateHorizon(dt) {
   world.workersFirst = game.mode === 'play' && !game.jet && !(alt > 20);
   world.landBytes = game.mode === 'play' ? 1.4e6 : Infinity;
   world.conformBudgetMs = game.mode === 'play' ? 3 : Infinity;   // earthworks in slices: _warmRoads in js/city.js
+  world.city.indexSliceMs = game.mode === 'play' ? 4 : Infinity; // a tile's indexing in slices: geo.js drainSliced
   world.vergeBudgetMs = world.workersFirst ? 1.5 : 0;            // verges ahead of the chunk specs: _warmVerges in js/city.js
   // The aerial photo picks its resolution from distance to the same LOOK-AHEAD
   // point the chunk streamer uses, so the full-detail ring sits over the ground
   // you are about to cross rather than the ground behind you.
   const of = leadFocus(game.car ?? player.pos);
-  orthoMgr?.setFocus?.(of.x, of.z);
-  const radius = (world.viewChunks + world.farChunks) * 120;
+  orthoMgr?.setFocus?.(of.x, of.z, game.car ? Math.abs(game.car.speed) : 0);
+  orthoMgr?.pump?.(renderer);
+  // (on the ground the buildings band counts too, eased so a ring that opens
+  // with speed does not move the wall in one frame; with no band it is the
+  // same radius as ever)
+  const radius = flier ? (world.viewChunks + world.farChunks) * 120
+    : (_fogR = easeFogR(_fogR, (world.viewChunks + world.shellChunks) * 120, dt));
   // haze reaches 88 % of the built radius: geometry has fully dissolved before
   // the streamed edge, so there is nothing to notice
   sky.fogScale = (radius * 0.88) / 900;
+  // …unless the view is open: then the wall moves out over the far land and
+  // the window's edge dissolves into it instead (sky.js OPEN_*, heightfog.js
+  // setFarEdge). Never in the air (its rings are its own) or in Prague, which
+  // has its own far skyline and far ground (js/landmarksfar.js).
+  const farK = flier || praha || gs.farLand === false ? 0
+    : Math.min(1, Math.max(0, (open - 0.55) / 0.4));
+  // (eased: openness eases by itself, but crossing into Prague's skyline or
+  // taking off switches farK at once, and the wall would jump kilometres; a
+  // teleport takes the new value at once, there is nothing to ease from)
+  const fogWant = farK * farK * (3 - 2 * farK);
+  const jumped = Math.abs(eye.x - _fogEye[0]) + Math.abs(eye.z - _fogEye[1]) > 300;
+  _fogEye[0] = eye.x; _fogEye[1] = eye.z;
+  _fogOpen = jumped ? fogWant : _fogOpen + (fogWant - _fogOpen) * (1 - Math.exp(-dt / 1.2));
+  if (Math.abs(fogWant - _fogOpen) < 1e-3) _fogOpen = fogWant;
+  sky.fogOpen = _fogOpen;
+  const farOn = sky.fogOpen > 0.001;
+  if (farTerrain) farTerrain.photos = gs.ortho !== false;
+  farTerrain?.update(eye.x, eye.z, farOn, renderer, fogWant > 0);
+  const er = world.edgeR ?? radius;
+  _farEdge[0] = world.edgeX ?? eye.x; _farEdge[1] = world.edgeZ ?? eye.z; _farEdge[2] = er - 200; _farEdge[3] = er - 20;
+  setFarEdge(_farEdge[0], _farEdge[1], _farEdge[2], _farEdge[3], farOn);
+  farLandLights?.update(eye.x, eye.z, farOn, sky.nightK ?? 0, _farEdge, scene.fog?.near ?? 3000, scene.fog?.far ?? 5000);
   // The far plane serves the SKY as well as the city. Tied to the city radius
   // it sat at 1632 m, while the cloud field spans ±2600 m — so 95 % of the
   // clouds were clipped away before they could be seen (measured: 16 of 319
@@ -1807,7 +1877,7 @@ function updateHorizon(dt) {
   // clamped to 0.89·far — so a far plane short of the chosen cloud range would
   // quietly cancel the setting the player just paid for.
   const cloudFar = clouds ? clouds.range / 0.89 + 400 : 5200;
-  const wantFar = Math.max(radius * 1.7, 5200, cloudFar);
+  const wantFar = Math.max(radius * 1.7, 5200, cloudFar, farOn ? 9500 : 0);
   if (Math.abs(camera.far - wantFar) > 50 || camera.near !== camNear) {
     camera.far = wantFar;
     camera.near = camNear;
@@ -1949,7 +2019,7 @@ async function initNavigation(city) {
       import('./place.js'), import('./navigation.js'), import('./navline.js'),
     ]);
     placeFinder = new PlaceFinder(city);
-    navigation = new Navigation(city);
+    navigation = new Navigation(city, { overview: 'data/overview.json' });   // (a far pin: js/coarseroute.js)
     navLine = new NavLine(scene);
   } catch (err) {
     console.warn('navigation unavailable:', err.message);
@@ -2017,12 +2087,15 @@ function updateTripHud() {
   // line, so both numbers are a floor rather than an answer — say so with the
   // one character that means "about" in every language on the map.
   const approx = navigation.partial ? '≈' : '';
-  const txt = (t === null ? '' : approx + fmtEta(t)) + '\n' + approx + fmtRoadDist(m);
+  // the next motorway exit, when the route takes one (js/mwhud.js)
+  const ex = exitHudText(navigation);
+  const txt = (t === null ? '' : approx + fmtEta(t)) + '\n' + approx + fmtRoadDist(m) + '\n' + ex;
   if (txt === _tripTxt) return;                 // ~1 DOM write a second, not 60
   _tripTxt = txt;
-  const nl = txt.indexOf('\n');
+  const nl = txt.indexOf('\n'), nl2 = txt.indexOf('\n', nl + 1);
   el.querySelector('.nv-eta').textContent = txt.slice(0, nl);
-  el.querySelector('.nv-dist').textContent = txt.slice(nl + 1);
+  el.querySelector('.nv-dist').textContent = txt.slice(nl + 1, nl2);
+  setExitLine(el, ex);
   el.classList.remove('hidden');
 }
 
@@ -2100,6 +2173,7 @@ function tickFpsMeter(now) {
 // cars with spotlights would melt the shadow budget; their emissive lamps read
 // fine as distant points.
 let _beamL = null, _beamR = null, _beamsOn = false;
+const mwRetro = new MwRetro(scene);   // the D11 delineators in the player's beams (js/mwretro.js)
 const _beamTarget = new THREE.Object3D();
 function updateNightLights(dt) {
   // how dark it is, read off the sun the sky module already computes
@@ -2148,6 +2222,8 @@ function updateNightLights(dt) {
       _beamTarget.updateMatrixWorld();
     }
   }
+  mwRetro.attach(lightPools);
+  mwRetro.update(world, game.car, want, (game.car?.mesh?.position.y ?? 0) + 0.75);
 }
 
 // ---------- HUD ----------
@@ -2195,13 +2271,21 @@ function updateHud(dt) {
     if (_hintHold > 0) { _hintHold -= 0.2; }
     else if (trains?.riding) {
       const t = trains.riding;
-      hint.innerHTML = t.halted
+      hint.innerHTML = (t.label ? t.label + ' · ' : '') + (t.halted
         ? `<b>${t.stopName ?? 'Stanice'}</b> · odjezd za ${Math.ceil(t.dwellLeft ?? 0)} s · <kbd>E</kbd> vystoupit`
-        : `Jedete do <b>${t.nextStopName ?? 'další stanice'}</b>`;
+        : `Jedete do <b>${t.nextStopName ?? 'další stanice'}</b>`
+          + (express?.skipping ? '' : ' · <kbd>N</kbd> do další stanice'));
       hint.classList.remove('hidden');
     }
     else if (!player.inCar && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
-      hint.innerHTML = '<kbd>E</kbd> nastoupit do vlaku';
+      const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
+      hint.innerHTML = t.express
+        ? '<kbd>E</kbd> nastoupit: ' + t.label + ' · jízdenka ' + kc(PRICE.train.ticket)
+        : '<kbd>E</kbd> nastoupit do vlaku';
+      hint.classList.remove('hidden');
+    }
+    else if (!player.inCar && !game.car && express?.hintAt(player.pos.x, player.pos.z)) {
+      hint.textContent = express.hintAt(player.pos.x, player.pos.z);
       hint.classList.remove('hidden');
     }
     else if (game.heli) {
@@ -2244,10 +2328,13 @@ function updateHud(dt) {
       const pump = c && Math.abs(c.speed) < 0.6 ? pumpAt(c.x, c.z) : null;
       if (pump) {
         const type = fuel.fuelTypeOf(c.kind);
-        const price = pumpPrice(pumpBrand(pump.n), type);
+        const brand = pumpBrand(pump.n);
+        const price = pumpPrice(brand, type);
         // kc2() already carries the "Kč" — appending another produced
         // "36,90 Kč Kč/l" on the first screenshot of this hint.
-        hint.innerHTML = '<kbd>E</kbd> vystoupit · <kbd>F</kbd> držet: '
+        hint.innerHTML = type === 'elektro' && !brand.dc
+          ? '<kbd>E</kbd> vystoupit · tady rychlonabíječka není'
+          : '<kbd>E</kbd> vystoupit · <kbd>F</kbd> držet: '
           + PRICE.fuel.label[type] + ' ' + kc2(price) + '/' + PRICE.fuel.unit[type];
       } else {
         hint.innerHTML = '<kbd>E</kbd> vystoupit';
@@ -2526,6 +2613,9 @@ function applySettings(s, key) {
     const wantOrtho = s.ortho ? orthoMgr : null;
     const recipeChanged = world.mats.ortho !== wantOrtho;
     world.mats.ortho = wantOrtho;
+    // the motorway sign atlas at half size on the low preset (or any profile
+    // rendering under native resolution): 4.9 MB of GPU memory instead of 19.6
+    setMotorwayAtlasScale(world.mats.motorwayDeco, s.preset === 'low' || s.resScale < 1 ? 0.5 : 1);
     // Facade textures are not a setting any more either — window rhythm IS
     // what tells a panelák from a warehouse, and the toggle only ever reached
     // the chunk meshes anyway, never the shells you actually stand in front
@@ -2537,6 +2627,10 @@ function applySettings(s, key) {
     // look like. The knob is gone from the panel and the flag is pinned on;
     // an old saved `trees: false` must not survive as an invisible switch.
     world.mats.trees = true;
+    // the tram masts cost a Prague chunk build a few milliseconds: off on the low preset
+    const mastsChanged = world.mats.tramMasts !== (s.tramMasts !== false);
+    world.mats.tramMasts = s.tramMasts !== false;
+    if (mastsChanged && key !== undefined && !recipeChanged) world.rebuildAll();
     grass?.setEnabled(s.grass !== false);
     trees?.setQuality(s);
     if (recipeChanged && (key === undefined || ['ortho', 'preset'].includes(key))) {
@@ -2593,6 +2687,8 @@ async function boot() {
   sky = makeSky(scene, renderer);
   lightPools = new LightPools(scene);
   farSkyline = new FarSkyline(scene, world);
+  farTerrain = new FarTerrain(scene, world.terrain);
+  farLandLights = new FarLandLights(scene, world.terrain);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
   // because it is the whole identity contract in one line: this same string
   // picks our jacket here, picks the dot in the co-op HUD, and is what every
@@ -2615,6 +2711,7 @@ async function boot() {
   // standing on, and one built before it is set is one built underground.
   vehicles.world = world;
   traffic = new Traffic(city, vehicles, world);
+  roadWorks = new RoadWorks(scene, world);   // the D11's roadworks zones, drawn (js/mwworks.js)
   // world.collide() pushes anything on foot out of these. Every hull in the
   // world: NPC traffic, parked, lot cars, and the player's own abandoned car.
   // Skipping the car the player is DRIVING is the whole exception — you are
@@ -2664,7 +2761,8 @@ async function boot() {
     return l;
   };
   minimap = new Minimap($id('minimap'), city);
-  trains = new Trains(scene, city);
+  trains = new Trains(scene, city, { terrain: world.terrain });   // (the terrain: trains ran 220 m underground)
+  express = new Express(trains, city, player);
   worldMap = new WorldMap(city, minimap);
   initNavigation(city);   // lazy + optional; never blocks the boot
   // the pumps that have streamed in so far, and every one that arrives later
@@ -2676,6 +2774,7 @@ async function boot() {
 
   peds = new Pedestrians(scene, city, world.footing ?? world.terrain);   // feet on the pavement, not under it
   cityLife = wireCityLife({ city, traffic, peds, vehicles, world, parked });
+  cityLife.trams?.draw?.glow.attach(lightPools);   // tram lamps seen from afar at night (js/tramglow.js)
   // riders on the cycleways: they read the crowd's indexes and the traffic's lights
   cyclists = new Cyclists(scene, city, world.footing ?? world.terrain, { peds, traffic, parked,
     playerCar: () => game.car, walker: () => (game.car || game.heli || game.jet ? null : player.pos) });
@@ -2786,6 +2885,7 @@ async function boot() {
   // the pod shares the interior manager's dust pool: one set of sprites does
   // rocket smoke, blast plume and the dust off a collapsing floor alike
   weapons = new Weapons(scene, world, { dust: world.interiors.dust });
+  weapons.onDetonate((h) => cityLife?.trams?.blast(h.x, h.z, h.r));   // a tram hit or near a blast stops (js/trams.js)
   streaks = new SpeedStreaks(scene);
   skids = new SkidMarks(scene);
   // vehicles borrow the shared dust pool for exhaust + wreck smoke, and the
@@ -3118,7 +3218,7 @@ function stepGame(dt) {
   // in a bare circle at any speed.
   grass?.update(focus.x, focus.z, dt);
   trees?.update(camera, dt, sky?.nightK ?? 0);
-  farSkyline?.update(camera, scene.fog?.far);
+  farSkyline?.update(camera, sky?.edgeFar ?? scene.fog?.far);
 
   if (game.jet) {
     // Same hands as the helicopter, and the same hands GTA trained everyone's
@@ -3263,6 +3363,7 @@ function stepGame(dt) {
   cyclists?.blockInto(traffic.blockers);   // riders out in a lane are hulls the traffic waits behind
   cityLife?.trams?.blockInto(traffic.blockers);   // …and so is a tram, on its rail or in the street (js/tramyield.js)
   traffic.update(dt, player.pos, game.car);
+  roadWorks?.update(dt, traffic.now(), sky?.nightK ?? 0, player.pos.x, player.pos.z);
   parkingLots?.update(dt, player.pos, tod());
   cityLife?.update(dt, player.pos, tod());
   // ragdoll physics needs to know what can hit a pedestrian: every SHARED AI
@@ -3275,6 +3376,7 @@ function stepGame(dt) {
   peds.update(dt, focus);
   if (cyclists) { cyclists.setViewer(view); cyclists.update(dt, focus); }   // after the crowd: its crossers list is theirs too
   trains?.update(dt, focus);
+  express?.update(dt, focus);
   for (const h of helis) if (h !== game.heli) h.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
   for (const j of fighters) if (j !== game.jet) j.update(dt, { throttle: 0 }, world);
   // There are machines at two airports now, but everything downstream — the
@@ -3760,6 +3862,7 @@ window.__atc = {
   vitals, wallet, fuel, statusbar, wanted,
   get combat() { return combat; },
   get police() { return police; },
+  get roadWorks() { return roadWorks; },
   get ambulance() { return ambulance; },
   get traffic() { return traffic; },
   said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
@@ -3767,6 +3870,7 @@ window.__atc = {
   get postfx() { return postfx; },
   get heli() { return heli; }, get clouds() { return clouds; },
   get sky() { return sky; }, get lightPools() { return lightPools; },
+  openness, get farTerrain() { return farTerrain; },
   get settings() { return getSettings(); },
   get player() { return player; }, get world() { return world; },
   get traffic() { return traffic; }, get vehicles() { return vehicles; },

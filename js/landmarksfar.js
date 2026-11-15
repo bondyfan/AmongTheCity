@@ -33,10 +33,13 @@ import { vitFar } from './landmarks-vit.js';
 import { hradFar } from './landmarks-hradfar.js';
 import { FAR_EXTRA } from './landmarks-farset.js';
 import { FAR_GROUND, groundReady, buildFarGround } from './landmarks-farground.js';
+import { setFarHand } from './heightfog.js';
 
 /** Where the silhouettes' own fog wall ends (m), and how far from Prague the set is kept at all. */
 export const FAR_R = 4600;
 const PRAGUE = [-95600, -5500], KEEP = 8000;
+/** Is (x, z) where the far skyline is kept (main.js: the far landscape and the open fog stay out of it)? */
+export const inSkyline = (x, z) => Math.hypot(x - PRAGUE[0], z - PRAGUE[1]) < KEEP;
 
 /**
  * The silhouettes. at: [x, z] the mesh origin; ground: absolute founding
@@ -120,6 +123,7 @@ export class FarSkyline {
     this._lm = new WeakMap();   // chunk group -> its landmark mesh (or null)
     this._ground = FAR_GROUND.map((g) => ({ g, mesh: null }));
     this._groundTodo = FAR_GROUND.length;   // a count, so a frame asks without a closure
+    this._handBoxes = [];                    // the far-ground boxes already built, for setFarHand
   }
 
   /** The silhouettes, once (a few hundred triangles each; the castle's outline is the bulk). */
@@ -161,6 +165,7 @@ export class FarSkyline {
       this.group.add(m);
       it.mesh = m;
       this._groundTodo--;
+      this._handBoxes.push(it.g.box);
     }
   }
 
@@ -169,18 +174,25 @@ export class FarSkyline {
     const cx = camera.position.x, cz = camera.position.z;
     const on = Math.hypot(cx - PRAGUE[0], cz - PRAGUE[1]) < KEEP;
     this.group.visible = on;
+    if (on && fogFar) {
+      if (!this.items) this._build();
+      if (this._groundTodo > 0) this._grounds();
+    }
+    // streamed geometry over a far-ground box gives way to it (heightfog.js
+    // setFarHand); only once that ground is actually drawn (from the frame it
+    // is built), never outside Prague
+    setFarHand(fogFar * WALL.value, this._handBoxes, on && !!fogFar && this._handBoxes.length > 0);
     if (!on || !fogFar) return;
-    if (!this.items) this._build();
-    if (this._groundTodo > 0) this._grounds();
     const R = fogFar * WALL.value, hand = 0.92 * R;
     const built = this.world.built, lmMat = landmarkMaterial(), nearMat = farNearMaterial();
+    const mat = farMaterial(), solid = nearMat;
     for (const it of this.items) {
       const [x0, z0, x1, z1] = it.e.box;
       const dx = Math.max(x0 - cx, 0, cx - x1), dz = Math.max(z0 - cz, 0, cz - z1);
       const d = Math.hypot(dx, dz);
       const fx = Math.max(Math.abs(cx - x0), Math.abs(cx - x1)), fz = Math.max(Math.abs(cz - z0), Math.abs(cz - z1));
-      it.mesh.visible = d < FAR_R && Math.hypot(fx, fz) > 0.7 * R;    // nearer, every pixel is discarded
       const nearOn = d < hand;
+      let near = false;
       for (const k of it.keys) {
         const g = built.get(k);
         if (!g) continue;
@@ -191,8 +203,14 @@ export class FarSkyline {
           if (lm) lm.material = nearMat;     // the silhouette's air (farNearMaterial)
           this._lm.set(g, lm);
         }
-        if (lm) lm.visible = nearOn;
+        if (lm) { lm.visible = nearOn; near = true; }
       }
+      // While the near model's chunk is still streaming in there is nothing
+      // under the dither, and the silhouette showed holes for a moment (round
+      // 7 review). Until the near model exists the silhouette is drawn whole,
+      // in the same air without the dither, and at any distance up to FAR_R.
+      it.mesh.material = near ? mat : solid;
+      it.mesh.visible = d < FAR_R && (!near || Math.hypot(fx, fz) > 0.7 * R);    // nearer, every dithered pixel is discarded
     }
   }
 }

@@ -40,6 +40,7 @@ const UNDER_NEAR = 45;      // m from a crossing to a way mapped underground tha
 const CLEAR_ROAD = 4.5, CLEAR_FOOT = 2.6;   // geo.js's headroom, the same numbers
 const DECK_DEPTH = { rail: 1.3, road: 1.0 };   // structure under the running surface
 const FOOT = new Set(['footway', 'cycleway', 'path', 'steps', 'pedestrian', 'track']);
+const SLIP = /_link$/;      // motorway_link, secondary_link...: a slip road
 
 function cellsOf(f, pad, out = new Set()) {
   for (let i = 0; i < f.p.length - 1; i++) {
@@ -66,6 +67,10 @@ function decksIn(c) {
   _decks.set(c, d);
   return d;
 }
+// deck -> [way, at, ...]: the abutments linkEnd pushed onto another way's
+// `_abut`. That list is plain numbers (it travels to the mesh workers), so
+// where each came from is remembered here, beside it.
+const _abutBy = new WeakMap();
 const cellAt = (city, x, z) => city.chunkIndex.get(Math.floor(x / CHUNK) + ',' + Math.floor(z / CHUNK));
 const lenOf = (r) => r._len ?? (r._len = polylineLength(r.p));
 
@@ -88,81 +93,160 @@ function segCross(ax, az, bx, bz, cx, cz, dx, dz) {
 
 /**
  * Where decks meet decks and no road (a Y of three spans on Generála
- * Svobody), the end of each holds ONE level: the highest road any of them
- * lands on at its far end. Null where there is no such node. The far links
- * are found once, at indexing (deckNodes), and kept on the deck as plain
- * data, so the mesher worker answers the same.
+ * Svobody, the mid-river joints of Jiráskův and Hlávkův most), the end of each
+ * holds ONE level, the same for every member meeting there: the road
+ * approaches of the whole structure, each weighted by how far along the decks
+ * it lies (inverse distance, so on a run between two banks the joints fall
+ * on the straight grade from one to the other). Null where there is no such
+ * node. The far links are found once, at indexing (deckNodes), and kept on
+ * the deck as plain data, so the mesher worker answers the same.
+ *
+ * (It used to be the HIGHEST approach reachable without crossing the member
+ * itself. On a run of short members that is the approaches behind each end,
+ * different at its two ends: every member of Hlávkův most's north arm ramped
+ * the whole 3.4 m from Štvanice to Holešovice on its own 15 to 55 m, and the
+ * deck was a saw, 21 steps over 12 %.)
  */
 export function deckNodeLevel(w, end, terrain) {
   const links = end === 0 ? w._apN0 : w._apN1;
   if (!links) return null;
-  let best = null;
+  let near = null, sw = 0, sy = 0;
   for (const l of links) {
     const y = roadGradeY(l.road, l.at, terrain);
-    if (y !== null && y !== undefined && (best === null || y > best)) best = y;
+    if (y === null || y === undefined) continue;
+    const d = l.d ?? 0;
+    // an approach AT the node (on another member's end) is the level
+    if (d < 1) { if (near === null || y > near) near = y; continue; }
+    sw += 1 / d; sy += y / d;
   }
-  return best;
+  return near !== null ? near : sw > 0 ? sy / sw : null;
 }
 function deckNodes(city, w) {
+  // (from scratch every time: a structure that grew since is measured whole;
+  // a lone deck's own chain, made when its profile was first asked for, is
+  // made again from what is known now)
+  delete w._apN0; delete w._apN1;
+  if (w._chain && w._chain.members.length === 1 && w._chain.members[0] === w) {
+    delete w._chain; delete w._chainOff; delete w._chainRev;
+  }
   for (const end of [0, 1]) {
     if (end === 0 ? w._ap0 : w._ap1) continue;
     const [x, z] = w.p[end === 0 ? 0 : w.p.length - 1];
     const c = cellAt(city, x, z);
     if (!c) continue;
-    const k0 = KEY(x, z), links = [];
-    let n = 0;
+    const k0 = KEY(x, z);
+    let n = 0, main = false;
     for (const o of c.roads) {
       // (a drivable deck counts and holds drivable decks only, as it always
-      // did; a footway deck, new here, counts every deck it meets)
+      // did; a footway deck counts every deck it meets)
       if (!o.br || (w.d && !o.d) || !o.p || o.p.length < 2) continue;
       const last = o.p.length - 1;
-      const at0 = KEY(o.p[0][0], o.p[0][1]) === k0, at1 = KEY(o.p[last][0], o.p[last][1]) === k0;
-      if (!at0 && !at1) continue;
-      n++;
-      const far = at0 ? o._ap1 : o._ap0;
-      if (far) links.push(far);
+      if (KEY(o.p[0][0], o.p[0][1]) === k0 || KEY(o.p[last][0], o.p[last][1]) === k0) {
+        n++;
+        if (!SLIP.test(o.t)) main = true;
+      }
     }
+    if (n < 2) continue;
     // A MID-RIVER JOINT: the branched complexes (Jiráskův and Hlávkův most)
-    // are pieced from footway and carriageway members joined out over the
-    // water, and the members next to a joint often reach no road themselves,
-    // or only the stair down to an island. Falling back to the ground at the
-    // end read the riverbed and the deck dipped under the Vltava; holding the
-    // island stair's foot ramped it 3 m in 15 m. So walk every member joined
-    // end to end from this node and hold the highest approach the whole
-    // complex reaches (on a plain Y of three spans that is the same answer).
-    if (n >= 2) complexLinks(city, w, k0, x, z, links);
-    if (n >= 2 && links.length) {
-      w[end === 0 ? '_apN0' : '_apN1'] = links;
-      w._bridgeProfile = null;
-      if (w._chain) w._chain.profile = null;
+    // are pieced from members joined out over the water, and the members next
+    // to a joint often reach no road themselves. Falling back to the ground
+    // at the end read the riverbed and the deck dipped under the Vltava. So
+    // walk the whole structure from this node and weigh every approach it has
+    // by its distance along the decks.
+    // Where a main carriageway meets the joint, the slip roads' landings do
+    // not count: a slip ramp follows the bridge down to the embankment
+    // (Hlávkův most's to nábřeží Kapitána Jaroše lands 6 m below the deck),
+    // the bridge does not follow it. The node is the same for every member
+    // meeting there, so the slip deck's end agrees with the main ones.
+    let links = complexLinks(city, w, k0, x, z);
+    if (main) {
+      const kept = links.filter((l) => !SLIP.test(l.road.t));
+      if (kept.length) links = kept;
     }
+    if (links.length) w[end === 0 ? '_apN0' : '_apN1'] = links;
   }
+  w._bridgeProfile = null;
+  if (w._chain) w._chain.profile = null;
 }
 
 // The road approaches of every bridge member reachable from node (x, z) by
-// walking members that share end nodes (any kind of deck, footways too), into
-// `out`. Bounded, a complex is a few dozen members at most.
-function complexLinks(city, w, k0, x, z, out) {
-  const seen = new Set([w]), queue = [[k0, x, z]], nodes = new Set([k0]);
-  while (queue.length && seen.size < 48) {
-    const [k, nx, nz] = queue.shift();
+// walking members that share end nodes, each with its distance along the
+// decks from the node (shortest path). A drivable deck walks drivable members
+// and counts approaches that are roads you can drive (the stairs down to an
+// island are not where the carriageway goes); a footway deck walks every deck.
+// Bounded: a complex is a few dozen members at most.
+function complexLinks(city, w, k0, x, z) {
+  const drive = !!w.d;
+  const dist = new Map([[k0, 0]]), at = new Map([[k0, [x, z]]]), done = new Set();
+  const best = new Map();                 // link -> shortest distance to it
+  const take = (l, d) => {
+    if (!l || typeof l !== 'object' || (drive && !l.road?.d)) return;
+    const o = best.get(l);
+    if (o === undefined || d < o) best.set(l, d);
+  };
+  let members = 0;
+  while (members < 64) {
+    // the nearest node not yet expanded (a complex is small: a scan will do)
+    let k = null, dk = Infinity;
+    for (const [kk, dd] of dist) if (!done.has(kk) && (dd < dk || (dd === dk && kk < k))) { k = kk; dk = dd; }
+    if (k === null) break;
+    done.add(k);
+    const [nx, nz] = at.get(k);
     const c = cellAt(city, nx, nz);
     if (!c) continue;
     for (const o of c.roads) {
-      if (!o.br || seen.has(o) || !o.p || o.p.length < 2) continue;
+      if (!o.br || !o.p || o.p.length < 2 || (drive && !o.d)) continue;
       const last = o.p.length - 1;
-      const at0 = KEY(o.p[0][0], o.p[0][1]) === k, at1 = KEY(o.p[last][0], o.p[last][1]) === k;
+      const at0 = KEY(o.p[0][0], o.p[0][1]) === k, at1 = !at0 && KEY(o.p[last][0], o.p[last][1]) === k;
       if (!at0 && !at1) continue;
-      seen.add(o);
-      for (const l of [o._ap0, o._ap1]) if (l && typeof l === 'object' && !out.includes(l)) out.push(l);
+      members++;
+      const L = lenOf(o);
+      take(at0 ? o._ap0 : o._ap1, dk);                    // its end here
+      take(at0 ? o._ap1 : o._ap0, dk + L);                // and its far end
       const fe = at0 ? o.p[last] : o.p[0], fk = KEY(fe[0], fe[1]);
-      if (!nodes.has(fk)) { nodes.add(fk); queue.push([fk, fe[0], fe[1]]); }
+      if (!done.has(fk) && !(dist.get(fk) <= dk + L)) { dist.set(fk, dk + L); at.set(fk, fe); }
     }
   }
+  // A FOOTBRIDGE holds its highest approach at every joint, as before: its
+  // members are level decks on stairs (geo.bridgeDeckHeight), and a joint on
+  // a weighted grade below them put a flight of stairs into the middle of
+  // Štvanická lávka. (d 0: every approach counts as at the node.)
+  const out = [];
+  for (const [l, d] of best) out.push({ road: l.road, at: l.at, d: drive ? d : 0 });
+  return out;
+}
+
+// Every deck joined end to end with `b` (any cell, any tile loaded so far).
+function complexOf(city, b, into) {
+  const stack = [b];
+  into.add(b);
+  while (stack.length && into.size < 256) {
+    const w = stack.pop();
+    for (const e of [w.p[0], w.p[w.p.length - 1]]) {
+      const c = cellAt(city, e[0], e[1]);
+      if (!c) continue;
+      const k = KEY(e[0], e[1]);
+      for (const o of c.roads) {
+        if (!o.br || into.has(o) || !o.p || o.p.length < 2) continue;
+        const last = o.p.length - 1;
+        if (KEY(o.p[0][0], o.p[0][1]) !== k && KEY(o.p[last][0], o.p[last][1]) !== k) continue;
+        into.add(o); stack.push(o);
+      }
+    }
+  }
+  return into;
 }
 
 /** Run after a tile's roads and rails are bucketed (geo.indexPayload). */
 export function stitchStructures(city, roads, rails) {
+  const it = stitchStructuresSteps(city, roads, rails);
+  while (!it.next().done);
+}
+// …in steps, for geo.js indexPayloadSteps when it indexes a tile a few
+// milliseconds a frame (round 8: up to 90 ms of one frame on a town tile).
+// Only the tile in hand is being indexed meanwhile, and it is far ahead of
+// the player, so nothing reads these ways between two steps.
+export function* stitchStructuresSteps(city, roads, rails) {
   const isRail = new Set(rails);
   // every bridge this tile can complete: its own, and the old ones its ways land on
   const bridges = new Set();
@@ -178,14 +262,23 @@ export function stitchStructures(city, roads, rails) {
       for (const b of d.rails) { bridges.add(b); isRail.add(b); }
     }
   }
+  yield;
   for (const b of bridges) {
     for (const end of [0, b.p.length - 1]) linkEnd(city, b, end, isRail.has(b));
   }
+  yield;
   // A viaduct split across a tile edge is still ONE structure (geo.js chains
   // the pieces of one tile): its pieces would each grade themselves and meet
   // at a step (0.8 m mid-span on Generála Svobody).
   for (const b of bridges) if (b.d && !isRail.has(b)) chainAcross(city, b);
-  for (const b of bridges) if (!isRail.has(b)) deckNodes(city, b);
+  // Every member of a structure this tile touched is measured again, whole:
+  // a complex split over a tile edge has to come out the same whichever of
+  // its tiles arrived first (co-op clients load them in any order).
+  const decks = new Set();
+  for (const b of bridges) if (!isRail.has(b) && !decks.has(b)) complexOf(city, b, decks);
+  yield;
+  for (const b of decks) if (!isRail.has(b)) deckNodes(city, b);
+  yield;
   // A railway deck in two pieces has one end on the other piece, where no rail
   // bed is: it holds the level of the end that has one. (Asking the ground
   // there read the street the underpass had just dug, and the deck dived.)
@@ -200,7 +293,9 @@ export function stitchStructures(city, roads, rails) {
   const bc = city._bridgeCells ??= new Set();
   for (const b of bridges) for (const k of cellsOf(b, 0)) bc.add(k);
   const ways = new Set();
+  let step = 0;
   for (const r of roads) {
+    if ((++step & 511) === 0) yield;
     if (r.br || !(r.p?.length > 1)) continue;
     for (const k of cellsOf(r, 0, _cells)) if (bc.has(k)) { ways.add(r); break; }
     _cells.clear();
@@ -211,7 +306,9 @@ export function stitchStructures(city, roads, rails) {
       if (c) for (const w of c.roads) if (!w.br && w.p?.length > 1) ways.add(w);
     }
   }
+  yield;
   for (const w of ways) {
+    if ((++step & 63) === 0) yield;
     const over = new Set();
     for (const k of cellsOf(w, 0)) {
       const c = city.chunkIndex.get(k);
@@ -222,6 +319,7 @@ export function stitchStructures(city, roads, rails) {
     }
     for (const b of over) crossing(city, w, b, isRail.has(b));
   }
+  yield;
   rebuildChains(city);
 }
 
@@ -239,13 +337,26 @@ function chainAcross(city, b0) {
   };
   // the component, and whether it is a simple line
   const comp = [b0], seen = new Set([b0]);
-  for (let q = 0; q < comp.length; q++) {
+  let branched = false;
+  for (let q = 0; q < comp.length && comp.length < 256; q++) {
     const w = comp[q];
     for (const e of [0, w.p.length - 1]) {
       const a = arms(w.p[e][0], w.p[e][1]);
-      if (a.length > 2) return;                       // branched: leave it to its own law
+      if (a.length > 2) branched = true;
       for (const o of a) if (!seen.has(o.b)) { seen.add(o.b); comp.push(o.b); }
     }
+  }
+  if (branched) {
+    // branched: leave it to its own law (deckNodes). A chain one of its tiles
+    // made of the part it held alone (a plain line until the branch came in
+    // with the next tile) is dissolved, or the structure would come out
+    // differently depending on which tile arrived first.
+    for (const w of comp) {
+      if (!w._chain || w._chain.members.length < 2) continue;
+      delete w._chain; delete w._chainOff; delete w._chainRev;
+      w._bridgeProfile = null;
+    }
+    return;
   }
   if (comp.length < 2) return;
   const ch0 = comp[0]._chain;
@@ -292,7 +403,13 @@ function linkEnd(city, b, end, rail) {
       if (KEY(w.p[i][0], w.p[i][1]) !== k0) continue;
       const at = arcTo(w, i);
       b[slot] = { road: w, at };
-      if (!rail) { (w._abut ??= []).push(at); w._prof = undefined; w._raw = undefined; }
+      if (!rail) {
+        (w._abut ??= []).push(at); w._prof = undefined; w._raw = undefined;
+        // (who put it there: a released deck takes its abutment back, releaseStructures)
+        let by = _abutBy.get(b);
+        if (!by) _abutBy.set(b, by = []);
+        by.push(w, at);
+      }
       b._bridgeProfile = null;
       if (b._chain) b._chain.profile = null;
       // a drivable deck and its road also become one junction, so the road is
@@ -389,3 +506,7 @@ function leadsUnder(city, w, hit) {
   }
   return false;
 }
+
+// what js/underpassrelease.js takes off again when a far tile lets go (main
+// thread; the deck cache and the abutment ledger stay owned here)
+export { _decks as deckCache, _abutBy as abutLedger, linkEnd, chainAcross, deckNodes };

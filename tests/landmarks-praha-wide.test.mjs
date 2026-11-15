@@ -62,14 +62,17 @@ test('each wide Prague landmark finds exactly one footprint, and no footprint is
 });
 
 test('the hide entries take out only the duplicates they are meant for', () => {
-  // Žižkov: eleven rings of one tower; the theatre: the porch the model builds
-  const expected = { 'zizkov-x1': 3, 'zizkov-x2': 2, 'zizkov-x3': 2, 'zizkov-x4': 1, 'zizkov-x5': 1, 'zizkov-x6': 1, 'zizkov-x7': 1, 'nd-sever': 1 };
+  // Žižkov: eleven rings of one tower; the theatre: the porch the model builds and the
+  // brick box against its river corner; St Wenceslas: the monument's own footprint
+  const expected = { 'zizkov-x1': 3, 'zizkov-x2': 2, 'zizkov-x3': 2, 'zizkov-x4': 1, 'zizkov-x5': 1, 'zizkov-x6': 1, 'zizkov-x7': 1, 'nd-sever': 1,
+    'nd-zapad': 1, 'vaclav-pomnik': 1 };
+  const homes = { 'nd-zapad': [-96215.6, -5498.8], 'vaclav-pomnik': [-95032.3, -5347.1] };
   for (const l of PRAHA.filter((e) => e.hide)) {
     const h = hits.get(l.id);
     assert.equal(h.length, expected[l.id], `${l.id} hides ${h.length} footprints`);
     for (const [, , f] of h) {
       const [cx, cz] = ringCentroid(f.o);
-      const home = l.id.startsWith('zizkov') ? [-93500, -5486] : [-96195, -5516];
+      const home = homes[l.id] ?? (l.id.startsWith('zizkov') ? [-93500, -5486] : [-96195, -5516]);
       assert.ok(Math.hypot(cx - home[0], cz - home[1]) < 12, `${l.id} hides a footprint ${Math.hypot(cx - home[0], cz - home[1]).toFixed(0)} m away`);
     }
     const s = new LandmarkBatch(); s.add(l, copy(h[0][2]), 250, terrain); assert.equal(s.sink.tris, 0, `${l.id} draws something`);
@@ -230,4 +233,165 @@ test('the far skyline stands where the near models do, and builds the same every
     assert.ok(s.tris > 100, `far ground ${g.id} is empty`);
     for (let i = 1; i < s.pos.length; i += 3) assert.ok(s.pos[i] > 150 && s.pos[i] < 400, `far ground ${g.id} at ${s.pos[i]}`);
   }
+});
+
+// ---- round 7 polish: the castle's passages, the Vyšehrad ramparts, the Gate of Giants ----
+const { PASSAGES, passages } = await import('../js/landmarks-hradpass.js');
+const { EXTRAS, landmarkExtras, landmarkBarrier } = await import('../js/landmarks.js');
+const { VALY_V } = await import('../js/landmarks-vysehradvaly.js');
+const { OBRI_LINE } = await import('../js/landmarks-hradobri.js');
+const { chunkKey } = await import('../js/geo.js');
+
+test('every passage out of the 2nd courtyard is found, open under its vault and solid over it and beside it', () => {
+  const f = copy(found('hrad'));
+  groundFor(f, terrain);
+  const list = passages(null, f);
+  assert.deepEqual(list.map((q) => q.p.id), PASSAGES.map((p) => p.id), 'a passage lost its mouth vertices');
+  const S = landmarkSolids(f), g = f._gy;
+  const solid = (x, z, y) => S.some((s) => solidHas(s, x, z) && y >= s.bot && y < s.top);
+  const above = (x, z, h) => terrain.heightAt(x, z) - g + h;
+  for (const q of list) {
+    for (const v of [-q.half + 0.6, 0, q.half - 0.6]) {
+      const [x, z] = q.G.xz(0, v);
+      assert.ok(!solid(x, z, above(x, z, 1.5)), `${q.p.id}: shut at head height, ${v.toFixed(1)} m along`);
+      assert.ok(solid(x, z, above(x, z, q.p.h + 1.5)), `${q.p.id}: nothing over the vault`);
+      for (const s of [-1, 1]) {
+        const [wx, wz] = q.G.xz(s * ((q.p.cw ?? q.p.w) / 2 + 1.5), v * 0.5);
+        assert.ok(solid(wx, wz, above(wx, wz, 1.5)), `${q.p.id}: the wing beside it is open`);
+      }
+    }
+  }
+  // the courtyards themselves stay open and the wings far from any passage solid
+  assert.ok(!solid(-97228, -6513, above(-97228, -6513, 1.5)), 'the 2nd courtyard is solid');
+  for (const [x, z] of [[-97130, -6470], [-97050, -6520]]) assert.ok(solid(x, z, above(x, z, 3)), `the wing at ${x},${z} is open`);
+});
+
+test('the ramparts and the railing are each built once, by the chunks they stand in, and replace their barriers', () => {
+  for (const id of ['vysehrad-valy', 'hrad-obri']) {
+    const e = EXTRAS.find((x) => x.id === id);
+    assert.ok(e, `${id} is not registered`);
+    let tris = 0;
+    const seen = new Map();
+    for (let cx = Math.floor(e.box[0] / CHUNK) - 1; cx <= Math.floor(e.box[2] / CHUNK) + 1; cx++) {
+      for (let cz = Math.floor(e.box[1] / CHUNK) - 1; cz <= Math.floor(e.box[3] / CHUNK) + 1; cz++) {
+        if (!landmarkExtras(cx, cz, CHUNK).includes(e)) continue;
+        const b = new LandmarkBatch();
+        b.extra(e, { key: chunkKey(cx * CHUNK + 1, cz * CHUNK + 1), cx, cz, roads: [], terrain, chunkOf: chunkKey });
+        tris += b.sink.tris;
+        // every vertex lies in or beside the chunk that built it (a piece is
+        // owned by the chunk of its middle, and no piece is longer than an edge)
+        for (let i = 0; i < b.sink.pos.length; i += 3) {
+          const x = b.sink.pos[i], z = b.sink.pos[i + 2];
+          assert.ok(x > cx * CHUNK - 140 && x < (cx + 1) * CHUNK + 140 && z > cz * CHUNK - 140 && z < (cz + 1) * CHUNK + 140, `${id}: a vertex far outside chunk ${cx},${cz}`);
+          assert.ok(b.sink.pos[i + 1] > 180 && b.sink.pos[i + 1] < 290, `${id}: a vertex at ${b.sink.pos[i + 1].toFixed(1)} m`);
+        }
+        if (b.sink.tris) seen.set(cx + ',' + cz, b.sink.tris);
+      }
+    }
+    assert.ok(tris > 1500 && tris < 12000, `${id}: ${tris} triangles`);
+    if (id === 'vysehrad-valy') assert.ok(seen.size >= 8, `the ramparts come from only ${seen.size} chunks`);
+  }
+  // the generic ribbon is not drawn on exactly those two lines
+  const replaced = [];
+  for (const k of KEYS) for (const b of TILES[k].barriers) if (landmarkBarrier(b)) replaced.push(b);
+  assert.equal(replaced.length, 2, `${replaced.length} barriers replaced`);
+  assert.ok(replaced.some((b) => b.p.length === VALY_V.length) && replaced.some((b) => b.p.length === OBRI_LINE.length));
+});
+
+test('a chunk of the ramparts and the railing chunk come back from the worker the same', () => {
+  const keyOf = (x, z) => Math.floor(x / CHUNK) + ',' + Math.floor(z / CHUNK);
+  const p = new THREE.Vector3(), q = new THREE.Vector3();
+  let compared = 0;
+  for (const key of [keyOf(-95772, -3486), keyOf(-95952, -3700), keyOf(-97316, -6524)]) {
+    const [cx, cz] = key.split(',').map(Number);
+    const world = worldFor(key);
+    const sync = buildChunkMeshes(world.city, cx, cz, world.mats, 'full');
+    const got = chunkSpec(world, cx, cz, 'full', { terrain: new Map(), canopy: new Map() });
+    const { reply } = handleMessage(makeWorkerState(), { t: 'build', id: 1, spec: structuredClone(got.spec, { transfer: got.transfer }) });
+    assert.equal(reply.t, 'done', `the worker failed chunk ${key}: ${reply.error}`);
+    const decMats = { ...world.mats, codecMats: {} };
+    for (const k of Object.keys(reply.brands)) decMats.codecMats[k] = world.wordmark;
+    const back = decode(reply.payload, decMats);
+    sync.updateMatrixWorld(true); back.updateMatrixWorld(true);
+    const lm = (root) => { const out = []; root.traverse((o) => { if (o.isMesh && o.material === world.mats.landmark) out.push(o); }); return out; };
+    const A = lm(sync), B = lm(back);
+    assert.equal(A.length, 1, `chunk ${key}: ${A.length} landmark meshes here`);
+    assert.equal(B.length, 1, `chunk ${key}: the landmark mesh did not come back`);
+    const a = A[0].geometry.attributes.position, b = B[0].geometry.attributes.position;
+    assert.equal(b.count, a.count, `chunk ${key}: vertex count`);
+    for (let v = 0; v < a.count; v++) {
+      p.fromBufferAttribute(a, v).applyMatrix4(A[0].matrixWorld);
+      q.fromBufferAttribute(b, v).applyMatrix4(B[0].matrixWorld);
+      assert.ok(p.distanceTo(q) < MAX_ERR, `chunk ${key}: a vertex ${p.distanceTo(q).toFixed(3)} m apart`);
+      compared++;
+    }
+  }
+  assert.ok(compared > 2000, `only ${compared} vertices compared`);
+});
+
+test('St Wenceslas stands on his plinth: no piece of the statue hangs in the air', () => {
+  const l = LANDMARKS.find((e) => e.id === 'nm'), f = copy(found('nm'));
+  const g = groundFor(f, terrain), b = new LandmarkBatch();
+  const kit = new Kit(b.sink, g, terrain);
+  l.grounds(kit, f, l);
+  const base = terrain.heightAt(-95032.3, -5347.1);
+  let top = -Infinity;
+  for (let i = 0; i < b.sink.pos.length; i += 3) {
+    if (Math.hypot(b.sink.pos[i] + 95032.3, b.sink.pos[i + 2] + 5347.1) < 8) top = Math.max(top, b.sink.pos[i + 1]);
+  }
+  assert.ok(top > base + 10 && top < base + 13.5, `the statue reaches ${(top - base).toFixed(1)} m over its square`);
+});
+
+// ---- round 7 polish review: the far hand-over and the sky dome, headless ----
+const { FarSkyline, farMaterial, farNearMaterial } = await import('../js/landmarksfar.js');
+const { landmarkMaterial, WALL } = await import('../js/landmarksmat.js');
+
+test('the far hand-over runs only in Prague, once the far ground is built, and a silhouette is whole until its near model exists', () => {
+  const scene = new THREE.Scene(), built = new Map();
+  const sky = new FarSkyline(scene, { built, terrain });
+  const hand = THREE.UniformsLib.fog.atcHand.value, A = THREE.UniformsLib.fog.atcHandA.value, B = THREE.UniformsLib.fog.atcHandB.value;
+  const cam = new THREE.PerspectiveCamera();
+  // Pardubice: nothing of the skyline, and the generic shaders never give way
+  cam.position.set(25, 230, -122);
+  sky.update(cam, 300);
+  assert.equal(hand[3], 0, 'the hand-over is on in Pardubice');
+  assert.equal(sky.group.visible, false);
+  // Charles Bridge: both far grounds build (their terrain is loaded), the hand-over comes on with their boxes
+  cam.position.set(-96338, 200, -6094);
+  sky.update(cam, 300);
+  assert.equal(sky._handBoxes.length, 2, 'the far grounds were not built');
+  assert.equal(hand[3], 1, 'the hand-over is off in Prague');
+  assert.ok(Math.abs(hand[0] - 300 * WALL.value) < 1e-3, `radius ${hand[0]}`);
+  const boxes = FAR_GROUND.map((g) => g.box.join(','));
+  assert.ok(boxes.includes([...A].join(',')) && boxes.includes([...B].join(',')) && [...A].join(',') !== [...B].join(','), 'the two boxes');
+  // nothing streamed: every silhouette in range is drawn whole (no dither over nothing)
+  for (const it of sky.items) {
+    assert.equal(it.mesh.material, farNearMaterial(), `${it.e.id} dithered with no near model`);
+    assert.equal(it.mesh.visible, true, `${it.e.id} hidden with no near model`);
+  }
+  // the castle's chunk arrives with its landmark mesh: the silhouette dithers again, and close to it is not drawn
+  const hrad = sky.items.find((it) => it.e.id === 'hrad');
+  const g = new THREE.Group(), lm = new THREE.Mesh(new THREE.BufferGeometry(), landmarkMaterial());
+  g.add(lm); built.set(hrad.keys[0], g);
+  sky.update(cam, 300);
+  assert.equal(hrad.mesh.material, farMaterial(), 'the silhouette is not dithered over its near model');
+  assert.equal(lm.material, farNearMaterial(), 'the near model is not in the silhouette air');
+  cam.position.set(-97137, 260, -6528);
+  sky.update(cam, 300);
+  assert.equal(hrad.mesh.visible, false, 'the silhouette is drawn over the near model at its foot');
+  // and out of Prague again it switches off
+  cam.position.set(25, 230, -122);
+  sky.update(cam, 300);
+  assert.equal(hand[3], 0, 'the hand-over stays on after leaving Prague');
+});
+
+test('the sky dome is centred on whatever camera draws it', async () => {
+  const { makeSky } = await import('../js/sky.js');
+  const scene = new THREE.Scene(), sky = makeSky(scene);
+  const cam = new THREE.PerspectiveCamera();
+  cam.position.set(-93500, 400, -5486);
+  sky.dome.onBeforeRender(null, scene, cam);
+  const e = sky.dome.matrixWorld.elements;
+  assert.deepEqual([e[12], e[13], e[14]], [-93500, 400, -5486]);
+  assert.deepEqual([e[0], e[5], e[10]], [1, 1, 1], 'the dome is not rotated or scaled');
 });

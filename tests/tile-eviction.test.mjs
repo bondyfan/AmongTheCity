@@ -1,16 +1,19 @@
 // ---- a tile's data has a lifetime: deep eviction and the way back -----------
 // geo.js evictDeep gives back everything a far tile filed in the chunk index
-// (and its polygons, fences, venues, power lines and furniture) and keeps only
-// the ways, the rails, the pois, the signals and the car parks. Since round 7
-// it also RELEASES what the graphs built from those ways (geo.js
-// RELEASE_GRAPHS, city.onTileReleased): the traffic edges, nodes and lights,
-// the route planner's graph, the walkers' paths and sites. These pin both
-// halves of that promise on the real Pardubice tiles: while away the data and
-// the graphs are GONE (cells, flat arrays, graph structures, and the objects
-// themselves once nothing holds them), and coming back gives the SAME world:
-// every cell holds the same ids, the kept ways are the same objects and are
-// handed to the graphs again, and the graphs come out exactly as a client's
-// that never had the tiles and got them in the same order. The last test is
+// (and its polygons, fences, venues, power lines and furniture). Since round 7
+// it also RELEASES what the graphs built from its ways (geo.js RELEASE_GRAPHS,
+// city.onTileReleased): the traffic edges, nodes and lights, the route
+// planner's graph, the walkers' paths and sites; and since the round 7 polish
+// the ways themselves, the rails, the signals, the car parks and the junction
+// pads (RELEASE_DATA): only the pois stay listed. These pin both halves of
+// that promise on the real Pardubice tiles: while away the data and the
+// graphs are GONE (cells, flat arrays, registries, graph structures, and the
+// objects themselves once nothing holds them), and coming back gives the SAME
+// world: every cell holds the same ids, the ways come back as new objects
+// with the same ids and are handed to the graphs as on a first visit, and the
+// graphs come out exactly as a client's that never had the tiles and got them
+// in the same order. (A tile released while its neighbour stays:
+// tests/tile-data-release.test.mjs.) The last test is
 // the co-op half: one tile released and returned while its neighbour stays
 // gives the cells, slots and light phases of a fresh build in either order,
 // away from the seam (every player is EVICT_REACH from a released tile).
@@ -42,6 +45,7 @@ const { Pedestrians } = await import('../js/pedestrians.js');
 const { Navigation } = await import('../js/navigation.js');
 const { SITE } = await import('../js/crowdsites.js');
 const { Cyclists } = await import('../js/cyclists.js');
+const geo = await import('../js/geo.js');
 await settleAt(SPAWN);
 const traffic = new Traffic(city, stubVehicles());
 const peds = new Pedestrians({ add() {}, remove() {} }, city);
@@ -136,8 +140,12 @@ const stamps = city.roads.map((r) => r._tg);
 const ixA = indexPrint(), trA = trafficPrint(), pdA = pedPrint(), flatA = flat();
 const navA = [nav._segs.length, nav._nodeIx.size];
 const cycA = [cyc.net.count, cyc.net.nodes.size, cyc._cells.size];
-const roadsA = city.roads.slice();
+// (ids, not the objects: holding the ways would keep them from going)
+const roadIdsA = city.roads.map((r) => r._id).sort((a, b) => a - b);
+const isTownWay = new Set(roadIdsA);
 const edgeRef = new WeakRef(traffic.edges[traffic.edges.length >> 1]);
+const roadRef = new WeakRef(city.roads[city.roads.length >> 1]);
+const padRef = new WeakRef([...geo.JUNCTIONS.values()].find((l) => l.length)[0]);
 const greenRef = new WeakRef(city.green.find((f) => near(f._home)));
 const loadedA = city.manifestTiles.filter((t) => t.state === 2).map((t) => t.tx + ',' + t.tz).sort();
 
@@ -165,17 +173,22 @@ test('far away, the data of the town is gone', async () => {
   const deep = city.manifestTiles.filter((t) => loadedA.includes(t.tx + ',' + t.tz));
   for (const t of deep) {
     assert.equal(t.state, 0, `tile ${t.tx},${t.tz} is in state ${t.state}`);
-    assert.ok(t.kept && t.res === null && t.cells === null, `tile ${t.tx},${t.tz} kept nothing, or kept it all`);
+    assert.ok(!t.kept && t.poisIn && t.res === null && t.cells === null, `tile ${t.tx},${t.tz} kept something`);
   }
   let left = 0;
   for (const k of city.chunkIndex.keys()) if (near(k)) left++;
   assert.equal(left, 0, `${left} cells round the spawn outlived every tile that filed them`);
   const f = flat();
-  for (const k of ['buildings', 'trees', 'water', 'green', 'power', 'venues', 'barriers', 'waterways'])
+  for (const k of ['buildings', 'trees', 'water', 'green', 'power', 'venues', 'barriers', 'waterways',
+    'roads', 'rails', 'signals', 'paved'])
     assert.equal(f[k], 0, `${f[k]} ${k} still listed`);
-  // ...and the kept kinds were not touched
-  for (const k of ['roads', 'rails', 'pois', 'signals']) assert.equal(f[k], flatA[k], k);
-  assert.ok(f.paved > 0 && f.paved < flatA.paved, 'only the car parks stay listed');
+  // ...but the pois (they are filed once, by readers that never let go)
+  assert.equal(f.pois, flatA.pois, 'pois');
+  // ...and the pads went with the ways
+  let pads = 0;
+  for (const l of geo.JUNCTIONS.values()) pads += l.length;
+  for (const l of geo.CLUSTERS.values()) pads += l.length;
+  assert.equal(pads, 0, `${pads} junction pads or clusters outlived their ways`);
   // ...and every graph let go of the town's ways
   assert.equal(traffic.edges.length, 0, 'traffic edges');
   assert.equal(traffic._nodes.size, 0, 'traffic nodes');
@@ -184,8 +197,8 @@ test('far away, the data of the town is gone', async () => {
   assert.equal(traffic._cells.size, 0, 'population cells');
   assert.equal(traffic._junctions.length, 0, 'signal controllers');
   // (what stays are the gate walks of js/landmarks-walks.js: module ways, no tile's)
-  for (const r of peds.paths) assert.ok(!roadsA.includes(r), 'a footway of the town is still walked');
-  for (const c of peds._cells.values()) for (const r of c.paths) assert.ok(!roadsA.includes(r), 'a square still holds a town footway');
+  for (const r of peds.paths) assert.ok(!isTownWay.has(r._id), 'a footway of the town is still walked');
+  for (const c of peds._cells.values()) for (const r of c.paths) assert.ok(!isTownWay.has(r._id), 'a square still holds a town footway');
   assert.equal(peds.drive.m.size, 0, 'carriageways the crowd still crosses');
   for (const a of peds.sites.m.values()) for (const st of a) assert.equal(st.kind, SITE.STOP, 'only the bus stops (kept pois) stay sites');
   assert.equal(nav._segs.length, 0, 'route planner segments');
@@ -198,6 +211,8 @@ test('far away, the data of the town is gone', async () => {
   await new Promise((r) => setTimeout(r, 5));
   assert.equal(greenRef.deref(), undefined, 'an evicted green polygon is still held by something');
   assert.equal(edgeRef.deref(), undefined, 'a released traffic edge is still held by something');
+  assert.equal(roadRef.deref(), undefined, 'a released way is still held by something');
+  assert.equal(padRef.deref(), undefined, 'a released junction pad is still held by something');
 });
 
 test('coming back gives the same world', async () => {
@@ -208,11 +223,11 @@ test('coming back gives the same world', async () => {
   assert.ok(back.length >= loadedA.length, 'the town tiles were not fetched again');
   let ways = 0;
   for (const t of back) {
-    // the graphs gave the ways back, so they are handed over again: the KEPT
-    // objects, not new ones; the pois never left and are not re-delivered
-    assert.equal(t.again, true);
+    // the ways come as on a first visit: new objects with the ids they had;
+    // the pois never left and are not delivered again
+    assert.ok(!t.again);
     assert.equal(t.pois.length, 0);
-    for (const r of t.roads) assert.ok(roadsA.includes(r), 'a way that is a new object');
+    for (const r of t.roads) assert.ok(isTownWay.has(r._id), 'a way with an id the town never had');
     ways += t.roads.length;
   }
   assert.ok(ways > 1000, ways + ' ways handed back');
@@ -225,9 +240,8 @@ test('coming back gives the same world', async () => {
   for (const [k, v] of ixA) if (ixB.get(k) !== v) { differ++; first ||= k + '\n' + v.slice(0, 200) + '\n' + ixB.get(k)?.slice(0, 200); }
   assert.equal(differ, 0, `${differ} cells hold other features: ${first}`);
   assert.deepEqual(flat(), flatA);
-  assert.equal(city.roads.length, roadsA.length);
-  for (let i = 0; i < roadsA.length; i++) if (city.roads[i] !== roadsA[i]) assert.fail(`way ${i} is a new object`);
-  for (const t of city.manifestTiles) assert.equal(t.kept ?? null, t.state === 0 ? t.kept ?? null : null);
+  assert.deepEqual(city.roads.map((r) => r._id).sort((a, b) => a - b), roadIdsA, 'the ways by id');
+  for (const t of city.manifestTiles) assert.equal(t.kept ?? null, null);
   // the graphs: what a client that never had these tiles builds from the same
   // payloads in the same order, to the edge, the cell, the slot and the phase
   traffic.addTile({ roads: [], signals: [] });

@@ -24,7 +24,7 @@
 // build, and per shell of every falling piece of debris. It is four array reads
 // and three lerps, with no allocation.
 
-import { STAMPS, STAMP_REGIONS, stampHeight } from './terrainstamps.js';
+import { STAMPS, STAMP_REGIONS, regionHeight } from './terrainstamps.js';
 import { riverbedInto } from './riverbed.js';
 
 const TERRAIN_URL = (tx, tz) => `data/terrain/${tx}_${tz}.bin`;
@@ -144,7 +144,7 @@ export class Terrain {
     for (let i = 0; i < REGION_N; i++) {
       const b = REGIONS[i].box;
       if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue;
-      return stampHeight(REGIONS[i].stamps, x, z, h);
+      return regionHeight(REGIONS[i], x, z, h);
     }
     return h;
   }
@@ -156,7 +156,7 @@ export class Terrain {
       const b = REGIONS[i].box;
       if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue;
       const h = this._gridAt(x, z);
-      return stampHeight(REGIONS[i].stamps, x, z, h) - h;
+      return regionHeight(REGIONS[i], x, z, h) - h;
     }
     return 0;
   }

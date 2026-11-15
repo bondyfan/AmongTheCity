@@ -304,6 +304,43 @@ export function arcAt(line, since, out) {
   return out;
 }
 
+const _inv = { s: 0, v: 0, i: 0, stop: false };
+
+/**
+ * The inverse of arcAt: the LATEST second since departure, no later than
+ * `hi`, at which the nose had not yet passed arc `a` (a held tram's own clock,
+ * js/trams.js). Pure; arcAt never goes back, so a bisection finds it.
+ */
+export function sinceAtArc(line, a, hi) {
+  if (hi > line.dur) hi = line.dur;
+  if (!(hi > 0)) return 0;
+  if (arcAt(line, hi, _inv).s <= a) return hi;
+  let lo = 0;
+  if (arcAt(line, lo, _inv).s > a) return 0;
+  for (let it = 0; it < 40 && hi - lo > 0.005; it++) {
+    const m = (lo + hi) / 2;
+    if (arcAt(line, m, _inv).s <= a) lo = m; else hi = m;
+  }
+  return lo;
+}
+
+/**
+ * The shared second trip k's nose is due at arc `a` by the timetable (the
+ * first moment it is there), or Infinity past its terminus. Pure: who goes
+ * first where two trams want the same rail (js/tramspacing.js).
+ */
+export function dueAt(line, k, a) {
+  const dep = departOf(line, k);
+  if (a <= line.stops[0].d) return dep;
+  if (a > line.stops[line.stops.length - 1].d) return Infinity;
+  let lo = 0, hi = line.dur;
+  for (let it = 0; it < 40 && hi - lo > 0.01; it++) {
+    const m = (lo + hi) / 2;
+    if (arcAt(line, m, _inv).s >= a) hi = m; else lo = m;
+  }
+  return dep + hi;
+}
+
 /** Is the path under arc `a` a tunnel (the tram is out of sight there)? */
 export function inTunnel(line, a) {
   const f = line.flags;

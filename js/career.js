@@ -41,6 +41,7 @@ import { toast } from './toasts.js';
 import { fmtDist } from './jobmath.js';
 import { discover, contextTips, payAwards, food, foodScan } from './careertips.js';
 import { startPoint as pickStart, nearestHospital } from './startplace.js';
+import { standY, groundReady, motorwaySave } from './savespot.js';
 
 const SAVE_EVERY = 20;         // s between autosaves
 // Where main.js stands you up after the death card is the hospital nearest
@@ -58,6 +59,13 @@ let statsPanel = null, foodPanel = null, carPanel = null;
 let applied = false;           // the save has been put into the live game
 let played = 0, saveT = SAVE_EVERY, slowT = 0, markT = 0, trackT = 0;
 let lastX = null, lastZ = null, lastSafe = null;
+// A save made at the wheel on the D11: where the owned car goes in the save
+// (its hard shoulder, js/savespot.js), valid while `ok`.
+const carStop = { ok: false, cx: 0, cz: 0, h: 0, px: 0, pz: 0, py: 0, deck: false };
+// The saved spot spawn() moved the player to, until standSaved() has found its
+// floor: { x, z, y, t } (y NaN for an older save), or null.
+let pendingStand = null;
+const STAND_WAIT = 20;         // s: then stand on what there is rather than hover
 let fuelT = -99, dryToldAt = -99, now = 0;
 let unsavedTold = false;       // "nothing is being saved" has been said (once is enough)
 const tips = {};
@@ -98,6 +106,37 @@ export async function spawn(player, city) {
     ]);
   } catch { /* a tile that will not load: the streamer retries in play */ }
   player.pos.x = p.x; player.pos.z = p.z; player.heading = p.h;
+  // The height is put down later (standSaved), once the world can say which
+  // level is there: here the terrain has not even arrived. Until then the
+  // walk controller would take the LOWEST level under a deck (the player
+  // starts at y 0, so everything is overhead): the riverbed under Charles
+  // Bridge, the D11 under an overpass.
+  pendingStand = { x: p.x, z: p.z, y: Number.isFinite(p.y) ? p.y : NaN, t: 0 };
+  if (Number.isFinite(p.y)) { player.y = p.y; player.vy = 0; }
+}
+
+// Stand the restored player on the saved level, as soon as the chunk cell,
+// the height map and the earthworks under the spot are in (js/savespot.js
+// groundReady). Until then they are held where the save was taken (or, for an
+// old save with no height, kept from falling), so a restore that runs before
+// the bridge's tile exists does not drop them into the river under it.
+function standSaved(dt) {
+  const ps = pendingStand, p = h?.player, world = h?.world;
+  if (!ps || !p || !world) return;
+  // anything else moved them (a teleport, a car, the death card): not ours now
+  if (p.inCar || h.game?.car || vitals.down() || Math.abs(p.pos.x - ps.x) > 0.5 || Math.abs(p.pos.z - ps.z) > 0.5) {
+    pendingStand = null;
+    return;
+  }
+  ps.t += dt;
+  if (!groundReady(world, ps.x, ps.z) && ps.t < STAND_WAIT) {
+    if (Number.isFinite(ps.y)) p.y = ps.y;
+    p.vy = 0;
+    return;
+  }
+  p.y = standY(world, ps.x, ps.z, ps.y);
+  p.vy = 0; p.grounded = true;
+  pendingStand = null;
 }
 
 // ---- wiring -------------------------------------------------------------------
@@ -168,7 +207,8 @@ export function attach(host) {
     // main.js has stood the body up at the hospital before reviving it: that
     // is where a reload belongs from now on, whether or not the feet have
     // found the ground by the time the save is taken
-    if (lastSafe && h?.player) { lastSafe.x = h.player.pos.x; lastSafe.z = h.player.pos.z; }
+    // (no height: the hospital is stood on its own floor, see js/savespot.js)
+    if (lastSafe && h?.player) { lastSafe.x = h.player.pos.x; lastSafe.z = h.player.pos.z; lastSafe.y = NaN; }
     if (stars <= 0) return;
     const fine = payFine(stars);
     wanted.clear();
@@ -192,6 +232,9 @@ export function attach(host) {
     snap.wanted = { heat: 0, crime: '' };          // the fine settles it
     if (!store.save(snap) && loadNote !== 'newer') tellUnsaved();
   });
+
+  // boot has warmed the spawn's neighbourhood by now: usually it can stand at once
+  standSaved(0);
 
   const flush = () => save();
   window.addEventListener('pagehide', flush);
@@ -271,13 +314,19 @@ function apply() {
 // ---- saving -------------------------------------------------------------------
 
 function snapshot() {
+  const car = garage.snapshot();
+  // the owned car, driven on the D11 when the save is taken, is saved on its
+  // hard shoulder beside where its driver is saved (see update)
+  if (car && carStop.ok && h.game.car && h.game.car === garage.car) {
+    car.x = carStop.cx; car.z = carStop.cz; car.h = carStop.h;
+  }
   return {
     money: wallet.money(),
     pos: lastSafe,
     tod: solo ? tod() : null,
     played: Math.round(played),
     vitals: { hp: vitals.hp(), armour: vitals.armour(), energy: vitals.energy() },
-    car: garage.snapshot(),
+    car,
     stats: progress.stats, ach: progress.unlocked,
     jobs: jobs.snapshot(),
     onb: { ...onb.toJSON(), tips },
@@ -364,6 +413,7 @@ export function footHint(el, car) {
 
 export function update(dt) {
   if (!h || !h.player) return;
+  if (pendingStand) standSaved(dt);
   if (!applied) apply();
   now += dt;
   played += dt;
@@ -382,13 +432,23 @@ export function update(dt) {
   // Where a reload should put you: the last place you were on the ground, on
   // foot or at the wheel. Never mid-air, on a train or on the death card.
   if ((onFoot && p.grounded !== false || car) && !vitals.down()) {
-    (lastSafe ??= { x: 0, z: 0, h: 0 });
+    (lastSafe ??= { x: 0, z: 0, h: 0, y: NaN });
     // At the wheel, the spot is beside the driver's door: a reload starts on
     // foot, and standing INSIDE the car you were driving is no way to wake up.
     // Heading 0 faces -z here, so the driver's left is (-cos h, sin h).
     const hd = car ? car.heading : p.heading;
     const off = car ? (car.wid ?? 1.8) / 2 + 1.1 : 0;
     lastSafe.x = x - Math.cos(hd) * off; lastSafe.z = z + Math.sin(hd) * off; lastSafe.h = hd;
+    // ...and the LEVEL it was on: a deck, or the road under one (savespot.js)
+    const y = car ? car.y : p.y;
+    lastSafe.y = Number.isFinite(y) ? y : NaN;
+    // On the D11 the door is the median or a running lane at 130: the driver
+    // is saved behind the guard rail and the car on its hard shoulder, when
+    // both spots are on the car's level (js/savespot.js motorwaySave).
+    carStop.ok = false;
+    if (car && motorwaySave(h.world, x, z, car.heading, y, carStop)) {
+      lastSafe.x = carStop.px; lastSafe.z = carStop.pz; lastSafe.h = carStop.h; lastSafe.y = carStop.py;
+    }
   }
 
   jobs.update(dt);

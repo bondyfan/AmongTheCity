@@ -263,3 +263,19 @@ export function signFrames(body) {
 }
 
 export const SECTION_TYPES = ['A', 'B', 'C', 'T'];
+
+/**
+ * The FAR body (js/tramdraw.js, beyond the near ring): one section as the bare
+ * loft of the 15T profile, a metre long (z -0.5..0.5) so a single geometry
+ * stretched by the instance matrix stands for every section of every body.
+ * 42 triangles where the near section has 200 to 460: the livery bands, the
+ * glass band (lit at night like the near one) and the caps, nothing else.
+ */
+export function farGeometry() {
+  const prof = profileOf('15T'), sill = prof[1][1], S = new Soup();
+  const ra = ring(prof, -0.5, 1, 0, 1, sill), rb = ring(prof, 0.5, 1, 0, 1, sill);
+  sweep(S, prof, ra, rb, '15T');
+  cap(S, prof, ra, -1, '15T');
+  cap(S, prof, rb, 1, '15T');
+  return S.geometry();
+}

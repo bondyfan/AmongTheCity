@@ -192,6 +192,13 @@ export class KerbParking {
     this.parked = parked;        // main's enterable-car array (shared reference)
     this.veto = veto;
     this._stalls = new WeakMap(); // way -> stalls (NOT on the way: see the header)
+    // A far tile gives its ways back (geo.js RELEASE_DATA) and brings new
+    // objects with the same ids when it returns, so the stalls are worked out
+    // again; which of them were BURNED (a car driven away, a pole in the
+    // space) is remembered by way id meanwhile, or the street would fill up
+    // again on the next visit and two co-op clients would disagree about it.
+    this._burnt = new Map();      // way _id -> indices of its burned stalls
+    city.onTileReleased?.((t) => this.releaseTile(t));
     this._roads = new Set();      // ways with a car on them, for the drain
     this._t = 0;
     this._count = 0;
@@ -236,6 +243,8 @@ export class KerbParking {
           if (!stalls) {
             if (budget-- <= 0) continue;
             this._stalls.set(r, stalls = kerbStalls(this.city, r, this.veto));
+            const was = this._burnt.get(r._id);
+            if (was) { for (const i of was) if (stalls[i]) stalls[i].burned = true; this._burnt.delete(r._id); }
           }
           for (const st of stalls) this._tend(r, st, pos, occ, virgin);
         }
@@ -251,6 +260,29 @@ export class KerbParking {
         if (Math.hypot(st.x - pos.x, st.z - pos.z) > REACH + 60) this._remove(st); else any = true;
       }
       if (!any) this._roads.delete(r);
+    }
+  }
+
+  /** A released tile's ways: remember their burned stalls by id, forget the rest. */
+  releaseTile(t) {
+    for (const r of t.roads ?? []) {
+      const stalls = this._stalls.get(r);
+      if (!stalls) continue;
+      const burnt = [];
+      for (let i = 0; i < stalls.length; i++) {
+        const st = stalls[i];
+        // (as the drain in update does: a car somebody took or bought is the
+        // stall's no longer and burns it, one still standing goes with its
+        // street, which is this far from the player only on a teleport)
+        if (st.car) {
+          if (st.car.owned || !this.parked.includes(st.car)) { st.car = null; st.burned = true; this._count--; }
+          else this._remove(st);
+        }
+        if (st.burned) burnt.push(i);
+      }
+      if (burnt.length && r._id !== undefined) this._burnt.set(r._id, burnt);
+      this._stalls.delete(r);
+      this._roads.delete(r);
     }
   }
 

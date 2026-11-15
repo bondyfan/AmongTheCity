@@ -1540,6 +1540,16 @@ and merged; these are the rules they agreed on.
   co-op clients could disagree on, no Math.random. A tram yields to a car on its
   rail only on this screen; the shared timetable is never changed.
   `traffic.railCross` makes cars wait short of a crossing a tram is due at.
+  Round 7 polish: two trams never stand in each other (js/tramspacing.js: a
+  tram claims its body plus its braking distance; where two claims cross, the
+  one already in the junction, else the one due first by the timetable, goes);
+  a held tram keeps a local `delay` and makes it up at 1.25 x its own clock,
+  never jumping to the timetable. Beyond 240 m a tram is a 42-triangle loft,
+  out to 1.5 km, with far glows at night (js/tramglow.js). Platforms are crowd
+  STOP sites keyed by stop node and heading (js/tramwait.js), put down within
+  800 m of the player once every line near is built, and the crowd's
+  busEta/busAt/busNear answer for trams too. `tramMasts` (js/settings.js, off
+  on low) is a chunk-recipe flag carried in the chunk spec.
 * **Party walls** (`js/partywalls.js`). `stampPartyWalls` writes `f._pw` per
   tile when it is indexed (same tile only, plain data, carried to the worker);
   `edgeRoles` reports them as `PARTY_ROLE` and a party edge is always drawn as
@@ -1551,5 +1561,178 @@ and merged; these are the rules they agreed on.
   `HOSPITALS`. With `geo.js RELEASE_GRAPHS` on, a deep-evicted tile is released
   from the traffic, walker, cycle and route-planner graphs, one graph per frame,
   and its ways come back when it returns; tests/tile-release.test.mjs pins that
-  release then return builds the same graphs as a fresh load. Geo's own roads,
-  pois and signals of far tiles are still kept.
+  release then return builds the same graphs as a fresh load. With
+  `RELEASE_DATA` (round 7 polish) the ways go too: roads, rails, signals, car
+  parks, their JUNCTIONS/CLUSTERS records and every stitch link a neighbour's
+  way holds to them (`underpassrelease.js releaseStructures`); only the pois stay
+  listed (`t.poisIn`). A returning tile is indexed as on a first visit (same
+  slot ids, new objects), and tests/tile-data-release.test.mjs pins that the
+  pair it forms with a resident neighbour equals a fresh load in the same
+  order, in both orders. Slim and deep eviction and every graph's release run
+  as ONE job of small steps (`queueJob`, about 6 ms a frame, a listener may
+  return a generator); tile indexing waits its turn behind it (`workTurn`).
+  Burned kerb stalls are remembered by way id (kerbparking.js), trains drop
+  the routes over released rails. A pin beyond the streamed roads gets the
+  rest of its route over `js/coarseroute.js`, a graph of the overview's major
+  roads (Navigation `opts.overview`, `coarseFrom`).
+
+---
+
+# v16 contract: the D11
+
+The ask: round 8, the D11 between Prague and Hradec Králové as a Czech driver
+knows it (barriers, signs with exit numbers, traffic at 130, services), with
+no tile rebuild. The tiles carry the motorway as anonymous ribbons: no ref, no
+names, no destinations, no junctions. Wave 0 landed three shared contracts
+that the five round 8 packages build on. Read them, never re-derive them.
+
+* **D11 facts** (`js/d11.js`, its baked lines in `js/d11lines.js` and its
+  tables in `js/d11data.js`; pure, no three, no DOM, worker safe, node
+  importable). Four carriageway centrelines
+  in their direction of travel: `E` and `W` (the D11, Černý Most to past exit
+  108 and back) and `S` and `N` (the D35 from the Sedlice split past Časy to
+  the tunnel Homole). They ARE the tile motorway ways chained end to end
+  (every tile vertex, 0.0 m off), the two ecoduct holes following the
+  roadpatches.js patches. Official km: a piecewise linear calibration of the
+  chainage through anchors (km 0 at the cs.wikipedia start, exit N at km N
+  at its measured interchange centre: the exit number is the km rounded to
+  the NEAREST, as the MD ČR notice for D0 interchange 60 at km 59.90 to 60.25
+  and the real km of the rest areas show; round 8 SIGNS moved the wave 0
+  N + 0.5 anchors down and re-baked every km in d11data.js; the raw chainage
+  was 0.29 to 1.23 km off),
+  W and N by projection onto
+  E and S. `UP[cw]` is +1 on E and S (km grows), -1 on W and N. API:
+  `d11At(km, cw, out?)` -> {x, z, dx, dz} (dx, dz the unit direction of
+  travel; heading h = atan2(-dx, -dz)); `d11Locate(x, z, out?)` -> {road, cw,
+  km, off, dx, dz} or null beyond `LOCATE_R` (25 m), `off` + to the right of
+  travel, O(1) through a lazily built 64 m bucket grid (the first call on a
+  thread decodes the lines and builds it, about 20 ms: call `d11Line('E')`
+  during boot); `exitAhead(km, cw)`, `restAhead(km, cw)`, `exitNear(x, z, r)`,
+  `onBridge(km, cw, pad)`, `kmRange(cw)`, `d11Line(cw)` (read-only typed
+  arrays). Tables, deep frozen: `EXITS` (number, ŘSD name, kind, centre km,
+  crossing shields, per carriageway the slip's diverge and merge {x, z, km}
+  as exact tile vertices, the gantry destinations `to` and shields `refs`
+  from the OSM destination tags, `thru`; texts without a tag are marked
+  FALLBACK in d11data.js for the owner to review), `REST` (Beranka, Bříství,
+  Vrbová Lhota, Dobšice off exit 50, Osice, Dolní Roveň on the D35: slips,
+  fuel brand and tile poi, food, trucks), `ECODUCTS` (Žehuň km 52.0, Voleč km
+  71.7: hole ends, deck length), bridge decks per carriageway (via
+  `onBridge`), `D35_SHARED` (the km where the D11 also carries the D35) and
+  `D11_WORLD_END_KM` (101.66: the tile ways run on to km 110.6 over no terrain,
+  plan nothing past it). Everything is a function of the constants: co-op
+  safe, the same on every thread and in any tile order. A fix to a fact goes
+  in d11data.js (the tables are plain literals; the lines in d11lines.js are
+  tile vertices, change them only with the tiles), and
+  tests/d11.test.mjs checks the lines against the tiles, the km monotonic,
+  every diverge in [N - 0.7, N + 0.5] and the round trip.
+
+* **Lanes** (`js/lanes.js`, pure, worker safe). The single source of
+  motorway lane geometry: the paint (meshes.js) and the AI (traffic.js) both
+  read it, and neither hard-codes its own numbers. `laneLayout(road)` is null
+  for every class but motorway and motorway_link, else one shared read-only
+  record in metres from the OSM centreline, + to the right of travel: lane
+  count, lane centres and widths, dividers, edge lines, the hard shoulder and
+  the drawn half width. It maps the Czech D 27.5 cross section onto the
+  measured carriageway spacing (median 12.4 m, the other carriageway always on
+  the left; 17 to 20 m only at the Prague end and past km 100): two 3.75 m
+  lanes with the lane line on the OSM line, the inner edge line 2.35 m from a
+  median barrier at about -6.22 m (`MEDIAN_HALF`, a median value: a barrier
+  must follow the measured distance to the other carriageway), the right
+  edge line at 3.875 and a 2.5 m shoulder (`SHOULDER_W`) to the drawn edge at
+  6.25. Narrow ways narrow their lanes to fit. A 3-lane piece keeps its two
+  through lanes in place and puts the third in the shoulder band (2.25 m
+  wide, about 1 m narrower than a real one: the drawn road is no wider).
+  `auxRight(road, endsAt)` walks a run of 3-lane ways through `endsIndex`
+  and classifies its rightmost lane as acceleration (`ACC_LEN` 283 m
+  median), deceleration (`DEC_LEN` 208), weaving, or the fallback 'aux'
+  (the slip road's tile not loaded yet: co-op code must not decide from it
+  alone); `auxShare(aux, s)` gives the taper (`TAPER` 60 m, not confirmed
+  by a standard). Everything is a pure function of the roads given.
+
+* **Road patches** (`js/roadpatches.js`, appended in `geo.js indexPayload`).
+  Ways the build dropped (it drops every tunnel) put back as tile road
+  records: Celetná through the Powder Tower and the four D11 carriageway
+  pieces under the two ecoducts. A patch lives in the tile of its first
+  vertex, takes its `_id` from the top of that tile's id block, and its ends
+  equal the neighbouring tile ways' ends to the decimetre (every graph welds
+  ways at rounded end points). The d11.js lines follow these patches vertex
+  for vertex, and tests/d11.test.mjs fails if they part. The elevation
+  model keeps the green bridges' earth 9 to 11 m over the road, so
+  `ecoductCuts()` describes one flat 'dig' stamp per carriageway, its floor a
+  straight line between the ground 40 m outside each end of the hole, and
+  js/terrainstamps.js lists them as two regions (Žehuň, Voleč); the road over
+  each patch then rises at most 0.15 m off that line. The green decks
+  themselves are drawn by the MOTORWAY-LOOK package.
+
+* **The motorway look** (round 8 MOTORWAY-LOOK). Five worker-safe modules,
+  none of them reading tile arrival order:
+  `js/mwpaint.js` paints a oneway motorway or slip road (meshes.js roadRibbon
+  hands it the ribbon frame) off `laneLayout`: V 4 edge lines 0.25 m at
+  edgeL / edgeR, 6/12 m lane lines, the 3/1.5 m auxiliary line on a 3-lane
+  piece by a slip road (`auxRight`) and wherever a slip road's asphalt covers
+  the right edge line; a slip road paints nothing on motorway asphalt, and
+  junction pads whose arms are all motorway or slip road cut nothing.
+  `js/mwplan.js barrierPlan(cell, key, terrain, grow)` is the ONE barrier
+  plan: per cell, walking every D11 / D35 way (`cwOf`: on a d11.js line) from
+  its first vertex in 4 m stations, a concrete median half at the midpoint to
+  the partner carriageway READ OFF THE d11.js LINES (9 to 15.5 m apart),
+  else a steel rail on the left; a steel W-beam 0.6 m past the right edge,
+  broken where another road's asphalt is; on a bridge both stand on the deck
+  kerb. Plain numbers (STRIDE 7). `js/mwdress.js` draws it ('full' chunks),
+  with the median surface and the delineators; `js/mwsolid.js` (city.collide)
+  pushes probes out of the same plan, memoised per cell, only for a caller
+  that gives its level (`opts.y`, which vehicles.js wallPass now passes, or a
+  walker's `opts.yLo`), thick behind the face so 130 km/h does not tunnel.
+  `js/mwtall.js` draws the two green bridges (the chunk holding each anchor)
+  and the procedural noise walls (`NOISE_RUNS`, official km), in the shell
+  tier too. The town lamp rule plants nothing along a D11 / D35 way outside
+  `motorwayLit` (250 m round an exit's or rest area's slip nodes), so
+  farlights follows. D11 bridge decks get concrete edge kerbs instead of the
+  dark parapet, and their piers stand at shared official km
+  (`mwPierStations`), side by side under both decks.
+* **Horizon** (round 8, HORIZON). A tile arrival is indexed in slices in
+  play (`geo.js indexPayloadSteps`, `city.indexSliceMs` 4 ms, set by main.js;
+  at boot and in tests it drains at once): the tile is filed into a private
+  stage and lands in a few steps after it (the index merge, the junction pads
+  and their shapes, `underpass.js stitchStructuresSteps`, the bays), and every
+  onTileLoaded listener gets a frame of its own (one may return a generator).
+  tests/tile-slices.test.mjs pins that the result equals the single pass.
+  A listener's payload gained `ids` ([lo, hi] of the tile's id block):
+  CityWorld re-bakes a neighbour's earthworks only when the tile's ways reach
+  it, and re-meshes only the cells whose ground the bake moved. The view: an
+  eased OPENNESS per viewer (`js/openness.js`, sight lines in the chunk
+  index; over the Prague Vltava the water counts) widens the ground window
+  by a buildings band (`streamplan.js planCarRings`, also above 90 km/h), and
+  outside Prague moves the fog out (`sky.fogOpen`, `sky.js OPEN_*`: wall to
+  5.5 km, haze scaled to 6 km by day) over `js/farterrain.js` (one coarse
+  orthophoto patch per terrain tile, min-pooled under the streamed ground)
+  with `js/farlightsland.js` town lights at night; the window's edge then
+  dissolves (`heightfog.js setFarEdge`, the same dither and discard as the
+  Prague hand-over; `ATC_NO_EDGE` opts a material out). Openness 0 is the old
+  fog to the digit. `sky.edgeFar` is the streamed edge's own wall: the crowd,
+  the traffic and the Prague skyline read it, never scene.fog.far.
+* **Services** (`js/d11services.js`, applied in `geo.js indexPayload` by
+  `servicesInto(data)` before anything is filed). Pure, per payload: the
+  Osice W Benzina, which OSM maps only as a building, gets a fuel poi under
+  its canopy (`SYNTH_FUEL`); and every fuel poi's mapped canopy (a tile
+  `t 'roof'` within 12 m, 32 m for a REST station) is LIFTED onto 4.5 m of
+  clear height with the skyway field `y` (mesher, collider and walkers read
+  it as passable underneath) and framed onto the poi (`cv`, `cr`, `ch`, `cd`).
+  `js/forecourt.js forecourtFrame()` is the one rule for where a forecourt
+  is: the mesher (`fuelInto` for a built one, `canopyFuelInto` under a mapped
+  roof), the pump (`js/pumps.js pumpAt`, main.js F) and the fuel shop's food
+  counter (`shopAt`, jobplaces.foodPlaceAt, `PRICE.shop`) all read it.
+  `sites()` / `siteNear()` (REST plus the exit 35 bay) tell the parking lots
+  a services lorry park (`lotClass`: 'lorry', 'service', 'town').
+* **The long run and the train** (`js/haul.js`, `js/express.js`,
+  `js/expressroute.js`, `js/railstitch.js`). A 'haul' job runs between two baked depots once per
+  GAME day per direction (`gameDay`), timed by `jobmath.haulLimitS` (not the
+  town's half-hour cap). "R Pardubice – Praha" leaves Pardubice hl.n. every
+  game hour (a pure function of worldT and station names), calls only at
+  `EXPRESS_STOPS` (`train.only`), charges `PRICE.train.ticket` on boarding,
+  and N skips a rider to the next station (`train.hold`, tiles awaited, the
+  clock untouched). `stitchPath` joins the Libeň yard end of line 010 to
+  Praha hl.n. (6.2 km, end points welded within 32 m, no reversing
+  continuation). trains.js now joins routes that meet end to end
+  (`_joinRoutes`) and, given the terrain, puts its track at the rail grade
+  (it ran at y 0.18 before, under the real terrain).

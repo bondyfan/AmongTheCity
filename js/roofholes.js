@@ -30,6 +30,13 @@ const DEPTHS = [7, 5.6, 4.5, 3.6, 2.8, 2.1, 1.5, 1.0, 0.6, 0.35];
 // line of their neighbours are dropped before the offset: the eave overhang
 // (0.25 m and up on every pitched roof) hides the difference against the wall.
 const SIMPLIFY = 0.15;
+// Where even that leaves a ring that folds at every depth (142 Prague
+// courtyard blocks stayed flat, measured: tiny jogs and slivers of wall), the
+// outline is simplified harder before the block gives up its pitch. 0.5 m is
+// the most: the eave overhangs the wall by 0.32 m, so a dropped kink can let
+// the roof edge fall at worst 18 cm inside one corner of the wall, invisible
+// from the street, where a flat deck over a palace is not.
+const SIMPLIFY_RETRY = [0.3, 0.5];
 
 const ringArea = (r) => Math.abs(polygonArea(r));
 
@@ -120,23 +127,39 @@ function band(sink, ring, eave, ey, top, ry, d, rise, sgn, away, r, g, b, soffit
 }
 
 /**
- * roofCapHoled(sink, outer, holes, topY, r, g, b, ov, soffit, tag, tri, pitch) -> rise
+ * roofCapHoled(sink, outer, holes, topY, r, g, b, ov, soffit, tag, tri, pitch, retry) -> rise
  * The courtyard version of roofs.js roofCap: same depth, rise and tag rules,
  * one slope band per ring, and a flat top with the yards cut out of it.
  * `tri(outer, holes)` returns index triples into outer.concat(...holes).
  * Returns 0 (nothing emitted) when the roof cannot be built cleanly.
  */
-export function roofCapHoled(sink, outer, holes, topY, r, g, b, ov, soffit, tag, tri, pitch = 0.78) {
+export function roofCapHoled(sink, outer, holes, topY, r, g, b, ov, soffit, tag, tri, pitch = 0.78,
+  retry = false) {
   if (!tri || outer.length < 3) return 0;
-  outer = simplifyRing(outer, SIMPLIFY);
-  const hs = holes.filter((h) => h.length >= 3).map((h) => simplifyRing(h, SIMPLIFY));
+  // the gentlest simplification that gives clean rings wins (the first one is
+  // the only one most blocks ever need, so their roofs are what they were);
+  // the harder ones only where the caller asks (roofs.js: Prague's palaces)
+  let P = capPlan(outer, holes, tag, tri, SIMPLIFY);
+  for (let k = 0; retry && !P && P !== false && k < SIMPLIFY_RETRY.length; k++)
+    P = capPlan(outer, holes, tag, tri, SIMPLIFY_RETRY[k]);
+  if (!P) return 0;
+  return capEmit(sink, P, topY, r, g, b, ov, soffit, tag, pitch);
+}
+
+// The rings of a courtyard roof at one simplification: the outline and yards,
+// the ridge rings at the deepest depth that clears, and the top's triangles.
+// null when the rings fold at every depth; false when no simplification can
+// help (too many vertices, too little solid roof).
+function capPlan(outer, holes, tag, tri, tol) {
+  outer = simplifyRing(outer, tol);
+  const hs = holes.filter((h) => h.length >= 3).map((h) => simplifyRing(h, tol));
   let total = outer.length;
   for (const h of hs) total += h.length;
-  if (total > MAX_N) return 0;
+  if (total > MAX_N) return false;
   const area = ringArea(outer);
   let solid = area;
   for (const h of hs) solid -= ringArea(h);
-  if (!(solid > 20)) return 0;
+  if (!(solid > 20)) return false;
   const sgn = polygonArea(outer) > 0 ? 1 : -1;
   const hsg = hs.map((h) => (polygonArea(h) > 0 ? 1 : -1));
   // the wing, not the block, sets how deep a slope can go, so the depth is
@@ -168,11 +191,16 @@ export function roofCapHoled(sink, outer, holes, topY, r, g, b, ov, soffit, tag,
     inner = cand; grown = gs;
     break;
   }
-  if (!inner) return 0;
+  if (!inner) return null;
   // the clipper first: if it cannot cut the top, nothing has been emitted yet
   let tris;
   try { tris = tri(inner, grown); } catch { tris = null; }
-  if (!tris?.length) return 0;
+  if (!tris?.length) return null;
+  return { outer, hs, hsg, sgn, inner, grown, d, want, tris };
+}
+
+function capEmit(sink, P, topY, r, g, b, ov, soffit, tag, pitch) {
+  const { outer, hs, hsg, sgn, inner, grown, d, want, tris } = P;
   // the pitch of roofs.js ridgeRoof (about 38 degrees, at most 5 m) and its
   // steeper old-town grammar when the caller asks (opts.pitch, rise per metre)
   let rise = Math.min(pitch > 0.9 ? 8 : 5, Math.max(0.8, d * pitch));

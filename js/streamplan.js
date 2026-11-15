@@ -138,3 +138,31 @@ export function planRings(speed, agl, base = 6) {
   }
   return { view, shell, far };
 }
+
+// ---- on the ground, a fast car and an open view (round 8, HORIZON) ---------
+// A car always got the ground window, whatever its speed: on medium the world
+// ended 480 m out, 9 s of sight at 200 km/h on the D11 and a fog wall at 422
+// m. Above CAR_FAST a car gets a band of ground and buildings (the shell
+// tier, 1.9 ms a cell against 30 for a full motorway cell), growing to
+// CAR_SHELL rings by CAR_FULL m/s (180 km/h): on medium 4 + 2 = 720 m. An open
+// view (js/openness.js, 0..1) asks for the same band standing still: the far
+// Vltava bank from an embankment, a field from the D11's shoulder. Beyond it
+// js/farterrain.js draws the land and the band's outer edge dissolves into it
+// (heightfog.js setFarEdge). No ground-only ring: the far land is that ring.
+// The low preset gets one ring; the window stays under WINDOW like any other.
+export const CAR_FAST = 25, CAR_FULL = 50;
+const CAR_SHELL = 2;
+export function planCarRings(speed, base = 6, open = 0) {
+  const low = base <= LOW_BASE;
+  const want = (t) => (t <= 0 ? 0 : low ? 1 : Math.max(1, Math.round(t * CAR_SHELL)));
+  const fast = speed > CAR_FAST ? 0.5 + 0.5 * clamp01((speed - CAR_FAST) / (CAR_FULL - CAR_FAST)) : 0;
+  // (an open view asks once it is a quarter open: the station forecourt, a
+  // square, a wide street are not a view, js/openness.js)
+  let shell = Math.max(want(fast), open < 0.25 ? 0 : want(clamp01(open)));
+  for (let guard = 0; guard < 20 && shell > 0; guard++) {
+    const c = windowCost(base, shell, 0);
+    if (c.kb <= WINDOW.kb && c.draws <= WINDOW.draws) break;
+    shell--;
+  }
+  return { view: base, shell, far: 0 };
+}

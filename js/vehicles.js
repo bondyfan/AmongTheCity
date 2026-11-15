@@ -42,6 +42,7 @@ import { CAR, CAR_COLORS } from './config.js';
 import { paintMatFor, glassMat, detailMat, headMat, tailMat, brakeMat, carNight,
   makeContactShadows } from './carpaint.js';
 import { buildCar } from './cardetail.js';
+import { attachTrailer, updateTrailer, updateBlink } from './semitrailer.js';   // round 8: the articulated lorry, indicators
 import { crash, sfxAt, skidChirp, skidBark } from './audio.js';   // no-ops headless — safe for node --check/tests
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
@@ -388,6 +389,22 @@ const KIND = {
       [-3.80, 0.38, 2.30, 0.92], [-3.62, 0.30, 2.48, 0.98],
       [-2.40, 0.30, 2.52, 1.00], [-1.55, 0.30, 2.46, 0.97]] },
   },
+  // Round 8, the D11: the tractor of an articulated lorry (tahač s návěsem).
+  // These numbers are the TRACTOR's (the cab is the box truck's, 6.2 m of it
+  // with the chassis); js/semitrailer.js hangs a 13.6 m trailer on the fifth
+  // wheel and makes the car 16.5 m long for everybody else (physics, the
+  // follow model, the shadow). Not in CAR_KINDS: it is motorway traffic.
+  semi: {
+    len: 6.2, wid: 2.5, wheelR: 0.50, wheelW: 0.40, axle: 1.85,
+    trailer: true,
+    accel: 2.4, vmax: 90 / 3.6, grip: 5.0, mass: 30,
+    brand: 'plain',
+    badgeF: { size: 0.18, y: 1.55, dz: -0.015 },
+    plateF: 0.60,
+    hull: { sh: 0.90, bw: 0.94, yA: 0.34, yB: 0.80, sts: [
+      [-3.10, 0.38, 2.30, 0.92], [-2.92, 0.30, 2.48, 0.98],
+      [-1.70, 0.30, 2.52, 1.00], [-0.85, 0.30, 2.46, 0.97]] },
+  },
   // SOR NS 12 city bus — one 11 m low-floor volume: near-flat face with a
   // one-piece raked windscreen and destination box, a full-length glazing
   // band framed by the white DPMP livery strips, two curbside door recesses,
@@ -454,6 +471,7 @@ const CAR_LABELS = {
   tesla:    ['Tesla Model 3 Performance', 'elektro · pohon všech kol'],
   van:      ['Dodávka', 'skříňová · do 3,5 t'],
   truck:    ['Nákladní vůz', 'trambus · skříňová nástavba'],
+  semi:     ['Kamion', 'tahač s návěsem · 40 t'],
   bus:      ['SOR NS 12', 'nízkopodlažní · DPMP'],
   trolleybus: ['Škoda 32Tr', 'trolejbus · nízkopodlažní · DPMP'],
 };
@@ -478,6 +496,7 @@ const KIND_COLORS = {
   tesla: [0xe9eae5, 0xe9eae5, 0xe9eae5, 0x17191d, 0x17191d, 0xa61c26, 0xa61c26, 0x8a9096, 0x2f4f72],
   van: [0xd8d5ce, 0xd8d5ce, 0xd8d5ce, 0xc4c9cf, 0xbcbfba, 0x3a63a8],
   truck: [0xd8d5ce, 0xbcbfba, 0x8a9096, 0x476b46, 0x3a63a8],
+  semi: [0xd8d5ce, 0xd8d5ce, 0xb5271f, 0x3a63a8, 0x2c3138, 0x476b46, 0xc9a227, 0x8a9096],
   bus: [0xb5271f, 0xb5271f, 0xb5271f, 0xd8d5ce, 0x9a2822],
   trolleybus: [0xb5271f, 0xb5271f, 0x9a2822],
 };
@@ -1113,6 +1132,7 @@ export class Vehicles {
       kind, color, len: K.len, wid: K.wid, ai: null,
       y: y0, _lat: 0, _pv: 0, _acc: 0, _roll: 0, _pitch: 0, _rammedT: 0,
       offroad: 0, _bumpT: 0 };
+    if (K.trailer) attachTrailer(car);   // (a semi: 16.5 m with its trailer, js/semitrailer.js)
     group.position.set(x, y0, z);
     group.rotation.y = heading;
     // Drawn after the street-light quads of the direct path (js/lightpools.js,
@@ -1362,6 +1382,8 @@ export class Vehicles {
       b.position.y = -0.055 * dmgK - 0.14 * (car._sag ?? 0) + (car._heave ?? 0);
       b.rotation.z = car._roll + bumpR + (car._crushR ?? 0);  // +z roll lifts the right flank
       b.rotation.x = car._pitch;         // +x pitch lifts the nose
+      if (car._tr) updateTrailer(car, dt);
+      if (car.blink || car._bl) updateBlink(car);
     }
     if (this.ghosts?.eachCar) {
       this._nb = nb;
@@ -1601,6 +1623,7 @@ function polePass(car, world) {
 // point drags the whole car out with it, and their summed push is the contact
 // normal. Points are pulled slightly inboard so brushing a wall reads as paint
 // contact, not a force field.
+const _wallOpts = { y: 0 };
 function wallPass(car, world) {
   const h = car.heading;
   const fx = -Math.sin(h), fz = -Math.cos(h);
@@ -1617,7 +1640,8 @@ function wallPass(car, world) {
     const wox = fx * of + rx * os, woz = fz * of + rz * os;
     _pt.x = car.x + wox; _pt.z = car.z + woz;
     const ox = _pt.x, oz = _pt.z;
-    if (world.collide(_pt, 0.5)) {
+    _wallOpts.y = (car.y ?? 0) + 0.3;      // the car's level: motorway barriers (js/mwsolid.js) need it
+    if (world.collide(_pt, 0.5, _wallOpts)) {
       const px = _pt.x - ox, pz = _pt.z - oz;
       const pl = Math.sqrt(px * px + pz * pz);
       snx += px; snz += pz; n++;
@@ -1635,7 +1659,7 @@ function wallPass(car, world) {
     const of = i < 2 ? hl : i < 4 ? -hl : 0, os = i & 1 ? hw : -hw;
     _pt.x = car.x + fx * of + rx * os; _pt.z = car.z + fz * of + rz * os;
     const ox = _pt.x, oz = _pt.z;
-    if (world.collide(_pt, 0.5)) depth = Math.max(depth, (_pt.x - ox) * nx + (_pt.z - oz) * nz);
+    if (world.collide(_pt, 0.5, _wallOpts)) depth = Math.max(depth, (_pt.x - ox) * nx + (_pt.z - oz) * nz);
   }
   car.x += nx * depth; car.z += nz * depth;
   const ax = sax / sw, az = saz / sw;            // lever: centre → contact

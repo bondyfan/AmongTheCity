@@ -11,8 +11,16 @@
 import * as THREE from 'three';
 import { WEIRS, WEIR_HALF, FOAM_LEN, riverFlowAt, crestDist, isPooled } from './riverpools.js';
 
-const FINE = 1.6;                        // m: longest edge near a crest
-const NEAR = WEIR_HALF + FOAM_LEN + 4;   // m: how far from a crest the surface is refined
+// The refinement is graded. Only the ramp itself (the face, WEIR_HALF either
+// side of the line) needs FINE edges to read as a sloping sheet; the foam band
+// downstream is a smooth fade painted per vertex, which MID edges carry as
+// well; upstream of the sill the pool is flat and needs nothing. Refining the
+// whole band both sides to FINE put up to 46 000 water vertices into one weir
+// chunk (a plain river chunk has 1 400).
+const FINE = 2;                          // m: longest edge on the weir face
+const MID = 4;                           // m: longest edge in the foam band
+const FACE = WEIR_HALF + 1;              // m from the crest: the face, refined FINE
+const NEAR = WEIR_HALF + FOAM_LEN + 2;   // m from the crest: the foam band, refined MID
 
 const _f = { fx: 0, fz: 0, foam: 0 };
 
@@ -46,6 +54,13 @@ export function refineNearWeirs(geo, f, x0, z0, x1, z1) {
   if (!geo || !isPooled(f)) return geo;
   const crests = crestsNear(x0, z0, x1, z1, NEAR + 10);
   if (!crests.length) return geo;
+  // which side of each crest is downstream: the side its loop holds
+  for (const c of crests) {
+    const ex = c.b[0] - c.a[0], ez = c.b[1] - c.a[1], L = Math.hypot(ex, ez);
+    let nx = -ez / L, nz = ex / L;
+    if (crestUpstream(c.w, (c.a[0] + c.b[0]) / 2 + nx * 6, (c.a[1] + c.b[1]) / 2 + nz * 6)) { nx = -nx; nz = -nz; }
+    c.nx = nx; c.nz = nz;
+  }
   const src = geo.attributes.position.array;
   const out = [];
   // The split is decided per EDGE, from the edge alone, so the two triangles
@@ -56,7 +71,13 @@ export function refineNearWeirs(geo, f, x0, z0, x1, z1) {
     const L = Math.hypot(bx - ax, bz - az);
     if (L <= FINE) return false;
     const mx = (ax + bx) / 2, mz = (az + bz) / 2;
-    for (const c of crests) if (segDist(mx, mz, c.a, c.b) < NEAR + L / 2) return true;
+    for (const c of crests) {
+      const d = segDist(mx, mz, c.a, c.b) - L / 2;    // nearest the edge can come
+      if (d < FACE) return true;
+      // the foam band, downstream only (either end of the edge is enough)
+      if (L > MID && d < NEAR && ((ax - c.a[0]) * c.nx + (az - c.a[1]) * c.nz > -FACE
+        || (bx - c.a[0]) * c.nx + (bz - c.a[1]) * c.nz > -FACE)) return true;
+    }
     return false;
   };
   const split = (ax, ay, az, bx, by, bz, cx, cy, cz, depth) => {

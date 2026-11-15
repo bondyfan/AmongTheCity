@@ -16,7 +16,10 @@
 // footways that end on its mouths (outer vertex at -97278.3,-6520.2, courtyard
 // vertex at -97264.1,-6527.9). The walls open there, and collision is the
 // footprint with a channel cut through it (keyhole ring) plus the masonry over
-// the passage as a `bot` piece.
+// the passage as a `bot` piece. The other passages out of the 2nd courtyard
+// (east to the 3rd courtyard, north to the Powder Bridge, south-west to the
+// Garden on the Bastion) and the arch cut shared by all of them live in
+// js/landmarks-hradpass.js.
 
 import { K } from './landmarkskit.js';
 import { Frame } from './landmarksframe.js';
@@ -29,40 +32,25 @@ import { buildTancici } from './landmarks-tancici.js';
 import { buildZizkov, zizkovSolids } from './landmarks-zizkov.js';
 import { buildPetrin, petrinSolids } from './landmarks-petrin.js';
 import { buildVysehrad, vysehradSolids } from './landmarks-vysehrad.js';
+import { passages, cutsOf, cutWall, vault, passSolids } from './landmarks-hradpass.js';
+import { VALY_EXTRA, isVysehradWall } from './landmarks-vysehradvaly.js';
+import { OBRI_EXTRA, isObriBarrier } from './landmarks-hradobri.js';
 
 const WALL = 0xe2dac4, STONE = 0xc9bfa6, ROOF = 0x66796f, PANE = 0x46535e;
 const COURT = 257.2;                 // the courtyards, absolute (survey: 257.1 to 257.3)
 const CORNICE = COURT + 18;          // one cornice for every wing, absolute
-const GATE_OUT = [-97278.3, -6520.2], GATE_IN = [-97264.1, -6527.9], GATE_W = 4.6, GATE_H = 7.2;
+const GATE_W = 4.6, GATE_H = 7.2;    // the Matthias Gate (its mouths: js/landmarks-hradpass.js PASSAGES)
 
-const nearest = (ring, p) => {
-  let best = -1, bd = 2.5;
-  for (let i = 0; i < ring.length; i++) {
-    const d = Math.hypot(ring[i][0] - p[0], ring[i][1] - p[1]);
-    if (d < bd) { bd = d; best = i; }
-  }
-  return best;
-};
-
-/** The passage: its frame (v along it, out toward the 1st courtyard), half length, and its two mouths. */
-function gate(kit, f) {
-  const mo = nearest(f.o, GATE_OUT);
-  let hole = -1, mh = -1;
-  (f.i ?? []).forEach((h, k) => { const i = nearest(h, GATE_IN); if (i >= 0) { hole = k; mh = i; } });
-  if (mo < 0 || mh < 0) return null;
-  const A = f.o[mo], B = f.i[hole][mh];
-  const G = new Frame(kit, (A[0] + B[0]) / 2, (A[1] + B[1]) / 2, A[0] - B[0], A[1] - B[1]);
-  return { G, half: Math.hypot(A[0] - B[0], A[1] - B[1]) / 2, mo, hole, mh };
-}
+/** The Matthias Gate as a passage of js/landmarks-hradpass.js (its frame, half length and mouths), or null. */
+function gate(kit, f) { return passages(kit, f).find((q) => q.p.id === 'matyas') ?? null; }
 
 export function buildHrad(kit, f) {
   const E = CORNICE - kit.ground;
-  const g = gate(kit, f);
+  const ps = passages(kit, f);
   kit.floodFn = (x, y) => (y > E - 14 ? 0.7 : 0.45);
-  // One wall per edge, founded under that edge. Around a passage mouth the
-  // two edges that meet there become three walls: up to the arch, the arch
-  // itself (one bay with a real hole in it), and on.
-  const walls = (ring, hole, mouth) => {
+  // One wall per edge, founded under that edge; where an edge crosses a
+  // passage it is cut along that passage's arch (js/landmarks-hradpass.js).
+  const walls = (ring, hole) => {
     const S = (ringArea2(ring) > 0 ? 1 : -1) * (hole ? -1 : 1);
     const n = ring.length;
     for (let i = 0; i < n; i++) {
@@ -71,62 +59,41 @@ export function buildHrad(kit, f) {
       if (L < 0.05) continue;
       const nx = S * ez / L, nz = -S * ex / L;
       const y0 = Math.min(kit.rel(a[0], a[1]), kit.rel(b[0], b[1])) - 0.6;
-      const grid = (yy) => (L < 3.4 ? null : { pitch: 3.9, inset: 0.6, seed: i + (hole ? 400 : 0),
-        rows: rowsFromTop(yy, E, 3.8, 2.2, 1.3, { hex: PANE, glow: 0.22, mezz: true }) });
-      const atMouth = mouth >= 0 && (i === mouth || (i + 1) % n === mouth);
-      if (!atMouth) { const sp = grid(y0); if (sp) kit.wallGrid(a, b, y0, E, nx, nz, sp); else kit.wall(a, b, y0, E, nx, nz); continue; }
-      // the edge runs into (or out of) the mouth vertex: stop short of the arch
-      const m = ring[mouth], far = i === mouth ? b : a;
-      const dx = (far[0] - m[0]) / L, dz = (far[1] - m[1]) / L, r = GATE_W / 2 + 0.5;
-      const cut = [m[0] + dx * r, m[1] + dz * r];
-      const yc = kit.rel(m[0], m[1]) - 0.6;
-      const sp = grid(y0);
-      if (L > r + 0.5) { if (sp) kit.wallGrid(cut, far, y0, E, nx, nz, sp); else kit.wall(cut, far, y0, E, nx, nz); }
-      halfArch(kit, m, cut, yc, E, nx, nz);
+      const body = (p, q, yy) => {
+        const sp = Math.hypot(q[0] - p[0], q[1] - p[1]) < 3.4 ? null : { pitch: 3.9, inset: 0.6, seed: i + (hole ? 400 : 0),
+          rows: rowsFromTop(yy, E, 3.8, 2.2, 1.3, { hex: PANE, glow: 0.22, mezz: true }) };
+        if (sp) kit.wallGrid(p, q, yy, E, nx, nz, sp); else kit.wall(p, q, yy, E, nx, nz);
+      };
+      const cuts = cutsOf(a, b, ps);
+      if (cuts.length) cutWall(kit, a, b, y0, E, nx, nz, cuts, body); else body(a, b, y0);
     }
   };
   kit.set(WALL, K.plaster);
-  walls(f.o, false, g ? g.mo : -1);
-  (f.i ?? []).forEach((h, k) => { if (h.length >= 3) walls(h, true, g && g.hole === k ? g.mh : -1); });
+  walls(f.o, false);
+  (f.i ?? []).forEach((h) => { if (h.length >= 3) walls(h, true); });
   // the cornice, a stone band proud of every wall, so the long fronts end in a line
   kit.set(STONE, K.stone);
   kit.ringWalls(kit.offsetRing(f.o, -0.35), E - 1.1, E);
   for (const h of f.i ?? []) if (h.length >= 3) kit.ringWalls(kit.offsetRing(h, 0.35), E - 1.1, E, null, true);
   kit.set(ROOF, K.copper);
   ringRoof(kit, f.o, f.i, E, 6, 5.5, 0.45);
-  if (g) gateDress(kit, g, E);
-}
-
-/**
- * Half of the gate's arch in a wall that runs from the mouth vertex m (the
- * passage's centre line) to c: the jamb beyond the opening, the wall over the
- * crown, and the spandrel between the round arch and the crown line.
- */
-function halfArch(kit, m, c, yc, E, nx, nz) {
-  const L = Math.hypot(c[0] - m[0], c[1] - m[1]), dx = (c[0] - m[0]) / L, dz = (c[1] - m[1]) / L;
-  const hw = GATE_W / 2, P = (s, y) => [m[0] + dx * s, y, m[1] + dz * s];
-  const crown = yc + 0.6 + GATE_H, spring = crown - hw;
-  kit.quad(P(hw, yc), P(L, yc), P(L, E), P(hw, E), nx, 0, nz);
-  kit.quad(P(0, crown), P(hw, crown), P(hw, E), P(0, E), nx, 0, nz);
-  const N = 5;
-  for (let k = 0; k < N; k++) {
-    const a0 = k / N * Math.PI / 2, a1 = (k + 1) / N * Math.PI / 2;
-    kit.tri(P(hw, crown), P(hw * Math.cos(a0), spring + hw * Math.sin(a0)), P(hw * Math.cos(a1), spring + hw * Math.sin(a1)), nx, 0, nz);
+  // the vaults: stone, paved where the passage is level (the north one falls
+  // to the Powder Bridge and keeps the ground as it runs)
+  for (const q of ps) {
+    kit.set(0xb9ae96, K.stone);
+    vault(kit, f, q, q.p.id === 'sever' ? 0 : 0x8f877b);
+    if (q.p.id === 'matyas') gateDress(kit, q, E);
   }
 }
 
 /** Signed area, local copy (the kit's own is imported by every other module; this keeps the edge loop self-contained). */
 function ringArea2(r) { let a = 0; for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a += p[0] * q[1] - q[0] * p[1]; } return a / 2; }
 
-/** The vault through the wing, and the triumphal arch on its face to the 1st courtyard. */
+/** The triumphal arch on the Matthias Gate's face to the 1st courtyard, and the flagpoles before it. */
 function gateDress(kit, g, E) {
   const { G, half } = g;
   const y0 = kit.rel(G.ox, G.oz);
   const T = G.sub(0, 0, y0);
-  kit.set(0xb9ae96, K.stone);
-  T.tunnel(0, GATE_W, -half - 0.3, half + 0.3, GATE_H + 0.6, 1);
-  kit.set(0x8f877b, K.stone);
-  T.flat(-GATE_W / 2, GATE_W / 2, -half - 0.3, half + 0.3, 0.05, true);
   // Scamozzi's arch: rusticated piers, an entablature, the attic with the
   // inscription, obelisks on top; it stands proud of the wing by a metre
   const v = half + 0.05;
@@ -151,16 +118,17 @@ function gateDress(kit, g, E) {
 
 /**
  * Solid as built: the whole footprint to the cornice over the courtyards, with
- * the passage cut out of it as a channel joining the outer ring to the 2nd
- * courtyard (one simple ring, the courtyard inside it), and the masonry over
- * the passage as a piece walked under.
+ * the Matthias Gate cut out of it as a channel joining the outer ring to the
+ * 2nd courtyard (one simple ring, the courtyard inside it), the other
+ * passages splitting that ring where they cross it, and the masonry over
+ * every passage as a piece walked under.
  */
 export function hradSolids(f) {
   const base = f._gy ?? 239.5;              // its founding height (terrain.groundFor caches it; 239.5 measured)
   const top = CORNICE - base;
   const g = gate(null, f);
   if (!g) return [{ ring: f.o, holes: f.i ?? null, top, bot: 0 }];
-  const { G, half, mo, hole, mh } = g;
+  const { G, half, hole } = g, mo = g.mo[0], mh = g.mh[0];
   const O = f.o, H = f.i[hole], hw = GATE_W / 2 - 0.3;
   const want = Math.abs(ringArea2(O)) - Math.abs(ringArea2(H)) - 2 * hw * 2 * half;
   let best = null, bd = Infinity;
@@ -174,8 +142,12 @@ export function hradSolids(f) {
     if (d < bd) { bd = d; best = r; }
   }
   const others = f.i.filter((h, k) => k !== hole);
-  return [{ ring: best, holes: others.length ? others : null, top, bot: 0 },
-    { ring: [G.xz(-hw - 0.4, -half), G.xz(hw + 0.4, -half), G.xz(hw + 0.4, half), G.xz(-hw - 0.4, half)], holes: null, top, bot: COURT - base + GATE_H + 0.6 }];
+  // the other passages out of the same courtyard each split the ring they cross
+  const rest = passages(null, f).filter((q) => q !== g && q.p.id !== g.p.id && q.hole === hole);
+  const { rings, over } = passSolids([best], rest, base, top);
+  return [...rings.map((r) => ({ ring: r, holes: others.length ? others : null, top, bot: 0 })),
+    { ring: [G.xz(-hw - 0.4, -half), G.xz(hw + 0.4, -half), G.xz(hw + 0.4, half), G.xz(-hw - 0.4, half)], holes: null, top, bot: COURT - base + GATE_H + 0.6 },
+    ...over];
 }
 
 /**
@@ -197,7 +169,23 @@ export const CLEAR_WIDE = [
   [-97292, -6508, -97300, -6548, 14],     // the 1st courtyard (Čestné nádvoří)
   [-97300, -6528, -97240, -6512, 4],      // ...through the Matthias Gate
   [-97250, -6478, -97216, -6548, 20],     // the 2nd courtyard
+  // the 3rd courtyard, paved from St Vitus's west front past the Golden Gate
+  // to the Old Royal Palace (a lime stood against the great south tower)
+  [-97185, -6545, -97075, -6530, 15],
+  [-97200, -6549, -97182, -6570, 9],      // ...out of the east passage to the cathedral's west front
+  // the paved terrace round the foot of the Žižkov tower (a spruce grew
+  // through one of its legs)
+  [-93503.5, -5485.3, -93503.5, -5485.3, 21],
 ];
+/**
+ * The footprint-less pieces of the wide set (js/landmarks.js EXTRAS): the
+ * Vyšehrad ramparts, and the railing of the castle's 1st courtyard with the
+ * Gate of Giants. Each replaces one barrier of the tile, which the generic
+ * ribbon would draw through it (isWideBarrier).
+ */
+export const EXTRAS_WIDE = [VALY_EXTRA, OBRI_EXTRA];
+/** Is this barrier one a wide piece draws itself? WORKER SAFE. */
+export function isWideBarrier(f) { return isVysehradWall(f) || isObriBarrier(f); }
 /**
  * Props the tile scatters where a wide landmark now stands outside its own
  * footprint (landmarks.js landmarkProp): points [x, z, r]. The five memorial
@@ -214,7 +202,11 @@ export const LANDMARKS_WIDE = [
   { id: 'vit', region: R, name: 'Katedrála svatého Víta', at: [-97121.4, -6579.4], area: 5513, r: 10, tol: 0.15, top: 15, build: buildVit, solids: vitSolids },
   { id: 'nd', region: R, name: 'Národní divadlo', at: [-96189.3, -5469.7], area: 3099, r: 10, tol: 0.15, top: 20, reach: 7, build: buildNd, solids: ndSolids },
   { id: 'nd-sever', region: R, kind: 'yes', at: [-96195.4, -5516.1], area: 169, r: 4, tol: 0.15, ...HIDE },
+  // a 9 m brick box the tile stands against the theatre's river corner, in front of its west front
+  { id: 'nd-zapad', region: R, kind: 'yes', at: [-96215.6, -5498.8], area: 75.5, r: 3, tol: 0.15, ...HIDE },
   { id: 'tancici', region: R, name: 'Tančící dům', at: [-96147.0, -4861.1], area: 663, r: 6, tol: 0.15, top: 28, build: buildTancici },
+  // the monument's own footprint (h 1, gabled), drawn as a little house over the statue's plinth
+  { id: 'vaclav-pomnik', region: R, name: 'Pomník svatého Václava', at: [-95031.9, -5346.8], area: 76.4, r: 3, tol: 0.15, ...HIDE },
   { id: 'nm', region: R, name: 'Národního muzea', at: [-94945.7, -5250.5], area: 7588, r: 10, tol: 0.15, top: 24, build: buildNm, solids: nmSolids, grounds: buildVaclav },
   { id: 'zizkov', region: R, kind: 'industrial', name: 'Žižkovský vysílač', at: Z_AT, area: 475.8, r: 3, tol: 0.08, top: 5.5, reach: 4, build: buildZizkov, solids: zizkovSolids },
   { id: 'zizkov-x1', region: R, kind: 'industrial', at: Z_AT, area: 391, r: 3, tol: 0.06, ...HIDE },

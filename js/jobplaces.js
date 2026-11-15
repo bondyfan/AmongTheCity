@@ -15,6 +15,8 @@
 // its "address" is the name of the real street its stop point lies on.
 
 import { CHUNK } from './config.js';
+import { shopAt } from './pumps.js';
+import { pumpBrand } from './prices.js';
 
 const key = (cx, cz) => cx + ',' + cz;
 
@@ -293,7 +295,13 @@ export function foodPlaceAt(city, x, z, maxD = 7) {
       if (d < best) { best = d; hit = b; }
     }
   }
-  return hit ? { name: hit.n, type: hit.t && FOOD_TYPES.has(hit.t) ? hit.t : hit.u } : null;
+  if (hit) return { name: hit.n, type: hit.t && FOOD_TYPES.has(hit.t) ? hit.t : hit.u };
+  // No eatery here: maybe a petrol station's shop (round 8). Three of the D11
+  // services sides have no restaurant at all, and every Czech forecourt sells
+  // coffee and a bageta over the till. Named by the brand, served from the
+  // shop menu (PRICE.shop, js/shoppanel.js).
+  const fuel = shopAt(city, x, z);
+  return fuel ? { name: pumpBrand(fuel.n).name + ' · prodejna', type: 'fuel', menu: 'shop' } : null;
 }
 
 /**

@@ -11,15 +11,14 @@
 //   náměstí Republiky, under a dome, with the half-round mosaic of the
 //   Homage to Prague over the entrance and an iron and glass canopy before it.
 //
-// The car gap in Celetná is a road-graph matter (the passage way would have
-// to be in the tile): the floor of the passage is paved and walked, the crowd
-// goes through on a walk link (js/landmarks-walks.js), traffic still turns.
+// Celetná's passage way is not in the tile (the build drops building
+// passages); js/roadpatches.js puts it back, so cars drive through the arch
+// and the crowd walks its south pavement on a link (js/landmarks-walks.js).
 
 import { K } from './landmarkskit.js';
 import { Frame, fitFrame } from './landmarksframe.js';
 import { rect, circle, GOLD, COPPER } from './landmarks-parts.js';
 import { gothicHelmet, figureOutline } from './landmarks-gothic.js';
-import { paving } from './landmarks-passage.js';
 
 const BLACK = 0x5b534a, BLACK_DK = 0x443e38, BLACK_LT = 0x766c60, PANE = 0x262b30;
 // the passage runs along v (Celetná), the front (v+) to the Old Town in the west
@@ -46,7 +45,8 @@ export function buildPrasna(kit, f) {
   F.face('r', -hu, hu, -hv, hv, 0, H, side);
   kit.set(BLACK_DK, K.stone);
   F.tunnel(pu, pw, -hv, hv, ph, 2);
-  if (kit.terrain) { kit.set(0x77736b, K.stone); paving(kit, F, pu - pw / 2, pu + pw / 2, -hv, hv, 0.05); }
+  // (no paving of its own: the floor is Celetná itself, js/roadpatches.js, a
+  // 4 m lane with its kerbs and pavements, which a slab here would z-fight)
   // corner buttresses, the round stair turrets of the outline, as octagonal shafts
   for (const su of [-1, 1]) for (const sv of [-1, 1]) {
     const [x, z] = F.xz(su * (hu + 0.3), sv * (hv + 0.1));

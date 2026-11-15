@@ -7,7 +7,8 @@
 //   startPoint(pick, saved)  where boot stands the player: the save when it
 //                            lies in the city picked in the menu (or no city
 //                            was picked), else that city's start square
-//   nearestHospital(x, z)    the respawn point after the death card
+//   nearestHospital(x, z)    the respawn point after the death card (on the
+//                            D11 corridor: the nearest services)
 //   tilesReady(city, x, z)   are all tiles around a point fully indexed (the
 //                            fleet of a place is only parked then, so every
 //                            client parks it from the same data)
@@ -16,6 +17,15 @@
 // corridor too: a save in Kolín belongs to Pardubice, one in Úvaly to Praha.
 
 import { START_PLACES, HOSPITALS } from './config.js';
+import { sites } from './d11services.js';
+
+// A death out on the D11 corridor used to wake you in Pardubice or Prague, up
+// to 55 km back (round 8): past FAR_HOSPITAL from either hospital, the
+// nearest motorway services within SERVICES_R takes the patient instead (the
+// ambulance's first stop; the fee is the same). Pure data, so the death save
+// (career.js) and the respawn (main.js) agree.
+const FAR_HOSPITAL = 15000;   // m
+const SERVICES_R = 20000;     // m
 
 const nearestOf = (list, x, z) => {
   let best = list[0], bd = Infinity;
@@ -63,7 +73,18 @@ export function startPoint(pick, saved) {
 /** The HOSPITALS entry nearest (x, z). */
 export function nearestHospital(x, z) {
   if (!Number.isFinite(x) || !Number.isFinite(z)) return HOSPITALS[0];
-  return nearestOf(HOSPITALS, x, z);
+  const h = nearestOf(HOSPITALS, x, z);
+  if (Math.hypot(h.x - x, h.z - z) <= FAR_HOSPITAL) return h;
+  let best = null, bd = SERVICES_R;
+  for (const s of sites()) {
+    if (!s.fuel) continue;                    // a fuel station, with people at it
+    // ...and its own spot: Dolní Roveň (D35) has no fuel poi, and its point is
+    // the slip roads' midpoint, out on the carriageway (round 8 review)
+    if (!s.exact) continue;
+    const d = Math.hypot(s.x - x, s.z - z);
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best ? { x: best.x, z: best.z, name: 'Odpočívka ' + best.name } : h;
 }
 
 /** "Přijíždíte do Prahy…" for the boot cover. */

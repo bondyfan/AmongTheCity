@@ -176,6 +176,18 @@ export const PRICE = deepFreeze({
     { id: 'svickova', name: 'Svíčková', price: 180, hp: 62 },
   ],
 
+  // The fuel shop's counter (round 8): what a Czech motorway station actually
+  // sells over the till, so a services stop on the D11 is somewhere to eat
+  // and not only to fill. Motorway prices, a little over the town ones per
+  // hit point (3,9 to 8 Kč/hp against 2,9 to 3,75 above): the station is the
+  // convenient answer, the restaurant the good one. Coffee heals little and is
+  // there because nobody drives 96 km without one.
+  shop: [
+    { id: 'kava', name: 'Káva s sebou', price: 65, hp: 8 },
+    { id: 'parek', name: 'Párek v rohlíku', price: 59, hp: 15 },
+    { id: 'bageta', name: 'Bageta se šunkou a sýrem', price: 109, hp: 28 },
+  ],
+
   // ---- iron ---------------------------------------------------------------
   // 3 500 is not what a pistol costs. A CZ P-10 in a shop is four times this
   // and needs a licence the player is never going to have; 3 500 is what it
@@ -245,6 +257,11 @@ export const PRICE = deepFreeze({
   job: {
     mission: { first: 850, min: 800, max: 3000 },
     delivery: { base: 240, perKm: 42, bonus: 150 },
+    // The long haul to Prague (js/haul.js): the delivery rate over 118 km of
+    // road is 5 192 Kč gross, about the town rate per hour of driving; the
+    // bonus for arriving with half the clock left is bigger because the clock
+    // is long. Fuel (about 9 l, 340 Kč in an Octavia) is the driver's.
+    haul: { bonus: 600 },
     pocket: { min: 40, max: 900, fat: 0.06 },
     // The taxi is the delivery's calmer sibling (js/jobs.js): it needs a car,
     // it has no stopwatch, and it pays the metres. A 4 km fare is 490 Kč
@@ -253,6 +270,12 @@ export const PRICE = deepFreeze({
     // the best courier run by about a fifth and a rough one loses to it.
     taxi: { flag: 110, perKm: 95, smooth: 0.4 },
   },
+
+  // The express to Prague (js/express.js): a 2nd class single Pardubice hl.n.
+  // to Praha hl.n., charged as you board. UNVERIFIED: ČD's real fare was not
+  // confirmed (the survey's search was inconclusive; RegioJet and Leo Express
+  // are cheaper); the owner may set it.
+  train: { ticket: 169 },
 
   // What the police take when they finally have you: charged per star at the
   // hospital door (js/career.js), where the stars are then cleared. Two stars

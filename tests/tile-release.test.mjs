@@ -99,3 +99,54 @@ test('a real line laid over a released way is laid again', () => {
   assert.equal(hit.chains, null); assert.equal(hit.whole, false); assert.equal(hit.gen, -1);
   assert.ok(miss.chains); assert.equal(miss.whole, true);
 });
+
+// (since the round 7 polish the ways themselves go too, geo.js RELEASE_DATA,
+// and come back as new objects with the same ids)
+const { Trains } = await import('../js/trains.js');
+const { KerbParking } = await import('../js/kerbparking.js');
+
+test('a route over released rails goes, and its rails chain again once', () => {
+  const rail = (id, x0, x1) => ({ _id: id, t: 'rail', p: [[x0, 0], [(x0 + x1) / 2, 0], [x1, 0]] });
+  const a = rail(1, 0, 1000), b = rail(TILE + 1, 1000, 2000);   // b: the far tile's
+  const city = { rails: [a, b], pois: [], onTileLoaded() {}, onTileReleased() {} };
+  const tr = new Trains({ add() {}, remove() {} }, city);
+  tr._ingest();
+  assert.equal(tr.routes.length, 1);
+  assert.ok(Math.abs(tr.routes[0].len - 2000) < 1, 'one route over both');
+  const id0 = tr.routes[0].id;
+  // round 7's kept ways: nothing to do
+  tr.releaseTile({ rails: [b] });
+  assert.equal(tr.routes.length, 1);
+  // a train running on the route (near the player, the line reaching out to
+  // the far tile): the route stays whole and the train with it
+  const running = { route: tr.routes[0], cars: [] };
+  tr.trains.add(running);
+  tr.releaseTile({ data: true, rails: [b] });
+  assert.equal(tr.routes.length, 1, 'a route with a train on it was dropped');
+  assert.ok(tr.trains.has(running), 'a running train vanished');
+  tr.trains.delete(running);
+  tr.releaseTile({ data: true, rails: [b] });
+  assert.equal(tr.routes.length, 0, 'the route over the released rail went');
+  assert.equal(a._trDone, false, 'its resident rail chains again');
+  city.rails = [a];
+  tr._ingest();                                  // (800 m of rail alone is a route)
+  assert.equal(tr.routes.length, 1);
+  // ...and the tile comes back: a NEW rail object with the old id
+  const b2 = rail(TILE + 1, 1000, 2000);
+  city.rails.push(b2);
+  tr._ingest();
+  assert.equal(tr.routes.length, 1, 'spliced onto the route, not a second one');
+  assert.ok(Math.abs(tr.routes[0].len - 2000) < 1, tr.routes[0].len);
+  assert.ok(tr.routes[0].id > id0, 'route ids are never reused');
+});
+
+test('a burned kerb stall is remembered by way id while its tile is away', () => {
+  const kp = new KerbParking({ chunkIndex: new Map(), onTileReleased() {} }, { remove() {} }, null, []);
+  const r = { _id: 77, p: [[0, 0], [100, 0]] };
+  kp._stalls.set(r, [{ burned: false, car: null }, { burned: true, car: null }, { burned: false, car: null }]);
+  kp._roads.add(r);
+  kp.releaseTile({ roads: [r] });
+  assert.deepEqual(kp._burnt.get(77), [1]);
+  assert.equal(kp._stalls.has(r), false);
+  assert.equal(kp._roads.has(r), false);
+});

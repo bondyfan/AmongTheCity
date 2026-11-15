@@ -41,6 +41,7 @@
 
 import { CHUNK } from './config.js';
 import { distPointToSegment } from './geo.js';
+import { motorwayPlace } from './mwhud.js';
 
 const PLACES_URL = 'data/places.json';
 
@@ -201,6 +202,9 @@ export class PlaceFinder {
   // excluded: if you are walking one, its name IS where you are, and on foot
   // that is more useful than the carriageway twenty metres away.
   _scanStreet(x, z) {
+    // the D11 / D35 has no name in the tiles: say the road, the km and the way
+    const mw = motorwayPlace(x, z);
+    if (mw) return mw;
     const idx = this.city?.chunkIndex;
     if (!idx) return null;
     const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);

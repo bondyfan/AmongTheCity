@@ -406,9 +406,11 @@ const BENCH_END = 1.25;        // m from the middle of a bench somebody stands w
 const SEAT_HALF = 0.42;        // two people on its 1.7 m of slats sit this far either side of the middle
 const SEAT_KEEP = 420;         // s a schedule is remembered at its bench after its generation: see _seatOf
 const BENCH_R = 6.5, STOP_R = 10, SHOP_R = 9;   // how far off the beat each is still "beside it"
+const TRAM_STOP_R = 24;           // …a tram platform (js/tramwait.js): further, as long as no carriageway is in between
 const STEP_SPEED = 1.1;        // m/s walking over to a bench or a shelter
 const SIT_BLEND = 0.45;        // s folding into the seat
 const BOARD_P = 0.28, ALIGHT_P = 0.24;  // share of walkers passing a served stop who take the bus
+const BOARD_P_TRAM = 0.5;               // …who take the tram, where the beat passes a tram platform
 // s: nobody waits longer than this for a bus. Five minutes, not two and a
 // half: the derived lines ran every 330 s, the real ones every ten minutes
 // (trolleybus) or fifteen (bus) as DPMP's do, and at 150 s three walkers in
@@ -586,7 +588,7 @@ export class Pedestrians {
       this._ingest(t.roads); this._ingest(landmarkWalks(t.roads)); this._ingestCells(t.cells); this._ingestPois();
       this._dud.clear();           // more map, so a beat that had nowhere to go may have somewhere now
     });
-    city.onTileReleased?.((t) => this.releaseTile(t));
+    city.onTileReleased?.((t) => this.releaseSteps(t));   // (geo.js runs the steps, a slice a frame)
   }
 
   now() { return this.clock ? this.clock() : worldT(); }
@@ -633,26 +635,43 @@ export class Pedestrians {
   // its food places out of the evening count. Bus stops stay: they come from
   // the pois geo.js keeps, which are never read twice. Everything the crowd
   // walks is within PHANTOM_R of a viewer; the tile is EVICT_REACH from all.
-  releaseTile(t) {
+  releaseTile(t) { for (const _ of this.releaseSteps(t)); }
+  // As steps (geo.js queueJob): the crossing index lets its carriageways go a
+  // batch at a time and each list is cut down in one step, so what the crowd
+  // reads between two steps is whole (nobody walks within kilometres of it).
+  *releaseSteps(t) {
     const roads = t?.roads ?? [];
     const gone = new Set(), drv = [];
+    let step = 0;
     for (const r of roads) {
+      if ((++step & 2047) === 0) yield;
       if (r._pedDrv) { r._pedDrv = 0; drv.push(r); continue; }
       if (r.d || !FOOT.has(r.t) || !this._seenIds.has(r._id)) continue;
       this._seenIds.delete(r._id);
       r._pedCum = null;            // (a cache of r.p, made again on the way back)
       gone.add(r);
     }
-    if (drv.length) this.drive.remove(drv);
+    yield;
+    for (let i = 0; i < drv.length; i += 400) { this.drive.remove(drv.slice(i, i + 400)); yield; }
     if (gone.size) {
       const keep = (a) => { let n = 0; for (let i = 0; i < a.length; i++) if (!gone.has(a[i])) a[n++] = a[i]; a.length = n; return n; };
-      keep(this.paths);
+      // (the survivors gathered a slice at a time, written back in one step)
+      const left = [];
+      for (let i = 0; i < this.paths.length; i++) {
+        if (!gone.has(this.paths[i])) left.push(this.paths[i]);
+        if ((i & 4095) === 4095) yield;
+      }
+      for (let i = 0; i < left.length; i++) this.paths[i] = left[i];
+      this.paths.length = left.length;
+      yield;
       const cks = new Set(), eks = new Set();
       for (const r of gone) {
+        if ((++step & 2047) === 0) yield;
         if (r._pmx !== undefined) cks.add(Math.floor(r._pmx / PCELL) + ',' + Math.floor(r._pmz / PCELL));
         for (const q of [r.p[0], r.p[r.p.length - 1]]) eks.add(Math.floor(q[0] / JOIN_R) + ',' + Math.floor(q[1] / JOIN_R));
       }
       for (const k of cks) {
+        if ((++step & 255) === 0) yield;
         const c = this._cells.get(k);
         if (!c) continue;
         const n0 = c.paths.length;
@@ -663,6 +682,7 @@ export class Pedestrians {
         c.len = len; c.sorted = null;
       }
       for (const k of eks) {
+        if ((++step & 511) === 0) yield;
         const b = this._ends.get(k);
         if (!b) continue;
         let n = 0;
@@ -672,7 +692,9 @@ export class Pedestrians {
         if (!n) this._ends.delete(k);
       }
     }
-    if (t?.ids) this.sites.removeIds(t.ids[0], t.ids[1]);
+    yield;
+    if (t?.ids) yield* this.sites.removeIdsSteps(t.ids[0], t.ids[1]);
+    yield;
     for (const v of t?.venues ?? []) {
       if (!v._pedV) continue;
       const q = v.p[0];
@@ -1196,7 +1218,10 @@ export class Pedestrians {
     s.board = -1; s.alight = null;
     if (this.busEta) {
       const roll = rnd01(hash32(rs, 0xb05));
-      const want = roll < BOARD_P ? 1 : roll < BOARD_P + ALIGHT_P ? 2 : 0;
+      // (a beat past a tram platform, js/tramwait.js, is a walk to the tram
+      // more often: the trams are what people in Prague wait for)
+      const bp = s.stops.some((st) => st.kind === DW.STOP && st.site?.tram) ? BOARD_P_TRAM : BOARD_P;
+      const want = roll < bp ? 1 : roll < bp + ALIGHT_P ? 2 : 0;
       for (let i = 0; want && i < s.stops.length; i++) {
         const st = s.stops[i];
         if (st.kind !== DW.STOP) continue;
@@ -1384,10 +1409,11 @@ export class Pedestrians {
     for (let a = 0; a <= s.span; a += 4) {
       this._poseOn(s.steps, a, _P);
       near.length = 0;
-      this.sites.near(_P.x, _P.z, STOP_R, near);
+      this.sites.near(_P.x, _P.z, TRAM_STOP_R, near);
       for (const q of near) {
         if (q.kind === SITE.ZEBRA) continue;
         const d = dist(q.x - _P.x, q.z - _P.z);
+        if (d > STOP_R && !q.tram) continue;
         const f = found.get(q);
         if (!f || d < f.d) found.set(q, { d, arc: a });
       }
@@ -1411,7 +1437,14 @@ export class Pedestrians {
         if (rd && rd.d < rd.hw + 0.3) continue;        // a bench mapped in the road
         out.push({ arc, kind: DW.BENCH, p: 0.42, min: 24, vr: 44, sid: q.sid, site: q, d: bd });
       } else if (q.kind === SITE.STOP) {
-        out.push({ arc, kind: DW.STOP, p: 0.2, min: 10, vr: 26, sid: q.sid, site: q, d: bd });
+        // A tram platform (js/tramwait.js) can be an island: one across a lane
+        // of traffic from this beat is not walked to (the step over to a stop
+        // is a straight line nobody driving sees)
+        if (q.tram && this._acrossRoad(s, arc, q)) continue;
+        // (a tram comes every few minutes, not every one or two: who stops
+        // at a tram stop is more likely to stay, and stays longer)
+        if (q.tram) out.push({ arc, kind: DW.STOP, p: 0.7, min: 30, vr: 90, sid: q.sid, site: q, d: bd });
+        else out.push({ arc, kind: DW.STOP, p: 0.2, min: 10, vr: 26, sid: q.sid, site: q, d: bd });
       } else if (bd <= SHOP_R) {
         const food = q.kind === SITE.FOOD;
         out.push({ arc, kind: food ? DW.FOOD : DW.WINDOW, p: food ? 0.2 : 0.16,
@@ -1422,6 +1455,17 @@ export class Pedestrians {
     // depend on the order a Map happened to be filled in
     out.sort((a, b) => (a.arc - b.arc) || (a.sid - b.sid));
     return out;
+  }
+
+  // Does the straight step from the beat at `arc` to site q cross a carriageway?
+  _acrossRoad(s, arc, q) {
+    this._poseOn(s.steps, arc, _P);
+    const x0 = _P.x, z0 = _P.z;
+    for (let k = 1; k <= 4; k++) {
+      const u = k / 5, rd = this.drive.nearest(x0 + (q.x - x0) * u, z0 + (q.z - z0) * u, 15);
+      if (rd && rd.d < rd.hw) return true;
+    }
+    return false;
   }
 
   // Where the timeline says this citizen is at shared time `wt`: how far along

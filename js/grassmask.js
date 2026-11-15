@@ -24,6 +24,7 @@
 import { CHUNK, LAYER_Y } from './config.js';
 import { chunkKey, roadGradeY, polylineLength, streetOf } from './geo.js';
 import { sealedGrid, SEAL_RES, isHardWay } from './sealed.js';
+import { motorwayVerge, vergeDrops, onMotorwayAsphalt } from './mwground.js';
 
 const RES = 1;                        // m per mask cell
 const N = CHUNK / RES;                // 120 cells a side
@@ -135,6 +136,13 @@ export class GrassMask {
     for (const p of cell.paved) if (p.o?.length >= 3) fillPolygon(m, x0, z0, p.o, p.i, 0);
     for (const w of cell.water) if (w.o?.length >= 3) fillPolygon(m, x0, z0, w.o, w.i, 0);
     for (const b of cell.buildings) if (b.o?.length >= 3) fillPolygon(m, x0, z0, b.o, b.i, 0);
+    // …and so does a courtyard that is a paved square, not a lawn: the hole of
+    // a footprint holding one of PAVED_COURTS (Prague Castle's 2nd courtyard)
+    if (x0 < PAVED_BOX[2] && x0 + CHUNK > PAVED_BOX[0] && z0 < PAVED_BOX[3] && z0 + CHUNK > PAVED_BOX[1]) {
+      for (const b of cell.buildings) for (const h of b.i ?? []) {
+        if (h.length >= 3 && PAVED_COURTS.some((p) => inside(h, p[0], p[1]))) fillPolygon(m, x0, z0, h, null, 0);
+      }
+    }
     // (a kerbed street's pavement reaches a couple of metres past its
     // carriageway, js/streets.js: no tufts through the paving)
     for (const r of cell.roads) stampLine(m, x0, z0, r.p, (r.w ?? 3) / 2 + (r.d && streetOf(r) ? 2.6 : 0.6));
@@ -185,10 +193,17 @@ export class GrassMask {
     }
     // …and the classifier's sealed ground says none too. The raster is 4 m
     // cells; asking at each mask metre keeps its edges where it drew them.
+    // (except in a motorway's verge, where the mesher drops those cells and
+    // draws the field: js/mwground.js)
     if (this.ground) {
+      let verge;
       for (let j = 0; j < N; j++) {
         for (let i = 0; i < N; i++) {
-          if (m[j * N + i] && this.ground.classAt(x0 + i + 0.5, z0 + j + 0.5) > 0) m[j * N + i] = 0;
+          if (!m[j * N + i] || !(this.ground.classAt(x0 + i + 0.5, z0 + j + 0.5) > 0)) continue;
+          if (verge === undefined) verge = motorwayVerge(cell, ci, cj);
+          // (the band holds the carriageway too: no tufts on its asphalt)
+          if (!vergeDrops(verge, ci, cj, x0 + i + 0.5, z0 + j + 0.5)
+            || onMotorwayAsphalt(cell, x0 + i + 0.5, z0 + j + 0.5)) m[j * N + i] = 0;
         }
       }
     }
@@ -276,6 +291,18 @@ function crossings(ring, zc, out) {
 /** Stamp a corridor of half-width `hw` around a polyline. */
 // Prague's old town, by x: the only place the square rule above runs
 const PRAHA_X0 = -110000, PRAHA_X1 = -85000;
+// Courtyards inside a building's footprint that are paved (js/landmarks-hrad.js
+// models the castle round them): a point in each, and the box they lie in.
+const PAVED_COURTS = [[-97228.4, -6512.8]];
+const PAVED_BOX = [-97400, -6700, -97000, -6350];
+const inside = (r, x, z) => {
+  let c = false;
+  for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+    const a = r[i], b = r[j];
+    if ((a[1] > z) !== (b[1] > z) && x < (b[0] - a[0]) * (z - a[1]) / (b[1] - a[1]) + a[0]) c = !c;
+  }
+  return c;
+};
 const SQUARE_NAME = /náměstí/i, SQUARE_REACH = 45;
 
 /** Clear the cells within hw of a polyline (only those holding `only`, when given). */

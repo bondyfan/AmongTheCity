@@ -52,6 +52,30 @@ const AIR = new Float32Array([0, 0, 3.4, 0]);
 // w: the afterglow, 0..1 (sky.js): the band the dome paints along the horizon
 // where the sun went down, so the haze on that side glows with it.
 const COL = new Float32Array([0.35, 0.5, 0.65, 0]);
+// THE FAR HAND-OVER (Prague only, js/landmarksfar.js drives it). Beyond the
+// streamed ring the far skyline draws coarse ground under the castle hill and
+// the Vyšehrad rock, dithered in over 0.70 to 0.90 of the built radius. The
+// streamed geometry over the same ground had the wall's full horizon colour by
+// then, and wherever the fine terrain or a tree stood above the coarse far
+// ground it painted pale specks over the green hill and the far castle's base
+// (seen from Charles Bridge). Inside the boxes below, generic geometry is now
+// discarded by the SAME dither the far ground is drawn with, so the two hand
+// over pixel for pixel instead of overlapping. x: built radius R (m), w: 1 = on
+// (0 everywhere else, Pardubice included: the test is one compare).
+const HAND = new Float32Array([0, 0, 0, 0]);
+// two boxes [x0, z0, x1, z1] in world metres
+const HAND_A = new Float32Array([0, 0, 0, 0]), HAND_B = new Float32Array([0, 0, 0, 0]);
+// THE STREAMED EDGE, DISSOLVED (round 8, HORIZON). Where the view is open the
+// wall moves out past the streamed window to the far landscape
+// (js/farterrain.js), and the window's square edge would stand in clear air:
+// houses, trees and road ribbons ending in a line, cells popping in along it.
+// So generic geometry gives way over its outer band by the same dither and the
+// same discard as the hand-over above (one test, one discard): x, z the
+// window's centre, z0 = z where the dissolve starts and w where it is complete
+// (Chebyshev metres from the centre, the window is square). w 0 = off, which
+// it is wherever the view is not open (Pardubice, Prague: the test is one
+// compare). A material with ATC_NO_EDGE defined (the far landscape) ignores it.
+const EDGE = new Float32Array([0, 0, 0, 0]);
 // The afterglow band, shared with the dome's shader so the two cannot drift:
 // `d` is a unit direction, `sd` the unit direction to the sun (under the
 // horizon by now). A low warm band, strongest over the sun's azimuth, that
@@ -108,6 +132,32 @@ C.fog_pars_fragment = /* glsl */`
 	uniform vec4 atcFogTint;
 	uniform vec4 atcFogAir;
 	uniform vec4 atcFogCol;
+	uniform vec4 atcHand;
+	uniform vec4 atcHandA;
+	uniform vec4 atcHandB;
+	uniform vec4 atcEdge;
+	// the far hand-over (HAND above): true where this fragment gives way to
+	// the far ground. The hash is the far material's own (js/landmarksfar.js),
+	// so a pixel is drawn by exactly one of the two. The streamed edge's
+	// dissolve (EDGE above) is the same test with its own share.
+	bool atcHandOut() {
+		float share = 0.0;
+		vec2 p = cameraPosition.xz + vAtcRay.xz;
+		#ifndef ATC_NO_EDGE
+		if ( atcEdge.w > 0.0 ) {
+			vec2 q = abs( p - atcEdge.xy );
+			share = smoothstep( atcEdge.z, atcEdge.w, max( q.x, q.y ) );
+		}
+		#endif
+		if ( atcHand.w >= 0.5 ) {
+			bool inA = p.x > atcHandA.x && p.x < atcHandA.z && p.y > atcHandA.y && p.y < atcHandA.w;
+			bool inB = p.x > atcHandB.x && p.x < atcHandB.z && p.y > atcHandB.y && p.y < atcHandB.w;
+			if ( inA || inB ) share = max( share, smoothstep( atcHand.x * 0.70, atcHand.x * 0.90, vFogDepth ) );
+		}
+		if ( share <= 0.0 ) return false;
+		float ign = fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) );
+		return ign < share;
+	}
 	#ifdef FOG_EXP2
 		uniform float fogDensity;
 	#else
@@ -182,6 +232,7 @@ C.tonemapping_fragment = /* glsl */`
 #if defined( USE_FOG ) && defined( ATC_FOG_PARS )
 	#define ATC_FOG_DONE
 	if ( atcFogAir.w > 0.5 ) {
+		if ( atcHandOut() ) discard;
 		gl_FragColor.rgb = mix( gl_FragColor.rgb, atcFogColour(), atcFogAmount() );
 	}
 #endif
@@ -202,6 +253,7 @@ C.fog_fragment = /* glsl */`
 	}
 	#ifndef ATC_FOG_DONE
 	else {
+		if ( atcHandOut() ) discard;
 		gl_FragColor.rgb = mix( gl_FragColor.rgb, atcFogColour(), atcFogAmount() );
 	}
 	#endif
@@ -213,6 +265,8 @@ C.fog_fragment = /* glsl */`
 const shared = () => ({
   atcFogSun: { value: SUN }, atcFogTint: { value: TINT },
   atcFogAir: { value: AIR }, atcFogCol: { value: COL },
+  atcHand: { value: HAND }, atcHandA: { value: HAND_A }, atcHandB: { value: HAND_B },
+  atcEdge: { value: EDGE },
 });
 Object.assign(THREE.UniformsLib.fog, shared());
 for (const k of Object.keys(THREE.ShaderLib)) {
@@ -228,24 +282,47 @@ for (const k of Object.keys(THREE.ShaderLib)) {
  *   glow     the dome's uDay: 1 by day, close to 0 at night
  *   far      the fog wall's far distance in metres (scene.fog.far)
  *   baseY    height of the ground under the camera, metres
+ *   vis      the distance the HAZE is scaled to (round 8): the wall's far
+ *            distance unless the view is open, see sky.js
  */
-export function setAirFog(colour, sunDir, sunColor, glow, far, baseY, after = 0) {
+export function setAirFog(colour, sunDir, sunColor, glow, far, baseY, after = 0, vis = far) {
   COL[0] = colour.r; COL[1] = colour.g; COL[2] = colour.b; COL[3] = after;
   SUN[0] = sunDir.x; SUN[1] = sunDir.y; SUN[2] = sunDir.z; SUN[3] = glow;
   TINT[0] = sunColor.r; TINT[1] = sunColor.g; TINT[2] = sunColor.b; TINT[3] = 1 / SCALE_H;
-  AIR[0] = HAZE.k / Math.max(50, far);
+  AIR[0] = HAZE.k / Math.max(50, vis);
   AIR[1] = baseY;
   AIR[2] = HAZE.pow;
   AIR[3] = 1;
 }
 
+/**
+ * The far hand-over (see HAND): `radius` the built radius in metres, `boxes`
+ * up to two [x0, z0, x1, z1], `on` false switches it off. Plain numbers into
+ * the shared arrays, once a frame from js/landmarksfar.js.
+ */
+export function setFarHand(radius, boxes, on) {
+  HAND[0] = radius; HAND[3] = on && boxes.length ? 1 : 0;
+  if (!HAND[3]) return;
+  const a = boxes[0], b = boxes[1] ?? boxes[0];
+  for (let i = 0; i < 4; i++) { HAND_A[i] = a[i]; HAND_B[i] = b[i]; }
+}
+
+/**
+ * The streamed window's edge dissolve (see EDGE): centre (x, z), the dissolve
+ * from r0 to r1 metres (Chebyshev). `on` false switches it off.
+ */
+export function setFarEdge(x, z, r0, r1, on) {
+  EDGE[0] = x; EDGE[1] = z; EDGE[2] = r0; EDGE[3] = on ? Math.max(r1, r0 + 1) : 0;
+}
+
 /** The same amount the shader computes, for a point `dist` metres away and
- *  `dy` metres above the camera, with the wall given as near/far. For tests and
- *  for anything on the CPU that has to agree with the picture. */
-export function airFogAmount(dist, dy, camAboveGround, near, far) {
+ *  `dy` metres above the camera, with the wall given as near/far (and the haze
+ *  scaled to `vis`, the wall's far by default). For tests and for anything on
+ *  the CPU that has to agree with the picture. */
+export function airFogAmount(dist, dy, camAboveGround, near, far, vis = far) {
   const t = Math.min(1, Math.max(0, (dist - near) / Math.max(1e-6, far - near)));
   const wall = t * t * (3 - 2 * t);
-  const k = dist * (HAZE.k / Math.max(50, far));
+  const k = dist * (HAZE.k / Math.max(50, vis));
   const d = Math.max(dy / SCALE_H, -60);
   const thin = Math.exp(-Math.min(60, Math.max(camAboveGround, 0) / SCALE_H));
   const col = Math.abs(d) > 0.001 ? (1 - Math.exp(-d)) / d : 1;

@@ -21,7 +21,7 @@
 import { polygonArea } from './geo.js';
 import { rnd, PIN_U, PIN_V } from './typology.js';
 import { praguePlace, inOldTown } from './praguezone.js';
-import { partyOf, blockCorner } from './partywalls.js';
+import { partyOf, blockCorner, chamferCorner } from './partywalls.js';
 
 const lin = (v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
 const linHex = (h) => [lin(h >> 16 & 255), lin(h >> 8 & 255), lin(h & 255)];
@@ -166,49 +166,96 @@ function sideIsParty(f, fr, s) {
 function dormers(sink, f, fr, topY, wall, roofRGB, id) {
   if (fr.mono || fr.tan < 0.55) return;
   const hw = fr.hw, tan = fr.tan;
-  const inset = 0.9, hD = 1.45, w = 1.5;
-  const back = inset + hD / tan;                  // where the dormer meets the slope
+  const inset = 0.9, hD = 1.45;
   if (inset + (hD + 0.55) / tan > hw - 0.4) return; // its ridge must die into the slope
   const span = (fr.hipped ? Math.max(0, fr.ra - 0.6) : fr.A - 1.4);
   const n = Math.min(6, Math.floor((2 * span) / 5.4));
   if (n < 1) return;
-  const [wr, wg, wb] = wall, [rr, rg, rb] = roofRGB;
-  const P = (a, bb, y) => [fr.cx + fr.ax * a + fr.bx * bb, y, fr.cz + fr.az * a + fr.bz * bb];
-  const T = (p, q, r, nx, ny, nz, c0, c1, c2) =>
-    sink.triFacing(p[0], p[1], p[2], q[0], q[1], q[2], r[0], r[1], r[2], nx, ny, nz, c0, c1, c2);
   for (const s of [-1, 1]) {
     if (sideIsParty(f, fr, s)) continue;
     // one in three roofs carries none on this side: not every attic is lived in
     if (rnd(id, s < 0 ? 121 : 122) < 0.3) continue;
-    const bF = s * (hw - inset), bB = s * (hw - back);
-    const yF = topY + inset * tan, yH = yF + hD, yR = yH + 0.55;
-    const ox = fr.bx * s, oz = fr.bz * s;                  // outward, across the ridge
-    for (let j = 0; j < n; j++) {
-      const a = ((j + 0.5) / n - 0.5) * 2 * span;
-      const L = a - w / 2, R = a + w / 2;
-      sink.pinTo?.(PIN_U, PIN_V);
-      // front wall and its window
-      T(P(L, bF, yF), P(R, bF, yF), P(R, bF, yH), ox, 0, oz, wr, wg, wb);
-      T(P(L, bF, yF), P(R, bF, yH), P(L, bF, yH), ox, 0, oz, wr, wg, wb);
-      const e = 0.03 * s, pl = a - 0.42, pr = a + 0.42;
-      T(P(pl, bF + e, yF + 0.25), P(pr, bF + e, yF + 0.25), P(pr, bF + e, yH - 0.2), ox, 0, oz, ...PANE);
-      T(P(pl, bF + e, yF + 0.25), P(pr, bF + e, yH - 0.2), P(pl, bF + e, yH - 0.2), ox, 0, oz, ...PANE);
-      // the cheeks, down to the slope
-      for (const [x, sg] of [[L, -1], [R, 1]])
-        T(P(x, bF, yF), P(x, bF, yH), P(x, bB, yH), fr.ax * sg, 0, fr.az * sg, wr * 0.85, wg * 0.85, wb * 0.85);
-      // the gable over the window
-      T(P(L, bF, yH), P(R, bF, yH), P(a, bF, yR), ox, 0, oz, wr, wg, wb);
-      // and its two little roof planes, from a hand's breadth past the front
-      // back to where each edge dies into the main slope (eave and ridge
-      // meet it at different depths, so each runs to its own)
-      const bO = bF + s * 0.15, yE = yH - 0.1;
-      const bE = s * (hw - (yE - topY) / tan), bR = s * (hw - (yR - topY) / tan);
-      for (const [x, sg] of [[L - 0.12, -1], [R + 0.12, 1]]) {
-        const nx = fr.ax * sg * 0.75, nz = fr.az * sg * 0.75;
-        T(P(x, bO, yE), P(a, bO, yR), P(a, bR, yR), nx, 0.66, nz, rr, rg, rb);
-        T(P(x, bO, yE), P(a, bR, yR), P(x, bE, yE), nx, 0.66, nz, rr, rg, rb);
-      }
+    dormerRow(sink, fr, s, span, n, inset, hD, 1.5, 0.42, 0.55, topY, wall, roofRGB);
+  }
+}
+
+// One row of `n` dormers spread over +-span along the frame's a axis, on side
+// s of it: the eave at b = s * hw, the slope rising tan per metre toward b = 0.
+// The front wall stands `inset` in from the eave, hD tall, `w` wide, with a
+// pane `ph` either side of its middle and a little gable `rH` high on top.
+function dormerRow(sink, fr, s, span, n, inset, hD, w, ph, rH, topY, wall, roofRGB) {
+  const hw = fr.hw, tan = fr.tan;
+  const back = inset + hD / tan;                  // where the dormer meets the slope
+  const [wr, wg, wb] = wall, [rr, rg, rb] = roofRGB;
+  const P = (a, bb, y) => [fr.cx + fr.ax * a + fr.bx * bb, y, fr.cz + fr.az * a + fr.bz * bb];
+  const T = (p, q, r, nx, ny, nz, c0, c1, c2) =>
+    sink.triFacing(p[0], p[1], p[2], q[0], q[1], q[2], r[0], r[1], r[2], nx, ny, nz, c0, c1, c2);
+  const bF = s * (hw - inset), bB = s * (hw - back);
+  const yF = topY + inset * tan, yH = yF + hD, yR = yH + rH;
+  const ox = fr.bx * s, oz = fr.bz * s;                  // outward, across the ridge
+  for (let j = 0; j < n; j++) {
+    const a = ((j + 0.5) / n - 0.5) * 2 * span;
+    const L = a - w / 2, R = a + w / 2;
+    sink.pinTo?.(PIN_U, PIN_V);
+    // front wall and its window
+    T(P(L, bF, yF), P(R, bF, yF), P(R, bF, yH), ox, 0, oz, wr, wg, wb);
+    T(P(L, bF, yF), P(R, bF, yH), P(L, bF, yH), ox, 0, oz, wr, wg, wb);
+    const e = 0.03 * s, pl = a - ph, pr = a + ph;
+    T(P(pl, bF + e, yF + 0.25), P(pr, bF + e, yF + 0.25), P(pr, bF + e, yH - 0.2), ox, 0, oz, ...PANE);
+    T(P(pl, bF + e, yF + 0.25), P(pr, bF + e, yH - 0.2), P(pl, bF + e, yH - 0.2), ox, 0, oz, ...PANE);
+    // the cheeks, down to the slope
+    for (const [x, sg] of [[L, -1], [R, 1]])
+      T(P(x, bF, yF), P(x, bF, yH), P(x, bB, yH), fr.ax * sg, 0, fr.az * sg, wr * 0.85, wg * 0.85, wb * 0.85);
+    // the gable over the window
+    T(P(L, bF, yH), P(R, bF, yH), P(a, bF, yR), ox, 0, oz, wr, wg, wb);
+    // and its two little roof planes, from a hand's breadth past the front
+    // back to where each edge dies into the main slope (eave and ridge
+    // meet it at different depths, so each runs to its own)
+    const bO = bF + s * 0.15, yE = yH - 0.1;
+    const bE = s * (hw - (yE - topY) / tan), bR = s * (hw - (yR - topY) / tan);
+    for (const [x, sg] of [[L - 0.12, -1], [R + 0.12, 1]]) {
+      const nx = fr.ax * sg * 0.75, nz = fr.az * sg * 0.75;
+      T(P(x, bO, yE), P(a, bO, yR), P(a, bR, yR), nx, 0.66, nz, rr, rg, rb);
+      T(P(x, bO, yE), P(a, bR, yR), P(x, bE, yE), nx, 0.66, nz, rr, rg, rb);
     }
+  }
+}
+
+// Dormers on a Prague mansard (roofs.js roofCap with a steep attic slope,
+// `cap` its { d, rise, sgn }): the Gruenderzeit attic lives behind a row of
+// them on every street wall, which the roof windows lying in the slope did
+// not say. Each free wall of 3.2 m and up gets its own frame (a along the wall,
+// b outward, b = d on the wall line, 0 at the top of the slope) and one dormer
+// per 5.4 m; a party wall is the gable it stands up as, so it gets none.
+// Capped at ten a building, eleven triangles each.
+const M_INSET = 0.3, M_HD = 1.25, M_RH = 0.4;
+/**
+ * Does a mansard slope `d` deep and `rise` high have room for a dormer? roofs.js
+ * roofCap asks before it gives up the roof windows: a slope whose depth stepped
+ * down to clear a narrow wing (0.7 m, measured on one Prague mansard in eight)
+ * keeps them, or its attic would show nothing at all.
+ */
+export function mansardFits(d, rise) {
+  const tan = rise / d;
+  return tan >= 1.4 && M_INSET + (M_HD + M_RH) / tan <= d - 0.2;
+}
+function mansardDormers(sink, f, cap, topY, wall, roofRGB) {
+  const ring = f.o, n = ring.length, d = cap.d, tan = cap.rise / cap.d, sgn = cap.sgn;
+  const inset = M_INSET, hD = M_HD, rH = M_RH;
+  if (!mansardFits(d, cap.rise)) return;
+  let left = 10;
+  for (let i = 0; i < n && left > 0; i++) {
+    if (partyOf(f, i) > 0) continue;
+    const a = ring[i], c = ring[(i + 1) % n];
+    const ex = c[0] - a[0], ez = c[1] - a[1], el = Math.hypot(ex, ez);
+    if (el < 3.2) continue;
+    const span = el / 2 - 1.0, m = Math.min(left, Math.floor((2 * span + 1.3) / 5.4) || 1);
+    if (span < 0.8) continue;
+    const ax = ex / el, az = ez / el, ox = ez / el * sgn, oz = -ex / el * sgn;
+    const fr = { ax, az, bx: ox, bz: oz, hw: d, tan,
+      cx: (a[0] + c[0]) / 2 - ox * d, cz: (a[1] + c[1]) / 2 - oz * d };
+    dormerRow(sink, fr, 1, m > 1 ? span : 0, m, inset, hD, 1.3, 0.36, rH, topY, wall, roofRGB);
+    left -= m;
   }
 }
 
@@ -227,7 +274,11 @@ function turret(sink, f, i, topY, sH, wall, id, rise) {
   let mx = o0x + o1x, mz = o0z + o1z;
   const ml = Math.hypot(mx, mz) || 1;
   mx /= ml; mz /= ml;
-  const R = 1.8, cx = c[0] + mx * 0.7, cz = c[1] + mz * 0.7;
+  turretAt(sink, c[0] + mx * 0.7, c[1] + mz * 0.7, mx, mz, topY, sH, wall, id, rise);
+}
+// The oriel itself, centred at (cx, cz), its windows looking along (mx, mz).
+function turretAt(sink, cx, cz, mx, mz, topY, sH, wall, id, rise) {
+  const R = 1.8;
   // over a pitched roof it stands clear of the slope; over a flat one it is
   // the parapet's height and the cone
   const y0 = topY - 2 * sH, y1 = topY + rise, yC = y1 + 3.2;
@@ -263,10 +314,11 @@ function turret(sink, f, i, topY, sH, wall, id, rise) {
 }
 
 /**
- * roofGrammar(sink, f, typ, roof, topY, wallRGB, fr, roofRGB, storeys)
- * Everything above. `fr` is the ridge frame when a ridge roof was built.
+ * roofGrammar(sink, f, typ, roof, topY, wallRGB, fr, roofRGB, storeys, cap)
+ * Everything above. `fr` is the ridge frame when a ridge roof was built, `cap`
+ * the mansard slope (roofs.js roofCap's info) when its attic wants dormers.
  */
-export function roofGrammar(sink, f, typ, roof, topY, wallRGB, fr, roofRGB, storeys) {
+export function roofGrammar(sink, f, typ, roof, topY, wallRGB, fr, roofRGB, storeys, cap = null) {
   if (!wearsGrammar(f, typ)) return;
   const id = f._id ?? 0;
   const pitched = roof.shape !== 'flat';
@@ -275,10 +327,23 @@ export function roofGrammar(sink, f, typ, roof, topY, wallRGB, fr, roofRGB, stor
   const yT = pitched ? topY - Math.min(0.4, (roof.ov ?? 0) * (fr?.tan ?? 0.8) + 0.05) : topY;
   if (lv >= 3) cornice(sink, f, yT, wallRGB);
   if (fr && !fr.mono && typ === 'tenement' && lv >= 3) dormers(sink, f, fr, topY, wallRGB, roofRGB, id);
+  if (cap) mansardDormers(sink, f, cap, topY, wallRGB, roofRGB);
   if (typ === 'tenement' && lv >= 4 && !inOldTown(f) && rnd(id, 130) < 0.4) {
     const i = blockCorner(f);
     const sH = Math.min(3.6, Math.max(2.8, (f.h ?? 3.1 * lv) / Math.max(1, lv)));
     if (i >= 0) turret(sink, f, i, topY, sH, wallRGB, id, pitched ? 2.6 : 0.8);
+    else {
+      // the Zizkov corner: the block turns through a short cut-off wall, and
+      // the oriel stands over the cut, looking down both streets
+      const k = chamferCorner(f);
+      if (k >= 0) {
+        const ring = f.o, n = ring.length, a = ring[k], c = ring[(k + 1) % n];
+        const el = Math.hypot(c[0] - a[0], c[1] - a[1]), sgn = polygonArea(ring) > 0 ? 1 : -1;
+        const mx = (c[1] - a[1]) / el * sgn, mz = -(c[0] - a[0]) / el * sgn;
+        turretAt(sink, (a[0] + c[0]) / 2 + mx * 0.9, (a[1] + c[1]) / 2 + mz * 0.9, mx, mz,
+          topY, sH, wallRGB, id, pitched ? 2.6 : 0.8);
+      }
+    }
   }
   sink.pinTo?.(PIN_U, PIN_V);
 }

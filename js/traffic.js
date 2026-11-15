@@ -365,6 +365,8 @@ import * as VEH from './vehicles.js';
 import { CAR as CAR_CFG } from './config.js';
 import { AI, cornerR, stanley, pedal, pedalFor, kinStep, ramImpulse } from './aidriver.js';
 import { laneAt, laneFoot, lanePt, projectArc, curveCap } from './ailane.js';
+import * as MW from './mwtraffic.js';
+import { laneTick, laneOffset, blinkOf, bodyLane, bodyAdopt } from './mwlanes.js';
 import { horn } from './audio.js';   // safe headless — no-ops without an AudioContext
 import { worldT } from './worldclock.js';
 import { sigAssets as sigModel, LAMP_Y, LAMP_Z, PED_Y, PED_X } from './signalmodel.js';
@@ -509,6 +511,7 @@ const SIG_MIN_EDGE = 14;      // shorter edges live INSIDE the junction box (dua
 const SIG_GREEN = 11, SIG_AMBER = 1.5;
 const SIG_CYCLE = 2 * (SIG_GREEN + SIG_AMBER);  // 25 s: green+amber per phase, alternating
 const SIG_STOP = 5;           // cars hold this many meters short of the junction node
+const SIG_CULL = 0.5;         // s between pole visibility passes (_cullSignals)
 const SIG_VIS2 = 800 * 800;   // pole meshes render within 800 m of the player (frustum
                               // culling handles the rest; a region's worth of poles never
                               // all draw at once)
@@ -647,6 +650,58 @@ const GHOST_LEG = 320;                 // m of extra route granted to a ghost th
 const PHANTOM_R_MAX = ATTACH_R_MAX + ROUTE_MAX + CELL_HALF_DIAG;
 const V_REACH = 30;                    // m/s ceiling used only to prune young cars
                                        // out of the candidate sweep cheaply
+// ==== round 8: the motorway pool ==========================================
+// A carriageway is not a street, and the town's slot rules starved it (survey9
+// motorway-traffic, measured on the real D11 tiles: 2 cars per km per
+// direction at noon where the census says 8 to 12). Two causes, both
+// structural. A slot's trip was ROUTE_MIN..ROUTE_MAX long, 25 to 40 s at
+// 130 km/h, while its generation lasts TRIP_T = 150 s: a motorway slot drove
+// 18 % of the time and stood finished the rest. And an edge belonged to the
+// cell of its midpoint, so a 5 km carriageway edge poured all its slots into
+// one cell and hit SLOT_MAX there.
+// So 'motorway' edges leave the town's cells for a pool of their own:
+//   · cut into MW_PIECE pieces, each owned by the cell its middle lies in
+//     (_mwCells), so the slot count is per metre wherever the metres are;
+//   · one slot per MPC_MW m of carriageway at density 1, scaled by the same
+//     density knob, never capped (the cap was about ramp geometry, and
+//     links stay in the town's cells under it);
+//   · a motorway-born trip is as long as its generation is at its own speed
+//     (MW_TRIP_K x desire x TRIP_T), so a slot drives all of its 150 s;
+//   · the sweep reaches MW_ROUTE_MAX for these cells only (the town keeps
+//     ROUTE_MAX), walking the list of motorway cells rather than the square.
+// Slot keys are 'ci,cj/<k>' with k = MWK + j: no town slot (0..32) nor
+// POLICE_K can collide with one, in _pool or in hash32, and claimSlot parses
+// a peer's steal of one like any other (a tombstone, not a phantom copy).
+const MW_PIECE = 128;
+const MPC_MW = 205;                    // m of carriageway per slot at density 1:
+                                       // noon (densK 2.125) is ~10 cars/km/dir,
+                                       // the 16:00 peak (3.875) ~18
+const MW_TRIP_K = 1.05;
+const MW_ROUTE_MAX = 6400;             // m, the longest trip: 139 km/h x 150 s x 1.05 = 6.1 km
+const MWK = 1 << 20;
+const MW_SLOT_SALT = 0x3eed;
+const MW_SALT = 0x6d77;                // the motorway draws on a schedule's seed (kind, vK, cruise)
+// The carriageway's patrols (round 8 fix). The carriageways left the town's
+// cells, and with them the patrol slot: not one police car drove the D11. A
+// motorway cell owes one more slot, k = MW_POLICE_K (no town slot, no POLICE_K
+// and no MWK + j can be it), on a coin per (cell, generation) like the town's,
+// weighted by the cell's carriageway metres: at the default police setting
+// (0.70) one patrol per MW_PATROL_M / 0.7 = 8.6 km of each carriageway (a
+// drive at 130 km/h meets one every two or three minutes). It is
+// stamped police = 2, which keeps every patrol rule (mesh, bar, trim, reap
+// test, pursuit pick) and drives the MOTORWAY tables, lanes and roadworks
+// like any car born there (a town patrol, police = 1, keeps the town's rule).
+const MW_POLICE_K = MWK - 1;
+const MW_PATROL_M = 6000;
+const MW_SCAN_BUDGET = 64;             // motorway schedules minted per sweep (beside SCAN_BUDGET)
+const V_REACH_MW = 40;                 // m/s, the motorway's own pruning ceiling (139 km/h + catch-up)
+const MW_R0 = 300;                     // m, the corner radius a body rounds a carriageway's vertices for
+const MW_LINK_R0 = 80;                 // m, and a slip road's (see the r0 note in _drive)
+const MW_LOOK_T = 3.5;                 // s of road ahead a motorway driver follows on
+const MW_HEADWAY = 1.3;                // s, the gap kept behind a leader at speed
+const MW_GAP_K = 0.2;                  // 1/s, how briskly a gap error is closed
+const MW_OFF_LANE = 2.2;               // m off its lane before a motorway body creeps (see OFF_LANE)
+const LANE_CATCHUP = 4;                // s of missed lane ticks a long frame replays (update)
 const SCAN_DT = 0.25;                  // candidate sweep rate (4 Hz)
 const SCAN_BUDGET = 96;                // new schedules minted per sweep. A cold boot
                                        // owes ~900 of them; at 4 Hz that is 2.3 s of
@@ -1440,6 +1495,7 @@ export class Traffic {
     this._cells = new Map();        // CELL key → { ci, cj, edges, len, sorted } — the
                                     // shared population lives on this, not on _near
     this._pool = new Map();         // slot key → schedule (with or without a mesh)
+    this._mwCells = new Map();      // CELL key -> the motorway pool's pieces (_mwCellAdd)
     this._standIn = new Map();      // slot key -> the ghost a blockage made of its car (see _drive's lag clamp)
     this._ghosts = new Set();       // v9: cars the schedule has finished with but
                                     // the local player can still see. NOT part of
@@ -1465,7 +1521,7 @@ export class Traffic {
     // optional chaining because bare test fixtures pass {roads:[…]} without it
     this.addTile({ roads: city.roads ?? [], signals: city.signals ?? [] });
     city.onTileLoaded?.((t) => this.addTile(t));
-    city.onTileReleased?.((t) => this.releaseTile(t));
+    city.onTileReleased?.((t) => this.releaseSteps(t));   // (geo.js runs the steps, a slice a frame)
     // a pole placed before its height map landed guessed its ground; the road
     // conform then moves that ground again. Re-seat them whenever either lands.
     // Only the poles on the tile that landed (plus a margin, the height
@@ -1848,6 +1904,10 @@ export class Traffic {
   // and spawning uniformly put most of the fleet in one at 20 km/h).
   _cellAdd(e) {
     const t = e.road.t;
+    // (e.mw: 1 a carriageway, 2 a slip road, 0 anything else; the motorway
+    // branch of the desire and the corner rules reads it on every step)
+    e.mw = t === 'motorway' ? 1 : t === 'motorway_link' ? 2 : 0;
+    if (e.mw === 1) { this._mwCellAdd(e); return; }
     if (t === 'service' || t === 'living_street') return;
     if (e.len < 14) return;                       // stub edges make sad spawns
     const ci = Math.floor(e.mx / CELL), cj = Math.floor(e.mz / CELL);
@@ -1864,6 +1924,67 @@ export class Traffic {
   _cellEdges(c) {
     if (!c.sorted) c.sorted = c.edges.slice().sort(cmpEdge);
     return c.sorted;
+  }
+
+  // A carriageway edge into the motorway pool: MW_PIECE pieces along its arc,
+  // each filed under the cell its middle lies in. Pure geometry of the edge,
+  // so every client files the same pieces whatever order the tiles came in.
+  // A cell first drops pieces whose edge has left the graph (releaseTile does
+  // not know this map; a tile that comes back files its edges afresh) and
+  // pieces of an edge it already holds under the same eid and arc.
+  _mwCellAdd(e) {
+    const n = Math.max(1, Math.round(e.len / MW_PIECE));
+    const step = e.len / n;
+    for (let j = 0; j < n; j++) {
+      const s0 = j * step, s1 = j === n - 1 ? e.len : (j + 1) * step;
+      const m = poseAt(e, (s0 + s1) / 2, 0);
+      const ci = Math.floor(m.x / CELL), cj = Math.floor(m.z / CELL);
+      const k = ci + ',' + cj;
+      let c = this._mwCells.get(k);
+      if (!c) this._mwCells.set(k, c = { ci, cj, mw: 1, pieces: [], len: 0, sorted: null });
+      this._mwPurge(c);
+      if (c.pieces.some((q) => q.e.eid === e.eid && q.s0 === s0 && q.e.len === e.len)) continue;
+      c.pieces.push({ e, s0, s1 });
+      c.sorted = null;
+      // (summed in canonical order, not arrival order: c.len sets the slot
+      // count and the birth point, and two clients' tiles arrive differently)
+      let len = 0;
+      for (const q of this._mwPieces(c)) len += q.s1 - q.s0;
+      c.len = len;
+    }
+  }
+  // drop the pieces of edges no longer in the graph (an edge is live while its
+  // start node still lists it) and recount the length in canonical order, so
+  // a client that released and re-took a tile holds the bits of one that never did
+  _mwPurge(c) {
+    let w = 0;
+    for (const q of c.pieces) if (q.e.a.out.includes(q.e)) c.pieces[w++] = q;
+    if (w === c.pieces.length) return;
+    c.pieces.length = w;
+    c.sorted = null;
+    let len = 0;
+    for (const q of this._mwPieces(c)) len += q.s1 - q.s0;
+    c.len = len;
+  }
+  _mwPieces(c) {
+    if (!c.sorted) c.sorted = c.pieces.slice().sort((a, b) => cmpEdge(a.e, b.e) || (a.s0 - b.s0));
+    return c.sorted;
+  }
+  // A motorway cell's slots: per metre, the density knob, the same eighths
+  // and the same hashed dither as _slots, and no cap.
+  _mwSlots(c) {
+    const k = this._densK;
+    if (k <= 0) return 0;
+    const f = c.len * k / MPC_MW;
+    const n = Math.floor(f);
+    return n + (rnd01(hash32(c.ci, c.cj, MW_SLOT_SALT)) < f - n ? 1 : 0);
+  }
+  // Is this schedule's slot still owed by its cell? (the reap and the refill
+  // must ask the very question the mint asked)
+  _owed(p) {
+    if (p.fixed) return true;
+    if (p.cell?.mw) return p.police ? this._mwSlots(p.cell) > 0 : p.k - MWK < this._mwSlots(p.cell);
+    return p.police ? this._patrolOwed(p.cell) : p.k < this._slots(p.cell);
   }
 
   // How many cars this square of city owes the world. Two players with the
@@ -2552,6 +2673,20 @@ export class Traffic {
     // driving back down the same street read as a glitch, because it is one —
     // real cul-de-sac visitors park, and the retire grace does exactly that.
     if (!_cand.length) return null;
+    // On a carriageway the slip road is no side street: most traffic is
+    // through traffic (MW.P_EXIT). The carriageway goes on where one does
+    // (two at a motorway fork: the hash picks, as anywhere).
+    if (edge.mw === 1) {
+      let nm = 0;
+      for (const o of _cand) if (o.mw === 1) nm++;
+      if (nm && nm < _cand.length) {
+        const out = rnd01(hash32(h, 0x5f1)) < MW.P_EXIT;
+        let n = 0;
+        for (const o of _cand) if ((o.mw === 1) !== out) _cand[n++] = o;
+        _cand.length = n;
+        return _cand[(rnd01(hash32(h, 0xb17)) * n) | 0];
+      }
+    }
     // city traffic mostly flows through; side streets soak up the remainder
     const pool = (_straight.length && rnd01(hash32(h, 0x5f1)) < 0.7) ? _straight : _cand;
     return pool[(rnd01(hash32(h, 0xb17)) * pool.length) | 0];
@@ -2569,7 +2704,9 @@ export class Traffic {
   // ghost itself: no shared car ever asks this.
   _pickNextGhost(edge, h) {
     const v = this._view;
-    if (!v) return this._pickNextDet(edge, h);
+    // (on a carriageway the way out of the picture is straight on: a ghost
+    // that took every slip road off the axis drew a car leaving at each exit)
+    if (!v || edge.mw === 1) return this._pickNextDet(edge, h);
     const node = edge.b;
     if (this._culDirty) this._culUpdate();
     let best = null, bc = Infinity, open = false;
@@ -2638,7 +2775,9 @@ export class Traffic {
     while (p.route.length <= want) {
       const last = p.route[p.route.length - 1];
       const end = last.base + last.e.len;
-      if (end >= p.routeM) { p.routeEnd = Math.min(p.routeM, end); return; }
+      // (a trip that runs out on a carriageway or a slip road ROLLS: nobody
+      // stops in a motorway lane because a hash said the trip was over)
+      if (end >= p.routeM) { p.routeEnd = Math.min(p.routeM, end); p.roll = last.e.mw ? 1 : 0; return; }
       const h = hash32(p.seed, p.route.length, 0x51);
       const nx = p.ghost ? this._pickNextGhost(last.e, h) : this._pickNextDet(last.e, h);
       if (!nx) { p.routeEnd = end; return; }     // dead end: the trip is over here
@@ -2666,8 +2805,17 @@ export class Traffic {
     const e = st.e, A = e.vertAng, n = e.pts.length;
     const a0 = seg === 0 ? st.turnIn : A[seg];
     const a1 = seg === n - 2 ? st.turnOut : A[seg + 1];
-    let v0 = Math.min(vMax, cornerLimit(a0)); if (!(v0 > 2)) v0 = 2;
-    let v1 = Math.min(vMax, cornerLimit(a1)); if (!(v1 > 2)) v1 = 2;
+    let c0, c1;
+    if (e.mw) {
+      // a motorway vertex is a turn spread over the segments it joins, not a
+      // 7 m junction arc (MW.mwCornerV): the 62 kinks on the D11 that capped
+      // the schedule at 45 to 82 km/h ask nothing of a real car
+      const cum = e.cum, L = cum[seg + 1] - cum[seg];
+      const Lp = seg > 0 ? cum[seg] - cum[seg - 1] : L, Ln = seg < n - 2 ? cum[seg + 2] - cum[seg + 1] : L;
+      c0 = MW.mwCornerV(a0, Lp < L ? Lp : L); c1 = MW.mwCornerV(a1, Ln < L ? Ln : L);
+    } else { c0 = cornerLimit(a0); c1 = cornerLimit(a1); }
+    let v0 = Math.min(vMax, c0); if (!(v0 > 2)) v0 = 2;
+    let v1 = Math.min(vMax, c1); if (!(v1 > 2)) v1 = 2;
     out.v0 = v0; out.v1 = v1;
     return out;
   }
@@ -2694,7 +2842,7 @@ export class Traffic {
         }
         p.ni++; p.na = 0; p.nseg = 0;
         const ne = p.route[p.ni].e;
-        p.vMax = ne.speed * p.vK;
+        p.vMax = this._desire(p, ne);
         p.nsig = 0;
         continue;
       }
@@ -2730,19 +2878,27 @@ export class Traffic {
       // the trapezoid. The reactive layer plans with the very same ACCEL and
       // BRAKE, so the two stay in step: measured lag is unchanged at ~2 m
       // while the city runs a third faster.
-      this._segCaps(st, p.nseg, p.vMax, _caps);
+      // (a carriageway's speed field: roadworks and the rush hour, js/mwtraffic.js
+      // zoneCap, keyed on the piece's own shared start time)
+      let vz = p.vMax;
+      if (e.mw === 1 && p.police !== 1 && !p.fixed) { const zc = MW.zoneCap(e, p.nseg, p.nt); if (zc < vz) vz = zc; }
+      this._segCaps(st, p.nseg, vz, _caps);
+      if (e.mw === 1 && vz > 2 && p.nseg < e.pts.length - 2 && p.police !== 1 && !p.fixed) {
+        const zn = MW.zoneCap(e, p.nseg + 1, p.nt);
+        if (zn < _caps.v1) _caps.v1 = zn;          // slowed for the zone by its start, not in it
+      }
       const atStart = p.na <= e.cum[p.nseg] + 1e-6;
       const atSegEnd = tgt >= segEnd - 1e-6;
       const atRouteEnd = st.base + tgt >= p.routeEnd - 1e-6;
       // resuming mid-segment (just past a stop line, or out of a red) we carry
       // the speed we actually left the last piece at, not the corner's
-      const v0 = atStart ? _caps.v0 : Math.min(p.vMax, p.nvOut > 2 ? p.nvOut : 2);
+      const v0 = atStart ? _caps.v0 : Math.min(vz, p.nvOut > 2 ? p.nvOut : 2);
       // …and we must be able to STOP at a destination and be slow at a stop
       // line, whatever colour it turns out to be
-      const v1 = (atRouteEnd || stopHere) ? 2
+      const v1 = ((atRouteEnd && !p.roll) || stopHere) ? 2
         : sigHere ? Math.min(p.vMax, SIG_APPROACH)
-          : atSegEnd ? _caps.v1 : p.vMax;
-      const dur = pieceTime(L, v0, v1, p.vMax);
+          : atSegEnd ? _caps.v1 : vz;
+      const dur = pieceTime(L, v0, v1, vz);
       p.nv = L / dur;                            // piecewise-constant, as before
       if (p.nt + dur > T) return;                // T falls inside this piece
       p.na = tgt; p.nt += dur; p.nvOut = v1;
@@ -2786,6 +2942,54 @@ export class Traffic {
   _scanCells(wt, px, pz) {
     const R = this._attachR();
     const phR = this._phantomR();
+    // ---- the motorway pool first, on its own budget and its own reach. The
+    // list of motorway cells is short (a few per km of carriageway), so it is
+    // walked whole instead of the square of MW_ROUTE_MAX.
+    if (this._mwCells.size) {
+      let mb = MW_SCAN_BUDGET;
+      for (const [key, c] of this._mwCells) {
+        const cd = dist((c.ci + 0.5) * CELL - px, (c.cj + 0.5) * CELL - pz) - CELL_HALF_DIAG;
+        if (cd > R + MW_ROUTE_MAX) {
+          // (out of reach: the place to let go of a deep-evicted tile's pieces,
+          // which releaseTile does not know about; else they held its dead
+          // edges for the rest of the session)
+          this._mwPurge(c);
+          if (!c.pieces.length) this._mwCells.delete(key);
+          continue;
+        }
+        const slots = this._mwSlots(c);
+        for (let j = 0; j < slots; j++) {
+          const k = MWK + j;
+          const sk = key + '/' + k;
+          if (this._pool.has(sk)) continue;
+          const ss = hash32(WORLD_SEED, c.ci, c.cj, k);
+          const ph = rnd01(hash32(ss, 7)) * TRIP_T;
+          const gen = Math.floor((wt + ph) / TRIP_T);
+          const t0 = gen * TRIP_T - ph;
+          if (wt < t0) continue;
+          const reach = Math.min(MW_ROUTE_MAX, (wt - t0) * V_REACH_MW);
+          if (cd - reach > R) continue;
+          if (mb-- <= 0) break;
+          this._birth(sk, c, k, ss, gen, t0, wt);
+        }
+        if (mb <= 0) break;
+        // …and this cell's patrol, when it wins its coin (see MW_POLICE_K)
+        if (slots > 0) {
+          const pk = key + '/' + MW_POLICE_K;
+          if (!this._pool.has(pk)) {
+            const ss = hash32(WORLD_SEED, c.ci, c.cj, MW_POLICE_K);
+            const ph = rnd01(hash32(ss, 7)) * TRIP_T;
+            const gen = Math.floor((wt + ph) / TRIP_T);
+            const t0 = gen * TRIP_T - ph;
+            if (wt >= t0 && rnd01(hash32(ss, gen, PATROL_SALT)) < c.len * (this.patrolP ?? PATROL_P) / MW_PATROL_M
+              && cd - Math.min(MW_ROUTE_MAX, (wt - t0) * V_REACH_MW) <= R) {
+              if (mb-- <= 0) break;
+              this._birth(pk, c, MW_POLICE_K, ss, gen, t0, wt, 1);
+            }
+          }
+        }
+      }
+    }
     const ci0 = Math.floor((px - phR) / CELL), ci1 = Math.floor((px + phR) / CELL);
     const cj0 = Math.floor((pz - phR) / CELL), cj1 = Math.floor((pz + phR) / CELL);
     let budget = SCAN_BUDGET;
@@ -2881,6 +3085,19 @@ export class Traffic {
       ctlT: 0, ctlMax: CTL_PATIENCE + rnd01(hash32(seed, 0x71f)) * CTL_PATIENCE_VAR,
       ctlE: null, ctlStood: 0, ctlHold: 0, blk: false,
       crsT: 0,         // seconds stood for crossing traffic that is itself standing
+      // round 8, the motorway branch (js/mwtraffic.js): the vehicle kind is
+      // known from birth (the schedule's desire depends on it), its desire
+      // class, motorway factor and heavy cruise; roll = the trip ends on a
+      // carriageway, where it rolls on at speed instead of stopping
+      kind: null, mwc: 0, mvk: 1, mhv: 0, roll: 0,
+      // its lane on a carriageway (js/mwlanes.js): lane, the lane it is moving
+      // from, the shared second that move was decided, its direction; and the
+      // tick's own scratch
+      ln: 1, lnF: 1, lnT: -1e9, lnD: 0,
+      // …and the BODY's lane (local, js/mwlanes.js bodyLane): the same four,
+      // seconds held behind a slower body, whether the body is on a carriageway
+      eL: 1, eF: 1, eT: -1e9, eD: 0, eHeld: 0, eOn: 0, eChk: 0, eCap: Infinity,
+      _carr: 0, _acc: 0, _accA: 0, _ls: 0, _lv: 0, _len: 5, _mid: false, _lnN: 1, _lnK: 0,
     };
   }
 
@@ -2969,6 +3186,7 @@ export class Traffic {
   // record so that every later decision — the reap, the hard cap, the mesh —
   // can ask the record instead of pattern-matching an index.
   _birth(sk, c, k, ss, gen, t0, wt, police = 0) {
+    if (c.mw) return this._mwBirth(sk, c, k, ss, gen, t0, wt, police);
     const arr = this._cellEdges(c);
     if (!arr.length) return;
     if (this._culDirty) this._culUpdate();
@@ -2997,6 +3215,70 @@ export class Traffic {
     const p = this._sched(sk, seed, t0, vK, e, sIn);
     p.ci = c.ci; p.cj = c.cj; p.k = k; p.cell = c; p.gen = gen; p.police = police;
     p.routeM = ROUTE_MIN + rnd01(hash32(seed, 3)) * ROUTE_VAR;
+    p.routeEnd = p.routeM;
+    p.nsig = (e.sig && e.sigStop <= sIn) ? 1 : 0;
+    // the kind _attach always drew, with its very hashes, so a town car is
+    // the car it was; known now because its desire on a motorway needs it
+    if (police) p.kind = PATROL_KIND;
+    else {
+      const big = e.speed >= FAST_EDGE && rnd01(hash32(seed, 5)) < BIG_CHANCE;
+      const pool = big ? BIG : COMMON;
+      p.kind = pool[(rnd01(hash32(seed, 6)) * pool.length) | 0];
+    }
+    this._mwTraits(p);
+    if (e.mw) { p.vMax = this._desire(p, e); p.nvOut = p.vMax; }
+    this._pool.set(sk, p);
+    this._nomTo(p, wt);
+  }
+
+  // The motorway draws of a schedule (any schedule: a town car may take the
+  // slip road): desire class, motorway factor, heavy cruise. Own salts, so
+  // no town draw moves.
+  _mwTraits(p) {
+    p.mwc = MW.classOf(p.kind);
+    p.mvk = MW.mwVk(rnd01(hash32(p.seed, MW_SALT, 1)));
+    p.mhv = MW.heavyV(p.mwc, rnd01(hash32(p.seed, MW_SALT, 2)));
+  }
+
+  // What this driver wants on edge e, m/s. Off the motorway (and for patrols
+  // and timetabled trips everywhere) the town's limit x vK, bit for bit;
+  // on a carriageway or a slip road the motorway tables (js/mwtraffic.js).
+  _desire(p, e) {
+    if (!e.mw || p.police === 1 || p.fixed) return e.speed * p.vK;
+    let entry = false;
+    if (e.mw === 2) for (const o of e.b.out) if (o.mw === 1) { entry = true; break; }
+    return MW.mwDesire(p.mwc, p.mvk, p.mhv, e.speed, entry);
+  }
+
+  // A motorway slot's car (see MWK). Born on a piece of carriageway in this
+  // cell, at a point uniform along the cell's carriageway metres, already at
+  // cruise (a schedule born mid-edge used to pull away from 2 m/s in the
+  // fast lane), on a trip as long as its generation at its own speed.
+  _mwBirth(sk, c, k, ss, gen, t0, wt, police = 0) {
+    this._mwPurge(c);
+    const arr = this._mwPieces(c);
+    if (!arr.length) return;
+    if (this._culDirty) this._culUpdate();
+    const seed = hash32(ss, gen, 0x1d3);
+    let u = rnd01(hash32(seed, 1)) * c.len, q = arr[arr.length - 1];
+    for (const it of arr) { const L = it.s1 - it.s0; if (u < L) { q = it; break; } u -= L; }
+    const e = q.e;
+    if (e.cul) return;
+    let sIn = q.s0 + rnd01(hash32(seed, 2)) * (q.s1 - q.s0);
+    if (sIn > e.len - 1) sIn = e.len - 1;
+    if (sIn < 0.5) sIn = 0.5;
+    // (the town factor stays on the record: the trip may leave the motorway;
+    // a patrol's is the patrol's cruise band, as in _birth)
+    const vK = police ? PATROL_VK_MIN + rnd01(hash32(seed, 4)) * PATROL_VK_VAR
+      : VK_MIN + rnd01(hash32(seed, 4)) * VK_VAR;
+    const p = this._sched(sk, seed, t0, vK, e, sIn);
+    p.ci = c.ci; p.cj = c.cj; p.k = k; p.cell = c; p.gen = gen;
+    p.kind = MW.mwKind(rnd01(hash32(seed, MW_SALT)));
+    if (police) { p.police = 2; p.kind = PATROL_KIND; }   // (see MW_POLICE_K)
+    this._mwTraits(p);
+    p.vMax = this._desire(p, e);
+    p.nvOut = p.vMax;
+    p.routeM = Math.min(MW_ROUTE_MAX, p.vMax * TRIP_T * MW_TRIP_K);
     p.routeEnd = p.routeM;
     p.nsig = (e.sig && e.sigStop <= sIn) ? 1 : 0;
     this._pool.set(sk, p);
@@ -3042,8 +3324,8 @@ export class Traffic {
       // still qualifies. The generation check above has already re-tested the
       // coin, so all that is left here is eligibility, which is exactly what
       // can change under a settings change or a late tile.
-      const owed = p.fixed || (p.police ? this._patrolOwed(p.cell) : p.k < this._slots(p.cell));
-      if (!owed || (cd > phR && !p.fixed)) { this._retire(p); continue; }
+      const owed = this._owed(p);
+      if (!owed || (cd > (p.cell?.mw ? phR - ROUTE_MAX + MW_ROUTE_MAX : phR) && !p.fixed)) { this._retire(p); continue; }
       if (p.car) {
         if (p.dead) { const sk = p.key; this._retire(p); this._refill(sk, p, wt); continue; }
         const dx = p.sx - px, dz = p.sz - pz;
@@ -3125,7 +3407,7 @@ export class Traffic {
     const ph = rnd01(hash32(ss, 7)) * TRIP_T;
     const gen = Math.floor((wt + ph) / TRIP_T);
     if (gen !== p.gen) return;                       // rolled over: the scan mints the next car
-    if (!(p.police ? this._patrolOwed(p.cell) : p.k < this._slots(p.cell))) return;
+    if (!this._owed(p)) return;
     this._birth(sk, p.cell, p.k, ss, gen, gen * TRIP_T - ph, wt, p.police);
   }
 
@@ -3169,7 +3451,6 @@ export class Traffic {
   }
 
   _attach(p, wt, pose) {
-    const e0 = p.route[0].e;
     // paint must be the same on both screens. vehicles.pickCarColor() reaches
     // for Math.random and does not take a seed; rather than reimplement its
     // per-kind bias table (which lives in vehicles.js and is not ours to fork)
@@ -3184,10 +3465,15 @@ export class Traffic {
         : (VEH.normalizeKind?.(p.fixed.kind) ?? VEH.CAR_KINDS[0]);
       color = p.fixed.color;
     } else if (!p.police) {
-      const bigOk = e0.speed >= FAST_EDGE && rnd01(hash32(p.seed, 5)) < BIG_CHANCE;
-      const pool = bigOk ? BIG : COMMON;
-      kind = pool[(rnd01(hash32(p.seed, 6)) * pool.length) | 0];
-      if (!VEH.CAR_KINDS.includes(kind)) kind = VEH.CAR_KINDS[0]; // roster drift guard
+      // (drawn at birth since round 8, with the hashes that were here: _birth)
+      kind = p.kind;
+      if (!VEH.CAR_KINDS.includes(kind)) {
+        // a kind that rolls on the motorway but is nobody's to buy (the
+        // articulated lorry): normalizeKind knows every kind there is; a
+        // build without it gets the box truck, and the roster drift guard
+        const n = VEH.normalizeKind?.(kind);
+        kind = n === kind ? kind : kind === 'semi' ? 'truck' : VEH.CAR_KINDS[0];
+      }
       const u = rnd01(hash32(p.seed, 8));
       if (typeof VEH.pickCarColor === 'function') {
         const real = Math.random;
@@ -3201,6 +3487,7 @@ export class Traffic {
     const e = p.edge;
     const heading = Math.atan2(-pose.dx, -pose.dz);
     p.laneOff = Math.min(TRAFFIC.laneOffsetK * e.road.w, TRAFFIC.laneOffsetMax);
+    if (e.mw) { bodyAdopt(p); p.eOn = e.mw === 1 ? 1 : 0; p.laneOff = laneOffset(p, p.ri, p.s, wt); }
     p.sh = p.ph = heading;
     p.sx = p.px = pose.x - pose.dz * p.laneOff;   // right of travel = (-dz, dx)
     p.sz = p.pz = pose.z + pose.dx * p.laneOff;
@@ -3229,7 +3516,7 @@ export class Traffic {
     // schedule's speed, going straight
     p.body = { x: p.sx, z: p.sz, heading, speed: car.speed, _lat: 0, yaw: 0, steer: 0, kappa: 0,
       len: car.len ?? 4.6, wid: car.wid ?? 1.8, offroad: 0, kind: car.kind, phys: false,
-      r0: cornerR(car.len ?? 4.6) };
+      r0: cornerR(car.len ?? 4.6), r0c: cornerR(car.len ?? 4.6) };
     p.bArc = p.sR; p.tI = p.ri; p.tSeg = 0;
     car.ai = p;
     car.y = p.sy;
@@ -3372,6 +3659,24 @@ export class Traffic {
     const raw = (this.maxCars ?? TRAFFIC.maxCars) / (TRAFFIC.maxCars || 1);
     this._densK = Math.max(0, Math.min(4, Math.round(raw * 32) / 32));
 
+    // round 8: the motorway's lane decisions, once per whole second of SHARED
+    // time and before anything advances a schedule past that second (see
+    // js/mwlanes.js: every client decides from the same nominal state)
+    // (every whole second, not only the latest: a frame that took longer than
+    // a second, a tile hitch or a throttled tab, would otherwise skip a
+    // decision its peer took, and their lanes part for the length of a lane
+    // change; a stall of more than LANE_CATCHUP s is not worth replaying)
+    const tq = Math.floor(wt);
+    if (tq !== this._laneT && this._mwCells.size) {
+      const lt = this._lt ??= {
+        nom: (p, T) => this._nomTo(p, T), arc: (p, T) => this._nomArc(p, T),
+        ens: (p, i) => this._routeEnsure(p, i),
+      };
+      const l0 = this._laneT;
+      let t = l0 !== undefined && tq > l0 && tq - l0 <= LANE_CATCHUP ? l0 + 1 : tq;
+      for (; t <= tq; t++) laneTick(this._pool, t, lt.nom, lt.arc, lt.ens, hash32, rnd01);
+      this._laneT = tq;
+    }
     this._scanT -= dt;
     if (this._scanT <= 0) {
       const since = SCAN_DT - this._scanT;      // wall time this sweep covers
@@ -3542,7 +3847,7 @@ export class Traffic {
     const wt = this._wt || this.now();
     const gen = Math.floor((wt + rnd01(hash32(ss, 7)) * TRIP_T) / TRIP_T);
     this._pool.set(key, { key, ci, cj, k, gen, cell: null, stolen: 1, car: null, route: null,
-      police: k === POLICE_K ? 1 : 0 });
+      police: k === POLICE_K ? 1 : k === MW_POLICE_K ? 2 : 0 });
   }
 
   // A rammed car (vehicles.js stamped _rammedT on impact, weapons.js too) is
@@ -3676,7 +3981,7 @@ export class Traffic {
   // gets there), the bus stop it is about to call at, the end of its trip.
   // Read only, the schedule is not touched.
   _schedStop(p, T) {
-    let stop = p.routeEnd;
+    let stop = p.roll ? Infinity : p.routeEnd;
     if (p.ndone || p.nwait > 0) return stop;
     const st = p.route[p.ni], e = st?.e;
     if (!e) return stop;
@@ -3783,6 +4088,12 @@ export class Traffic {
       const sk = p.key;
       this._toGhost(p);
       this._refill(sk, p, T);
+    } else if (p.roll && p.ndone && !p.ghost && !p.fixed) {
+      // A trip that ends on a carriageway is let off at speed, wherever the
+      // body is: driven on as a ghost if somebody sees it, else taken away
+      // at the next sweep (unseen, so nobody watches it brake for nothing).
+      if (this._heldVisible(p)) { const sk = p.key; this._toGhost(p); this._refill(sk, p, T); }
+      else p.dead = 1;
     }
     if (p.ghost) {
       // A ghost's road has to be LAID. The itinerary is lazy and it is the
@@ -3812,7 +4123,8 @@ export class Traffic {
     // v² = vc² + 2·b·d, so speed bleeds off smoothly on approach instead of at
     // the apex. On a straight edge nothing here fires — vertAng sits under the
     // 0.06 rad noise floor — so steady speed genuinely reaches desire.
-    const desire = e.speed * p.vK;
+    let desire = this._desire(p, e);
+    if (e.mw === 1 && p.police !== 1 && !p.fixed) { const zc = MW.zoneCap(e, p.seg, T); if (zc < desire) desire = zc; }
     // the ONE new term: a car behind its schedule may exceed its desire by
     // CATCH_K to close the gap, and a car that is not behind may not. The hard
     // clamp below is what actually forbids running ahead; this only sets how
@@ -3826,6 +4138,10 @@ export class Traffic {
       if (!near) catchK = CATCH_FAR;
     }
     let tgt = desire * catchK;
+    // (on a motorway the catch-up is a few km/h, never x1.9: 247 km/h was a
+    // car making up a lag the player could not even see)
+    const ceil = e.mw ? MW.mwCeil(p.mwc, desire) : Infinity;
+    if (tgt > ceil) tgt = ceil;
     // the envelope's reach must scale with speed: 16 m of lookahead is a city
     // number, a 90 km/h driver needs v²/2b (~62 m) of warning or every rural
     // bend becomes an emergency stop
@@ -3834,8 +4150,15 @@ export class Traffic {
       const d = e.cum[k] - p.s;
       if (d > look) break;
       if (d < 0) continue;
+      if (e.mw === 1 && p.police !== 1 && !p.fixed) {
+        const zc = MW.zoneCap(e, k, T);
+        if (zc < tgt) tgt = Math.min(tgt, Math.sqrt(zc * zc + 2 * BRAKE * d));
+      }
       const a = e.vertAng[k];
-      if (a > 0.06) tgt = Math.min(tgt, Math.sqrt(cornerSpeed(a) ** 2 + 2 * BRAKE * d));
+      if (a > 0.06) {
+        const vc = e.mw ? MW.mwCornerV(a, Math.min(e.cum[k] - e.cum[k - 1], e.cum[k + 1] - e.cum[k])) : cornerSpeed(a);
+        tgt = Math.min(tgt, Math.sqrt(vc * vc + 2 * BRAKE * d));
+      }
     }
     const dEnd = e.len - p.s;
     if (dEnd < look + 10) {
@@ -3845,12 +4168,19 @@ export class Traffic {
         const crs = e.ldx * p.next.fdz - e.ldz * p.next.fdx;
         ang = Math.abs(Math.atan2(crs, dot));
       }
-      if (ang > 0.06)
-        tgt = Math.min(tgt, Math.sqrt(cornerSpeed(ang) ** 2 + 2 * BRAKE * Math.max(dEnd, 0)));
+      if (ang > 0.06) {
+        const vc = e.mw && p.next?.mw
+          ? MW.mwCornerV(ang, Math.min(e.cum[e.pts.length - 1] - e.cum[e.pts.length - 2], p.next.cum[1])) : cornerSpeed(ang);
+        tgt = Math.min(tgt, Math.sqrt(vc * vc + 2 * BRAKE * Math.max(dEnd, 0)));
+      }
       // slower road ahead: aim at ITS desire by the handoff, so nobody blasts
-      // into a village at 110 and stands on the brakes between the houses
-      if (p.next && p.next.speed < e.speed)
-        tgt = Math.min(tgt, Math.sqrt((p.next.speed * p.vK) ** 2 + 2 * BRAKE * Math.max(dEnd, 0)));
+      // into a village at 110 and stands on the brakes between the houses.
+      // (Not off a carriageway onto its exit slip: a driver brakes ON the
+      // slip road, not in the right lane ahead of the diverge.)
+      if (p.next && p.next.speed < e.speed && !(e.mw === 1 && p.next.mw === 2)) {
+        const nv = this._desire(p, p.next);
+        tgt = Math.min(tgt, Math.sqrt(nv * nv + 2 * BRAKE * Math.max(dEnd, 0)));
+      }
     }
 
     // ---- traffic lights are the SCHEDULE's job, not this layer's.
@@ -3881,14 +4211,31 @@ export class Traffic {
     // …and whether a PHYSICAL hull is in the way, which is a different thing
     // from being held by flow: flow resolves itself, a parked car does not.
     let blocked = false;
+    // (a motorway driver reads the road several seconds ahead, not 22 m: at
+    // 130 km/h that was 0.6 s and every leader an emergency)
+    const look2 = e.mw ? Math.max(TRAFFIC.lookAhead, MW_LOOK_T * car.speed + 12) : TRAFFIC.lookAhead;
     for (const other of this.cars) {
       const o = other.ai;
       if (!o || o === p) continue;
       const rx = o.sx - p.sx, rz = o.sz - p.sz;
       const fwd = rx * fx + rz * fz;
-      if (fwd <= 0 || fwd > TRAFFIC.lookAhead) continue;
+      if (fwd <= 0 || fwd > look2) continue;
       const lat = fx * rz - fz * rx;
       if (Math.abs(lat) > LAT_GATE || Math.abs(angWrap(o.sh - p.sh)) > HEAD_GATE) {
+        // A carriageway has no level crossing: whatever a car on one meets
+        // that is not on the motorway is on a bridge over it or a road beside
+        // it (and the other way round).
+        if ((e.mw === 1) !== (o.edge?.mw === 1) && !(e.mw && o.edge?.mw)) continue;
+        if (e.mw) {
+          // Two lanes of one carriageway are not a junction. A car in the
+          // next lane (3.75 m off, inside CROSS_CLEAR) read as a crossing
+          // conflict and the pair stood on the brakes side by side; and the
+          // mainline never gives way to a car on its right coming off a slip
+          // road (that one merges into a gap, js/mwlanes.js). Same direction
+          // outside the follow corridor is another lane; inside it, a leader.
+          if (e.mw === 1 && o.edge?.mw === 2) continue;
+          if (fx * -Math.sin(o.sh) + fz * -Math.cos(o.sh) > 0.94) continue;
+        }
         // Not a leader — but possibly a collision. Only pairs the follow model
         // has ALREADY discarded reach here, so the two rules never fight.
         // Somebody waiting at their give-way line is not a collision course,
@@ -3929,15 +4276,29 @@ export class Traffic {
             // both were already at rest, it was for good)
             const olat = ofx * -rz - ofz * -rx;
             const mine = lat > 0, theirs = olat > 0;
-            if (mine !== theirs ? mine : (p.seed >>> 0) < (o.seed >>> 0)) { tgt = 0; hard = true; held = true; crossHeld = true; }
+            if (mine !== theirs ? mine : (p.seed >>> 0) < (o.seed >>> 0)) {
+              tgt = 0; hard = true; held = true; crossHeld = true;
+              if (e.mw) this.mwCrossN = (this.mwCrossN | 0) + 1;   // (a census for tests/d11-traffic: stays near 0)
+            }
           }
         }
         continue;
       }
-      const gap = fwd - 3.9;                      // center distance → bumpers
+      // (bumper to bumper by the real lengths on a motorway, where a semi is
+      // 16.5 m: the town's 3.9 m is two car halves)
+      const gap = e.mw ? fwd - ((car.len ?? 4.6) + (other.len ?? 4.6)) / 2 : fwd - 3.9;   // center distance → bumpers
       if (fwd < leadD) { leadD = fwd; leader = o; }
       if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; }
-      else { const fv = (gap - TRAFFIC.stopGap) / 2;         // gap/2s rule
+      else if (e.mw) {
+        // Follow at a time headway, matching the leader's speed (an IDM-like
+        // gap): the gap/2 s rule asked a car 20 m behind a lorry at 85 km/h
+        // for 32 km/h. Never faster than stopping behind it allows.
+        const vL = other.speed;
+        let fv = vL + (gap - TRAFFIC.stopGap - car.speed * MW_HEADWAY) * MW_GAP_K;
+        const safe = Math.sqrt(vL * vL + 2 * BRAKE * (gap - TRAFFIC.stopGap));
+        if (fv > safe) fv = safe;
+        if (fv < tgt) { tgt = fv; held = true; }
+      } else { const fv = (gap - TRAFFIC.stopGap) / 2;         // gap/2s rule
              if (fv < tgt) { tgt = fv; held = true; } }
     }
     // A STANDING HULL IS SEEN FROM AS FAR AS IT TAKES TO STOP FOR IT. The
@@ -3959,7 +4320,16 @@ export class Traffic {
       // (obstLong: the 3.9 m is two car halves; a bus has three metres more nose)
       const gap = fwd - this._obst[i + 2] - obstLong;
       if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; blocked = true; }
-      else { const fv = (gap - TRAFFIC.stopGap) / 2;
+      else if (e.mw && i === 0 && !this.actors?.length && this._pvx !== undefined) {
+        // the local player driving down the carriageway is a leader, not a
+        // wall: followed at the motorway headway at the speed they are doing
+        // (a car closing on them at 130 used to brake as for a parked hull)
+        const vL = Math.max(0, this._pvx * fx + this._pvz * fz);
+        let fv = vL + (gap - TRAFFIC.stopGap - car.speed * MW_HEADWAY) * MW_GAP_K;
+        const safe = Math.sqrt(vL * vL + 2 * BRAKE * (gap - TRAFFIC.stopGap));
+        if (fv > safe) fv = safe;
+        if (fv < tgt) { tgt = fv; held = true; if (fv < BLOCK_V) blocked = true; }
+      } else { const fv = (gap - TRAFFIC.stopGap) / 2;
              // `blocked` here too: the gap/2 s rule closes on a standing hull
              // for ever and never quite fills the stop gap, so a driver
              // creeping up behind the player's parked car was "held by flow",
@@ -4200,6 +4570,20 @@ export class Traffic {
       this.onHonk?.(p.sx, p.sz);
     }
 
+    // ---- round 8: the body's lane on a carriageway (js/mwlanes.js). Onto
+    // one out of a slip road it is the acceleration lane; otherwise it takes
+    // the shared lane over and follows it, waiting where the bodies beside it
+    // leave no room and pulling out round a slower body it is stuck behind.
+    if (e.mw === 1) {
+      if (!p.eOn) {
+        p.eOn = 1;
+        if (p.ri > 0 && p.route[p.ri - 1].e.mw === 2) { p.eL = p.eF = 2; p.eT = -1e9; p.eD = 0; p.eHeld = 0; }
+        else bodyAdopt(p);
+      }
+      const cap = bodyLane(p, car, this.cars, T, dt, leader, desire);
+      if (cap < tgt) tgt = cap;
+    } else p.eOn = 0;
+
     // ---- v11: the lane first, because the driver now steers FOR it. Same
     // offset as ever (right of the centreline, clear of the kerb, round the
     // parked cars, into a bus bay, squeezed for an oncoming car); what changed
@@ -4235,6 +4619,11 @@ export class Traffic {
       if (squeeze > room) squeeze = room > 0 ? room : 0;
     }
     p.laneOff += (offTgt + bay + squeeze - p.laneOff) * Math.min(1, 3 * dt);
+    // a carriageway or a slip road: its lane is js/mwlanes.js's, already a
+    // smooth function of shared time (the lane change is its cosine ramp),
+    // and so is the indicator
+    if (re.mw) { p.laneOff = laneOffset(p, p.ri, p.s, T); car.blink = blinkOf(p, T); }
+    else if (car.blink) car.blink = 0;
 
     // ---- v11: pedals and wheel, then the schedule. Until v10 this was a rail:
     // the speed was integrated straight into an arc, and the arc WAS the car.
@@ -4274,11 +4663,23 @@ export class Traffic {
         if (es < tgt) tgt = es;
       }
     }
-    if (!p.ghost && !blocked && lag > LAG_MAX - HAUL_W)
-      tgt = Math.max(tgt, nomV + (lag - (LAG_MAX - HAUL_W)) * HAUL_K);
+    if (!p.ghost && !blocked && lag > LAG_MAX - HAUL_W) {
+      let hv = nomV + (lag - (LAG_MAX - HAUL_W)) * HAUL_K;
+      // (on a motorway the haul is the catch-up's own few km/h over desire at
+      // most: a lag there is paid off over a minute, not at 168 km/h)
+      if (hv > ceil) hv = ceil;
+      tgt = Math.max(tgt, hv);
+    }
+    // (a carriageway's vertices are rounded for a motorway radius, not the
+    // vehicle's lock: at 130 km/h a 0.1 rad vertex rounded for 5 m read as a
+    // 50 km/h bend to the speed planner and the wheel alike)
+    // (a slip road's polyline is a curve of small vertices: rounded for the
+    // vehicle's lock each one read as a tight bend, and cars crawled every
+    // slip at 30 km/h; the segments' own room still keeps a loop honest)
+    b.r0 = !e.mw || (p.next && !p.next.mw) ? b.r0c ?? b.r0 : e.mw === 1 ? MW_R0 : MW_LINK_R0;
     // the turn ahead, at the speed the tyres allow with a comfortable margin
     const aLat = (car.len ?? 4.6) > 6 ? AI.A_LAT_BIG : AI.A_LAT;
-    const cc = curveCap(p.route, p.ri, bArc, look + 20, aLat, BRAKE, p.laneOff, b.r0);
+    const cc = curveCap(p.route, p.ri, bArc, look + 20, aLat, BRAKE, p.laneOff, b.r0, b.r0c ?? b.r0);
     if (cc < tgt) tgt = cc;
     const v0 = b.speed;
     // the wheel: the front axle onto the lane (aidriver stanley), the lane's
@@ -4312,8 +4713,13 @@ export class Traffic {
       // full speed across the pavement it had already run onto.
       else offL = away;
     }
-    if (offL > OFF_LANE) {
-      const cv = OFF_LANE_V - (offL - OFF_LANE) * 2.4;
+    // (on a carriageway the creep is for a body truly off its lane, not for
+    // one a lane change has left a metre behind its moving target: at 130 a
+    // Stanley wheel tracks a 3.75 m change a metre or so behind, and the town
+    // rule stood the car down to 16 km/h in the middle of every overtake)
+    const offMax = e.mw ? MW_OFF_LANE : OFF_LANE;
+    if (offL > offMax) {
+      const cv = OFF_LANE_V - (offL - offMax) * 2.4;
       if (cv < tgt) tgt = cv > BODY_V ? cv : BODY_V;
     }
     // the rail's own speed law (up at ACCEL, down at BRAKE_SOFT, or BRAKE_HARD
@@ -4436,15 +4842,18 @@ export class Traffic {
   }
 
   // Which pole groups render, and so which ones _tickSignals lights: every
-  // 2 s (and at once after new poles), the junctions in _jgrid cells within
-  // SIG_VIS2 of the player. Walking the grid around the player instead of
+  // SIG_CULL s (and at once after new poles), the junctions in _jgrid cells
+  // within SIG_VIS2 of the player. (It was every 2 s, and at 130 km/h a mast
+  // then came into being up to 72 m inside the radius, in plain view down a
+  // straight avenue; the walk is some 700 grid cells, so half a second costs
+  // nothing.) Walking the grid around the player instead of
   // every controller ever loaded keeps this flat however much of Prague the
   // session has seen. A junction coming back into range has stale lamps, so
   // its state is reset and the tick relights it in the same frame.
   _cullSignals(dt, px, pz) {
     this._cullT -= dt;
     if (this._cullT > 0) return;
-    this._cullT = 2.0;
+    this._cullT = SIG_CULL;
     const prev = this._sigLive, next = this._sigNext;
     next.length = 0;
     const mark = ++this._sigMark;
@@ -4508,25 +4917,46 @@ export class Traffic {
   // A cell keeps its surviving edges in arrival order and its lengths are
   // summed again in that order, so they carry the bits a client that never
   // had the tile would hold.
-  releaseTile(t) {
+  releaseTile(t) { for (const _ of this.releaseSteps(t)); }
+  // The same work as steps (geo.js queueJob): every `yield` is a point where
+  // the graph is whole again for whatever runs in between, which is the
+  // per-frame update far from the tile (nothing is added to the graph until
+  // the job is through). The scans are read-only and yield anywhere; each
+  // list is cut down in one step.
+  *releaseSteps(t) {
     const gone = new Set();
-    for (const r of t?.roads ?? []) if (r._tg) gone.add(r);
+    const roads = t?.roads ?? [];
+    for (let i = 0; i < roads.length; i++) {
+      if (roads[i]._tg) gone.add(roads[i]);
+      if ((i & 4095) === 4095) yield;
+    }
     const rect = t?.rect;
     const inRect = rect ? (x, z) => x >= rect[0] && x < rect[2] && z >= rect[1] && z < rect[3] : () => false;
     let junctions = false;
     for (const jn of this._junctions) if (inRect(jn.x, jn.z)) { junctions = true; break; }
     if (!gone.size && !junctions) return;
     // 1. edges
-    const dead = new Set(), nodes = new Set();
-    let w = 0;
+    // (the survivors are gathered by the same sliced scan and written back in
+    // one step: a second pass over the session's edges was 6 ms of one frame
+    // with six Prague tiles resident, and it grows with every tile)
+    const dead = new Set(), nodes = new Set(), keep = [];
     for (let i = 0; i < this.edges.length; i++) {
       const e = this.edges[i];
-      if (gone.has(e.road)) { dead.add(e); nodes.add(e.a); nodes.add(e.b); } else this.edges[w++] = e;
+      if (gone.has(e.road)) { dead.add(e); nodes.add(e.a); nodes.add(e.b); } else keep.push(e);
+      if ((i & 2047) === 2047) yield;
     }
-    this.edges.length = w;
+    if (dead.size) {
+      for (let i = 0; i < keep.length; i++) this.edges[i] = keep[i];
+      this.edges.length = keep.length;
+    }
+    keep.length = 0;
+    yield;
     const drop = (arr, f) => { let k = 0; for (let i = 0; i < arr.length; i++) if (!f(arr[i])) arr[k++] = arr[i]; arr.length = k; };
     for (const e of dead) if (e.offSign === 1) { e.a.deg--; e.b.deg--; }
+    yield;
+    let step = 0;
     for (const n of nodes) {
+      if ((++step & 511) === 0) yield;
       drop(n.out, (e) => dead.has(e));
       drop(n.inn, (e) => dead.has(e));
       n.outS = null;
@@ -4540,16 +4970,20 @@ export class Traffic {
     // the cost is the tile's and not the session's
     const gk = new Set(), ck = new Set();
     for (const e of dead) {
+      if ((++step & 1023) === 0) yield;
       if (e._gks) for (const k of e._gks) gk.add(k);
       ck.add(Math.floor(e.mx / CELL) + ',' + Math.floor(e.mz / CELL));
     }
+    yield;
     for (const k of gk) {
+      if ((++step & 511) === 0) yield;
       const a = this._egrid.m.get(k);
       if (!a) continue;
       drop(a, (e) => dead.has(e));
       if (!a.length) this._egrid.m.delete(k);
     }
     for (const k of ck) {
+      if ((++step & 255) === 0) yield;
       const c = this._cells.get(k);
       if (!c) continue;
       const n0 = c.edges.length;
@@ -4563,6 +4997,7 @@ export class Traffic {
     }
     // 3. the usage census, counted back down way by way
     for (const r of gone) {
+      if ((++step & 511) === 0) yield;
       for (const k of this._ukeys.get(r) ?? []) {
         const u = this._usage.get(k);
         if (!u) continue;
@@ -4583,7 +5018,11 @@ export class Traffic {
         if (!this._jgrid.m.get(jn._gk)?.length) this._jgrid.m.delete(jn._gk);
         jn.group.parent?.remove(jn.group);
       }
-      for (const e of this.edges) if (e.sig && off.has(e.sig)) { e.sig = null; e.sigD = 1e9; }
+      for (let i = 0; i < this.edges.length; i++) {
+        const e = this.edges[i];
+        if (e.sig && off.has(e.sig)) { e.sig = null; e.sigD = 1e9; }
+        if ((i & 8191) === 8191) yield;
+      }
     }
     this._culDirty = true;
   }

@@ -36,6 +36,7 @@
 
 import * as THREE from 'three';
 import { lampPlan } from './meshes.js';
+import { landmarkOf } from './landmarks.js';
 
 const CHUNK = 120;                // m: the streaming cell (config.js CHUNK)
 const MAX = 30000;                // instances: nearest cells first when a city has more
@@ -212,12 +213,21 @@ export function cellPoints(key, cell, terrain, windows = true, city = null) {
     // a building belongs to the cell its first corner is in, so one that
     // straddles a border is not lit twice
     if (o[0][0] < x0 || o[0][0] >= x1 || o[0][1] < z0 || o[0][1] >= z1) continue;
-    const h = Math.max(3, b.h ?? 6), n = 1 + ((hash2(id, 5) * Math.min(3, 1 + h / 9)) | 0);
+    // A footprint a landmark claims is drawn as the hand-built model at every
+    // tier (meshes.js), and the model's panes glow on their own. Points at the
+    // TILE's heights hung in the air beside the Old Town Hall tower, in the
+    // arch of the Powder Tower and over Charles Bridge's towers' passages.
+    if (landmarkOf(b)) continue;
+    // ...and a footprint the tile lifts (a skyway, a covered bridge, a gate
+    // over its passage) has its walls from y up, not from the street
+    const y0 = b.y > 0.5 ? b.y : 0;
+    const h = Math.max(3, b.h ?? 6), n = 1 + ((hash2(id, 5) * Math.min(3, 1 + (h - y0) / 9)) | 0);
+    if (h - y0 < 2.4) continue;
     for (let j = 0; j < n; j++) {
       const e = (hash2(id, 20 + j) * o.length) | 0, f = (e + 1) % o.length, t = hash2(id, 40 + j);
       const x = o[e][0] + (o[f][0] - o[e][0]) * t, z = o[e][1] + (o[f][1] - o[e][1]) * t;
       const w = hash2(id, 60 + j) < 0.14 ? COOL : WARM, v = 0.34 + 0.22 * hash2(id, 80 + j);
-      out.push(x, H(x, z) + 1.6 + (h - 2.4) * hash2(id, 100 + j), z, w[0] * v, w[1] * v, w[2] * v);
+      out.push(x, H(x, z) + y0 + 1.6 + (h - y0 - 2.4) * hash2(id, 100 + j), z, w[0] * v, w[1] * v, w[2] * v);
     }
   }
   return out.length ? new Float32Array(out) : EMPTY;

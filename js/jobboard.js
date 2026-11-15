@@ -5,13 +5,14 @@
 
 import { makePanel, el } from './panel.js';
 import { placeLabel } from './jobgen.js';
-import { payEstimate, estRouteM, courierLimitS, fmtDist, fmtClock } from './jobmath.js';
+import { payEstimate, estRouteM, courierLimitS, haulLimitS, fmtDist, fmtClock } from './jobmath.js';
 import { kc } from './prices.js';
 
-const ICON = { courier: '📦', taxi: '🚕' };
+const ICON = { courier: '📦', taxi: '🚕', haul: '🚚' };
 
 export function jobTitle(job) {
-  return job.kind === 'taxi' ? 'Taxi: ' + job.who : 'Rozvoz: ' + job.what;
+  return job.kind === 'taxi' ? 'Taxi: ' + job.who
+    : job.kind === 'haul' ? 'Dálková jízda: ' + job.what : 'Rozvoz: ' + job.what;
 }
 
 function row(job, { active = false, onAccept, onAbandon, busy }) {
@@ -24,7 +25,9 @@ function row(job, { active = false, onAccept, onAbandon, busy }) {
   // The courier's clock is an estimate until the route exists, and says so.
   const meta = job.kind === 'taxi'
     ? '≈ ' + fmtDist(routeM) + ' · prémie za plynulou jízdu · potřebuješ auto'
-    : '≈ ' + fmtDist(routeM) + ' · limit ≈ ' + fmtClock(courierLimitS(routeM)) + ' od vyzvednutí';
+    : job.kind === 'haul'
+      ? '≈ ' + fmtDist(routeM) + ' po D11 · limit ' + Math.round(haulLimitS(routeM) / 60) + ' min od vyzvednutí · palivo platíš ty'
+      : '≈ ' + fmtDist(routeM) + ' · limit ≈ ' + fmtClock(courierLimitS(routeM)) + ' od vyzvednutí';
   main.appendChild(el('div', 'pr-line', meta));
   const side = el('div', 'pr-side');
   side.appendChild(el('span', 'pr-pay', 'až ' + kc(payEstimate(job.kind, job.distM))));

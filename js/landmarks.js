@@ -32,7 +32,7 @@ import { buildBartolomej, buildZvestovani, buildJan, buildZvonice } from './land
 import { buildMlyny, buildSilo, buildMost, mlynySolids } from './landmarks-mlyny.js';
 import { buildDivadlo, divadloSolids } from './landmarks-divadlo.js';
 import { LANDMARKS_OLD, EXTRAS_OLD, ZONES_OLD, CLEAR_OLD, isOldBridgeWay } from './landmarks-praha.js';
-import { LANDMARKS_WIDE, CLEAR_WIDE, PROP_WIDE } from './landmarks-hrad.js';
+import { LANDMARKS_WIDE, CLEAR_WIDE, PROP_WIDE, EXTRAS_WIDE, isWideBarrier } from './landmarks-hrad.js';
 
 /**
  * id: stable key. name: OSM name it must agree with when the feature has one.
@@ -89,7 +89,7 @@ for (const l of LANDMARKS) if (l.hide) { l.build = NOTHING; l.solids = () => [];
  * exactly one chunk, whatever the order tiles arrived in. The kit's ground is
  * zero: heights are absolute.
  */
-export const EXTRAS = [...EXTRAS_OLD];
+export const EXTRAS = [...EXTRAS_OLD, ...EXTRAS_WIDE];
 
 /** Dev and test switch: off, every footprint is a generic building again
  *  (the before half of a before/after measurement). Not a setting. */
@@ -284,7 +284,7 @@ export function landmarkBridge(f) {
  * wall)? Then the generic ribbon is not drawn: it would stand across the gate.
  * WORKER SAFE: js/meshes.js asks on both threads.
  */
-export function landmarkBarrier(f) { return SWITCH.on && isValyBarrier(f); }
+export function landmarkBarrier(f) { return SWITCH.on && (isValyBarrier(f) || isWideBarrier(f)); }
 
 // ---- clear zones -------------------------------------------------------------
 // The surface model the scattered trees come from sees a tower as tall green,

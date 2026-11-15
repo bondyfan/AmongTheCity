@@ -39,6 +39,23 @@ export const DEV_PLACES = [
   { n: 'Zlín, tř. T. Bati', x: 136864, z: 89742, h: Math.PI / 2 },
   { n: 'Kudlov', x: 135947, z: 92122, h: 0 },
   { n: 'Březůvky', x: 140461, z: 97194, h: 0 },
+  // The D11 (round 8), eastbound towards Hradec. Each door stands on the
+  // verge 9.5 m right of the carriageway's centreline (3.25 m off the
+  // asphalt, on the flat bench the ground is clamped to), looking along the
+  // motorway: never ON a lane, where the first truck ends the reproduction.
+  // Points from js/d11.js d11At at the official km, checked clear of every
+  // other road and off every bridge deck.
+  { n: 'D11, rovina u Kostelní Lhoty (km 30)', x: -54566, z: -9850, h: -1.26 },
+  { n: 'D11, exit 8 Jirny', x: -75904, z: -10051, h: -1.51 },          // 250 m before the diverge
+  { n: 'D11, most přes Labe u Poděbrad', x: -42885, z: -9607, h: -1.49 }, // 60 m before the deck
+  { n: 'D11, ekodukt Žehuň', x: -32663, z: -9945, h: -1.37 },          // 90 m before the green bridge
+  { n: 'D11, estakáda u Chlumce', x: -25041, z: -10649, h: -1.23 },    // 50 m before the 542 m viaduct
+  { n: 'D11, exit 68 Chýšť', x: -17468, z: -11309, h: -1.17 },
+  { n: 'D11/D35, křižovatka Sedlice', x: -1870, z: -12849, h: -0.97 },
+  // on the Benzina forecourt, 3 m beside the lane in to the pumps and 3 m
+  // short of the canopy (a building=roof footprint, which city.collide holds
+  // solid: a door under it lands inside a box), facing the pumps
+  { n: 'D11, odpočívka Osice', x: -4202.5, z: -11741.5, h: -1.3 },
 ];
 
 // Czech names for the kinds vehicles.js exports, so the dropdown reads like a

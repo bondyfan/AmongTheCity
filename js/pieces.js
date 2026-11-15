@@ -412,9 +412,29 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
       const px = a[0] + ux * s + inx * off, pz = a[1] + uz * s + inz * off;
       let yB = base, yT = base + wallH;
       const isDoor = door && Math.abs(s - door.c) < door.w / 2 + pw * 0.5;
+      // the parts of a door bay beside the opening, as fractions of the bay:
+      // [0, jL] and [jR, 1] stay wall up to the lintel
+      let jL = 0, jR = 1;
       if (isDoor) {
+        // The opening is the door's own width, as the far mesh cuts it. With
+        // the door on the line between two bays (t = 0.5 makes that the rule)
+        // both bays used to open from the pavement to the lintel: 5 m of
+        // missing ground floor, the pale interior walls showing on the street.
+        jL = clamp((door.c - door.w / 2 - (s - pw / 2)) / pw, 0, 1);
+        jR = clamp((door.c + door.w / 2 - (s - pw / 2)) / pw, 0, 1);
         // the entrance: only the lintel above it, and only if there is room
-        if (fy + I.entryH + 0.25 > yT) continue;
+        if (fy + I.entryH + 0.25 > yT) {
+          // (no room: the door runs to the ceiling, the wall beside it too)
+          for (const [u0, u1] of [[0, jL], [jR, 1]]) {
+            if (u1 - u0 < 0.01) continue;
+            const sx = ux * (u0 + u1 - 1) * pw * 0.5, sz = uz * (u0 + u1 - 1) * pw * 0.5;
+            const p = push(out, px + sx, (yB + yT) / 2, pz + sz, (u1 - u0) * pw / 2, (yT - yB) / 2,
+              thick / 2, yaw, col, leaf, false, 0.92, 1.0);
+            p.leaf = leaf;
+            if (leaf === 'ext') p.pin = true;
+          }
+          continue;
+        }
         yB = fy + I.entryH;
       }
 
@@ -492,7 +512,12 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
         // Both wear wallHex — classify() stamped the cool grey onto f.c, so
         // the far LOD's flat box is already the same colour.
         if (officeVar && !row.store) {
-          if (isDoor) { flat(yB, yTw, 0, 1, col, 0.94, 1.0); continue; }
+          if (isDoor) {
+            flat(yB, yTw, 0, 1, col, 0.94, 1.0);
+            flat(base, yB, 0, jL, col, 0.92, 0.98);
+            flat(base, yB, jR, 1, col, 0.92, 0.98);
+            continue;
+          }
           const kA = ao(base + wallH * 0.5);
           if (officeVar === 'bands') {
             const gB = base + wallH * 0.30, gT = base + wallH * 0.88;
@@ -519,7 +544,12 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
 
         // ---- NOVOSTAVBA: white plaster, tall windows, French balconies ----
         if (novaExt && !row.store) {
-          if (isDoor) { flat(yB, yTw, 0, 1, col, 0.94, 1.02); continue; }
+          if (isDoor) {
+            flat(yB, yTw, 0, 1, col, 0.94, 1.02);
+            flat(base, yB, 0, jL, col, 0.93, 1.0);
+            flat(base, yB, jR, 1, col, 0.93, 1.0);
+            continue;
+          }
           const kA = ao(base + wallH / 2);
           // (one bay in seven used to be hash-blanked here; the far mesh paints
           // a window on every bay, so the shell now cuts one on every bay too)
@@ -600,6 +630,11 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
         if (solid) {
           const fv0 = (yB - base) / wallH, fv1 = (yT - base) / wallH;
           put(yB, yT, 0, 1, uvOf(0, 1, fv0, fv1));
+          if (isDoor) {
+            // beside the opening, the bay's own paint, as the far mesh draws it
+            put(base, yB, 0, jL, uvOf(0, jL, 0, fv0));
+            put(base, yB, jR, 1, uvOf(jR, 1, 0, fv0));
+          }
           continue;
         }
         const j0 = (1 - frac) / 2, j1 = 1 - j0;
@@ -622,6 +657,13 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
       if (isDoor) {
         push(out, px, (yB + yT) / 2, pz, pw / 2, (yT - yB) / 2, thick / 2,
           yaw, col, leaf, false).leaf = leaf;
+        // and the lining beside the opening, matching the outer leaf
+        for (const [u0, u1] of [[0, jL], [jR, 1]]) {
+          if (u1 - u0 < 0.01) continue;
+          const sx = ux * (u0 + u1 - 1) * pw * 0.5, sz = uz * (u0 + u1 - 1) * pw * 0.5;
+          push(out, px + sx, (fy + yB) / 2, pz + sz, (u1 - u0) * pw / 2, (yB - fy) / 2, thick / 2,
+            yaw, col, leaf, false).leaf = leaf;
+        }
         continue;
       }
       const wants = winH > 0.6 && rnd(plan.id, 5000 + fi * 97 + ei * 13 + i) < winChance;

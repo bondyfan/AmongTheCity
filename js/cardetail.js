@@ -77,6 +77,7 @@ export const STYLE = {
       [2.40, 0.28, 1.03, 0.96]],
   },
   truck: { wheel: 'steel', sweepF: 0.07, sweepR: 0.0, roofR: 0.16, arches: 'front', archGap: 0.08, sweepLenF: 0.45 },
+  semi: { wheel: 'steel', sweepF: 0.07, sweepR: 0.0, roofR: 0.16, arches: 'front', archGap: 0.08, sweepLenF: 0.45 },
   bus: { wheel: 'steel', sweepF: 0.07, sweepR: 0.05, roofR: 0.20, archGap: 0.07, crown: 0.05, sweepLenF: 0.5, sweepLenR: 0.45 },
   trolleybus: { wheel: 'steel', sweepF: 0.06, sweepR: 0.05, roofR: 0.16, archGap: 0.07, crown: 0.04, sweepLenF: 0.5, sweepLenR: 0.45 },
 };
@@ -510,6 +511,67 @@ DRESS.truck = (c) => {
   } else {
     for (const sg of [1, -1]) c.tail.add(box(0.2, 0.14, 0.03, sg * 0.86, 0.78, rz + 0.07), null, 0.9);
   }
+};
+
+// Round 8: the tractor of an articulated lorry (js/semitrailer.js hangs the
+// trailer on its fifth wheel). The cab is the box truck's, taller roof
+// deflector up to the trailer's 4 m, and behind it bare chassis: rails, the
+// fifth-wheel plate, tanks, the drive axle's mudguards. The box truck's lamps
+// at the end of the frame would sit under the trailer; the trailer carries
+// the rear lamps.
+DRESS.semi = (c) => {
+  const { S, K } = c, z0 = S.z0, W = K.wid / 2, rr = c.lod ? rect : rrect;
+  c.d('front', rr(-1.00, 1.60, 1.00, 2.27, 0.07, 3), M.gloss, { eps: 0.003, h: 0.12, hu: 0.2 });
+  c.g('front', rr(-0.975, 1.625, 0.975, 2.245, 0.06, 3), { h: 0.12, hu: 0.2 });
+  c.d('side', rr(z0 + 0.20, 1.52, z0 + 1.02, 2.20, 0.06, 2), M.gloss, { mirror: true, eps: 0.003, h: 0.12, hu: 0.2 });
+  c.g('side', rr(z0 + 0.225, 1.545, z0 + 0.995, 2.175, 0.05, 2), { mirror: true, h: 0.12, hu: 0.2 });
+  c.d('front', rr(-0.88, 0.98, 0.88, 1.44, 0.05, 2), M.gloss, { eps: 0.004, h: 0.1, hu: 0.2 });
+  c.near(() => { for (const y of [1.08, 1.20, 1.32]) c.d('front', rect(-0.82, y - 0.012, 0.82, y + 0.012), M.satin, { eps: 0.0065, h: 0.1, hu: 0.25 }); });
+  c.d('front', [[-1.06, 0.40], [1.06, 0.40], [1.06, 0.84], [-1.06, 0.84]], M.dark, { eps: 0.004, h: 0.1, hu: 0.1 });
+  headlamp(c, 0.60, 1.00, 0.52, 0.72, 0.52, 0.72, { drl: 'top', proj: 2, drlT: 0.02 });
+  c.near(() => {
+    c.d('front', rect(-0.99, 2.275, 0.99, 2.30), M.dark, { eps: 0.006, h: 0.1, hu: 0.25 });
+    c.d('side', rect(z0 + 1.10, 0.95, z0 + 1.109, 2.32), M.gloss, { mirror: true, eps: 0.0025, h: 0.2 });
+    c.d('side', rect(z0 + 0.10, 0.95, z0 + 0.109, 2.32), M.gloss, { mirror: true, eps: 0.0025, h: 0.2 });
+    c.d('side', rect(z0 + 0.14, 0.42, z0 + 0.34, 0.92), M.dark, { mirror: true, eps: 0.004, h: 0.12 });
+  });
+  for (const sg of [1, -1]) {
+    c.detail.add(box(0.10, 0.44, 0.07, sg * (W + 0.20), 1.88, z0 + 0.14), M.dark);
+    if (!c.lod) {
+      c.detail.add(box(0.24, 0.025, 0.03, sg * (W + 0.09), 2.07, z0 + 0.14), M.dark);
+      c.detail.add(box(0.24, 0.025, 0.03, sg * (W + 0.09), 1.69, z0 + 0.14), M.dark);
+    }
+  }
+  // roof deflector up to the trailer's roof line, and the cab's back wall
+  const top = 3.86, bz = S.z1 + 0.25;
+  {
+    const s = c.paint, b = s.base(), zr = bz, zf = z0 + 0.9, yf = S.topAt(zf, 0) - 0.01, wf = W * 0.80, wr = W * 0.92;
+    const v = [[-wf, yf, zf], [wf, yf, zf], [wr, yf, zr], [-wr, yf, zr], [wr, top - 0.04, zr], [-wr, top - 0.04, zr]].map((q, k) => s.v(q[0], q[1], q[2], b + k));
+    s.quad(v[0], v[1], v[4], v[5], 0, 1, -0.6);
+    const v2 = [[wf, yf, zf], [wr, yf, zr], [wr, top - 0.04, zr], [-wf, yf, zf], [-wr, yf, zr], [-wr, top - 0.04, zr]].map((q) => s.v(q[0], q[1], q[2]));
+    s.tri(v2[0], v2[1], v2[2], 1, 0, 0); s.tri(v2[3], v2[4], v2[5], -1, 0, 0);
+    // (the back of the deflector, so a car overtaking does not look into it)
+    const v3 = [[-wr, yf, zr], [wr, yf, zr], [wr, top - 0.04, zr], [-wr, top - 0.04, zr]].map((q) => s.v(q[0], q[1], q[2]));
+    s.quad(v3[0], v3[1], v3[2], v3[3], 0, 0, 1);
+  }
+  const D = c.detail, zEnd = S.z0 + K.len;
+  D.add(box(1.0, 0.30, zEnd - S.z1, 0, 0.78, (zEnd + S.z1) / 2), M.dark);                      // rails
+  D.add(box(2.0, 0.12, 1.4, 0, 1.06, K.axle - 0.45), M.dark);                                     // fifth-wheel plate
+  D.add(box(0.12, 0.30, 0.9, 0, 1.22, K.axle - 0.45), M.dark);                                    // its jaw
+  if (!c.lod) {
+    for (const sg of [1, -1]) {
+      const mg = new THREE.CylinderGeometry(K.wheelR + 0.10, K.wheelR + 0.10, 0.62, 12, 1, true, -Math.PI / 2, Math.PI);
+      mg.rotateZ(Math.PI / 2);
+      mg.translate(sg * (W - 0.33), K.wheelR + 0.02, K.axle);
+      D.add(mg, M.dark);
+      const tank = new THREE.CylinderGeometry(0.30, 0.30, 1.0, 12);
+      tank.rotateX(Math.PI / 2);
+      tank.translate(sg * (W - 0.36), 0.66, S.z1 + 0.75);
+      D.add(tank, M.satin);
+    }
+  } else D.add(box(K.wid - 0.4, 0.5, 1.0, 0, 0.66, S.z1 + 0.75), M.satin);
+  // a tail lamp each side at the end of the frame (seen with no trailer on)
+  for (const sg of [1, -1]) c.tail.add(box(0.16, 0.10, 0.03, sg * 0.86, 0.78, zEnd + 0.02), null, 0.9);
 };
 
 // SOR NS 12 in DPMP red: a flat face with a deep one-piece screen and a lit

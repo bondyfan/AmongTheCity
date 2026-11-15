@@ -289,7 +289,8 @@ import { TRAFFIC, LAYER_Y } from './config.js';
 import { distPointToSegment, roadGradeY, bridgeDeckHeight } from './geo.js';
 import { sfxAt } from './audio.js';
 import { worldT } from './worldclock.js';
-import { tierFor, MAX_UNITS } from './policetune.js';
+import { tierFor, MAX_UNITS, motorwayVmax } from './policetune.js';
+import { mwCornerV } from './mwtraffic.js';
 import { wantsFree, enterFree, freeStep, rejoin, BLEND } from './policeram.js';
 import { Officers } from './policecops.js';
 import { Gunfire } from './copfire.js';
@@ -891,14 +892,20 @@ export class Police {
   // you cannot see from where you stand. A linear walk of traffic.edges, run at
   // most once per RECRUIT_CD; the sight test runs only for a candidate that
   // already beats the best, so it is a handful of samples, not thousands.
-  _spawnRail(px, pz) {
+  _spawnRail(px, pz, any = false) {
     const edges = this.traffic?.edges;
     if (!edges || !edges.length) return null;
     let best = null, bestScore = Infinity;
     const r0 = SPAWN_MIN * SPAWN_MIN, r1 = SPAWN_MAX * SPAWN_MAX;
+    // Round 8: a player on a motorway carriageway is chased on THAT
+    // carriageway. A unit born on the other one, running at the player, can
+    // only reach them across the central barrier (or kilometres round an
+    // interchange): it is born behind them on their own side instead.
+    const pc = any ? null : this._carriageway(px, pz);
     for (let i = 0; i < edges.length; i++) {
       const e = edges[i];
       if (!e.pts || e.pts.length < 2 || !(e.len >= 20) || !(e.speed >= 7)) continue;
+      if (pc && (e.mw !== 1 || e.fdx * pc.dx + e.fdz * pc.dz < 0.5)) continue;
       if (e.road?.br) continue;                       // never born on a bridge deck
       const mx = e.mx ?? e.pts[0][0], mz = e.mz ?? e.pts[0][1];
       const dx = px - mx, dz = pz - mz, d2 = dx * dx + dz * dz;
@@ -911,7 +918,31 @@ export class Police {
       if (this._los(mx, mz, px, pz, d) && d < SEE_R + 40) score += SPAWN_SEEN_PEN;
       if (score < bestScore) { bestScore = score; best = e; }
     }
+    // (nothing on their side in range: the old rule, rather than no unit at all)
+    if (!best && pc) return this._spawnRail(px, pz, true);
     return best;
+  }
+
+  // The direction of the motorway carriageway the player is on, or null
+  // (within 8 m of a carriageway centreline: the lanes and the shoulder).
+  _carriageway(px, pz) {
+    const g = this.traffic?._egrid;
+    if (!g?.near) return null;
+    let best = 64, out = null;
+    g.near(px, pz, (e) => {
+      if (e.mw !== 1) return;
+      const P = e.pts;
+      for (let k = 0; k < P.length - 1; k++) {
+        const ax = P[k][0], az = P[k][1], ex = P[k + 1][0] - ax, ez = P[k + 1][1] - az;
+        const L2 = ex * ex + ez * ez;
+        if (!(L2 > 1e-6)) continue;
+        let t = ((px - ax) * ex + (pz - az) * ez) / L2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const qx = px - ax - ex * t, qz = pz - az - ez * t, d2 = qx * qx + qz * qz;
+        if (d2 < best) { best = d2; const L = Math.sqrt(L2); out = { dx: ex / L, dz: ez / L }; }
+      }
+    });
+    return out;
   }
 
   // ---------------------------------------------------------- releasing ----
@@ -1056,7 +1087,11 @@ export class Police {
       ? 1 + (bandMax - 1) * clamp01((dPlayer - near) / (BAND_FAR - near))
       : 1;
     const vk = chase ? COP_VK : IDLE_VK;
-    let tgt = Math.min(e.speed * vk * band, tier ? tier.vmax : COP_VMAX);
+    let ceil = tier ? tier.vmax : COP_VMAX;
+    // (round 8: on a motorway carriageway the ceiling follows the player up,
+    // js/policetune.js motorwayVmax, or no D11 chase could ever be won)
+    if (chase && e.mw === 1) ceil = motorwayVmax(ceil, this.P?.speed ?? 0);
+    let tgt = Math.min(e.speed * vk * band, ceil);
 
     // ---- corners, on traffic.js's own braking envelope -------------------
     // v² = vc² + 2·b·d, so speed bleeds off on the approach instead of at the
@@ -1069,7 +1104,9 @@ export class Police {
       if (d < 0) continue;
       const a = e.vertAng[k];
       if (a > 0.06) {
-        const v = Math.sqrt(cornerSpeed(a) ** 2 + 2 * BRAKE * d);
+        // (a motorway vertex is a long gentle turn, js/mwtraffic.js mwCornerV)
+        const vc = e.mw ? mwCornerV(a, Math.min(e.cum[k] - e.cum[k - 1], e.cum[k + 1] - e.cum[k])) : cornerSpeed(a);
+        const v = Math.sqrt(vc * vc + 2 * BRAKE * d);
         if (v < tgt) tgt = v;
       }
     }
@@ -1085,7 +1122,8 @@ export class Police {
         ang = Math.abs(Math.atan2(crs, dot));
       }
       if (ang > 0.06) {
-        const v = Math.sqrt(cornerSpeed(ang) ** 2 + 2 * BRAKE * Math.max(dEnd, 0));
+        const vc = e.mw && nx?.mw ? mwCornerV(ang, Math.min(e.cum[e.pts.length - 1] - e.cum[e.pts.length - 2], nx.cum[1])) : cornerSpeed(ang);
+        const v = Math.sqrt(vc * vc + 2 * BRAKE * Math.max(dEnd, 0));
         if (v < tgt) tgt = v;
       }
     }

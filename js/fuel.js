@@ -259,6 +259,18 @@ const L_PER_M = 1e-5;        // (l/100 km) → litres per metre: /100 then /1000
 const ACC_K = 0.18;          // extra fraction burned per m/s² of acceleration
 const ACC_CAP = 1.0;         // …never more than double. See the header.
 const MOVING = 0.05;         // m/s below which a car is parked, not creeping
+// SPEED (round 8, the D11). Drag grows with the square of speed, so a real car
+// at 130 km/h burns about a third more per kilometre than at 90, and the
+// brochure figure above is a town-and-country one. Nothing changes at or below
+// V_FREE (25 m/s, 90 km/h): every town drive and the range test
+// (tests/economy.test.mjs drives at 25 m/s) keep their numbers. Above it the
+// bill grows with the square of the excess, x1.35 at 130 km/h (36.1 m/s), and
+// stops at x1.8 (reached at 150 km/h), so the D11 at 200 costs a real
+// premium without a 96 km trip ever needing two stops in a full tank.
+const V_FREE = 25;           // m/s
+const V_130 = 130 / 3.6;     // m/s
+const SPEED_K = 0.35;        // the extra fraction at 130 km/h
+const SPEED_CAP = 1.8;
 // A single step is never more than main.js's 50 ms clamp. Anything larger is a
 // tab that was hidden or a debugger that was paused, and in both cases the car
 // did NOT travel vGround × dt metres while the screen was frozen — charging it
@@ -352,12 +364,23 @@ export function burn(car, dt) {
   const a = car._acc;
   const pen = a > 0 ? ACC_K * a : 0;
   const spec = specOf(car.kind);
-  const used = spec.per100 * L_PER_M * d * (1 + (pen < ACC_CAP ? pen : ACC_CAP));
+  const used = spec.per100 * L_PER_M * d * (1 + (pen < ACC_CAP ? pen : ACC_CAP)) * speedFactor(v);
 
   const left = levelOf(car) - used;
   // `used` is finite by construction (v, d and pen are all guarded above), so
   // this comparison cannot be tricked into zeroing a tank by a NaN.
   car._fuel = left > 0 ? left : 0;
+}
+
+/**
+ * How much more a metre costs at ground speed v (m/s) than the brochure says:
+ * 1 at or below 25 m/s, x1.35 at 130 km/h, never more than x1.8. See SPEED.
+ */
+export function speedFactor(v) {
+  if (!(v > V_FREE)) return 1;
+  const k = (v - V_FREE) / (V_130 - V_FREE);
+  const f = 1 + SPEED_K * k * k;
+  return f < SPEED_CAP ? f : SPEED_CAP;
 }
 
 /**

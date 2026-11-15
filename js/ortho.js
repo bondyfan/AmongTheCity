@@ -27,6 +27,8 @@
 
 import * as THREE from 'three';
 import { CHUNK, ORTHO, COLORS } from './config.js';
+import { quayLiftArray } from './quayground.js';
+import { GRID_SNAP } from './quayedge.js';
 
 // GetMap BBOX needs the local-meters ↔ WGS84 mapping. These constants mirror
 // the data pipeline EXACTLY (scripts/fetch-region.mjs → manifest/city JSON:
@@ -61,6 +63,18 @@ const WMS = 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServ
 // under a screen pixel anyway.
 const PX_NEAR = 2400, PX_MID = 512, PX_FAR = 256;
 const R_NEAR = 960, R_MID = 3000;    // m from the focus
+// AT SPEED (round 8, HORIZON): a car on the D11 at 130 to 200 km/h crossed a
+// new 2400² supertile every 2 to 4 s, each a 31 MB upload and its mip chain
+// in one frame, for ground that passes under the bonnet in a blur. Above
+// FAST_ON m/s the near tier is the mid one (0.94 m/px; the lanes and their
+// paint are geometry), and it comes back below FAST_OFF, held FAST_HOLD s so
+// a braking car does not flip the tiers and re-mesh the window twice. (Only
+// an upgrade re-meshes a chunk, city.js: going fast costs no rebuild at all.)
+const FAST_ON = 25, FAST_OFF = 18, FAST_HOLD = 2;
+// …and the uploads are paced: a photo that has landed is decoded off the
+// main thread (img.decode) and handed to the GPU by pump(), at most one near
+// photo (or UPLOAD_SMALL of the others) a frame.
+const UPLOAD_SMALL = 6;
 const LRU_MAX = 480;                 // entries — the tiers keep the bytes sane
 const VRAM_MAX = 640e6;              // …and this is the actual budget
 const pxBytes = (px) => px * px * 4 * 1.33;   // RGBA + the mip chain
@@ -94,6 +108,16 @@ function tileUrl(sx, sz, px) {
     + `&BBOX=${bbox}&WIDTH=${px}&HEIGHT=${px}&FORMAT=image/jpeg`;
 }
 
+/** A GetMap URL for any box of local metres (x0 < x1, z0 < z1) at px²: the
+ *  far landscape's photos (js/farterrain.js), same service and registration. */
+export function wmsUrl(x0, z0, x1, z1, px) {
+  const lonW = ORIGIN.lon + x0 / M_PER_LON, lonE = ORIGIN.lon + x1 / M_PER_LON;
+  const latN = ORIGIN.lat - z0 / M_PER_LAT, latS = ORIGIN.lat - z1 / M_PER_LAT;
+  const bbox = [lonW, latS, lonE, latN].map((v) => v.toFixed(7)).join(',');
+  return `${WMS}?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=0&STYLES=&CRS=CRS:84`
+    + `&BBOX=${bbox}&WIDTH=${px}&HEIGHT=${px}&FORMAT=image/jpeg`;
+}
+
 export function initOrtho(terrain = null) {
   const loader = new THREE.TextureLoader(); // default crossOrigin 'anonymous' — the WMS allows it
   const S = ORTHO.tile / CHUNK;             // chunks per supertile edge (480/120 = 4)
@@ -104,6 +128,8 @@ export function initOrtho(terrain = null) {
   const tiles = new Map();
   let bytes = 0;                            // live texture bytes, tracked
   let fx = 0, fz = 0;                       // the focus the tiers are measured from
+  let fast = false, slowFor = 0, lastT = 0;  // the speed rule above
+  const pending = [];                       // landed photos waiting for pump()
 
   function evict() {
     while (tiles.size > LRU_MAX || bytes > VRAM_MAX) {
@@ -119,7 +145,7 @@ export function initOrtho(terrain = null) {
     const T = ORTHO.tile;
     const cx = (sx + 0.5) * T - fx, cz = (sz + 0.5) * T - fz;
     const d = Math.hypot(cx, cz);
-    return d <= R_NEAR ? PX_NEAR : d <= R_MID ? PX_MID : PX_FAR;
+    return d <= (fast ? 0 : R_NEAR) ? PX_NEAR : d <= R_MID ? PX_MID : PX_FAR;
   }
 
   // The coarse version of this supertile, if one is already loaded. Upgrading
@@ -151,7 +177,11 @@ export function initOrtho(terrain = null) {
     const tex = loader.load(tileUrl(sx, sz, px),
       () => {
         if (tiles.get(key) !== entry) { tex.dispose(); return; } // evicted mid-flight
-        mat.map = tex; mat.color.set(0xffffff); mat.needsUpdate = true;
+        // (decoded off the main thread first where the browser can: an
+        // undecoded 2400² JPEG is decoded inside the upload, in the frame)
+        const img = tex.image;
+        const go = () => pending.push(key, entry);
+        if (img && typeof img.decode === 'function') img.decode().then(go, go); else go();
       },
       undefined,
       // The WMS reports its own failures as HTTP 200 + XML the image decoder
@@ -210,8 +240,33 @@ export function initOrtho(terrain = null) {
 
   // main.js calls this each frame with wherever the camera's attention is.
   // The tiers are measured from here, so the detail follows the player rather
-  // than the world origin — which is the whole point.
-  function setFocus(x, z) { fx = x; fz = z; }
+  // than the world origin, which is the whole point. `speed` (m/s, a car's)
+  // switches the near tier off at speed, see FAST_ON.
+  function setFocus(x, z, speed = 0) {
+    fx = x; fz = z;
+    const t = typeof performance !== 'undefined' ? performance.now() / 1000 : 0;
+    const dt = Math.min(0.5, Math.max(0, t - lastT));
+    lastT = t;
+    if (speed > FAST_ON) { fast = true; slowFor = 0; }
+    else if (fast && speed < FAST_OFF && (slowFor += dt) >= FAST_HOLD) fast = false;
+  }
+
+  // Put landed photos on their materials, a few a frame (see UPLOAD_SMALL).
+  // initTexture uploads now, inside this budget, instead of in the first
+  // render that happens to draw the chunk.
+  function pump(renderer) {
+    let small = 0;
+    while (pending.length) {
+      const key = pending[0], entry = pending[1];
+      const big = entry.bytes >= pxBytes(PX_NEAR);
+      if (big && small) break;               // a near photo gets a frame of its own
+      pending.splice(0, 2);
+      if (tiles.get(key) !== entry) { entry.tex.dispose(); continue; }   // evicted meanwhile
+      renderer?.initTexture?.(entry.tex);
+      entry.mat.map = entry.tex; entry.mat.color.set(0xffffff); entry.mat.needsUpdate = true;
+      if (big || ++small >= UPLOAD_SMALL) break;
+    }
+  }
 
   /**
    * Which detail tier chunk (cx, cz) would get RIGHT NOW. city.js compares this
@@ -227,7 +282,7 @@ export function initOrtho(terrain = null) {
     return pxFor(Math.floor(cx / S2), Math.floor(cz / S2));
   }
 
-  return { orthoGroundMesh, plan, setFocus, tierOf };
+  return { orthoGroundMesh, plan, setFocus, tierOf, pump };
 }
 
 /**
@@ -267,7 +322,9 @@ export function orthoQuad(cx, cz, plan, terrain, material) {
   if (terrain) {
     const p = geo.attributes.position, a = p.array;
     const ox = mesh.position.x, oz = mesh.position.z;
-    for (let i = 0; i < a.length; i += 3) a[i + 1] = terrain.heightAt(ox + a[i], oz + a[i + 2]);
+    // (by a Prague quay wall a vertex is lifted onto the wall's line instead
+    // of leaning a wedge out over the quay: js/quayground.js)
+    quayLiftArray(a, terrain, ox, oz, GRID_SNAP);
     p.needsUpdate = true;
     geo.computeVertexNormals();
   }

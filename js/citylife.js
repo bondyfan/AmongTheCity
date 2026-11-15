@@ -23,6 +23,7 @@ import { TramDraw } from './tramdraw.js';
 import { nightKOf } from './sky.js';
 import { tramGround } from './tramground.js';
 import { TramStops } from './tramstops.js';
+import { TramWait } from './tramwait.js';
 
 /**
  * Tie the crowd to the traffic. Every argument is something main.js already
@@ -80,15 +81,26 @@ export function wireCityLife({ city, traffic, peds, vehicles = null, world = nul
     const busy = peds.roadBusy;
     peds.roadBusy = (cx, cz, hw, need, stops) => busy(cx, cz, hw, need, stops) || trams.threatens(cx, cz, hw);
   }
+  // …people wait at their platforms, and get on and off (js/tramwait.js):
+  // the crowd asks the same three questions it asks of a bus
+  const tramWait = (trams && peds?.sites) ? new TramWait(trams, peds) : null;
+  if (tramWait) {
+    const eta = peds.busEta, at = peds.busAt, near = peds.busNear;
+    peds.busEta = (x, z, t) => Math.min(eta ? eta(x, z, t) : Infinity, tramWait.eta(x, z, t));
+    peds.busAt = (x, z) => tramWait.standingAt(x, z) ?? (at ? at(x, z) : null);
+    peds.busNear = (x, z) => tramWait.approaching(x, z) || (near ? near(x, z) : false);
+  }
   // …and their stops wear a post with the tram plate and the name
   const tramStops = trams?.draw ? new TramStops({ scene: vehicles.scene, trams,
     standY: world?.walkY ? (x, z) => world.walkY(x, z) : null }) : null;
+  if (trams) trams.wait = tramWait;
   if (trams && typeof window !== 'undefined') window.trams = trams;     // for checks in the console
   return {
-    buses, kerb, dress, names, masts, trams,
+    buses, kerb, dress, names, masts, trams, tramWait,
     update(dt, pos, t01) {
       buses?.update(dt, pos);
       trams?.update(dt, pos, t01);
+      tramWait?.update(pos);
       tramStops?.update(dt, pos);
       masts?.update(dt, pos);
       dress?.update(dt, t01);

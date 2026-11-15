@@ -10,10 +10,15 @@
 // and player all share one geometry truth.
 
 import { stampPartyWalls } from './partywalls.js';
+import { withRoadPatches } from './roadpatches.js';
+import { servicesInto } from './d11services.js';
 import { CHUNK, BRIDGE_Y, BRIDGE_RAMP } from './config.js';
 import { junctionOutline, indexBays, computeVerge, finishJunction, roadRank } from './streets.js';
 import { bayAt, WALK_W } from './streets.js';
-import { stitchStructures, deckNodeLevel } from './underpass.js';
+import { stitchStructures, stitchStructuresSteps, deckNodeLevel } from './underpass.js';
+import { releaseStructures } from './underpassrelease.js';
+import { workTurn as workTurnOn, queueJob as queueJobOn, guarded, addAllSteps, compactSteps, RELEASE_STATS } from './tilework.js';
+import { onQuay } from './quayedge.js';
 import { applyDip, underCap } from './dipchain.js';
 
 // how far ahead of the focus a tile starts loading. View streams ±600 m, so
@@ -41,6 +46,18 @@ const EVICT_REACH = 9000;
 // walker, rider or route schedule is on those ways (all of them live within
 // two kilometres of a viewer). false = the round-6 behaviour.
 export const RELEASE_GRAPHS = true;
+// …and since the round 7 polish the tile gives back its WAYS too: roads,
+// rails, signals and car parks leave the flat arrays, the junction pads and
+// crossing clusters built from them leave JUNCTIONS and CLUSTERS, and every
+// link stitching made from a neighbour's way to them is taken off again
+// (underpassrelease.js releaseStructures). Those were 110 of the 137 MB four central
+// Prague tiles still left behind after the graph release (57 MB of it the
+// junction registry alone, whose arms pinned every way). On return the tile
+// is indexed exactly as on a first visit: the same slot-derived ids, fresh
+// objects, indexJunctions and the stitching run again. Only the pois stay
+// listed (t.poisIn): the pump, police and bus-stop readers file them once and
+// they cost next to nothing. false = keep the ways as round 7 did.
+export const RELEASE_DATA = true;
 // Feature ids must survive that round trip unchanged: _id seeds the tree size
 // jitter, the lamp stagger and which shed is a fast-food franchise, so a
 // building that came back with a new id would come back as a different
@@ -517,8 +534,14 @@ function levelWayBase(way, terrain, pinList) {
     // ground a stamp DUG (a moat, js/terrainstamps.js) is not a hollow for
     // the levelling to fill: the road across the chateau's moat floor rode
     // over it on a 1.6 m bank and the bank's shoulders filled the moat back in
-    if (terrain.stampDelta && terrain.stampDelta(gx[i], gz[i]) < -0.25) hi[i] = ground[i] + 0.1;
+    const sd = terrain.stampDelta ? terrain.stampDelta(gx[i], gz[i]) : 0;
+    if (sd < -0.25) hi[i] = ground[i] + 0.1;
     lo[i] = Math.min(top[i] - GRADE_CUT, hi[i]);
+    // and in Prague a path on a lower quay or on a ramp or flight down to it
+    // (quayedge.onQuay) lies ON the stamped ground: the stamps are drawn to be
+    // walked, and a blurred path over a flight of stairs ran a metre under
+    // its treads and over its foot. (Carriageways keep their own grade.)
+    if (!way.d && onQuay(gx[i], gz[i])) { hi[i] = ground[i] + 0.1; lo[i] = ground[i]; }
   }
 
   // blur, then put the bounds back, and again — a bound applied once to a
@@ -980,8 +1003,11 @@ export function bridgeDeckHeight(way, dist, terrain) {
     const first = way.p[0], last = way.p[way.p.length - 1];
     // (a drivable deck with a road at one end only holds that road's level:
     // the survey under its other end is the dell, and the ramp down into it
-    // was a 25 % wall on nábřeží Václava Havla)
-    const a0 = way._ap0 ?? (way.d ? way._ap1 : undefined), a1 = way._ap1 ?? (way.d ? way._ap0 : undefined);
+    // was a 25 % wall on nábřeží Václava Havla. Unless that other end is a
+    // joint with more decks: it then holds the joint's level, which every
+    // member meeting there shares, js/underpass.js deckNodeLevel)
+    const a0 = way._ap0 ?? (way.d && !way._apN0 ? way._ap1 : undefined);
+    const a1 = way._ap1 ?? (way.d && !way._apN1 ? way._ap0 : undefined);
     const start = reach(a0, first, 0);
     const end = reach(a1, last, 1);
     // the grade each approach arrives with, along the deck (the ramps leave it on that)
@@ -1258,7 +1284,7 @@ function segDist(a1x, a1z, a2x, a2z, b1x, b1z, b2x, b2z) {
   return { d: best, x: bx, z: bz };
 }
 
-function linkOverlaps(roads, at) {
+function* linkOverlaps(roads, at) {
   const usable = roads.filter((r) => r.d && !r.br && r.p?.length > 1 && r.w > 0);
   if (usable.length < 2) return;
   for (const r of usable) r._len ??= polylineLength(r.p);
@@ -1267,7 +1293,9 @@ function linkOverlaps(roads, at) {
   // — the first version of this pass sampled every 40 m and missed 297 of the
   // 368 bad overlaps in the tile, which are exactly the crossings.
   const grid = new Map();
+  let built = 0;
   for (const r of usable) {
+    if ((++built & 127) === 0) yield;
     let run = 0;
     for (let i = 0; i < r.p.length - 1; i++) {
       const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
@@ -1284,8 +1312,13 @@ function linkOverlaps(roads, at) {
       run += L;
     }
   }
+  yield;
   const made = new Set();
+  let step = 0;
   for (const segs of grid.values()) {
+    // (a bucket of the two D11 carriageways, which overlap along their whole
+    // length, is the expensive kind: every pair is a hit and a nearestOn)
+    if ((++step & 63) === 0) yield;
     for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {
       const A = segs[i].r, B = segs[j].r;
       if (A === B || (A.l ?? 0) !== (B.l ?? 0)) continue;
@@ -1317,9 +1350,27 @@ const J_MAX_TRIM = 0.35;    // never eat more than this fraction of a short road
 const CLUSTER_LINK = 32;    // m of shared way that makes two nodes one crossing
 const CLUSTER_RANK = 2;     // …if that way is at least a residential street
 export function indexJunctions(roads) {
+  const it = indexJunctionsSteps(roads);
+  let r;
+  do r = it.next(); while (!r.done);
+  const land = r.value();
+  do r = land.next(); while (!r.done);
+}
+// indexJunctions in steps (round 8, HORIZON: one D11 tile spent up to 250 ms
+// here in one frame, almost all of it in linkOverlaps). The steps only touch
+// THIS call's ways and nodes; nothing reaches JUNCTIONS or CLUSTERS until
+// the function it returns is called, which registers the pads, forms the
+// clusters and shapes them in one go (geo.js indexPayloadSteps calls it in
+// the step that puts the tile's roads in the index). linkOverlaps used to
+// run last; it runs before the clusters now, which therefore leave its
+// pins out: they are not junction pins, and the shaping never read them.
+function* indexJunctionsSteps(roads) {
   const at = new Map();
   const fresh = [];            // nodes registered by THIS call, shaped at the end
+  const cand = [];             // [chunk key, node]: the pads, registered on landing
+  let step = 0;
   for (const r of roads) {
+    if ((++step & 255) === 0) yield;
     if (!r.d || !r.p || r.p.length < 2) continue;
     for (let i = 0; i < r.p.length; i++) {
       const k = J_KEY(r.p[i][0], r.p[i][1]);
@@ -1342,6 +1393,7 @@ export function indexJunctions(roads) {
   // non-bridge road sharing the node and remember a point ten metres along it,
   // away from the water. bridgeDeckHeight samples the terrain there.
   for (const e of at.values()) {
+    if ((++step & 255) === 0) yield;
     for (const a of e.arms) {
       if (!a.r.br || !a.end) continue;
       const road = e.arms.find((o) => o.r !== a.r && !o.r.br && o.r.p.length > 1);
@@ -1418,7 +1470,21 @@ export function indexJunctions(roads) {
     // Bucketed by the chunk that holds the CENTRE, so a junction straddling a
     // chunk border is drawn once. A chunk build then costs one map lookup
     // rather than a scan of every junction in the world.
-    const k = chunkKey(e.x, e.z);
+    cand.push(chunkKey(e.x, e.z), e);
+  }
+  // …and finally the overlaps that never got a node of their own.
+  yield* linkOverlaps(roads, at);
+  yield;
+  return () => landJunctions(roads, cand, fresh);
+}
+
+// The landing half of indexJunctions: what other tiles' chunks can see. The
+// pads and the clusters are registered in its first step; the outlines are
+// shaped in the steps after, each only if no reader has shaped it already
+// (junctionHull and clusterHull shape on first use, the same function).
+function* landJunctions(roads, cand, fresh) {
+  for (let i = 0; i < cand.length; i += 2) {
+    const k = cand[i], e = cand[i + 1];
     let list = JUNCTIONS.get(k);
     if (!list) JUNCTIONS.set(k, list = []);
     if (!list.some((o) => o.x === e.x && o.z === e.z)) { list.push(e); fresh.push(e); }
@@ -1450,7 +1516,8 @@ export function indexJunctions(roads) {
     // forecourt). A crossing is made of streets.
     if (roadRank(r) < CLUSTER_RANK) continue;
     if (!r._pins || r._pins.length < 2) continue;
-    const ps = [...r._pins].sort((p1, p2) => p1.s - p2.s);
+    const ps = r._pins.filter((p) => !p.node._ovl).sort((p1, p2) => p1.s - p2.s);   // (see indexJunctionsSteps)
+    if (ps.length < 2) continue;
     for (let i = 0; i < ps.length - 1; i++) {
       if (ps[i + 1].s - ps[i].s < CLUSTER_LINK
         && ps[i].node.pad !== undefined && ps[i + 1].node.pad !== undefined
@@ -1502,10 +1569,13 @@ export function indexJunctions(roads) {
   // Shaped here rather than on first use, because the outline decides how far
   // each mouth reaches (lg.m), and the ribbons need that before any chunk is
   // built: their kerb stops where the junction's kerb starts.
-  for (const cl of newClusters) shapeCluster(cl);
-  for (const e of fresh) if (!e._cluster && !e._ring) shapeJunction(e);
-  // …and finally the overlaps that never got a node of their own.
-  linkOverlaps(roads, at);
+  yield;
+  let step = 0;
+  for (const cl of newClusters) { if (cl._ring === undefined) shapeCluster(cl); if ((++step & 31) === 0) yield; }
+  for (const e of fresh) {
+    if (!e._cluster && !e._ring && e._hullRing === undefined) shapeJunction(e);
+    if ((++step & 31) === 0) yield;
+  }
 }
 
 // ---- roundabouts have a MIDDLE ------------------------------------------------
@@ -1746,6 +1816,11 @@ function segCross(ax, az, bx, bz, cx, cz, dx, dz) {
 }
 
 export function indexBridgeCrossings(roads, rails) {
+  const it = indexBridgeCrossingsSteps(roads, rails);
+  while (!it.next().done);
+}
+// (in steps for indexPayloadSteps: only this tile's ways are written)
+function* indexBridgeCrossingsSteps(roads, rails) {
   const bridges = roads.filter((r) => r.br && r.p?.length > 1);
   if (!bridges.length) return;
   // A bridge shares nodes with the roads it JOINS; those are junctions, not
@@ -1770,7 +1845,9 @@ export function indexBridgeCrossings(roads, rails) {
     }
   };
   for (const r of rails ?? []) if (r.p?.length > 1) put(r, CLEAR_RAIL);
-  for (const r of roads) if (!r.br && r.p?.length > 1) put(r, clearanceOver(r));
+  let step = 0;
+  for (const r of roads) { if (!r.br && r.p?.length > 1) put(r, clearanceOver(r)); if ((++step & 511) === 0) yield; }
+  yield;
 
   // ---- chained bridges are ONE structure ---------------------------------
   // A viaduct arrives from OSM as a chain of bridge ways sharing endpoints.
@@ -1839,7 +1916,9 @@ export function indexBridgeCrossings(roads, rails) {
       chain.headEnd = chain.members[0]._chainRev ? chain.members[0].p.length - 1 : 0;
     }
   }
+  yield;
   for (const b of bridges) {
+    if ((++step & 15) === 0) yield;
     const nodes = new Set(b.p.map(([x, z]) => J_KEY(x, z)));
     const found = [];
     for (let i = 0; i < b.p.length - 1; i++) {
@@ -2008,6 +2087,36 @@ export const JUNCTIONS = new Map();
 // has to be nameable and copyable. clustersIn() stays the reader for callers
 // that are on this side of the boundary.
 export const CLUSTERS = new Map();
+
+// A released tile's pads (RELEASE_DATA). indexJunctions only ever sees one
+// tile's ways, so a record with a released arm is that tile's own (measured
+// on six Pardubice and four Prague tiles: not one record had arms from two
+// tiles, and no record was dropped as a duplicate of a neighbour's), and it
+// goes whole; a crossing cluster goes with its members. In place: a bucket
+// array may be held by a reader for the length of a build.
+function* releaseJunctions(ways, keys) {
+  const hit = (e) => e.arms.some((a) => ways.has(a.r));
+  let n = 0, step = 0;
+  for (const k of keys) {
+    if ((++step & 1023) === 0) yield;
+    const l = JUNCTIONS.get(k);
+    if (!l) continue;
+    let w = 0;
+    for (let i = 0; i < l.length; i++) if (!hit(l[i])) l[w++] = l[i];
+    n += l.length - w;
+    l.length = w;
+    if (!w) JUNCTIONS.delete(k);
+  }
+  yield;
+  for (const [k, l] of CLUSTERS) {
+    if ((++step & 1023) === 0) yield;
+    let w = 0;
+    for (let i = 0; i < l.length; i++) if (!l[i].members.some(hit)) l[w++] = l[i];
+    l.length = w;
+    if (!w) CLUSTERS.delete(k);
+  }
+  return n;
+}
 
 export function junctionsIn(chunkK) {
   const l = JUNCTIONS.get(chunkK) ?? null;
@@ -2297,23 +2406,73 @@ function pave(r) {
 }
 
 // roads and polygons never left, so re-indexing them would double them.
-function indexPayload(city, data, touched, slot = 0, heavyOnly = false, kept = null) {
+//
+// A GENERATOR since round 8 (HORIZON): one rural D11 tile used to cost 40 to
+// 400 ms of main thread here in ONE frame, a Prague tile two seconds, so in
+// play (city.indexSliceMs, set by main.js) loadTile drains it a few
+// milliseconds a frame; at boot and in tests indexPayload below drains it at
+// once. Everything up to the landing only works on this tile's own objects
+// and files them in a private STAGE index: nothing the game reads (the chunk
+// index, the flat arrays, JUNCTIONS) sees the tile until the stage is merged
+// in, and what needs the merged index (the junction pads and their shapes,
+// the bridge stitching, the bays) runs in the steps after it. So the result
+// is the same, list for list and in the same order, as the old single pass
+// (tests/tile-slices.test.mjs compares the two).
+function indexPayload(city, data, touched, slot = 0, heavyOnly = false, kept = null, poisIn = false) {
+  const it = indexPayloadSteps(city, data, touched, slot, heavyOnly, kept, poisIn);
+  for (;;) { const r = it.next(); if (r.done) return r.value; }
+}
+const IDX_STEP = 256;          // features between two yields of a loop below
+function* stepEach(list, fn) {
+  for (let i = 0; i < list.length; i++) { fn(list[i]); if ((i % IDX_STEP) === IDX_STEP - 1) yield; }
+}
+// (bucketize and bucketizeLine one slice at a time, into the stage)
+function* bucketizeSteps(index, list, kind, touched, line = false) {
+  for (let i = 0; i < list.length; i += IDX_STEP) {
+    (line ? bucketizeLine : bucketize)(index, list.slice(i, i + IDX_STEP), kind, touched);
+    yield;
+  }
+}
+// The stage into the city's index: a cell nobody had yet is taken whole, a
+// shared one gets this tile's features after the ones already filed there,
+// exactly where the old in-place bucketize put them.
+function mergeStage(index, stage) {
+  for (const [key, s] of stage) {
+    const cell = index.get(key);
+    if (!cell) { index.set(key, s); continue; }
+    for (const kind of CELL_KINDS) {
+      const add = s[kind];
+      if (add === NONE) continue;
+      if (cell[kind] === NONE) cell[kind] = add; else appendAll(cell[kind], add);
+    }
+  }
+}
+function* indexPayloadSteps(city, data, touched, slot = 0, heavyOnly = false, kept = null, poisIn = false) {
+  servicesInto(data);   // fuel the tiles lack, forecourt canopies lifted (js/d11services.js)
   let next = slot * IDS_PER_TILE;
   const stamp = (list) => { for (const f of list ?? []) f._id = ++next; return list ?? []; };
+  const stage = new Map();
+  let landJ = null;            // indexJunctions' landing half, run when the roads land
   const buildings = stamp(data.buildings);
+  yield;
   stampPartyWalls(buildings);   // f._pw: shared walls, this tile only (partywalls.js)
+  yield;
   // trees are bare [x,z] pairs — wrap so they can carry _home/_id like the rest
   const trees = (data.trees ?? []).map(t => ({ p: [t], _id: ++next }));
-  bucketize(city.chunkIndex, buildings, 'buildings', touched);
-  bucketize(city.chunkIndex, trees, 'trees', touched);
-  appendAll(city.buildings, buildings);
-  appendAll(city.trees, trees);
+  yield* bucketizeSteps(stage, buildings, 'buildings', touched);
+  yield* bucketizeSteps(stage, trees, 'trees', touched);
   const heavy = { buildings, trees };
-  if (heavyOnly) return { roads: [], signals: [], heavy };
+  if (heavyOnly) {
+    mergeStage(city.chunkIndex, stage);
+    appendAll(city.buildings, buildings);
+    appendAll(city.trees, trees);
+    return { roads: [], signals: [], heavy };
+  }
 
   // ids for the resident layers continue past the heavy ones in the same slot
   let roads = stamp(data.roads), rails = stamp(data.rails), paved = stamp(data.paved);
   const water = stamp(data.water), green = stamp(data.green);
+  roads = withRoadPatches(roads, data.tx, data.tz, (slot + 1) * IDS_PER_TILE);   // ways the build dropped (js/roadpatches.js)
   if (kept) {
     // A tile coming back from DEEP eviction (evictDeep below): its ways never
     // left, because the traffic, route and walker graphs hold them, so the
@@ -2322,53 +2481,40 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false, kept = n
     roads = kept.roads; rails = kept.rails;
     paved = paved.map((f) => kept.lots.get(f._id) ?? f);
   } else {
-    for (const r of roads) { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); pave(r); }
-    for (const r of rails) r.p = smoothBends(r.p, r.br);
-    indexJunctions(roads);
-    indexBridgeCrossings(roads, rails);
+    yield* stepEach(roads, (r) => { r.p = smoothBends(r.p, r.br); r._len = polylineLength(r.p); pave(r); });
+    yield* stepEach(rails, (r) => { r.p = smoothBends(r.p, r.br); });
+    landJ = yield* indexJunctionsSteps(roads);
+    yield* indexBridgeCrossingsSteps(roads, rails);
+    yield;
     indexRoundabouts(roads);
+    yield;
   }
-  bucketize(city.chunkIndex, roads, 'roads', touched);
-  bucketize(city.chunkIndex, rails, 'rails', touched);
-  // bridge ends that meet a way of another tile, rail decks, underpasses
-  stitchStructures(city, roads, rails);
-  bucketize(city.chunkIndex, water, 'water', touched);
-  bucketize(city.chunkIndex, green, 'green', touched);
-  bucketize(city.chunkIndex, paved, 'paved', touched);
-  // lay-bys: the kerb steps out around them (js/streets.js)
-  if (!kept) indexBays(city, data.pois);
-  // (what deep eviction keeps never left the flat arrays: roads, rails, the
-  // car parks, the pois and the signals; see evictDeep)
-  if (!kept) appendAll(city.roads, roads);
-  if (!kept) appendAll(city.rails, rails);
-  appendAll(city.water, water);
-  appendAll(city.green, green);
-  appendAll(city.paved, kept ? paved.filter((f) => !kept.lots.has(f._id)) : paved);
-  appendAll(city.waterways, data.waterways ?? []); // not bucketized — minimap-only
-  if (!kept) appendAll(city.pois, data.pois ?? []); // (not bucketized: HUD, labels)
+  yield* bucketizeSteps(stage, roads, 'roads', touched);
+  yield* bucketizeSteps(stage, rails, 'rails', touched);
+  yield* bucketizeSteps(stage, water, 'water', touched);
+  yield* bucketizeSteps(stage, green, 'green', touched);
+  yield* bucketizeSteps(stage, paved, 'paved', touched);
   const signals = kept ? [] : data.signals ?? [];  // [[x,z],...]: traffic lights v3
-  appendAll(city.signals, signals);
   // road signs — typed {p:[x,z], k:'give_way'|'stop'|'priority'}; wrapped like
   // trees so bucketize can hand each chunk its own posts
   const signs = (data.signs ?? []).map((g) => ({ p: [g.p], k: g.k, _id: ++next }));
-  bucketize(city.chunkIndex, signs, 'signs', touched);
+  yield* bucketizeSteps(stage, signs, 'signs', touched);
   // pedestrian crossings — bare [x,z] zebra points on the way
   const crossings = (data.crossings ?? []).map((c) => ({ p: [c], _id: ++next }));
-  bucketize(city.chunkIndex, crossings, 'crossings', touched);
+  yield* bucketizeSteps(stage, crossings, 'crossings', touched);
   // transmission lines — every vertex is a pylon, wires hang between them.
   // Bucketized like any polyline so each chunk raises its own towers.
   const power = stamp(data.power);
   // (a tile's line by the cells it stands in; the one-file city, which is as
   // big as it will ever get, keeps the box it always had)
-  (slot ? bucketizeLine : bucketize)(city.chunkIndex, power, 'power', touched);
-  appendAll(city.power, power);
+  yield* bucketizeSteps(stage, power, 'power', touched, !!slot);
   // street furniture — every prop is a point, wrapped like trees so bucketize
   // can hand each chunk its own benches, bins, lamps and crosses
   const furniture = (data.furniture ?? []).map((f) => ({ p: [f.p], k: f.k, a: f.a, _id: ++next }));
-  bucketize(city.chunkIndex, furniture, 'furniture', touched);
+  yield* bucketizeSteps(stage, furniture, 'furniture', touched);
   // retardéry ride the road they sit on, so they are points too
   const calming = (data.calming ?? []).map((c) => ({ p: [c.p], k: c.k, _id: ++next }));
-  bucketize(city.chunkIndex, calming, 'calming', touched);
+  yield* bucketizeSteps(stage, calming, 'calming', touched);
   // THE NAMED TRADE OSM SURVEYED — {p:[[x,z]], t:'supermarket'|'cafe'|…, n:name}.
   // A venue standing in a footprint of its own was folded INTO that building at
   // build time, so its name is already on `f.n` and its trade on `f.u`
@@ -2379,11 +2525,39 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false, kept = n
   // the flat list holds every tile not yet deep-evicted (evictDeep), so a
   // linear scan would be the size of everywhere the session has been lately.
   const venues = (data.venues ?? []).map((v) => ({ p: [v.p], t: v.t, n: v.n, b: v.b, _id: ++next }));
-  bucketize(city.chunkIndex, venues, 'venues', touched);
-  appendAll(city.venues, venues);
+  yield* bucketizeSteps(stage, venues, 'venues', touched);
   // fences and walls are POLYLINES: one owner chunk per line, like a road
   const barriers = stamp(data.barriers);
-  bucketize(city.chunkIndex, barriers, 'barriers', touched);
+  yield* bucketizeSteps(stage, barriers, 'barriers', touched);
+  yield;
+
+  // ---- the tile lands: the index first, then what reads it -----------------
+  // (in a few steps: the tile is 2.6 km ahead of the player when it lands, so
+  // nothing in view is built between them, and every cell they touch is
+  // re-queued once the tile is through, CityWorld's listener)
+  mergeStage(city.chunkIndex, stage);
+  yield;
+  if (landJ) yield* landJ();
+  appendAll(city.buildings, buildings);
+  appendAll(city.trees, trees);
+  yield;
+  // bridge ends that meet a way of another tile, rail decks, underpasses
+  yield* stitchStructuresSteps(city, roads, rails);
+  yield;
+  // lay-bys: the kerb steps out around them (js/streets.js)
+  if (!kept) indexBays(city, data.pois);
+  // (what deep eviction keeps never left the flat arrays: roads, rails, the
+  // car parks, the pois and the signals; see evictDeep)
+  if (!kept) appendAll(city.roads, roads);
+  if (!kept) appendAll(city.rails, rails);
+  appendAll(city.water, water);
+  appendAll(city.green, green);
+  appendAll(city.paved, kept ? paved.filter((f) => !kept.lots.has(f._id)) : paved);
+  appendAll(city.waterways, data.waterways ?? []); // not bucketized: minimap-only
+  if (!kept && !poisIn) appendAll(city.pois, data.pois ?? []); // (not bucketized: HUD, labels; listed once, RELEASE_DATA)
+  appendAll(city.signals, signals);
+  appendAll(city.power, power);
+  appendAll(city.venues, venues);
   appendAll(city.barriers, barriers);
   // everything this tile filed outside its heavy half, for evictDeep
   const res = { roads, rails, water, green, paved, signs, crossings, power, furniture,
@@ -2395,6 +2569,33 @@ function indexPayload(city, data, touched, slot = 0, heavyOnly = false, kept = n
 }
 
 const _resolved = Promise.resolve(); // ensureTiles' no-work answer, allocated once
+
+// ---- a tile's indexing, a few milliseconds a frame (round 8, HORIZON) -----
+// What one tile arrival costs the main thread, slice by slice: slices run,
+// the longest one (ms, indexing and listeners apart), and the tile count.
+// tests/tile-slices.test.mjs and the dev probe read it (city.indexStats).
+export const INDEX_STATS = { tiles: 0, slices: 0, maxMs: 0, lastMs: 0, listenerMaxMs: 0, over8: 0 };
+const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+function noteSlice(ms, listener) {
+  INDEX_STATS.slices++; INDEX_STATS.lastMs = ms;
+  if (ms > 8) INDEX_STATS.over8++;
+  if (listener) { if (ms > INDEX_STATS.listenerMaxMs) INDEX_STATS.listenerMaxMs = ms; }
+  else if (ms > INDEX_STATS.maxMs) INDEX_STATS.maxMs = ms;
+}
+// Run `it` to its end: at once when city.indexSliceMs is unset (boot, tests),
+// else that many milliseconds a frame on the index gate. Resolves to its value.
+async function drainSliced(city, it) {
+  const budget = city.indexSliceMs;
+  if (!(budget < Infinity)) { for (;;) { const r = it.next(); if (r.done) return r.value; } }
+  for (;;) {
+    const t0 = nowMs();
+    let r;
+    do r = it.next(); while (!r.done && nowMs() - t0 < budget);
+    noteSlice(nowMs() - t0, false);
+    if (r.done) return r.value;
+    await indexGate();
+  }
+}
 
 // One tile is indexed per frame, at most, and never in the same task as the
 // one before it. Everything queued here is main-thread work measured in tens of
@@ -2415,6 +2616,13 @@ function indexGate() {
   }));
   return _indexChain;
 }
+
+// ---- a tile's release, a few milliseconds per frame (js/tilework.js) -------
+// Slim and deep eviction and every graph's release are jobs of small steps
+// that run up to a few milliseconds a frame on this same gate, and tile
+// indexing takes its turn in the same queue (workTurn).
+const workTurn = () => workTurnOn(indexGate);
+const queueJob = (steps, onEnd) => queueJobOn(indexGate, steps, onEnd);
 
 export async function loadCity(url) {
   const res = await fetch(url);
@@ -2449,7 +2657,13 @@ export async function loadCity(url) {
   const releaseListeners = [];
   city.onTileReleased = (cb) => { releaseListeners.push(cb); };
   city.releaseGraphs = RELEASE_GRAPHS;
-  city.releasing = 0;              // release slices still queued (tests wait on it)
+  city.releaseData = RELEASE_GRAPHS && RELEASE_DATA;
+  city.releasing = 0;              // release jobs still queued (tests wait on it)
+  city.releaseStats = RELEASE_STATS;
+  city.indexStats = INDEX_STATS;
+  // Milliseconds a frame a tile's indexing may take (drainSliced); main.js
+  // sets it in play. Unset, a tile is indexed in one go as before.
+  city.indexSliceMs = Infinity;
   // A building the player has wrecked must not be evicted out from under the
   // wreck; interiors installs this guard.
   city.keepAlive = null;
@@ -2519,10 +2733,14 @@ export async function loadCity(url) {
       // 700 m/s. The gate serialises the indexing and puts each tile on its own
       // frame: the same total work, but never two hitches back to back, and
       // never one while the renderer is trying to present.
-      await indexGate();
+      // (and after any release queued before it: see workTurn)
+      const finish = await workTurn();
+      try {
       const touched = new Set();
       const kept = back === 0 ? t.kept : null;
-      const { roads, signals, heavy, res: filed } = indexPayload(city, payload, touched, t.slot, back === 3, kept);
+      const poisIn = back === 0 && !!t.poisIn;     // a released tile's pois never left (RELEASE_DATA)
+      const { roads, signals, heavy, res: filed } = await drainSliced(city,
+        indexPayloadSteps(city, payload, touched, t.slot, back === 3, kept, poisIn));
       // A LOADED TILE OWNS ITS CELLS. A chunk with no cell is "outside the
       // mapped city" and is not meshed at all (meshes.buildChunkMeshesGen), so
       // whether open country had ground used to hang on some feature's
@@ -2540,6 +2758,7 @@ export async function loadCity(url) {
       }
       t.heavy = heavy;
       t.state = 2;
+      INDEX_STATS.tiles++;
       // what deep eviction has to find again: every cell this tile filed
       // anything in, and the box they span
       if (back !== 3) { t.res = filed; t.cells = touched; t.ext = cellsBox(touched); t.kept = null; }
@@ -2554,8 +2773,24 @@ export async function loadCity(url) {
       // ways let go of this tile's, and builds them again from these.
       const again = kept && t.released;
       t.released = false;
-      for (const cb of listeners) cb({ roads: again ? kept.roads : roads, signals: again ? kept.signals ?? [] : signals,
-        pois: back === 3 || kept ? [] : payload.pois ?? [], tx: t.tx, tz: t.tz, cells: touched, again });
+      const ev = { roads: again ? kept.roads : roads, signals: again ? kept.signals ?? [] : signals,
+        pois: back === 3 || kept || poisIn ? [] : payload.pois ?? [], tx: t.tx, tz: t.tz, cells: touched, again,
+        ids: [t.slot * IDS_PER_TILE, (t.slot + 1) * IDS_PER_TILE] };
+      // In play every listener gets a frame of its own (the traffic graph,
+      // the route planner, the walkers and the cycle net each cost tens of
+      // milliseconds on a rural tile), in the order they registered, so
+      // CityWorld's re-queue still comes first; at boot and in tests they run
+      // together as they always did. One that returns a generator is drained
+      // in slices like the indexing.
+      const sliced = city.indexSliceMs < Infinity;
+      for (const cb of listeners) {
+        if (sliced) await indexGate();
+        const t0 = sliced ? nowMs() : 0;
+        const it = cb(ev);
+        if (sliced) noteSlice(nowMs() - t0, true);
+        if (it && typeof it.next === 'function') await drainSliced(city, it);
+      }
+      } finally { finish(); }
     } catch (err) {
       t.state = back;
       throw err;
@@ -2596,30 +2831,12 @@ export async function loadCity(url) {
       if (distSqTo(t, x, z) <= EVICT_REACH * EVICT_REACH) continue;
       const { buildings, trees } = t.heavy;
       if (city.keepAlive && buildings.some(city.keepAlive)) continue;
-      const gone = new Set(buildings);
-      for (const f of trees) gone.add(f);
-      const cells = new Set();
-      for (const f of buildings) forEachCellOf(f, (k) => cells.add(k));
-      for (const f of trees) forEachCellOf(f, (k) => cells.add(k));
-      for (const key of cells) {
-        const cell = city.chunkIndex.get(key);
-        if (!cell) continue;
-        cell.buildings = cell.buildings.filter(f => !gone.has(f));
-        cell.trees = cell.trees.filter(f => !gone.has(f));
-        if (!cell.buildings.length) cell.buildings = NONE;
-        if (!cell.trees.length) cell.trees = NONE;
-      }
-      // in place — every consumer holds this array by reference, forever
-      const compact = (arr) => {
-        let w = 0;
-        for (let i = 0; i < arr.length; i++) if (!gone.has(arr[i])) arr[w++] = arr[i];
-        arr.length = w;
-      };
-      compact(city.buildings);
-      compact(city.trees);
+      // slim at once for ensureTiles; the work itself is a job (queueJob),
+      // and a heavy half coming back waits for it to finish
       t.heavy = null;
       t.state = 3;
-      for (const cb of unloadListeners) cb({ tx: t.tx, tz: t.tz, cells });
+      city.releasing++;
+      queueJob(slimSteps(t, buildings, trees), () => { city.releasing--; });
       // ONE per call. Each eviction walks every cell the tile touched and then
       // compacts the whole (six-figure) building array, and a jet leaves half a
       // dozen tiles behind at once — doing them all in one tick is a freeze in
@@ -2636,6 +2853,27 @@ export async function loadCity(url) {
     }
   }
 
+  function* slimSteps(t, buildings, trees) {
+    const gone = new Set();
+    yield* addAllSteps(gone, buildings);
+    yield* addAllSteps(gone, trees);
+    const cells = new Set();
+    for (let i = 0; i < buildings.length; i++) { forEachCellOf(buildings[i], (k) => cells.add(k)); if ((i & 511) === 511) yield; }
+    for (let i = 0; i < trees.length; i++) { forEachCellOf(trees[i], (k) => cells.add(k)); if ((i & 2047) === 2047) yield; }
+    let n = 0;
+    for (const key of cells) {
+      const cell = city.chunkIndex.get(key);
+      if (!cell) continue;
+      if (cell.buildings !== NONE) { const l = cell.buildings.filter(f => !gone.has(f)); cell.buildings = l.length ? l : NONE; }
+      if (cell.trees !== NONE) { const l = cell.trees.filter(f => !gone.has(f)); cell.trees = l.length ? l : NONE; }
+      if ((++n & 255) === 0) yield;
+    }
+    // in place, every consumer holds these arrays by reference, forever
+    yield* compactSteps(city.buildings, gone);
+    yield* compactSteps(city.trees, gone);
+    for (const cb of unloadListeners) cb({ tx: t.tx, tz: t.tz, cells });
+  }
+
   // ---- DEEP EVICTION: the rest of a tile's data, not only its houses -------
   // Going slim gives back the buildings and trees, and that used to be all:
   // a teleport tour of six places (13 Nov 2026, headless, city data only) ended
@@ -2650,6 +2888,9 @@ export async function loadCity(url) {
   // co-op peer this client knows of (city.evictHolds) gives back the rest too,
   // and goes back to state 0 so it is fetched again when it comes in reach.
   //
+  // (What follows is the round 7 rule, still what RELEASE_DATA = false gives.
+  // With it on, the default since the round 7 polish, the ways, signals and
+  // car parks go too and only the pois stay listed: see RELEASE_DATA.)
   // What does NOT go, and why: the roads and rails, the pois, the signals and
   // the car parks. The traffic, navigation, cyclist and walker graphs and the
   // trains hold the way objects for the whole session (traffic.js _growGraph,
@@ -2685,34 +2926,47 @@ export async function loadCity(url) {
     return !!o && o !== gone && (o.state === 2 || o.state === 3);
   }
   function evictDeep(t) {
-    const r = t.res;
-    // the graphs' release is queued first; it runs on later frames, after the
-    // cells below are emptied, from the tile's own lists in `ev`
+    const r = t.res, tileCells = t.cells;
+    // the graphs' release runs after the cells below are emptied, from the
+    // tile's own lists in `ev`
     const release = city.releaseGraphs && releaseListeners.length > 0;
-    if (release) {
-      const ev = { tx: t.tx, tz: t.tz, rect: [t.tx * T, t.tz * T, (t.tx + 1) * T, (t.tz + 1) * T],
-        roads: r.roads, rails: r.rails, signals: r.signals ?? [], venues: r.venues, cells: t.cells,
-        ids: [t.slot * IDS_PER_TILE, (t.slot + 1) * IDS_PER_TILE] };
-      // one graph per frame, on the same gate the tile indexing waits at:
-      // together they cost about what indexing the tile did, and a tile that
-      // comes straight back queues its indexing behind its own release
-      for (const cb of releaseListeners) {
-        city.releasing++;
-        indexGate().then(() => {
-          try { cb(ev); } catch (err) { console.error('tile release', err); }
-          city.releasing--;
-        });
-      }
+    // (the ways themselves go too, RELEASE_DATA; never without the graphs'
+    // release, which is what lets go of every other reference to them)
+    const data = release && city.releaseData;
+    const lots = new Map();
+    for (const f of r.paved) if (f.t === 'parking') lots.set(f._id, f);
+    const ev = release ? { tx: t.tx, tz: t.tz, rect: [t.tx * T, t.tz * T, (t.tx + 1) * T, (t.tz + 1) * T],
+      roads: r.roads, rails: r.rails, signals: r.signals ?? [], venues: r.venues, cells: tileCells,
+      ids: [t.slot * IDS_PER_TILE, (t.slot + 1) * IDS_PER_TILE], data, lots: [...lots.values()] } : null;
+    // Gone at once as far as ensureTiles is concerned (state 0: fetched again
+    // when it comes in reach, and indexed only once this job is through); the
+    // work is a job of small steps, see queueJob.
+    if (data) {
+      t.kept = null;
+      t.poisIn = true;
+      t.released = false;
+    } else {
+      t.kept = { roads: r.roads, rails: r.rails, lots, signals: r.signals ?? [] };
+      t.released = release;
     }
+    t.res = null; t.cells = null; t.ext = null; t.heavy = null;
+    t.state = 0;
+    city.releasing++;
+    queueJob(deepSteps(t, r, tileCells, ev, data, lots), () => { city.releasing--; });
+  }
+  function* deepSteps(t, r, tileCells, ev, data, lots) {
     const mine = new Set();
-    for (const kind in r) if (kind !== 'waterways') for (const f of r[kind]) mine.add(f);
+    for (const kind in r) if (kind !== 'waterways') yield* addAllSteps(mine, r[kind]);
+    yield;
     // (its rectangle too: a cell some neighbour's feature made first was not
     // this tile's to record, but it is this tile's to own)
-    const visit = new Set(t.cells);
+    const visit = new Set(tileCells);
     const c0 = Math.floor((t.tx * T) / CHUNK), c1 = Math.floor(((t.tx + 1) * T - 1e-6) / CHUNK);
     const d0 = Math.floor((t.tz * T) / CHUNK), d1 = Math.floor(((t.tz + 1) * T - 1e-6) / CHUNK);
     for (let cx = c0; cx <= c1; cx++) for (let cz = d0; cz <= d1; cz++) visit.add(cx + ',' + cz);
+    let n = 0;
     for (const key of visit) {
+      if ((++n & 127) === 0) yield;
       const cell = city.chunkIndex.get(key);
       if (!cell) continue;
       let empty = true;
@@ -2725,29 +2979,46 @@ export async function loadCity(url) {
       }
       if (empty && !ownerResident(key, t)) city.chunkIndex.delete(key);
     }
-    const lots = new Map();
-    for (const f of r.paved) if (f.t === 'parking') lots.set(f._id, f);
     // what leaves the flat arrays: everything filed above but the kept kinds
-    const gone = new Set();
-    for (const kind in r) {
-      if (kind === 'roads' || kind === 'rails') continue;
-      for (const f of r[kind]) if (!(kind === 'paved' && lots.has(f._id))) gone.add(f);
+    // (with RELEASE_DATA nothing is kept but the pois, which were never filed)
+    let gone = mine;            // (with RELEASE_DATA the same set: everything it filed,
+    if (data) {                 // and the two kinds it lists without filing them)
+      for (const s of r.signals ?? []) mine.add(s);
+      for (const w of r.waterways) mine.add(w);
+    } else {
+      gone = new Set();
+      for (const kind in r) {
+        if (kind === 'roads' || kind === 'rails') continue;
+        if (kind === 'paved') { for (const f of r.paved) if (!lots.has(f._id)) gone.add(f); continue; }
+        yield* addAllSteps(gone, r[kind]);
+      }
     }
+    yield;
     // in place: every consumer holds these arrays by reference, forever
-    const compact = (arr) => {
-      let w = 0;
-      for (let i = 0; i < arr.length; i++) if (!gone.has(arr[i])) arr[w++] = arr[i];
-      arr.length = w;
-    };
     for (const arr of [city.water, city.green, city.paved, city.power, city.venues, city.barriers, city.waterways])
-      compact(arr);
+      yield* compactSteps(arr, gone);
     if (r.waterways.length) delete city._wwChunks;   // meshes.js rebuilds it from city.waterways
-    const cells = visit;
-    t.kept = { roads: r.roads, rails: r.rails, lots, signals: r.signals ?? [] };
-    t.released = release;
-    t.res = null; t.cells = null; t.ext = null; t.heavy = null;
-    t.state = 0;
-    for (const cb of unloadListeners) cb({ tx: t.tx, tz: t.tz, cells, deep: true });
+    if (data) {
+      for (const arr of [city.roads, city.rails, city.signals]) yield* compactSteps(arr, gone);
+      // the pads and the stitching: nothing resident may still reach a released
+      // way, or it stays alive and stands in for its successor on return
+      const ways = new Set();
+      yield* addAllSteps(ways, r.roads);
+      yield* addAllSteps(ways, r.rails);
+      yield* releaseJunctions(ways, visit);
+      const ring = new Set(visit);
+      let m = 0;
+      for (const key of visit) {
+        if ((++m & 511) === 0) yield;
+        const i = key.indexOf(','), cx = +key.slice(0, i), cz = +key.slice(i + 1);
+        for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) ring.add((cx + a) + ',' + (cz + b));
+      }
+      yield;
+      yield* releaseStructures(city, ways, ring);
+    }
+    for (const cb of unloadListeners) cb({ tx: t.tx, tz: t.tz, cells: visit, deep: true });
+    // every graph built from the tile's ways lets go of them, each in steps
+    if (ev) for (const cb of releaseListeners) { yield; yield* guarded(cb, ev); }
   }
   return city;
 }

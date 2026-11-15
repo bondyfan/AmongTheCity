@@ -145,7 +145,7 @@ export class Garage {
   snapshot() {
     const c = this.car;
     if (!c) return null;
-    return { kind: c.kind, color: c.color, x: c.x, z: c.z, h: c.heading,
+    return { kind: c.kind, color: c.color, x: c.x, z: c.z, h: c.heading, y: c.y,
       fuel: fuel.levelOf(c), damage: c.damage ?? 0, seed: this.seedOf(c),
       parkIdx: Number.isInteger(c.parkIdx) ? c.parkIdx : null };
   }
@@ -183,6 +183,10 @@ export class Garage {
       car = h.vehicles.add(s.kind, s.x, s.z, s.h, s.color);
       h.parked.push(car);
     }
+    // The saved LEVEL: vehicles.js settles an un-grounded car onto the surface
+    // nearest its y, and vehicles.add put it on the HIGHEST one (the overpass
+    // over the D11 lane it was left in, the deck over a car park under it).
+    if (Number.isFinite(s.y)) { car.y = s.y; car._grounded = false; }
     car._buySeed = s.seed;
     car.damage = s.damage;
     if (s.fuel !== null) {

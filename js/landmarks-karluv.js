@@ -259,6 +259,32 @@ export function buildKarluv(kit, ctx) {
   for (let i = 0; i < PIERS.length; i++) if (own(PIERS[i])) pier(kit, ctx, i);
 }
 
+/**
+ * Where the lanterns stand and what they light, for the night's light map
+ * (js/lightpools.js): one pair per span, on the coping over the middle of the
+ * arch, exactly where lantern() builds them. `roadsAt(x, z)` hands the roads
+ * filed at a point (a chunk cell's), `terrain` is the height field. A lantern
+ * whose deck cannot be read yet (its tile not indexed) is left out: returns
+ * entries { x, z, deck, ax, az, nx, nz } with (ax, az) along the bridge and
+ * (nx, nz) pointing from the lantern in over the walkway.
+ */
+export function karluvLanterns(roadsAt, terrain, out = []) {
+  out.length = 0;
+  for (let j = 0; j + 1 < SUPPORTS.length; j++) {
+    const mid = (SUPPORTS[j] + SUPPORTS[j + 1]) / 2;
+    const [px, pz, ax, az, lx, lz] = axisAt(mid);
+    const deck = deckAt({ roads: roadsAt(px, pz), terrain }, px, pz, NaN);
+    if (!(deck > 0)) continue;
+    for (const e of [-1, 1]) {
+      const c = at(mid, e * (W - PT / 2), 0);
+      out.push({ x: c[0], z: c[2], deck, ax, az, nx: -e * lx, nz: -e * lz });
+    }
+  }
+  return out;
+}
+/** The lantern's light, over the deck at its foot (lantern(): post on the coping, glass 2.7 to 3.3 m up). */
+export const LANTERN_UP = PH + 0.08 + 3.0;
+
 /** The box the bridge lies in (js/landmarks.js EXTRAS). */
 export const KARLUV_BOX = (() => {
   let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;

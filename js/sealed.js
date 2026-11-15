@@ -28,6 +28,7 @@
 // The caller enforces the second one; see grassmask.js.
 
 import { CHUNK } from './config.js';
+import { motorwayVerge } from './mwground.js';
 
 export const SEAL_RES = 2;                 // m per cell — the square's gaps are metres
 const N = CHUNK / SEAL_RES;                // 60 cells a side
@@ -51,8 +52,15 @@ export function isHardWay(r) {
   // a BANK — the one piece of ground guaranteed not to be a paved square — and
   // in Jinonice the staircases seeding the closing were exactly how a 35 %
   // hillside got tiled ("kachličky na křivo nad terénem").
-  return !!r && r.t !== 'steps' && HARD.has(r.s);
+  // A motorway and its slip roads are excluded the same way: two concrete
+  // carriageways 12 m apart and a link beside them are a "network" by this
+  // test, and at exit 68 (round 8) the closing tiled a third of the chunk,
+  // the median, the wedge before every slip road and the verge beyond the
+  // rail, in square paving. Nobody walks there; a motorway's surroundings are
+  // grass and gravel, which is what the unmapped-ground rule already gives.
+  return !!r && r.t !== 'steps' && !NO_SEAL.has(r.t) && HARD.has(r.s);
 }
+const NO_SEAL = new Set(['motorway', 'motorway_link']);
 
 // A town square is flat; a hillside laced with footpaths is not. Measured where
 // the two meet: náměstí Jana Pernera's sealed cells slope 0.018 median, 0.031
@@ -160,11 +168,16 @@ export function sealedGrid(cell, cx, cz, terrain = null) {
   // cell on ground too steep to be a square. Gating on the cropped cells keeps
   // the terrain reads to the cells actually sealed, which is what makes this
   // affordable.
+  // …and beside a motorway nothing is a square, whatever closed there: the
+  // crossing road and its slip roads still make a network at every
+  // interchange, and the wedge they enclose is a verge (js/mwground.js).
+  const verge = motorwayVerge(cell, cx, cz);
   const out = new Uint8Array(N * N);
   let any = 0;
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       let v = closed[(j + PAD) * W + (i + PAD)];
+      if (v && verge && verge[j * N + i]) v = 0;
       if (v && terrain) {
         const px = x0 + (i + 0.5) * SEAL_RES, pz = z0 + (j + 0.5) * SEAL_RES;
         const gx = (terrain.heightAt(px + SEAL_RES, pz) - terrain.heightAt(px - SEAL_RES, pz)) / (2 * SEAL_RES);

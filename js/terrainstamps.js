@@ -30,15 +30,21 @@
 // pass and the stamps share a surface without knowing about each other.
 
 import { VALY, VALY_FLOOR } from './valyring.js';
-import { NAPLAVKY } from './naplavky.js';
+import { NAPLAVKY, NAPLAVKA_BEFORE, NAPLAVKA_AFTER } from './naplavky.js';
+import { VYSEHRAD } from './vysehraddata.js';
+import { ecoductCuts } from './roadpatches.js';
 
-const CELL = 8;              // m, the bucket grid that finds a stamp's nearby segments
+export const CELL = 8;       // m, the bucket grid that finds a stamp's nearby segments
 
 /**
  * Make a stamp from its description.
  * @param def { pts: [[x,z]...], closed?: bool, base: number | number[] (per vertex),
  *              prof: [[d, dy, w]...] sorted by d, mode: 'dig'|'raise'|'set',
- *              holes?: [{ pts, hw, fall }] }
+ *              holes?: [{ pts, hw, fall }], capped?: bool }
+ * An open line is capped by default: past either end the profile goes on
+ * round the end vertex (a half disc). `capped: false` stops it square at the
+ * ends instead, which is what a quay or a ramp that ends at a street wants
+ * (the round cap of the Novoměstská náplavka dug the cycleway at Výtoň).
  */
 export function makeStamp(def) {
   const pts = def.pts, n = pts.length, closed = !!def.closed;
@@ -68,8 +74,16 @@ export function makeStamp(def) {
   let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
   for (const [x, z] of pts) { x0 = Math.min(x0, x); z0 = Math.min(z0, z); x1 = Math.max(x1, x); z1 = Math.max(z1, z); }
   x0 -= reach; z0 -= reach; x1 += reach; z1 += reach;
+  // the profile's hard edges (two entries at one d): where the drawn ground
+  // may be snapped onto the line (js/quayedge.js quaySnap)
+  const hard = [];
+  for (let i = 0; i < prof.length - 1; i++) {
+    if (prof[i + 1][0] - prof[i][0] < 0.01 && Math.abs(prof[i + 1][2] - prof[i][2]) > 0.5) hard.push((prof[i][0] + prof[i + 1][0]) / 2);
+  }
   const st = { mode: def.mode, prof, reach, x0, z0, x1, z1, segN, sx, sz, ex, ez, len, nx, nz, y0, y1,
-    closed, holes: (def.holes ?? []).map(prepHole), grid: null, gw: 0, gh: 0 };
+    hard: def.snap ? hard : [],
+    closed, open: !closed && def.capped === false,
+    holes: (def.holes ?? []).map(prepHole), grid: null, gw: 0, gh: 0 };
   // ---- the bucket grid: per CELL square, the segments within reach of it ----
   st.gw = Math.ceil((x1 - x0) / CELL); st.gh = Math.ceil((z1 - z0) / CELL);
   const lists = new Array(st.gw * st.gh);
@@ -127,15 +141,17 @@ export function applyStamp(st, x, z, h) {
   const list = st.grid[gj * st.gw + gi];
   if (!list) return h;
   // the nearest segment, and on it the nearest point
-  let best = Infinity, bk = -1, bt = 0;
+  let best = Infinity, bk = -1, bt = 0, braw = 0;
   for (let q = 0; q < list.length; q++) {
     const k = list[q];
-    let t = ((x - st.sx[k]) * st.ex[k] + (z - st.sz[k]) * st.ez[k]) / (st.len[k] * st.len[k]);
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const raw = ((x - st.sx[k]) * st.ex[k] + (z - st.sz[k]) * st.ez[k]) / (st.len[k] * st.len[k]);
+    const t = raw < 0 ? 0 : raw > 1 ? 1 : raw;
     const d = Math.hypot(x - st.sx[k] - st.ex[k] * t, z - st.sz[k] - st.ez[k] * t);
-    if (d < best) { best = d; bk = k; bt = t; }
+    if (d < best) { best = d; bk = k; bt = t; braw = raw; }
   }
   if (bk < 0 || best > st.reach) return h;
+  // (an uncapped line stops square: nothing past its two end vertices)
+  if (st.open && ((bk === 0 && braw < 0) || (bk === st.segN - 1 && braw > 1))) return h;
   // which side: the segment's own normal, or at a vertex the mean of the two
   // segments meeting there (the pseudo-normal, so a bastion's corner is
   // inside on both of its faces)
@@ -198,16 +214,92 @@ const PARDUBICE = [
     closed: true, base: 215.8, mode: 'dig', holes: CAUSEWAY,
     prof: [[-400, 0, 1], [-0.001, 0, 1], [6, 0, 0]] }),
 ];
-// PRAGUE: the lower quays of the Vltava (js/naplavky.js)
-const PRAHA = NAPLAVKY.map(makeStamp);
+// PRAGUE: the lower quays of the Vltava and the ramps and stairs down to them
+// (js/naplavky.js). A ramp between two walls is set BEFORE the quay is dug, so
+// whatever of it spills over the quay wall is dug back to the floor; a ramp
+// or a stair that climbs the quay's own face is laid on the floor AFTER.
+//
+// First, RAŠÍNOVO NÁBŘEŽÍ AT PALACKÉHO MOST. The survey holds a hump of 3 to
+// 4 m along the embankment street at the bridgehead (197.8 m at z -4615,
+// where the street either side runs at 193 to 195), and the bridge's east
+// end, which lands on the street, climbed to 197.5 over it. Dug to the
+// embankment's own line (a gentle grade from Jiráskův most to Dřevná), full
+// within 20 m of the street and fading out by 55 m, so Palackého náměstí
+// runs down to it. 'dig' only: where the street is already lower it stays.
+const RASINOVO = {
+  pts: [[-96173, -4800], [-96170, -4720], [-96160, -4610], [-96158, -4500], [-96157, -4465]],
+  base: [194.2, 195.0, 194.7, 194.5, 193.4], mode: 'dig',
+  prof: [[-55, 0, 0], [-20, 0, 1], [20, 0, 1], [55, 0, 0]],
+};
+// Then Vyšehrad: the rock face over the embankment road, and the road's cut
+// through the spur that its tunnel roof covers (js/vysehraddata.js).
+const PRAHA = [RASINOVO, VYSEHRAD.faceN, VYSEHRAD.faceS, VYSEHRAD.tunnel,
+  ...NAPLAVKA_BEFORE, ...NAPLAVKY, ...NAPLAVKA_AFTER].map(makeStamp);
+// the quays and the ways down to them (js/quayedge.js onQuay)
+const QUAYS = PRAHA.slice(4);
+// THE D11 under its two green bridges: the elevation model holds the bridges'
+// earth, 9 to 11 m over the road the build dropped and js/roadpatches.js puts
+// back, so each carriageway runs in a flat trench dug to the approaches'
+// grade. One region per bridge (they are 19 km apart).
+const ECODUCT = ecoductCuts().map(makeStamp);
+const ZEHUN = ECODUCT.filter((s, i) => ecoductCuts()[i].pts[0][0] < -20000);
+const VOLEC = ECODUCT.filter((s, i) => ecoductCuts()[i].pts[0][0] >= -20000);
 
 // Each city's stamps with their own box, so the hot path in Terrain.heightAt
 // stays one compare per region everywhere outside them (two cities, 100 km
 // apart: one shared box would cover everything between them).
-export const STAMP_REGIONS = [PARDUBICE, PRAHA].map((stamps) => ({ stamps, box: stampsBox(stamps) }));
+const RCELL = 16;            // m, the region grid of indexRegion below
+export const STAMP_REGIONS = [PARDUBICE, PRAHA, ZEHUN, VOLEC].map((stamps) => indexRegion({ stamps, box: stampsBox(stamps) }));
+for (const st of QUAYS) st.quay = true;
+
+// Inside a region's box, the stamps that can have a say at a point, from a
+// coarse grid built once: with Prague's thirty-odd quay, ramp and stair stamps
+// in one long box, asking every one of them at every heightAt doubled the
+// build time of a quay chunk. A cell lists every stamp with a non-empty bucket
+// overlapping it, in the stamps' order, so the answer is the same as asking
+// them all (applyStamp returns h unchanged where its bucket is empty).
+function indexRegion(R) {
+  const { box } = R;
+  const gw = Math.max(1, Math.ceil((box.x1 - box.x0) / RCELL)), gh = Math.max(1, Math.ceil((box.z1 - box.z0) / RCELL));
+  const cells = new Array(gw * gh).fill(null);
+  const mark = (st, x0, z0, x1, z1) => {
+    const a0 = Math.max(0, Math.floor((x0 - box.x0) / RCELL)), a1 = Math.min(gw - 1, Math.floor((x1 - box.x0) / RCELL));
+    const b0 = Math.max(0, Math.floor((z0 - box.z0) / RCELL)), b1 = Math.min(gh - 1, Math.floor((z1 - box.z0) / RCELL));
+    for (let b = b0; b <= b1; b++) for (let a = a0; a <= a1; a++) {
+      const k = b * gw + a, l = cells[k] ?? (cells[k] = []);
+      if (l[l.length - 1] !== st) l.push(st);
+    }
+  };
+  for (const st of R.stamps) {
+    for (let j = 0; j < st.gh; j++) for (let i = 0; i < st.gw; i++) {
+      if (!st.grid[j * st.gw + i]) continue;
+      const cx = st.x0 + i * CELL, cz = st.z0 + j * CELL;
+      mark(st, cx, cz, cx + CELL, cz + CELL);
+      // (a point exactly on the box's east edge reads the first bucket of
+      // the next row: keep that answer too)
+      if (i === 0 && j > 0) mark(st, st.x1, cz - CELL, st.x1, cz);
+    }
+  }
+  R.gw = gw; R.gh = gh; R.cells = cells;
+  return R;
+}
+// the stamps of region R that can move (x, z), a point inside R.box; null for none
+export function regionList(R, x, z) {
+  const b = R.box;
+  let a = Math.floor((x - b.x0) / RCELL), c = Math.floor((z - b.z0) / RCELL);
+  if (a >= R.gw) a = R.gw - 1;
+  if (c >= R.gh) c = R.gh - 1;
+  return R.cells[c * R.gw + a];
+}
+/** stampHeight for the stamps of region R at (x, z), a point inside R.box. */
+export function regionHeight(R, x, z, h) {
+  const l = regionList(R, x, z);
+  if (l) for (let i = 0; i < l.length; i++) h = applyStamp(l[i], x, z, h);
+  return h;
+}
 // every stamp, in order (the regions never overlap, so order within a region
 // is all that matters)
-export const STAMPS = [...PARDUBICE, ...PRAHA];
+export const STAMPS = [...PARDUBICE, ...PRAHA, ...ZEHUN, ...VOLEC];
 
 /** Every stamp, in order, applied to the height h at (x, z). */
 export function stampHeight(stamps, x, z, h) {

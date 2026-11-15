@@ -28,9 +28,10 @@ export function rebuildChains(city) {
   const next = new Map();
   for (const ch of old.values()) for (const m of ch.members) { m.r._dipChain = undefined; m.r._dipM = undefined; }
   const order = [...(city._dipWays ?? [])].sort((a, b) => a._id - b._id);
+  const ends = new Map();     // cell -> its ways by end vertex, for this rebuild (see endsOf)
   for (const w of order) {
     if (w._dipChain) continue;
-    const fwd = walk(city, w, 1), back = walk(city, w, 0);
+    const fwd = walk(city, w, 1, ends), back = walk(city, w, 0, ends);
     const seq = [...back.reverse(), { r: w, rev: false }, ...fwd];
     const ch = { members: [], dips: [], field: null, total: 0 };
     let off = 0;
@@ -74,7 +75,28 @@ export function rebuildChains(city) {
   city._dipChains = next;
 }
 
-function walk(city, w, atEnd) {
+// The ways of a cell that END at each vertex key, in the cell's own order.
+// A rebuild walks out of the same town cells hundreds of times (311 ways
+// under something on four Prague tiles), and keying every way of a cell for
+// every step was 35 ms of a frame; each cell is keyed once per rebuild now.
+function endsOf(c, ends) {
+  let m = ends.get(c);
+  if (m) return m;
+  m = new Map();
+  for (const o of c.roads) {
+    if (o.br || !o.p || o.p.length < 2) continue;
+    const n = o.p.length - 1;
+    const k0 = KEY(o.p[0][0], o.p[0][1]), k1 = KEY(o.p[n][0], o.p[n][1]);
+    let a = m.get(k0);
+    if (!a) m.set(k0, a = []);
+    a.push(o);
+    if (k1 !== k0) { let b = m.get(k1); if (!b) m.set(k1, b = []); b.push(o); }
+  }
+  ends.set(c, m);
+  return m;
+}
+
+function walk(city, w, atEnd, ends) {
   const out = [];
   let cur = w, end = atEnd, reach = 0;
   for (let guard = 0; guard < 24 && reach < CHAIN_REACH; guard++) {
@@ -86,7 +108,7 @@ function walk(city, w, atEnd) {
     if (!c) break;
     const k0 = KEY(x, z);
     let best = null, bestScore = 0.7;
-    for (const o of c.roads) {
+    for (const o of (ends ? endsOf(c, ends).get(k0) : c.roads) ?? []) {
       if (o === cur || o === w || o.br || !o.p || o.p.length < 2 || !!o.d !== !!w.d) continue;
       if (o._dipChain || out.some((m) => m.r === o)) continue;   // (one chain a way)
       const n = o.p.length - 1;

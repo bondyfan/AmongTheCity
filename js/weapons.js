@@ -276,8 +276,9 @@ export class Weapons {
       if (ctx?.cars) {
         for (const c of ctx.cars) {
           if (Math.abs(c.x - x) > 2.6 || Math.abs(c.z - z) > 2.6) continue;
-          const cy = c.mesh?.position.y ?? 0;
-          if (y > cy + 2.2 || y < cy - 0.4) continue;
+          // (a stand-in with no mesh, a tram section, says where it stands and how tall it is)
+          const cy = c.mesh?.position.y ?? c.y ?? 0;
+          if (y > cy + (c.tallY ?? 2.2) || y < cy - 0.4) continue;
           return { x, y, z, b: null };
         }
       }

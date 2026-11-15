@@ -31,6 +31,8 @@
 // pointing at the main road is infinitely more useful than `null`.
 
 import { distPointToSegment } from './geo.js';
+import { CoarseRoutes } from './coarseroute.js';
+import { exitJointAt } from './mwhud.js';
 
 // ---- graph keying: MUST agree with traffic.js ----------------------------
 // 10 cm snapping welds shared OSM nodes without gluing near-misses, and it is
@@ -212,7 +214,7 @@ class Heap {
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 export class Navigation {
-  constructor(city) {
+  constructor(city, opts = {}) {
     this.city = city;
 
     // ---- public contract ----
@@ -262,12 +264,24 @@ export class Navigation {
     this._retryIn = PARTIAL_RETRY;  // …and the current partial-route backoff
     this._bd = 0; this._bi = 0; this._bs = 0;  // _scan results, kept off the stack
     this._bscore = 0;
-    this._turn = { dist: 0, dir: 'straight', street: null };
+    this._turn = { dist: 0, dir: 'straight', street: null, exit: null };
+
+    // ---- beyond the streamed roads (js/coarseroute.js) ----
+    // opts.overview: the URL of data/overview.json. Fetched and built the
+    // first time a route stops short of its pin; from then on such a route
+    // carries on to the pin over the region's major roads (`coarseFrom` is
+    // where that part starts), and the fine route takes it back piece by
+    // piece as tiles stream in. Without it a partial route ends where the
+    // streamed roads do, as it always did.
+    this._overview = opts.overview ?? null;
+    this.coarse = null;
+    this.coarseFrom = -1;
+    this._coarseP = null;
 
     // whatever already streamed in, then every tile after us
     this._growGraph(city.roads ?? []);
     city.onTileLoaded?.((t) => this._growGraph(t.roads ?? []));
-    city.onTileReleased?.((t) => this.releaseTile(t));
+    city.onTileReleased?.((t) => this.releaseSteps(t));   // (geo.js runs the steps, a slice a frame)
   }
 
   // ======================= graph construction ==============================
@@ -666,6 +680,7 @@ export class Navigation {
       const gi = g[i], out = n.out;
       for (let e = 0; e < out.length; e++) {
         const ed = out[e], j = ed.b;
+        if (ed.seg.dead) continue;           // (a released tile's, still being unhooked: releaseSteps)
         if (stamp[j] !== gen) { stamp[j] = gen; closed[j] = 0; g[j] = Infinity; }
         if (closed[j]) continue;
         const ng = gi + ed.cost;
@@ -745,6 +760,18 @@ export class Navigation {
     this._emit(out, spd, head, sIn, head.seg.len);
     for (let i = 1; i < _chain.length; i++) {
       const e = _chain[i], prev = _chain[i - 1];
+      // Leaving the D11 / D35 for a slip road: say the exit, whatever the
+      // angle (38 of 39 D11 diverges are under TURN_MIN, and motorways carry
+      // no name, so _joint was silent at every one of them).
+      // (or for another motorway carriageway: the D35 leaving the D11 at Sedlice;
+      // only then is the far end asked whether the route carries straight on, as
+      // a slip's first piece can end within 6 m of the carriageway: 90 E is 54 m)
+      const mwLink = e.seg.road.t === 'motorway_link';
+      const mw = prev.seg.road.t === 'motorway' && (mwLink
+        || (e.seg.road.t === 'motorway' && this.nodes[prev.b].out.length >= 2))
+        ? exitJointAt(out[out.length - 1][0], out[out.length - 1][1],
+          mwLink ? null : e.rev ? e.seg.pts[0] : e.seg.pts[e.seg.pts.length - 1]) : null;
+      if (mw) { joints.push({ idx: out.length - 1, dir: 'exit', street: mw.street, exit: mw.exit }); this._emit(out, spd, e, 0, e.seg.len); continue; }
       const dir = this._joint(prev, e, prev.b);
       if (dir) joints.push({ idx: out.length - 1, dir, street: e.seg.name });
       this._emit(out, spd, e, 0, e.seg.len);
@@ -795,6 +822,8 @@ export class Navigation {
     const built = this._build(_poolA[0], res);
     this.stats.ms = now() - t0;
     if (!built || built.pts.length < 2) return false;
+    this.coarseFrom = -1;
+    if (!built.complete) this._coarseTail(built, dest);
     this.route = built.pts;
     this.partial = !built.complete;
     this.stats.partial = this.partial;
@@ -816,7 +845,7 @@ export class Navigation {
     }
     this._joints.length = 0;
     for (const j of built.joints)
-      this._joints.push({ s: cum[j.idx], dir: j.dir, street: j.street });
+      this._joints.push({ s: cum[j.idx], dir: j.dir, street: j.street, exit: j.exit ?? null });
     this._ji = 0; this._i = 0; this._s = 0;
     // a partial route stops short; the straight-line remainder is added to
     // remainingM so the HUD's distance never lies about how far away the pin is
@@ -826,6 +855,33 @@ export class Navigation {
     this._gapT = this._gap / GAP_V;
     this._track(x, z, true);
     return true;
+  }
+
+  // A route that stops short of the pin goes on over the coarse graph, from
+  // its last point to the pin (and asks for the graph the first time). The
+  // fine part keeps its turns; the coarse part has none, and is still a
+  // partial route, so it is planned again as tiles arrive.
+  _coarseTail(built, dest) {
+    if (!this.coarse) {
+      if (this._overview && !this._coarseP && typeof fetch === 'function') {
+        this._coarseP = fetch(this._overview)
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+          .then((d) => CoarseRoutes.create(d?.roads ?? []))
+          .then((c) => { this.coarse = c; this._since = 1e9; this._retryIn = PARTIAL_RETRY; })
+          .catch((err) => { console.warn('[navigation] no coarse graph:', err.message); });
+      }
+      return;
+    }
+    const last = built.pts[built.pts.length - 1];
+    const far = this.coarse.route(last[0], last[1], dest.x, dest.z);
+    if (!far || far.pts.length < 2) return;
+    this.coarseFrom = built.pts.length - 1;
+    for (let i = 0; i < far.pts.length; i++) {
+      const p = far.pts[i], q = built.pts[built.pts.length - 1];
+      if (Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) < 0.5) continue;
+      built.pts.push(p);
+      built.spd.push(far.speeds[i] || far.speeds[1] || MIN_V);
+    }
   }
 
   // Called every frame. Cheap unless something actually changed: tracking is a
@@ -893,6 +949,7 @@ export class Navigation {
       this._turn.dist = J[j].s - this._s;
       this._turn.dir = J[j].dir;
       this._turn.street = J[j].street;
+      this._turn.exit = J[j].exit;                // the exit number for dir 'exit' (js/mwhud.js)
       this.nextTurn = this._turn;
     } else this.nextTurn = null;
   }
@@ -905,16 +962,30 @@ export class Navigation {
   // arrival build them again. Local only (GPS), no co-op contract: a route
   // planned over the far tile simply becomes the best-so-far route until the
   // tile is back, as for any part of the region not streamed yet.
-  releaseTile(t) {
+  releaseTile(t) { for (const _ of this.releaseSteps(t)); }
+  // As steps (geo.js queueJob). The segments are found by a read-only scan
+  // that may yield anywhere, then marked dead a few thousand a step: a search
+  // running between two later steps (a reroute) walks past a dead segment
+  // (_search, as the snap grid always has), so the nodes, the snap grid and
+  // the census are unhooked in slices.
+  *releaseSteps(t) {
     const gone = new Set();
-    for (const r of t?.roads ?? []) if (r._ng) gone.add(r);
+    const roads = t?.roads ?? [];
+    for (let i = 0; i < roads.length; i++) {
+      if (roads[i]._ng) gone.add(roads[i]);
+      if ((i & 4095) === 4095) yield;
+    }
     if (!gone.size) return;
     const drop = (arr, f) => { let k = 0; for (let i = 0; i < arr.length; i++) if (!f(arr[i])) arr[k++] = arr[i]; arr.length = k; };
     const ends = new Set();
-    const dead = new Set();
-    for (const seg of this._segs) {
-      if (!gone.has(seg.road)) continue;
-      dead.add(seg);
+    const dead = new Set(), keep = [];   // (the survivors, written back in one step below)
+    for (let i = 0; i < this._segs.length; i++) {
+      if (gone.has(this._segs[i].road)) dead.add(this._segs[i]); else keep.push(this._segs[i]);
+      if ((i & 2047) === 2047) yield;
+    }
+    let step = 0;
+    for (const seg of dead) {
+      if ((++step & 2047) === 0) yield;
       if (!seg.dead) {            // a welded-away piece is unhooked already
         ends.add(seg.f.a); ends.add(seg.f.b);
         this._indeg[seg.f.b]--;
@@ -922,8 +993,15 @@ export class Navigation {
       }
       seg.dead = 1;
     }
-    drop(this._segs, (seg) => dead.has(seg));
+    yield;
+    if (dead.size) {
+      for (let i = 0; i < keep.length; i++) this._segs[i] = keep[i];
+      this._segs.length = keep.length;
+    }
+    keep.length = 0;
+    yield;
     for (const i of ends) {
+      if ((++step & 511) === 0) yield;
       const n = this.nodes[i];
       drop(n.out, (e) => dead.has(e.seg));
       if (!n.out.length && this._indeg[i] <= 0) {
@@ -934,15 +1012,18 @@ export class Navigation {
       }
     }
     // the snap cells _gridAdd filed those segments in, and no others
+    yield;
     const keys = new Set();
     for (const seg of dead) for (const k of seg._gks ?? []) keys.add(k);
     for (const k of keys) {
+      if ((++step & 1023) === 0) yield;
       const a = this._grid.get(k);
       if (!a) continue;
       drop(a, (seg) => dead.has(seg));
       if (!a.length) this._grid.delete(k);
     }
     for (const r of gone) {
+      if ((++step & 1023) === 0) yield;
       for (const k of this._ukeys.get(r) ?? []) {
         const u = this._usage.get(k);
         if (!u) continue;

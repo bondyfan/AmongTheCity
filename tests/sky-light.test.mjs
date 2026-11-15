@@ -95,6 +95,33 @@ test('the fog wall ends inside the streamed world, day and night, at any scale',
   }
 });
 
+// round 8 (HORIZON): where the view is open (sky.fogOpen, js/openness.js) the
+// wall moves out over the far land and the haze is scaled to a few km; at 0
+// it must be exactly the old fog, and the crowd and the cars keep their edge.
+test('an open view moves the wall out to kilometres, and a street keeps it exactly', () => {
+  const { scene, sky, cam } = rig();
+  sky.fogScale = (480 * 0.88) / 900;                 // medium, on foot
+  for (const tod of [NOON, MIDNIGHT]) {
+    sky.fogOpen = 0;
+    updateSky(sky, tod, cam, scene, 221);
+    const street = { near: scene.fog.near, far: scene.fog.far, vis: sky.fogVis };
+    assert.equal(sky.edgeFar, street.far, 'the edge wall is the wall in a street');
+    assert.equal(street.vis, street.far, 'the haze is scaled to the wall in a street');
+    if (tod === NOON) {
+      assert.ok(Math.abs(street.far - 422.4) < 0.05 && Math.abs(street.near - 278.8) < 0.05,
+        `medium noon at the station is ${street.near.toFixed(1)} / ${street.far.toFixed(1)}`);
+    }
+    sky.fogOpen = 1;
+    updateSky(sky, tod, cam, scene, 221);
+    const { near, far } = scene.fog;
+    assert.equal(sky.edgeFar, street.far, 'the streamed edge moved with the view');
+    assert.ok(far >= 3000, `the open wall is at ${far} m`);
+    assert.ok(airFogAmount(1000, 0, 2, near, far, sky.fogVis) < 0.10, 'a kilometre is milk in the open');
+    assert.ok(airFogAmount(far, 0, 2, near, far, sky.fogVis) > 0.999);
+  }
+  sky.fogOpen = 0;
+});
+
 test('haze: light at your feet, thick at the edge, thinner from above', () => {
   const near = 280, far = 422;                    // medium preset, on the ground
   // the next junction must not sit in milk

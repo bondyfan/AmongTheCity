@@ -24,11 +24,13 @@ const load = (k) => JSON.parse(readFileSync(new URL(`../public/data/tiles/${k}.j
 const tile = load('0_-1');
 // Prague (round 7): the links through the Charles Bridge towers anchor in -21_-2
 const praha = load('-21_-2');
+// ...and the one through the Powder Tower in -20_-2 (round 7 polish)
+const prahaE = load('-20_-2');
 const found = new Map();
-for (const t of [tile, praha]) for (const f of t.buildings) for (const l of LANDMARKS) if (!l.hide && matches(l, f)) found.set(l.id, f);
+for (const t of [tile, praha, prahaE]) for (const f of t.buildings) for (const l of LANDMARKS) if (!l.hide && matches(l, f)) found.set(l.id, f);
 const footEnds = [];
 // (a pedestrian way is walked like a footway: Charles Bridge and Mostecká are pedestrian)
-for (const t of [tile, praha]) for (const r of t.roads)
+for (const t of [tile, praha, prahaE]) for (const r of t.roads)
   if (!r.d && (r.t === 'footway' || r.t === 'pedestrian') && r.p.length >= 2) footEnds.push(r.p[0], r.p[r.p.length - 1]);
 const isFootEnd = (q) => footEnds.some((p) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 0.6);
 
@@ -106,7 +108,7 @@ test('a player walks from the outer court through the portal into the courtyard'
 
 test('the links arrive with the tile that holds their anchor, whatever the order', () => {
   const ids = (roads) => landmarkWalks(roads).map((w) => w._id).sort();
-  const roads = tile.roads.concat(praha.roads);
+  const roads = tile.roads.concat(praha.roads, prahaE.roads);
   const all = ids(roads);
   assert.deepEqual([...new Set(all)], WALKS.map((w) => w.way._id).sort(), 'not every link found its anchor');
   // shuffled (deterministically): the same links, the same objects

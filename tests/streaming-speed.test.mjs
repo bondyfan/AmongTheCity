@@ -70,7 +70,7 @@ const THREE = await import('three');
 const { CHUNK } = await import('../js/config.js');
 const { CityWorld } = await import('../js/city.js');
 const { loadCity } = await import('../js/geo.js');
-const { planRings, windowCost, WINDOW } = await import('../js/streamplan.js');
+const { planRings, planCarRings, windowCost, WINDOW } = await import('../js/streamplan.js');
 
 const settle = () => new Promise((r) => setTimeout(r, 60));
 // Wait for a CONDITION, never for a fixed number of settles. Tile indexing is
@@ -112,7 +112,7 @@ function makeClock() {
 }
 
 /** Four workers that mesh in modelled time and never fail. */
-function fakePool(city, clock, n = 4) {
+function fakePool(city, clock, n = 4, fullMs = 0) {
   const busyUntil = new Array(n).fill(-Infinity);
   const live = [];
   return {
@@ -123,7 +123,7 @@ function fakePool(city, clock, n = 4) {
       for (let i = 1; i < n; i++) if (busyUntil[i] < busyUntil[slot]) slot = i;
       const w = weightOf(city.chunkIndex.get(cx + ',' + cz));
       const start = Math.max(clock.now(), busyUntil[slot]);
-      busyUntil[slot] = start + meshMs(lod, w);
+      busyUntil[slot] = start + meshMs(lod, w) + (lod === 'full' ? fullMs : 0);
       const job = { done: false, ready: busyUntil[slot], cx, cz, lod, w };
       live.push(job);
       return job;
@@ -157,8 +157,8 @@ const city = await loadCity('data/manifest.json');
  * into the reported hole. A fixed step would hide it.
  */
 const AHEAD = 5;
-async function fly(v, { dur = 10, agl = 400, plan = planRings, coverageFirst = true } = {}) {
-  const x0 = -4000, z0 = 200;
+async function fly(v, { dur = 10, agl = 400, plan = planRings, coverageFirst = true,
+  x0 = -4000, z0 = 200, base = 6, fullMs = 0 } = {}) {
   await city.ensureTiles(x0, z0);
   await city.ensureTiles(x0 + v * dur * 0.5, z0);
   await city.ensureTiles(x0 + v * dur, z0);
@@ -177,7 +177,7 @@ async function fly(v, { dur = 10, agl = 400, plan = planRings, coverageFirst = t
   await waitUntil(() => [0, 0.5, 1].every((f) =>
     world.terrain.ready(x0 + v * dur * f, z0)));
 
-  world.pool = fakePool(city, clock, 4);
+  world.pool = fakePool(city, clock, 4, fullMs);
   world.coverageFirst = coverageFirst;
   world.buildCooldownMs = 0;
   world.buildBudgetMs = v > 140 ? 11 : 9;
@@ -192,7 +192,7 @@ async function fly(v, { dur = 10, agl = 400, plan = planRings, coverageFirst = t
     let simT = 0, lastDt = 1 / 60;
     while (simT < dur) {
       focus.x = x0 + v * simT;
-      const r = plan(v, agl, 6);
+      const r = plan(v, agl, base);
       world.viewChunks = r.view; world.shellChunks = r.shell; world.farChunks = r.far;
       const a = clock.now();
       world.update(Math.min(0.1, lastDt), focus, {});
@@ -259,6 +259,26 @@ test('holes do not start at 576 km/h any more', async () => {
   }
 });
 
+// ---- a CAR on the D11 (round 8): a buildings ring above 25 m/s ---------------
+// From the km 30 straight (real D11 tiles) at 130, 160 and 200 km/h, medium
+// and high draw distance. A full motorway cell is priced 20 ms dearer than the
+// town-fitted model: 30 ms median measured on D11 cells (the model says 10 to 15).
+test('a car at 200 km/h on the D11 has the road ahead built, with the wider rings', async () => {
+  for (const base of [4, 6]) for (const v of [36, 44, 56]) {
+    const r = await fly(v, { dur: 8, agl: 0, x0: -55440, z0: -9600, base, fullMs: 20,
+      plan: (vv, agl, b) => planCarRings(vv, b) });
+    assert.ok(r.counted > 100, `only ${r.counted} frames were measured`);
+    assert.ok(r.worstRun <= GRACE, `${Math.round(v * 3.6)} km/h on base ${base} left a hole for ${r.worstRun} frames`);
+  }
+  // and the rule itself: nothing below 90 km/h or in a street, a buildings
+  // band above it or where the view is open, one ring on the low preset
+  assert.deepEqual(planCarRings(20, 4), { view: 4, shell: 0, far: 0 });
+  assert.deepEqual(planCarRings(56, 4), { view: 4, shell: 2, far: 0 });
+  assert.deepEqual(planCarRings(30, 4), { view: 4, shell: 1, far: 0 });
+  assert.deepEqual(planCarRings(0, 4, 1), { view: 4, shell: 2, far: 0 });
+  assert.deepEqual(planCarRings(56, 3), { view: 3, shell: 1, far: 0 });
+});
+
 test('a low fast pass keeps up too — that is where the ring is narrowest', async () => {
   const r = await fly(555, { dur: 8, agl: 60 });
   assert.ok(r.worstRun <= GRACE,
@@ -276,6 +296,10 @@ test('no speed can ask for a window bigger than the one already shipping', () =>
     for (const agl of [0, 40, 120, 300, 900]) {
       const r = planRings(v, agl, 6);
       const c = windowCost(r.view, r.shell, r.far);
+      for (const base of [3, 4, 6]) {
+        const k = planCarRings(v, base, 1), ck = windowCost(k.view, k.shell, k.far);
+        assert.ok(ck.kb <= WINDOW.kb && ck.draws <= WINDOW.draws, `a car at ${v} m/s on base ${base} is over the ceiling`);
+      }
       assert.ok(c.kb <= WINDOW.kb && c.draws <= WINDOW.draws,
         `${v} m/s at ${agl} m asks for ${(c.kb / 1024).toFixed(0)} MB / ` +
         `${c.draws.toFixed(0)} draws, over the ${(WINDOW.kb / 1024).toFixed(0)} MB / ` +

@@ -334,7 +334,7 @@ export function projectArc(route, i, arc0, x, z, h, ahead, back = 1) {
  * turn at aLat is sqrt(aLat R). The cap is the braking envelope
  * v^2 = vc^2 + 2 b d, d to where the rounding begins.
  */
-export function curveCap(route, i, arc, reach, aLat, brake, off = 0, r0 = 5) {
+export function curveCap(route, i, arc, reach, aLat, brake, off = 0, r0 = 5, lockR = r0) {
   let cap = Infinity, lastS = NaN;
   const hi = arc + reach;
   while (i > 0 && route[i].base > arc - T_MAX) i--;
@@ -357,7 +357,10 @@ export function curveCap(route, i, arc, reach, aLat, brake, off = 0, r0 = 5) {
       // anybody down (pedestrians.js HIT_MIN_SPEED), since this is where a car
       // brushes the kerb. An ordinary junction turn is not squeezed and keeps
       // its sqrt(aLat R).
-      if (c.cut && c.R < r0 * TIGHT_K) v = TIGHT_V;
+      // (lockR: the vehicle's own radius, where a caller rounds wider than it,
+      // as traffic.js does on a motorway: the walk is for corners the vehicle
+      // cannot steer, not for ones rounded tighter than a 300 m radius)
+      if (c.cut && c.R < lockR * TIGHT_K) v = TIGHT_V;
       const d = c.aS - arc;
       const vc = d > 0 ? Math.sqrt(v * v + 2 * brake * d) : v;
       if (vc < cap) cap = vc;

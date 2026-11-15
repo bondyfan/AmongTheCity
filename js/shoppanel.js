@@ -27,7 +27,8 @@ function payRow(icon, title, line, price, label, can, onClick, cost = true) {
 }
 
 // ---- food -----------------------------------------------------------------
-const FOOD_ICON = { parek: '🌭', pernik: '🍪', langos: '🫓', smazak: '🧀', gulas: '🍲', svickova: '🍽️' };
+const FOOD_ICON = { parek: '🌭', pernik: '🍪', langos: '🫓', smazak: '🧀', gulas: '🍲', svickova: '🍽️',
+  kava: '☕', bageta: '🥖' };
 /** Energy a plate gives: more filling than healing, so a snack keeps you going
  *  and a proper meal resets the day. */
 export const energyOf = (plate) => Math.min(100, Math.round(plate.hp * 1.7));
@@ -51,7 +52,9 @@ export class FoodPanel {
     const body = this.panel.body, have = this.money();
     body.textContent = '';
     this.panel.sub.textContent = kc(have);
-    for (const plate of PRICE.food) {
+    // a petrol station's till has its own short menu (jobplaces.foodPlaceAt)
+    const menu = this._venue?.menu === 'shop' ? PRICE.shop : PRICE.food;
+    for (const plate of menu) {
       body.appendChild(payRow(FOOD_ICON[plate.id] ?? '🍴', plate.name,
         '+' + plate.hp + ' zdraví · +' + energyOf(plate) + ' sytost',
         plate.price, 'Koupit', have >= plate.price,
