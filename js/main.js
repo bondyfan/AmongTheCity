@@ -66,6 +66,7 @@ import { SkidMarks } from './skidmarks.js';
 import { MISSILE } from './config.js';
 import { showMenu } from './menu.js';
 import { connectCity, queueEvent, getPlayerName, CityNetWS } from './netcity.js';
+import { closeNotice, connectNotice } from './netnotice.js';
 // ---- the co-op wave, wired in here and nowhere else ----
 // worldclock: the day is a pure function of the shared wall clock now, so two
 //   players never run two different afternoons (js/worldclock.js explains why).
@@ -3750,8 +3751,9 @@ async function start() {
         // A dead socket used to change NOTHING on screen: the avatars simply
         // stopped moving and the player carried on driving round a city they
         // believed was shared. Now it says so, and keeps saying so.
-        ui.setStatus({ online: false, count: 0, names: [] });
-        if (!info?.expected) ui.toast('Server spadl, pokračuješ sám', 'error');
+        const notice = info?.expected ? null : closeNotice(info);
+        ui.setStatus({ online: false, count: 0, names: [], notice });
+        if (notice) ui.toast(notice, 'error');
         // every proxy dies with the session; pumpGhosts finishes the job on
         // the next frame once `net` goes null, this covers the socket dropping
         // while the session object is still alive
@@ -3769,7 +3771,7 @@ async function start() {
       // nobody had open — the game simply started, in silence, alone.
       console.error('Multiplayer: připojení selhalo, spouštím jednohráčovku.', err);
       net = null;
-      ui.toast('Server je nedostupný, hraješ sám', 'error');
+      ui.toast(connectNotice(err), 'error');
     }
   }
   // Read the save before anything is built from it, in the mode the session

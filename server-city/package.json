@@ -3,12 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Dedicated co-op relay server for Among The City (shared Pardubice world).",
+  "description": "Co-op relay for Among The City: Node for local play, a Cloudflare Durable Object for the live server.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "node --test test.js"
+    "test": "node --test test.js",
+    "test:worker": "node --test --test-timeout=120000 worker/test.js",
+    "worker:dev": "cd worker && wrangler dev --local"
   },
   "engines": {
     "node": ">=18"

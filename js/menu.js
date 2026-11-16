@@ -8,9 +8,10 @@
 // The multiplayer button gates on the server actually being up: the same
 // /health polling pattern as the Woods serverstatus module, enabled only
 // while GET {SERVER_URL}/health answers { ready: true }, with the player/room
-// count as the status line, re-checked every few seconds while the menu is
-// open. No WebSocket is touched here; the transport (netcity.js) connects
-// only after the click.
+// count as the status line, re-checked every 10 s while the menu is open and
+// visible (js/menuhealth.js, which also stops asking once the page has been
+// left alone for 10 minutes). No WebSocket is touched here; the transport
+// (netcity.js) connects only after the click.
 //
 // Layering: the menu sits at z-index 15, above the HUD (10) but BELOW the
 // settings gear (20) and panel (40), so "Nastavení" stays reachable from the
@@ -26,7 +27,7 @@
 // it is still remembered and handed back, so a player who types a name once
 // never has to think about it again.
 
-import { SERVER_URL } from '../server-config.js';
+import { startHealthPoll } from './menuhealth.js';
 import { browserStore, fmtPlayed } from './savegame.js';
 import { confirmPanel } from './panel.js';
 import { kc } from './prices.js';
@@ -105,29 +106,7 @@ function saveStart(id) {
 // The stylesheet lives in js/menustyle.js and the painted town behind the
 // menu in js/menubg.js; this file keeps the behaviour.
 
-// ---- /health poller (Woods serverstatus pattern, inlined) --------------------
-function healthUrl() {
-  if (!SERVER_URL) return null;
-  return SERVER_URL.replace(/\/+$/, '') + '/health';
-}
-
-async function checkHealth() {
-  const url = healthUrl();
-  if (!url) return { online: false, detail: 'server není nastaven' };
-  try {
-    const ctl = new AbortController();
-    const to = setTimeout(() => ctl.abort(), 4000);
-    const res = await fetch(url, { signal: ctl.signal, cache: 'no-store' });
-    clearTimeout(to);
-    const j = res.ok ? await res.json().catch(() => null) : null;
-    if (res.ok && j && j.ready) {
-      return { online: true, detail: `online · ${j.players ?? 0} hráčů` };
-    }
-    return { online: false, detail: 'server není připraven' };
-  } catch {
-    return { online: false, detail: 'server nedostupný' };
-  }
-}
+// The /health poller and its cost guard live in js/menuhealth.js.
 
 const NOTE_IDLE = 'Uvidí ji ostatní hráči · na server bez ní nelze';
 const NOTE_MISS = 'Nejdřív si zvolte přezdívku';
@@ -289,17 +268,8 @@ export function showMenu() {
 
     // health poll while the menu is open; also re-enables if the server comes
     // UP after the menu appeared (typical local flow: start game, then server)
-    const status = multi.querySelector('.atc-mp-status');
-    let timer = null, closed = false;
-    const poll = async () => {
-      const { online, detail } = await checkHealth();
-      if (closed) return;
-      multi.disabled = !online;
-      multi.classList.toggle('online', online);
-      status.textContent = detail;
-    };
-    if (SERVER_URL) { poll(); timer = setInterval(poll, 5000); }
-    else status.textContent = 'server není nastaven';
+    let closed = false;
+    const stopPoll = startHealthPoll(multi, multi.querySelector('.atc-mp-status'));
 
     // typing clears a pending rejection and saves as you go, so the name is
     // already in localStorage even if the tab is closed before picking a mode
@@ -321,7 +291,7 @@ export function showMenu() {
 
     // The gate is a click-time REFUSAL, not a disabled button, for two reasons.
     // (1) `multi.disabled` already means one specific thing, "the server is
-    // not answering", and the poller rewrites it every 5 s; folding a second
+    // not answering", and the poller rewrites it every 10 s; folding a second
     // condition into it would have the poller undo the name check (and the
     // status line can only tell one story at a time). (2) A disabled button
     // swallows the click, so it can never explain itself; an enabled one that
@@ -343,7 +313,7 @@ export function showMenu() {
     const pick = (mode) => {
       if (closed) return;
       closed = true;
-      if (timer) clearInterval(timer);
+      stopPoll();
       clearInterval(clock);
       if (cover) cover.style.visibility = coverVis;   // spinner covers the boot
       overlay.classList.add('atc-menu-out');        // the town rushes towards you

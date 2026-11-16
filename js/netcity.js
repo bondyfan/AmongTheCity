@@ -28,6 +28,7 @@ import { PLAYER_SCALE, WALK } from './config.js';
 import { NameTags } from './nametags.js';
 import { strHash, lookForUid, baseUid, localUid, shortId } from './identity.js';
 import { setEpoch } from './worldclock.js';
+import { CLOSE_CODES } from './netnotice.js';
 
 const MSG = {
   HELLO: 'hello', STATE: 'state', EVENT: 'event', SNAP: 'snap', META: 'meta',
@@ -40,6 +41,11 @@ const MSG = {
 const SHARED_ROOM = 'PARDUBICE';
 
 const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+// The server's deliberate close codes and what the HUD says about them live
+// in js/netnotice.js. The transport never reconnects by itself: a dropped
+// session stays dropped until the player picks Multiplayer again from the
+// menu, so no close, the budget one included, can become a reconnect loop.
 
 function wsUrl() {
   if (!SERVER_URL) return null;
@@ -109,7 +115,9 @@ export const CityNetWS = {
         if (!settled && m.t === MSG.ERROR) {
           settled = true; clearTimeout(failTimer);
           try { ws.close(); } catch {}
-          reject(new Error(m.msg || 'Server refused the connection.'));
+          const err = new Error(m.msg || 'Server refused the connection.');
+          if (typeof m.code === 'string') err.code = m.code;   // 'limit': the month's budget is used up
+          reject(err);
           return;
         }
         this._dispatch(m);
@@ -127,7 +135,10 @@ export const CityNetWS = {
         this._stopPing();
         if (!settled) {
           settled = true; clearTimeout(failTimer);
-          reject(new Error('Server connection closed.'));
+          const err = new Error('Server connection closed.');
+          if (e?.code === CLOSE_CODES.LIMIT) err.code = 'limit';
+          else if (e?.code === CLOSE_CODES.UNMEASURED) err.code = 'unmeasured';
+          reject(err);
           return;
         }
         if (this._ws !== ws) return;    // a socket we already replaced
@@ -137,9 +148,15 @@ export const CityNetWS = {
         this.partnerUid = null;
         for (const uid of gone) { try { this._handlers.peerState?.(uid, null); } catch {} }
         this._emitStatus();
+        const code = e?.code ?? 0;
         this._handlers.close?.({
-          code: e?.code ?? 0, reason: e?.reason ?? '',
+          code, reason: e?.reason ?? '',
           clean: !!e?.wasClean, expected: this._left,
+          limit: code === CLOSE_CODES.LIMIT,
+          unmeasured: code === CLOSE_CODES.UNMEASURED,
+          idle: code === CLOSE_CODES.IDLE,
+          silent: code === CLOSE_CODES.SILENT,
+          replaced: code === CLOSE_CODES.REPLACED,
         });
       };
     });
@@ -228,9 +245,10 @@ export const CityNetWS = {
   onSnap(fn) { this._handlers.snap = fn; },
 
   onPeer(fn) { this._handlers.peer = fn; },
-  // fn({ code, reason, clean, expected }) — the socket went away. `expected`
-  // is true only when leave() asked for it, so the UI can stay quiet on a
-  // deliberate exit and shout on a real drop.
+  // fn({ code, reason, clean, expected, limit, unmeasured, idle, silent, replaced }):
+  // the socket went away. `expected` is true only when leave() asked for it,
+  // so the UI can stay quiet on a deliberate exit and shout on a real drop;
+  // the other flags name the server's deliberate closes (see closeNotice).
   onClose(fn) { this._handlers.close = fn; },
   // fn({ online, count, uids }) — every membership change, plus WELCOME.
   onStatus(fn) { this._handlers.status = fn; },

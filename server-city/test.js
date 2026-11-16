@@ -1,5 +1,5 @@
 // ==========================================================================
-// server-city tests — `npm test` inside server-city/ (seconds, not minutes).
+// server-city tests: `npm test` inside server-city/ (seconds, not minutes).
 //
 // Everything here drives a REAL server process over a REAL websocket on a
 // free port: the bug this suite exists for (F1, reconnect with the same uid
@@ -81,7 +81,7 @@ test('F1: reconnecting with the same uid keeps exactly one seat, not zero', asyn
   await first.wait((m) => m.t === 'state' === false || true); // settle
   assert.equal((await s.health()).players, 2, 'two players before the reconnect');
 
-  // the same uid comes back (second tab / Wi-Fi blip) — the old socket is kicked
+  // the same uid comes back (second tab / Wi-Fi blip): the old socket is kicked
   const second = client(s.port); await second.hello('samewho');
   const welcome = await second.wait((m) => m.t === 'welcome');
   assert.deepEqual(welcome.peers, ['watcher']);
@@ -151,7 +151,7 @@ test('F23: a joiner learns every peer\'s last state immediately', async () => {
   assert.equal(st.state.nm, 'Ranger');
 });
 
-test('F23b: reconnecting keeps the avatar — lastState survives the new socket', async () => {
+test('F23b: reconnecting keeps the avatar, lastState survives the new socket', async () => {
   const s = await startServer();
   const a = client(s.port); await a.hello('mover');
   await a.wait((m) => m.t === 'welcome');
@@ -175,7 +175,7 @@ test('F15: an oversized frame is rejected, never amplified', async () => {
   a.send({ t: 'state', state: { blob: 'x'.repeat(1024 * 1024) } });  // 1 MiB
   await sleep(300);
   assert.equal(a.closed !== null, true, 'the sender is closed by maxPayload (1009)');
-  // the room only hears that the flooder left — the megabyte itself went nowhere
+  // the room only hears that the flooder left: the megabyte itself went nowhere
   assert.equal(b.msgs.some((m) => m.t === 'state'), false, 'the blob was never relayed');
   assert.equal(b.msgs.some((m) => m.t === 'peer' && m.event === 'leave'), true);
 });
@@ -188,7 +188,7 @@ test('F15: an over-limit state frame under maxPayload is dropped, not stored', a
   a.send({ t: 'state', state: { blob: 'x'.repeat(8 * 1024) } });     // 8 KiB > LIMITS.state
   await sleep(200);
   assert.equal(b.msgs.some((m) => m.t === 'state'), false, 'oversized state never relayed');
-  assert.equal(a.closed, null, 'but the socket survives — it is a drop, not a kill');
+  assert.equal(a.closed, null, 'but the socket survives: it is a drop, not a kill');
 });
 
 test('F15: a burst is absorbed, sustained flooding closes the socket', async () => {
@@ -353,7 +353,7 @@ test('a reconnecting AUTHORITY gets the world snapshot back', async () => {
   a.send({ t: 'snap', snap: [{ x: 1, y: 2, z: 3, r: 9, id: 'boss:1' }] });
   await b.wait((m) => m.t === 'snap');
 
-  // the authority reloads the page — its world comes back EMPTY
+  // the authority reloads the page: its world comes back EMPTY
   const a2 = client(s.port); await a2.hello('boss');
   await a2.wait((m) => m.t === 'welcome');
   const snap = await a2.wait((m) => m.t === 'snap');

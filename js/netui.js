@@ -404,13 +404,21 @@ export function makeNetUI(opts = {}) {
     netBox.classList.remove('atc-net-hide');
     netBox.classList.toggle('off', !online);
     if (!cnt.textContent) cnt.textContent = czPlayers(0);
-    if (online === was) return;
+    // s.notice: WHY the session ended (netnotice.js closeNotice), e.g. the
+    // server's monthly budget is used up. It arrives with main.js's onClose,
+    // one status update after the drop itself, so it rewrites the banner.
+    if (online === was) {
+      if (!online && s.notice && banner) showBanner(s.notice, false);
+      return;
+    }
     if (!online) {
-      // The whole reason this module exists. Persistent — it stays up until
+      // The whole reason this module exists. Persistent: it stays up until
       // the connection is back, because the player needs to know that
       // everything they do from here on is happening in their world only.
-      showBanner('Spojení se serverem ztraceno, hraješ sám', false);
-      toast('Spojení ztraceno, zkouším se připojit…', 'error');
+      // No "trying to reconnect" here: the transport never reconnects by
+      // itself (netcity.js), the player picks Multiplayer again from the menu.
+      showBanner(s.notice || 'Spojení se serverem ztraceno, hraješ sám', false);
+      toast('Spojení se serverem ztraceno', 'error');
       known = new Map();                 // everyone is gone as far as we can tell
       cnt.textContent = czPlayers(0);
     } else if (was === false) {

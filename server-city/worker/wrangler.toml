@@ -1,0 +1,49 @@
+# Among The City co-op: one Worker and one Durable Object (the shared
+# PARDUBICE room). Live URL after deploy:
+#   https://among-the-city-coop.digifycz.workers.dev   (health /health, ws /ws)
+# Deploying, the optional secret and the cost model: ../README.md.
+name = "among-the-city-coop"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+account_id = "b7117cdad0da911d200d1cff741dd934"
+workers_dev = true
+preview_urls = false
+
+# Workers Logs bill per log event, and with hibernation every inbound
+# WebSocket message is an invocation. Keep them off.
+[observability]
+enabled = false
+
+[vars]
+# The object's OWN caps for one billing cycle (counted high, see budget.js).
+BUDGET_GBS = "50000"
+BUDGET_REQUESTS = "300000"
+# The billing cycle starts at 00:00 UTC on this day of the month.
+CYCLE_DAY = "13"
+# The optional account-wide guard runs only with the secret
+# CF_ANALYTICS_TOKEN (Account Analytics Read). It closes co-op when the
+# WHOLE account passes these (95 % of what Workers Paid includes).
+CF_ACCOUNT_ID = "b7117cdad0da911d200d1cff741dd934"
+ACCOUNT_GBS_LIMIT = "380000"
+ACCOUNT_REQUESTS_LIMIT = "950000"
+ACCOUNT_CHECK_MS = "3600000"
+# A failed check is retried after this long; this many failures in a row and
+# co-op closes until a check succeeds again (fail closed, 4503 'unmeasured').
+ACCOUNT_RETRY_MS = "120000"
+ACCOUNT_FAILS_TO_CLOSE = "2"
+# The menu's /health answer is reused in each isolate for this long.
+HEALTH_TTL_MS = "30000"
+# WebSocket handshakes one address may start per minute (per isolate).
+UPGRADES_PER_MIN = "30"
+# A seated socket that has not moved for this long is closed (a forgotten tab).
+IDLE_MS = "1800000"
+# No frame at all for this long: the socket is dead.
+SILENCE_MS = "300000"
+
+[[durable_objects.bindings]]
+name = "COOP"
+class_name = "CoopRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CoopRoom"]

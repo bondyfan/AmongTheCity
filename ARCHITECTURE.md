@@ -1736,3 +1736,34 @@ that the five round 8 packages build on. Read them, never re-derive them.
   continuation). trains.js now joins routes that meet end to end
   (`_joinRoutes`) and, given the terrain, puts its track at the rail grade
   (it ran at y 0.18 before, under the real terrain).
+
+# Co-op server: a Cloudflare Durable Object (November 2026)
+
+The co-op relay moved off the deleted VPS onto Cloudflare, the way Death Run
+runs: a Worker `among-the-city-coop` (`server-city/worker/`) in front of ONE
+Durable Object (SQLite class `CoopRoom`, `idFromName('PARDUBICE')`, European
+location hint). The client contract did not change: `server-config.js`
+SERVER_URL, `GET /health` (the menu, `js/menuhealth.js`) and the WebSocket at
+`/ws` (`js/netcity.js`), same protocol.
+
+* **One logic, two hosts.** `server-city/hub.js` (admission, hello and uid
+  takeover, rate limits, lanes, PING/PONG, deadlines), `room.js` and
+  `protocol.js` run unchanged under the Node relay (`index.js`, local play,
+  `npm test`) and the Durable Object (`worker/src/coop.js`, adapter
+  `worker/src/conn.js`). A rule changed in the hub is changed on both.
+* **Hibernation.** `ctx.acceptWebSocket` and the `webSocket*` handlers, no
+  timers; one alarm only while sockets exist (hello, silence, idle, dead
+  sockets, the hourly account check). After a wake the hub is rebuilt from
+  the socket attachments (seat, joinedAt, authority, last state) and from
+  storage (meta with its stable `created`, the world snapshot, the budget).
+* **Cost guard.** The object counts its own duration and requests per
+  billing cycle (13th to 13th) on the high side and closes co-op with close
+  code 4402 `limit` at `BUDGET_GBS` / `BUDGET_REQUESTS`; an optional secret
+  `CF_ANALYTICS_TOKEN` adds an account-wide check against the GraphQL
+  Analytics API, which fails closed (4503 `unmeasured` after two failed
+  checks). `/health` then says `{ ready: false, reason: 'limit' }`, the
+  menu and the HUD say it in Czech (`js/netnotice.js`), and
+  nothing reconnects by itself. Socket caps count `ctx.getWebSockets()`,
+  because a Workers socket cannot be terminated and a peer that ignores the
+  close keeps it open. Details, numbers, what no cap can stop, and the
+  deploy commands: `server-city/README.md`.

@@ -1,7 +1,7 @@
 // ==========================================================================
 // Wire protocol shared by the Among The City client (js/netcity.js) and this
 // dedicated server. Every frame on the socket is a single JSON object with a
-// `t` (type) field. Ported from ../AmongTheWoods/server/protocol.js — the
+// `t` (type) field. Ported from ../AmongTheWoods/server/protocol.js: the
 // shapes are kept identical so the two servers stay drop-in familiar; the
 // city only actually uses HELLO / STATE / EVENT / PING / BYE today, but the
 // meta/snap lanes cost nothing to keep and spare a future re-port.
@@ -17,7 +17,7 @@ export const PROTOCOL_VERSION = 1;
 // ~120 B, HELLO ~90 B. The generous rounding leaves room for future fields
 // without leaving room for a 1 MB blob that the relay would amplify ×20.
 export const LIMITS = {
-  payload: 64 * 1024,       // ws maxPayload — hard cap on any single frame
+  payload: 64 * 1024,       // ws maxPayload: hard cap on any single frame
   hello: 1024,
   state: 4 * 1024,
   event: 4 * 1024,
@@ -26,7 +26,7 @@ export const LIMITS = {
   // Client budget: 10 state/s + a ping every 25 s + a drained event outbox
   // (capped at 33 in netcity.js), so a legitimate firefight frame can spike to
   // ~45/s. The ceiling sits well above that and a socket is only KILLED after
-  // three over-budget seconds in a row — a burst loses frames, a script loses
+  // three over-budget seconds in a row, a burst loses frames, a script loses
   // the socket.
   msgsPerSec: 120,
   bytesPerSec: 96 * 1024,
@@ -38,13 +38,13 @@ export const LIMITS = {
 };
 
 // Room meta the client may patch, with the type each key must have. `host`,
-// `created` and anything unlisted are server-owned — a relay whose room meta
+// `created` and anything unlisted are server-owned: a relay whose room meta
 // any anonymous socket can rewrite is a griefing lane, not a feature.
 export const META_PATCHABLE = { mode: 'string', state: 'string', seed: 'number' };
 
 export const MSG = {
   // ---- client -> server ----
-  HELLO: 'hello',   // { uid, want:'join', code? }  (one shared room — code ignored)
+  HELLO: 'hello',   // { uid, want:'join', code? }  (one shared room, code ignored)
   STATE: 'state',   // { state }   throttled own player-state blob
   EVENT: 'event',   // { ev }      one-shot gameplay event (rocket boom / …)
   SNAP:  'snap',    // { snap }    world snapshot (only the room authority sends)
@@ -68,7 +68,7 @@ export const MSG = {
   PONG:    'pong',    // { }
 };
 
-// A room's shared meta — same shape as the Woods server so clients written
+// A room's shared meta: same shape as the Woods server so clients written
 // against either protocol read it without surprises.
 export function freshMeta(mode, seed) {
   return {
@@ -80,7 +80,7 @@ export function freshMeta(mode, seed) {
   };
 }
 
-// 4-char room codes — unused while everyone shares MAIN, kept for parity.
+// 4-char room codes: unused while everyone shares MAIN, kept for parity.
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 export function genCode(rand = Math.random) {
   let s = '';
@@ -99,7 +99,7 @@ export function decode(buf) {
 // forget. ws.send() on a client that stopped reading buffers in OUR heap: 20
 // stalled sockets × unbounded queue is how a relay dies. A backed-up peer
 // loses relayed frames (all of which are superseded ~100 ms later anyway) and
-// a truly wedged one gets terminated — the heartbeat would have reaped it too,
+// a truly wedged one gets terminated, the heartbeat would have reaped it too,
 // only much later and after the damage.
 export function sendRaw(ws, data) {
   if (!ws || ws.readyState !== 1) return false;
@@ -114,14 +114,14 @@ export function sendObj(ws, obj) { return sendRaw(ws, encode(obj)); }
 // charset that can't smuggle markup or blow up a log line.
 //
 // THE COLON IS PART OF THE UID, NOT PUNCTUATION TO BE SCRUBBED. js/identity.js
-// mints 'base:tab' — the base half persists in localStorage (it is what the
+// mints 'base:tab': the base half persists in localStorage (it is what the
 // player's look, colour and 'Hráč xxxx' stub are hashed from) and the tab half
 // lives in sessionStorage (so two tabs are two bodies, not one re-seated uid).
 // While ':' was stripped here the server handed back a uid nobody on the client
 // could match:
 //   · netcity.js compares PEER 'authority'.uid against its own localUid(), so
 //     the comparison failed for everyone and the authority demoted itself to
-//     'guest' one frame after WELCOME — which killed the late-joiner world
+//     'guest' one frame after WELCOME, which killed the late-joiner world
 //     snapshot outright, because main.js only sends it when role === 'host';
 //   · identity.baseUid() splits on ':', so with the colon gone a peer's "base"
 //     was the WHOLE string: every player looked one colour to themselves and a
@@ -142,7 +142,7 @@ export function isPlainPayload(v) {
 // The SNAP lane is the exception, and it had to be: the world snapshot the
 // client sends is city.js's `hitLog`, which is an ARRAY of blast records, and
 // the client's applyHits() refuses anything that is not one. Running snaps
-// through isPlainPayload dropped every single one on the floor — silently, on
+// through isPlainPayload dropped every single one on the floor, silently, on
 // the authority-only lane, so nothing anywhere reported it and late joiners
 // simply never inherited the wreckage. Nothing here spreads the payload: the
 // room stores it and relays it verbatim, and the size ceiling (LIMITS.snap) is

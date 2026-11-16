@@ -1,9 +1,9 @@
 // ==========================================================================
-// Room — the one shared Pardubice living on the neutral server.
+// Room: the one shared Pardubice living on the neutral server.
 //
 // Port of ../AmongTheWoods/server/room.js MINUS the server-side simulation
 // (the Woods Milestone 2 `sim` seam): Among The City is client-authoritative
-// v1 — every client runs its own world and the server merely OWNS the room
+// v1: every client runs its own world and the server merely OWNS the room
 // (registry, lifecycle, 24/7 persistence, peer join/leave) and RELAYS the
 // protocol between connected clients. The Woods "authority" role is kept: it
 // costs three lines, announces itself over PEER exactly like the original,
@@ -22,10 +22,32 @@ export class Room {
     this.code = code;
     this.meta = freshMeta(mode, seed);
     this.players = new Map();     // uid -> { uid, ws, lastState, joinedAt }
-    this.authorityUid = null;     // first player in — a seat for future world sync
+    this.authorityUid = null;     // first player in, a seat for future world sync
     this.lastSnap = null;         // most recent world snapshot (for late joiners)
     this.createdAt = Date.now();
     this.lastActivity = Date.now();
+    // (prevUid, nextUid) whenever the authority seat changes hands; the
+    // Durable Object host keeps it in the socket attachments.
+    this.onAuthority = null;
+  }
+
+  setAuthority(uid) {
+    const prev = this.authorityUid;
+    this.authorityUid = uid;
+    if (prev !== uid) this.onAuthority?.(prev, uid);
+  }
+
+  // Put a seat back after the host woke from hibernation: no WELCOME, no
+  // PEER frames, because from every client's point of view nothing happened.
+  restore(uid, ws, lastState, joinedAt, isAuthority) {
+    this.players.set(uid, { uid, ws, lastState, joinedAt });
+    if (isAuthority) this.authorityUid = uid;
+    else if (!this.authorityUid || !this.players.has(this.authorityUid)) {
+      // nobody claims the seat yet: the oldest joiner holds it until one does
+      const oldest = [...this.players.values()].sort((a, b) => a.joinedAt - b.joinedAt)[0];
+      this.authorityUid = oldest ? oldest.uid : null;
+    }
+    this.meta.state = 'playing';
   }
 
   get size() { return this.players.size; }
@@ -36,21 +58,21 @@ export class Room {
   add(uid, ws, prevState = null) {
     this.lastActivity = Date.now();
     this.players.set(uid, { uid, ws, lastState: prevState, joinedAt: Date.now() });
-    if (!this.authorityUid) this.authorityUid = uid;   // first in holds the seat
+    if (!this.authorityUid) this.setAuthority(uid);    // first in holds the seat
     this.meta.state = 'playing';
 
     const others = [...this.players.values()].filter((p) => p.uid !== uid);
     this.sendTo(uid, {
       t: MSG.WELCOME, code: this.code, uid,
       // THE ROOM'S CLOCK. Everything the two clients are supposed to agree
-      // about without talking — where each AI car is on its route, which way a
-      // traffic light is showing, what time of day it is — is derived from
+      // about without talking, where each AI car is on its route, which way a
+      // traffic light is showing, what time of day it is, is derived from
       // worldT(), and worldT() was each machine's own Date.now(). Measured on
       // the real schedule: one second of skew between the two wall clocks puts
       // the shared fleet 16.8 m apart on average and 643 m apart at worst (a
       // car near a generation boundary respawns somewhere else entirely), and
       // ten seconds leaves 18 of ~100 cars existing on one screen only. NTP
-      // usually keeps two machines inside 50 ms, which is fine — but "usually"
+      // usually keeps two machines inside 50 ms, which is fine, but "usually"
       // is not a guarantee anybody can see, and a laptop that just woke up is
       // seconds out. One field cancels the whole class of failure: the client
       // anchors worldclock.setEpoch() to THIS number instead of its own.
@@ -70,11 +92,11 @@ export class Room {
       if (p.lastState) this.sendTo(uid, { t: MSG.STATE_UP, from: p.uid, state: p.lastState });
     }
 
-    // Everyone who arrives inherits the wreckage — the AUTHORITY INCLUDED.
+    // Everyone who arrives inherits the wreckage: the AUTHORITY INCLUDED.
     // Excluding them read as "it is their own snapshot, they already have it",
     // which stops being true the moment they are ARRIVING: an authority who
     // reloads (or reconnects, F1) brings an empty world back and the exclusion
-    // left them staring at an intact city while everyone else stood in rubble —
+    // left them staring at an intact city while everyone else stood in rubble,
     // then overwrote lastSnap with their own short hitLog and took the
     // wreckage away from every future joiner too. Same for the first player
     // back into the persistent MAIN room, which keeps lastSnap while empty.
@@ -93,23 +115,23 @@ export class Room {
     this.broadcast({ t: MSG.PEER, event: 'leave', uid });
     // promote a survivor to the authority seat, oldest joiner first
     if (uid === this.authorityUid) {
-      this.authorityUid = null;
       const next = [...this.players.values()].sort((a, b) => a.joinedAt - b.joinedAt)[0];
-      if (next) {
-        this.authorityUid = next.uid;
-        this.broadcast({ t: MSG.PEER, event: 'authority', uid: this.authorityUid });
-      }
+      this.setAuthority(next ? next.uid : null);
+      if (next) this.broadcast({ t: MSG.PEER, event: 'authority', uid: this.authorityUid });
     }
   }
 
   // ---- message relay: everyone else gets your state/event, nothing more ----
+  // onState / onSnap / onMeta return true when they accepted the payload, so
+  // the host can persist what changed.
   onState(uid, state) {
-    if (!isPlainPayload(state)) return;
+    if (!isPlainPayload(state)) return false;
     const p = this.players.get(uid);
-    if (!p) return;
-    p.lastState = state;          // frame size is capped by the caller (index.js)
+    if (!p) return false;
+    p.lastState = state;          // frame size is capped by the caller (hub.js)
     this.lastActivity = Date.now();
     this.broadcast({ t: MSG.STATE_UP, from: uid, state }, uid);
+    return true;
   }
 
   onEvent(uid, ev, to = null) {
@@ -125,19 +147,20 @@ export class Room {
   }
 
   onSnap(uid, snap) {
-    if (uid !== this.authorityUid) return; // only the authority's snapshot counts
-    if (!isSnapPayload(snap)) return;      // an ARRAY is the real shape — see protocol.js
+    if (uid !== this.authorityUid) return false; // only the authority's snapshot counts
+    if (!isSnapPayload(snap)) return false;      // an ARRAY is the real shape, see protocol.js
     this.lastSnap = snap;
     this.lastActivity = Date.now();
     this.broadcast({ t: MSG.SNAP_UP, snap }, uid);
+    return true;
   }
 
   // Room meta belongs to the room, not to whoever shouts last: only the
   // authority may patch it, and only the keys the protocol lists (so `host`
   // and `created` stay server-owned).
   onMeta(uid, patch) {
-    if (uid !== this.authorityUid) return;
-    if (!isPlainPayload(patch)) return;
+    if (uid !== this.authorityUid) return false;
+    if (!isPlainPayload(patch)) return false;
     let changed = false;
     for (const [k, want] of Object.entries(META_PATCHABLE)) {
       if (!Object.hasOwn(patch, k)) continue;
@@ -145,9 +168,10 @@ export class Room {
       if (want === 'string' && typeof v === 'string' && v.length <= 16) { this.meta[k] = v; changed = true; }
       else if (want === 'number' && Number.isFinite(v)) { this.meta[k] = v; changed = true; }
     }
-    if (!changed) return;
+    if (!changed) return false;
     this.lastActivity = Date.now();
     this.broadcast({ t: MSG.META_UP, meta: this.meta });
+    return true;
   }
 
   // ---- transport helpers ----
