@@ -39,9 +39,12 @@
 
 import * as THREE from 'three';
 import { CAR, CAR_COLORS } from './config.js';
-import { paintMatFor, glassMat, detailMat, headMat, tailMat, brakeMat, carNight,
-  makeContactShadows } from './carpaint.js';
+import { detailMat, headMat, tailMat, brakeMat, carNight, makeContactShadows } from './carpaint.js';
 import { buildCar } from './cardetail.js';
+import { ATLAS, mergedBodies } from './carmerge.js';
+import { BODY_U } from './carbodymat.js';
+import { dressCar, bindCar, setCarState, carMergeOn } from './carmesh.js';
+import { hookScene, setCarInstancing, carInstancingOn, carInstanceStats } from './carinstances.js';
 import { attachTrailer, updateTrailer, updateBlink } from './semitrailer.js';   // round 8: the articulated lorry, indicators
 import { crash, sfxAt, skidChirp, skidBark } from './audio.js';   // no-ops headless — safe for node --check/tests
 
@@ -97,7 +100,9 @@ function emitVehicleEvent(type, data) {
 // stays here is the handle main.js has always driven at dusk: one assignment
 // to lampMats.head / .tail still lights every car in the city, and
 // lampMats.night(k) tells the same shaders how dark it is (the projectors, the
-// tail clusters and the fallback sky follow it).
+// tail clusters and the fallback sky follow it). The one-draw body material
+// (js/carbodymat.js) reads the same three objects through getters, so the
+// handle still reaches every car whichever way it is drawn.
 // chrome for the CABIN only (the interior is Lambert and unlit by design)
 const chromeMat = new THREE.MeshLambertMaterial({ color: 0xd4dae2 });
 export const lampMats = { head: headMat, tail: tailMat, brake: brakeMat, night: carNight };
@@ -105,13 +110,14 @@ export { carNight };
 
 // ---- brand badges: tiny CanvasTextures drawn once, cached forever ----
 // A 13 cm plane on the nose is only ever seen from a few meters, so 128 px is
-// plenty. Each brand draws with plain 2D paths — no assets, no fetches — and
-// the material is shared by every car of the brand. polygonOffset floats the
-// decal off the paint it sits a centimeter in front of.
-const _badgeMats = new Map();
-function badgeMatFor(brand) {
-  let m = _badgeMats.get(brand);
-  if (m) return m;
+// plenty. Each brand draws with plain 2D paths (no assets, no fetches) once,
+// and is copied into the decal atlas of every kind and colour that wears it
+// (decalTexFor below). The body shader's depth rung floats the decal off the
+// paint it sits a centimetre in front of.
+const _badgeCv = new Map();
+function drawBadge(brand) {
+  let cached = _badgeCv.get(brand);
+  if (cached) return cached;
   const cv = document.createElement('canvas');
   // 256 device pixels, still AUTHORED in the original 128 grid: the canvas is
   // scaled once so every path below reads the way it was written, at twice the
@@ -203,24 +209,15 @@ function badgeMatFor(brand) {
     x.beginPath(); x.moveTo(42, 32); x.lineTo(64, 62); x.lineTo(86, 32); x.stroke();
     x.beginPath(); x.moveTo(32, 62); x.lineTo(46, 96); x.lineTo(64, 70); x.lineTo(82, 96); x.lineTo(96, 62); x.stroke();
   }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  // -5: decals ride above every draped layer (glass and trim -2, lamps -3, brake -4)
-  m = new THREE.MeshLambertMaterial({ map: tex, transparent: true, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 });
-  _badgeMats.set(brand, m);
-  return m;
+  _badgeCv.set(brand, cv);
+  return cv;
 }
 
 // ---- license plates: white EU plate, Pardubice's "5E" series ----
 // The registration hashes off kind+paint so it is DETERMINISTIC — the same
 // blue Octavia always wears the same number, front and rear, without storing
 // anything per car. The cache is bounded by |kinds| × |color pools|.
-const _plateMats = new Map();
-function plateMatFor(kind, hex) {
-  const key = kind + '|' + hex;
-  let m = _plateMats.get(key);
-  if (m) return m;
+function drawPlate(kind, hex) {
   let h = hex >>> 0;
   for (let i = 0; i < kind.length; i++) h = Math.imul(h ^ kind.charCodeAt(i), 0x01000193) >>> 0;
   h = Math.imul(h ^ (h >>> 15), 0x85ebca6b) >>> 0;
@@ -236,11 +233,29 @@ function plateMatFor(kind, hex) {
   x.fillText('CZ', 18, 46);
   x.fillStyle = '#171a1e'; x.font = 'bold 40px sans-serif';
   x.fillText(text, 145, 42);
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  _plateMats.set(key, m = new THREE.MeshLambertMaterial({ map: tex, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 }));
-  return m;
+  return cv;
+}
+
+// ---- the decal atlas: plate and badge on one canvas per kind and colour -----
+// The body is one draw (carmerge.js), so its two decals share one texture: the
+// badge in the top 256 rows, the plate in the bottom 56 (carmerge.js ATLAS has
+// the layout). Bounded like the plates always were, by kinds x colour pools.
+const _decals = new Map();
+function decalTexFor(kind, hex) {
+  const key = kind + '|' + hex;
+  let t = _decals.get(key);
+  if (t) return t;
+  const cv = document.createElement('canvas');
+  cv.width = ATLAS.w; cv.height = ATLAS.h;
+  const x = cv.getContext('2d');
+  const brand = KIND[kind]?.brand;
+  if (brand) x.drawImage(drawBadge(brand), 0, 0, 256, 256);
+  x.drawImage(drawPlate(kind, hex), 0, ATLAS.h - 56, 256, 56);
+  t = new THREE.CanvasTexture(cv);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  _decals.set(key, t);
+  return t;
 }
 
 // ---- per-kind silhouette + engine specs ----
@@ -974,17 +989,11 @@ if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
   let i = 0;
   const next = () => {
     if (i >= CAR_KINDS.length) return;
-    geomFor(CAR_KINDS[i++]);
+    const g = geomFor(CAR_KINDS[i++]);
+    if (carMergeOn()) mergedBodies(g);   // the one-draw bodies too (js/carmerge.js)
     window.setTimeout(next, 40);
   };
   window.setTimeout(next, 600);
-}
-
-// shadow + matrix housekeeping for a part that never moves on its parent
-function fixed(m, cast, receive) {
-  m.castShadow = cast; m.receiveShadow = receive;
-  m.matrixAutoUpdate = false;
-  return m;
 }
 
 // ---- makeCarMesh(colorHex[, kind]) → { group, wheels } ----
@@ -994,12 +1003,13 @@ function fixed(m, cast, receive) {
 // = −z); front wheels use YXZ euler order so steering yaw and rolling spin
 // compose.
 //
-// Budget. A near car is 11 draw calls: paint, glass, detail, head lamps, tail
-// lamps, plates, badges and four one-piece wheels (the brake element is a
-// twelfth that only exists while the car is slowing). Beyond LOD_FAR the body
-// swaps to its distance variant, four draw calls with the wheels baked in.
-// Only the paint and the wheels cast shadows: a number plate's shadow was
-// never visible and cost a draw in the shadow pass regardless.
+// Budget (js/carmesh.js has the table). A near car is ONE draw call: paint,
+// glass, trim, lamps, brake element, plates and badges are one geometry under
+// one material, and the brake light is a material swap. Its four wheels and
+// its distance dress (beyond LOD_FAR, wheels baked in) are members of the
+// instanced pools of js/carinstances.js: one draw per kind and side for every
+// wheel on the street, one per kind for every distant car in the city. The
+// old eleven-part car is still here behind ?carmerge=0, for an A/B.
 export function makeCarMesh(colorHex, kind = 'octavia') {
   kind = ALIAS[kind] ?? kind;
   const g = geomFor(kind), K = g.K;
@@ -1010,31 +1020,6 @@ export function makeCarMesh(colorHex, kind = 'octavia') {
   near.matrixAutoUpdate = far.matrixAutoUpdate = false;
   far.visible = false;
   body.add(near, far);
-  const paint = paintMatFor(colorHex);
-  const part = (parent, geo, mat, cast, receive = true) => {
-    if (!geo) return null;
-    const m = fixed(new THREE.Mesh(geo, mat), cast, receive);
-    parent.add(m);
-    return m;
-  };
-  const N = g.near, F = g.far;
-  // (the glass is a skin over the paint now, so its shadow would only repeat the paint's)
-  const pm = part(near, N.paint, paint, true), gm = part(near, N.glass, glassMat, false);
-  // the truck's cargo body lives in the detail mesh, so there it must cast
-  const dm = part(near, N.detail, detailMat, !!K.cargo);
-  const hm = part(near, N.head, headMat, false, false), tm = part(near, N.tail, tailMat, false, false);
-  const bm = part(near, N.brake, brakeMat, false, false);
-  if (bm) bm.visible = false;
-  // dentCar crumples these. Paint first and glass second, as the crash code
-  // has always assumed; the trim and the lamps follow so a pushed-in nose
-  // takes its grille and headlamps with it instead of leaving them in mid-air.
-  group.userData.hulls = [pm, gm, dm, hm, tm, bm].filter(Boolean);
-  if (g.plates) part(near, g.plates, plateMatFor(kind, colorHex), false, false);
-  if (g.badges) part(near, g.badges, badgeMatFor(K.brand), false, false);
-  part(far, F.paint, paint, true);
-  part(far, F.detail, detailMat, true);
-  part(far, F.head, headMat, false, false);
-  part(far, F.tail, tailMat, false, false);
   // long kinds tuck the axles inside the overhangs (a bus pivots mid-body,
   // not at the bumpers) — K.axle overrides the wheels-at-the-corners default
   const ax = K.axle ?? (K.len / 2 - K.wheelR - 0.35);
@@ -1050,10 +1035,16 @@ export function makeCarMesh(colorHex, kind = 'octavia') {
     group.add(w);
     wheels.push(w);
   }
+  const dress = dressCar({ g, K, kind, hex: colorHex, decal: decalTexFor(kind, colorHex), near, far, wheels });
+  // dentCar crumples these: the merged body is one mesh, every draped layer
+  // in it, so a pushed-in nose takes its grille and headlamps with it
+  group.userData.hulls = dress.hulls;
   group.userData.body = body;
   group.userData.wheelR = K.wheelR;
   group.userData.lod = { near, far, wheels, far_: false };
-  group.userData.brake = bm;
+  group.userData.brake = dress.brake;
+  group.userData.carState = dress.state;
+  bindCar(group, dress);
   return { group, wheels };
 }
 
@@ -1069,11 +1060,32 @@ export function setCarLod(group, isFar) {
 }
 const LOD_FAR = 62, LOD_NEAR = 54;       // m, with hysteresis so a car on the line does not flicker
 
+// ---- A/B from the console ----------------------------------------------------
+//   atcCars.instancing(false)   wheels and distance dress draw one by one again
+//   atcCars.instancing(true)    back into the pools (the default)
+//   atcCars.city(0)             no skyline in the paint (1 is the default)
+//   atcCars.stats()             { pools, members, drawn, on, merged }
+// ?carmerge=0 in the URL builds every car as the old eleven-part model, and
+// ?carinst=0 starts with the pools off: a cold A/B in one browser.
+if (typeof window !== 'undefined') {
+  window.atcCars = {
+    instancing(on = true) { setCarInstancing(on); return this.stats(); },
+    city(k = 1) { BODY_U.uCity.value = +k; return BODY_U.uCity.value; },
+    stats(scene) {
+      return { ...carInstanceStats(scene ?? window.__atc?.scene), on: carInstancingOn(), merged: carMergeOn() };
+    },
+  };
+}
+
 // ---- Vehicles: owns every car mesh in the scene, animates the dressing ----
 export class Vehicles {
   constructor(scene) {
     this.scene = scene;
     this.cars = new Set();
+    // the instanced wheel and distance-dress pools fill in this scene's
+    // onBeforeRender (js/carinstances.js); hooked here so it is there before
+    // the first car, whichever way that car reaches the scene
+    hookScene(scene);
     // CO-OP GHOSTS. A peer's car is a proxy js/netvehicles.js owns: it is not
     // in this.cars (nothing here may write its pose), so it never got the two
     // things that are decided per frame for every other car in view: the
@@ -1259,6 +1271,7 @@ export class Vehicles {
       // The player's car rides real springs (bodyStep, fed by the tyre
       // forces); everyone else's keeps the cheap lean, and a car the player
       // has just left eases from the one into the other.
+      const sprung = !!car._bLive;      // (read before it is cleared: the lamps want it below)
       if (car._bLive) {
         car._roll = car._bRoll; car._pitch = car._bPitch;
         car._bLive = false;
@@ -1353,14 +1366,30 @@ export class Vehicles {
         }
       }
       // ---- brake lights ----
-      // The same smoothed deceleration that dips the nose. No per-car material:
-      // the brake element is a mesh of its own that simply exists or does not.
+      // The same smoothed deceleration that dips the nose. On the merged body
+      // the brake element is part of the one draw and lights by a material
+      // swap (js/carmesh.js setCarState); userData.brake is then a plain
+      // { visible } that the trailer (js/semitrailer.js) reads like before.
       const bl = m.userData.brake;
+      let braking = false;
       if (bl) {
         // (against the direction of travel: pulling away in reverse is a
         // negative acceleration too, and it is not braking)
-        const on = (car.speed < 0 ? -car._acc : car._acc) < -2.4 && Math.abs(car.speed) > 0.5;
-        if (bl.visible !== on) bl.visible = on;
+        braking = (car.speed < 0 ? -car._acc : car._acc) < -2.4 && Math.abs(car.speed) > 0.5;
+        if (bl.visible !== braking) bl.visible = braking;
+      }
+      // ---- lamps on or off ----
+      // A car with somebody in it burns its lamps (the running lights by day,
+      // the full set after dark); a parked one is dark, the way a street of
+      // parked cars is at night. Somebody: the traffic AI, a police or rescue
+      // crew, the player's springs this frame, or plain movement. The hold
+      // keeps a car stopped at a light, or just left by the player, from
+      // blinking out for a frame.
+      if (m.userData.carState) {
+        if (car.ai || car.police || car.rescue || sprung || car._litT === Infinity
+          || Math.abs(car.speed) > 0.3) car._litT = Math.max(car._litT ?? 0, 2);
+        else if (car._litT > 0) car._litT -= dt;
+        setCarState(m, car._litT > 0, braking);
       }
       // ---- contact shadow ----
       // Rides the car's own matrix (so it lies along the hill with the car),

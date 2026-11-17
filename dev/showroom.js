@@ -134,7 +134,8 @@ if (P.n > 0) {
   for (const c of cars) c.x -= mid;
 }
 // after dark the cars count as DRIVEN, so they lay their headlight pools
-for (const c of cars) { c.steer = P.steer; c._grounded = true; if (P.night > 0.3) c.ai = {}; }
+// (and every car burns its lamps, day or night: a showroom car is never parked)
+for (const c of cars) { c.steer = P.steer; c._grounded = true; c._litT = Infinity; if (P.night > 0.3) c.ai = {}; }
 
 // lamps: exactly what main.js updateNightLights writes, plus the module's own
 // night hook when it has one
@@ -209,7 +210,8 @@ function stats() {
   let meshes = 0, tris = 0;
   if (cars.length) {
     cars[0].mesh.traverse((o) => {
-      if (!o.isMesh || !o.visible) return;
+      // (a pooled wheel or distance dress is drawn by its pool, not by itself)
+      if (!o.isMesh || !o.visible || !o.layers.test(camera.layers)) return;
       let p = o.parent, vis = true;
       while (p) { if (!p.visible) vis = false; p = p.parent; }
       if (!vis) return;

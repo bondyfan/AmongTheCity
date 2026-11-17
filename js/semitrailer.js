@@ -21,6 +21,8 @@
 import * as THREE from 'three';
 import { Soup } from './carbody.js';
 import { detailMat, tailMat, brakeMat } from './carpaint.js';
+import { mergeBody } from './carmerge.js';
+import { bodyMatFor } from './carbodymat.js';
 import { worldT } from './worldclock.js';
 
 export const SEMI_LEN = 16.5;     // m, tractor + trailer overall (what physics and the follow model see)
@@ -113,14 +115,23 @@ export function attachTrailer(car) {
   const grp = new THREE.Group();
   grp.position.set(0, 0, KINGPIN);
   const mk = (geo, mat, cast) => { const o = new THREE.Mesh(geo, mat); o.castShadow = cast; o.receiveShadow = true; o.matrixAutoUpdate = false; o.updateMatrix(); grp.add(o); return o; };
-  mk(g.detail, detailMat, true);
-  mk(g.tail, tailMat, false);
+  let br = null, body = null;
+  if (ud.carState) {
+    // the tractor is one draw (js/carmesh.js), so the trailer is too: box,
+    // chassis, wheels, tail and brake lamps in one geometry under the body
+    // material, whose lamps and brake follow the tractor's (updateTrailer)
+    g.body ??= mergeBody([{ geo: g.detail, kind: 'detail' }, { geo: g.tail, kind: 'tail' }, { geo: g.brake, kind: 'brake' }]);
+    body = mk(g.body, bodyMatFor('trailer', 0xffffff, null, true, false), true);
+  } else {
+    mk(g.detail, detailMat, true);
+    mk(g.tail, tailMat, false);
+    br = mk(g.brake, brakeMat, false);
+    br.visible = false;
+  }
   mk(g.marker, markerMat(), false);
-  const br = mk(g.brake, brakeMat, false);
-  br.visible = false;
   m.add(grp);
   car.len = SEMI_LEN; car.wid = SEMI_WID;
-  car._tr = { grp, br, psi: car.heading, init: false };
+  car._tr = { grp, br, body, st: -1, psi: car.heading, init: false };
 }
 
 const angWrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -135,6 +146,12 @@ export function updateTrailer(car, dt) {
   const k = Math.abs(car.speed) * dt / AXLE_C;
   t.psi = angWrap(t.psi + Math.sin(d) * (k < 1 ? k : 1));
   t.grp.rotation.y = angWrap(t.psi - car.heading);
+  if (t.body) {
+    const s = car.mesh.userData.carState, lit = s ? s.lit : true, on = s ? s.brake : false;
+    const st = (lit ? 1 : 0) + (on ? 2 : 0);
+    if (t.st !== st) { t.st = st; t.body.material = bodyMatFor('trailer', 0xffffff, null, lit, on); }
+    return;
+  }
   const bl = car.mesh.userData.brake;
   const on = !!bl && bl.visible;
   if (t.br.visible !== on) t.br.visible = on;
