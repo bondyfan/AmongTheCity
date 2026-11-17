@@ -90,6 +90,7 @@ import * as career from './career.js';
 import { exitHudText, setExitLine } from './mwhud.js';
 import { MwRetro } from './mwretro.js';
 import { setMotorwayAtlasScale } from './mwatlas.js';
+import { installSceneGraphPolicy } from './scenegraph.js';
 
 const $id = (id) => document.getElementById(id);
 
@@ -105,6 +106,9 @@ renderer.toneMappingExposure = EXPOSURE_DAY;   // sky.js drives it from here on 
 $id('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
+// the world origin never moves, and hidden subtrees are not multiplied out
+// every frame: js/scenegraph.js (9 ms of a Prague frame, measured)
+installSceneGraphPolicy(scene);
 scene.fog = new THREE.Fog(0xa8b8c8, 180, 900); // sky.js recolors/moves this
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1400);
 

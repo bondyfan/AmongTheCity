@@ -30,6 +30,7 @@ import { stampShaped, onQuay } from './quayedge.js';
 import { Canopy } from './canopy.js';
 import { GroundClass } from './groundclass.js';
 import { mwCollide } from './mwsolids.js';
+import { freezeStatic } from './scenegraph.js';
 
 // Wake the mesher workers as soon as the page has this module, which is while
 // the menu is still up: see prewarmMeshPool. Nothing happens under node.
@@ -1153,7 +1154,8 @@ export class CityWorld {
     }
     const prev = this.built.get(key);            // rebuilt / upgraded in place
     if (prev) { this.scene.remove(prev); shed(prev); }
-    if (group) this.scene.add(group);
+    // a finished chunk never moves: its matrices are composed once (js/scenegraph.js)
+    if (group) this.scene.add(freezeStatic(group));
     this.built.set(key, group);
     // The lamp masts of this chunk become collidable objects. It has to happen
     // on every build, not once: a rebuild hands over brand-new InstancedMeshes
@@ -1314,7 +1316,7 @@ export class CityWorld {
       }
       const group = buildChunkMeshes(this.city, cx, cz, this.mats, 'roads');
       this._farRibbons.set(hk, group ?? null);
-      if (group) this.scene.add(group);
+      if (group) this.scene.add(freezeStatic(group));
       builds++;
     }
     // retire what nothing needs any more — or what the real chunk now draws
@@ -1356,7 +1358,7 @@ export class CityWorld {
         continue;
       }
       this._farRibbons.set(hk, out.group ?? null);
-      if (out.group) this.scene.add(out.group);
+      if (out.group) this.scene.add(freezeStatic(out.group));
     }
   }
 
