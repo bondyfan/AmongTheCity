@@ -164,6 +164,16 @@ test('species and size survive the worker: the same trees from both paths', () =
   assert.ok(a && b, 'no crown batch');
   assert.equal(a.count, w.recs.length);
   assert.equal(b.count, a.count);
+  // The shader stands a trunk under every crown that the template only holds
+  // a placeholder of, so the batch's sphere is grown past what three computes
+  // (rebase does it, the codec carries it): without that a wood's edge pops
+  // out of view a tree early at the side of the screen and in the shadows
+  const ref = new THREE.InstancedMesh(a.geometry, a.material, a.count);
+  ref.instanceMatrix.copy(a.instanceMatrix);
+  ref.computeBoundingSphere();
+  assert.ok(Math.abs(a.boundingSphere.radius - ref.boundingSphere.radius - S.FAR_BOUND_PAD) < 1e-3, 'main thread: no pad');
+  assert.ok(Math.abs(b.boundingSphere.radius - a.boundingSphere.radius) < 0.05, 'worker: the pad was lost');
+  assert.equal(b.name, 'trees-far');
   const ma = new THREE.Matrix4(), mb = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Vector3();
   const ca = a.instanceColor.array, cb = b.instanceColor.array;
   const fa = ca instanceof Float32Array ? 255 : 1, fb = cb instanceof Float32Array ? 255 : 1;

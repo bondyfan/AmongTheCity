@@ -9,8 +9,9 @@
 //   2. an avenue is one planting, a wood is a mix
 //   3. the species survives the colour, through the worker's byte quantisation
 //   4. the near model stands on the ground the far matrix puts it on, and fills
-//      the crown the far blob fills
+//      the crown the far picture is painted from
 //   5. a street tree gets its pit on paving and nowhere else
+//   6. every species, the shrub included, has a picture framed on its foliage
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -20,7 +21,9 @@ register(new URL('./three-alias.mjs', import.meta.url));
 
 const THREE = await import('three');
 const S = await import('../js/treeshapes.js');
-const { nearModel } = await import('../js/treemodels.js');
+const { nearModel, shrubModel } = await import('../js/treemodels.js');
+const { impostorFrame } = await import('../js/treeimpostor.js');
+const { IMP_COLS, IMP_ROWS } = await import('../js/treeshader.js');
 const { pavingUnder, treePitsInto } = await import('../js/treepits.js');
 const { treeQuality } = await import('../js/trees.js');
 
@@ -84,23 +87,50 @@ test('the species rides in the colour and survives the worker', () => {
   }
 });
 
-test('the far templates are what the codec can carry', () => {
-  const [trunk, crown] = S.farTemplates();
-  assert.equal(trunk.getAttribute('position').count + crown.getAttribute('position').count, S.FAR_VERTS);
-  for (const g of [trunk, crown]) {
-    for (const name of ['position', 'normal', 'color', 'uv']) assert.ok(g.getAttribute(name), name);
-    const n = g.getAttribute('normal'), c = g.getAttribute('color'), uv = g.getAttribute('uv');
-    for (let i = 0; i < n.count; i++) {
-      assert.ok(Math.abs(Math.hypot(n.getX(i), n.getY(i), n.getZ(i)) - 1) < 2e-3, 'a normal off unit length');
-      for (const v of [c.getX(i), c.getY(i), c.getZ(i), uv.getX(i), uv.getY(i)]) assert.ok(v >= 0 && v <= 1, `${v} outside 0..1`);
-    }
-    assert.ok(g.index, 'a template that shares no vertices cannot shade smooth');
+test('the far template is what the codec can carry', () => {
+  const g = S.farTemplate();
+  assert.equal(g.getAttribute('position').count, S.FAR_VERTS);
+  for (const name of ['position', 'normal', 'color', 'uv']) assert.ok(g.getAttribute(name), name);
+  const p = g.getAttribute('position'), n = g.getAttribute('normal'), c = g.getAttribute('color'), uv = g.getAttribute('uv');
+  let quad = 0;
+  for (let i = 0; i < n.count; i++) {
+    assert.ok(Math.abs(Math.hypot(n.getX(i), n.getY(i), n.getZ(i)) - 1) < 2e-3, 'a normal off unit length');
+    for (const v of [c.getX(i), c.getY(i), c.getZ(i), uv.getX(i), uv.getY(i)]) assert.ok(v >= 0 && v <= 1, `${v} outside 0..1`);
+    // the shader tells the picture from the trunk by the normal alone, and
+    // the codec ships normals as bytes: the two must be far apart
+    const ny = Math.round(n.getY(i) * 127) / 127;
+    if (ny < -0.5) quad++;
+    else assert.ok(ny > -0.2, `a trunk normal ${ny} too close to the picture's marker`);
   }
-  // the extent trees.js undoes the worker's quantisation with
-  const p = crown.getAttribute('position');
+  assert.equal(quad, 4, 'the picture is one quad');
+  assert.ok(g.index, 'a template that shares no vertices cannot shade smooth');
+  // The worker quantises the template by its largest coordinate and folds that
+  // into the instance matrices; the shader reads a crown's radii off those
+  // matrices, so the largest coordinate must be exactly 1 (the fold is then 1)
   let ext = 0;
   for (let i = 0; i < p.count; i++) ext = Math.max(ext, Math.abs(p.getX(i)), Math.abs(p.getY(i)), Math.abs(p.getZ(i)));
-  assert.ok(Math.abs(ext - S.farCrownExtent()) < 1e-6);
+  assert.equal(ext, 1);
+  assert.equal(S.farCrownExtent(), 1);
+  assert.ok(S.FAR_BOUND_PAD > 0);
+});
+
+test('every species has a picture, framed on its foliage', () => {
+  assert.ok(S.SPECIES.length * 2 <= IMP_COLS * IMP_ROWS, 'the atlas has a cell for every build');
+  for (let sp = 0; sp < S.SPECIES.length; sp++) for (const variant of [0, 1]) {
+    const g = sp === S.SP.SHRUB ? shrubModel(variant) : nearModel(sp, variant), name = S.SPECIES[sp].name;
+    assert.ok(g, `${name} has no model to paint`);
+    const f = impostorFrame(g);
+    // the picture is about a crown wide (a poplar's is its height, which in
+    // crown space is about 1), and centred inside the crown
+    assert.ok(f.half > 0.6 && f.half < 1.9, `${name}: a picture ${f.half.toFixed(2)} crown radii wide`);
+    assert.ok(Math.abs(f.yc) < 0.5, `${name}: picture centred ${f.yc.toFixed(2)} off the crown`);
+    assert.ok(f.foot >= f.yc - f.half, `${name}: the stem would run off the cell`);
+  }
+  // a shrub's cushion reaches down to its own ground
+  const g = shrubModel(0), p = g.getAttribute('position');
+  let low = Infinity;
+  for (let i = 0; i < p.count; i++) low = Math.min(low, p.getY(i));
+  assert.ok(low < -0.8 && low > -1.2, `the shrub's foliage ends at ${low.toFixed(2)}`);
 });
 
 test('the near model stands where the far matrix puts the ground', () => {
@@ -124,8 +154,7 @@ test('the near model stands where the far matrix puts the ground', () => {
       const name = S.SPECIES[sp].name;
       assert.ok(low < 200.05 && low > 199.0, `${name}: the trunk ends ${(low - 200).toFixed(2)} m from the ground`);
       assert.ok(Math.abs(top - 212) < 1.3, `${name}: a 12 m tree drawn ${(top - 200).toFixed(1)} m tall`);
-      // the foliage fills the crown the far blob fills (a spruce is a cone,
-      // the far shader widens its foot by the same 1.45)
+      // the foliage fills the crown (a spruce is a cone, widest at its foot)
       assert.ok(wide > 0.7 && wide < (sp === S.SP.SPRUCE ? 1.75 : 1.3), `${name}: foliage ${wide.toFixed(2)} crown radii wide`);
       for (const name2 of ['normal', 'aGeoN', 'color', 'uv']) assert.equal(g.getAttribute(name2).count, p.count);
       assert.ok(p.count < 1500, `${name} is ${p.count} vertices`);

@@ -91,8 +91,17 @@ chunks are ≤ ~2 km from origin, float32 is plenty). Inside, few merged meshes:
   EXCEPT `gabled` on small houses (< 300 m²): add a simple ridge prism.
   Windows: NONE in v1 (flat style) — but named landmarks (n present) keep
   full saturation so they pop.
-- **trees**: instanced low-poly tree (trunk cylinder + 2 stacked cones or
-  icosphere crown), slight scale/hue jitter, at [x, 0, z].
+- **trees**: ONE InstancedMesh per chunk (`trees-far`, mats.crown): every
+  tree is a camera-facing picture of its species' crown on a five-sided
+  trunk the shader builds from a species table (js/treeshapes.js "the far
+  tier", js/treeshader.js). The pictures are the near models themselves,
+  rendered once at start-up into an atlas with their normals and shade
+  (js/treeimpostor.js), so a far crown is lit by the real sun. Round the
+  camera js/trees.js swaps them for the full models of js/treemodels.js.
+  The batch's bounding sphere carries `userData.boundPad` (rebase adds it)
+  because the template only holds a placeholder of the trunk. A/B and costs
+  from the console: `__atc.trees.ab` ({ impostor, near, wind }) and
+  `__atc.trees.stats()`.
 Return null if the chunk index has no entry.
 
 ### js/vehicles.js — AGENT B

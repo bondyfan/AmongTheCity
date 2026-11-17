@@ -3222,7 +3222,7 @@ function stepGame(dt) {
   // and pushing it two seconds down the track would leave the player standing
   // in a bare circle at any speed.
   grass?.update(focus.x, focus.z, dt);
-  trees?.update(camera, dt, sky?.nightK ?? 0);
+  trees?.update(camera, dt, sky?.nightK ?? 0, sky?.lightDir);
   farSkyline?.update(camera, sky?.edgeFar ?? scene.fog?.far);
 
   if (game.jet) {
