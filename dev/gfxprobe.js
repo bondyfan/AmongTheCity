@@ -175,8 +175,10 @@ const G = {
       for (const m of ['update', 'tick', 'draw', 'render', 'bake']) {
         if (typeof o[m] !== 'function') continue;
         const orig = o[m], key = k + '.' + m;
-        o[m] = function (...a) { const t0 = performance.now(); try { return orig.apply(this, a); } finally { G._sim.t[key] = (G._sim.t[key] ?? 0) + performance.now() - t0; } };
-        G._sim.undo.push(() => { o[m] = orig; });
+        try {
+          o[m] = function (...a) { const t0 = performance.now(); try { return orig.apply(this, a); } finally { G._sim.t[key] = (G._sim.t[key] ?? 0) + performance.now() - t0; } };
+          G._sim.undo.push(() => { o[m] = orig; });
+        } catch { /* a module namespace: read-only */ }
       }
     }
     const r = A.renderer, ro = r.render;
@@ -196,6 +198,20 @@ const G = {
     G._sim = null;
     return { secs: +secs.toFixed(1), perSecondMs: Object.fromEntries(Object.entries(s.t)
       .sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, +(v / secs).toFixed(1)])) };
+  },
+
+  /**
+   * A full-resolution frame of the canvas, without the HUD, posted to a local
+   * sink (a tiny HTTP server that writes it to disk). Fire and forget: nothing
+   * here awaits, so it is safe while the hidden-tab pump runs.
+   */
+  shot(name, sink = 'http://127.0.0.1:5499/') {
+    const A = window.__atc;
+    G.frame();
+    if (A.postfx && !G._pf) return 'no post frame captured yet, call again';
+    const url = A.renderer.domElement.toDataURL('image/jpeg', 0.92);
+    fetch(sink + name, { method: 'POST', body: url }).catch(() => {});
+    return name + ' ' + Math.round(url.length / 1024) + ' kB';
   },
 
   /** The post stack, one pass at a time (each switched off on its own). */
