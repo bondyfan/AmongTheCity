@@ -28,6 +28,8 @@
 // any zoom, under any bridge.
 
 import * as THREE from '../libs/three.module.js';
+import { NOISE_GLSL, WRAP_GLSL, GROUND_DETAIL } from './groundglsl.js';
+import { STREET_DETAIL_GLSL } from './streetdetail.js';
 
 // ---- the classes -----------------------------------------------------------
 // Layer indices into the texture arrays. The order is the order they are
@@ -379,17 +381,20 @@ export function surfaceMaterial() {
     shader.uniforms.uAlbedo = { value: _albedo };
     shader.uniforms.uNormalArr = { value: _normal };
     shader.uniforms.uScale = { value: SCALE };
+    shader.uniforms.uGroundDetail = GROUND_DETAIL;
 
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         attribute float surf;
         varying float vSurf;
         varying vec2 vWorldXZ;
-        varying float vWorldY;`)
+        varying float vWorldY;
+        ${WRAP_GLSL}`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vSurf = surf;
         vec4 atcWorld = modelMatrix * vec4(position, 1.0);
-        vWorldXZ = atcWorld.xz;
+        // (wrapped: see js/groundglsl.js, the textures were a mosaic in Prague)
+        vWorldXZ = atcWrapXZ(position);
         vWorldY = atcWorld.y;`);
 
     shader.fragmentShader = shader.fragmentShader
@@ -401,24 +406,9 @@ export function surfaceMaterial() {
         varying vec2 vWorldXZ;
         varying float vWorldY;
 
-        // Lattice hash on coordinates WRAPPED to 4096 first. The world reaches
-        // 140 km from its origin, and a hash fed raw coordinates that size has
-        // spent most of a float's mantissa before the fraction it wants: the
-        // old sin() hash came out in bands in Prague. Wrapped, every lattice
-        // point is a small exact integer wherever it is; the pattern repeats
-        // every 4 km of lattice, which nobody will ever line up.
-        float atcHash(vec2 p) {
-          p = mod(p, 4096.0);
-          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-          p3 += dot(p3, p3.yzx + 33.33);
-          return fract((p3.x + p3.y) * p3.z);
-        }
-        float atcNoise(vec2 p) {
-          vec2 i = floor(p), f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          return mix(mix(atcHash(i), atcHash(i + vec2(1.0, 0.0)), f.x),
-            mix(atcHash(i + vec2(0.0, 1.0)), atcHash(i + vec2(1.0, 1.0)), f.x), f.y);
-        }
+        uniform float uGroundDetail;
+        // atcHash / atcNoise / atcUnit: js/groundglsl.js
+        ${NOISE_GLSL}
         // A second, very slow noise that multiplies the albedo. Without it a
         // texture repeating every few metres beats into a visible grid the
         // moment you get above the rooftops — this is 30 m across and costs
@@ -437,6 +427,7 @@ export function surfaceMaterial() {
           }
           return sqrt(d2) - sqrt(d1);
         }
+        ${STREET_DETAIL_GLSL}
 `)
       .replace('#include <map_fragment>', `
         // what the surface detail below hands on to the roughness and the
@@ -527,11 +518,18 @@ export function surfaceMaterial() {
             float wear = vUv.y;
             if (wear > 0.004) {
               float l = fract((vUv.x - 0.25) * 16.0) - 0.5;
-              float tr = exp(-pow((abs(l) - 0.255) / 0.085, 2.0));
+              float tr = exp(-pow((abs(l) - 0.255) / (0.085 + 0.03 * uGroundDetail), 2.0));
               float oil = exp(-pow(l / 0.07, 2.0)) * smoothstep(0.62, 1.0, wear)
                 * (0.6 + 0.4 * atcNoise(w * vec2(0.5, 0.5) + 2.0));
-              tone *= 1.0 - 0.12 * wear * tr - 0.24 * oil;
+              // (deeper with the street-level detail on, where the rest of
+              // the surface has enough going on that 12 % got lost in it)
+              float trK = 0.12 + 0.14 * uGroundDetail;
+              tone *= 1.0 - trK * wear * tr - (0.24 + 0.08 * uGroundDetail) * oil;
               atcSmooth += 0.24 * wear * tr + 0.28 * oil;
+              // the strip between the tracks and along every lane line is
+              // where the dust the tyres throw off settles: a shade paler
+              float dust = exp(-pow((abs(l) - 0.5) / 0.08, 2.0));
+              tone *= 1.0 + 0.05 * uGroundDetail * wear * dust;
             }
             // chippings are a centimetre: the class bump is for standing over
             // them, not for a road seen along its length
@@ -546,6 +544,10 @@ export function surfaceMaterial() {
             // dirtier one, on a scale no tile carries
             tone *= 0.93 + 0.14 * atcNoise(vWorldXZ * 0.23 + 11.0);
             atcBump *= clamp(1.0 - px * 5.0, 0.2, 1.0);
+          }
+          if (uGroundDetail > 0.5) {
+            vec2 fwd = fwidth(vWorldXZ);
+            tone *= atcStreetDetail(layer, vWorldXZ, atcST, px, min(fwd.x, fwd.y), atcBump);
           }
           diffuseColor.rgb *= tone;
         }`)
@@ -586,8 +588,16 @@ export function surfaceMaterial() {
   };
   // three keys its program cache on this, and two materials with different
   // injected code must not share one
-  mat.customProgramCacheKey = () => 'surfaces-v4';
+  mat.customProgramCacheKey = () => 'surfaces-v5';
   return mat;
+}
+
+/** The synthesised arrays, for the aerial photo's street-level detail
+ *  (js/orthodetail.js): the same setts and chippings, so a photographed
+ *  square and a mapped one are laid in the same stone. */
+export function surfaceTextures() {
+  build();
+  return { albedo: _albedo, normal: _normal, scale: SCALE };
 }
 
 /** For tests and for the settings toggle that throws the ground away. */

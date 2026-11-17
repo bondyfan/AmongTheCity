@@ -26,15 +26,15 @@ const PRESETS = {
   low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 60,
             ortho: false, facades: false, trees: true, grass: false, peds: 12, bloom: false, rays: false,
             ao: false, interiors: false, buildingR: 80, mblur: false, flare: false,
-            tramMasts: false, cloudDist: 'medium' },
+            tramMasts: false, cloudDist: 'medium', groundDetail: false },
   medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 240,
             ortho: true,  facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
             ao: true,  interiors: true, buildingR: 160, mblur: true, flare: true,
-            tramMasts: true, cloudDist: 'medium' },
+            tramMasts: true, cloudDist: 'medium', groundDetail: true },
   high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
             ortho: true,  facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
             ao: true,  interiors: true, buildingR: 280, mblur: true, flare: true,
-            tramMasts: true, cloudDist: 'far' },
+            tramMasts: true, cloudDist: 'far', groundDetail: true },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
 
@@ -313,6 +313,9 @@ export function initSettings(apply) {
     selectRow('traffic', 'Hustota provozu', [[0, 'Žádná'], [60, 'Řídká'],
       [120, 'Běžná'], [240, 'Hustá']]),
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
+    // street-level detail on the ground (js/groundglsl.js): shader arithmetic
+    // and a few texture reads per ground pixel, no draw call; off on low
+    toggleRow('groundDetail', 'Detail povrchů zblízka'),
     toggleRow('grass', 'Tráva (3D stébla)'),
     toggleRow('ao', 'Ambient occlusion (stíny v koutech)'),
     toggleRow('bloom', 'Bloom (záře světel)'),

@@ -1767,3 +1767,29 @@ SERVER_URL, `GET /health` (the menu, `js/menuhealth.js`) and the WebSocket at
   because a Workers socket cannot be terminated and a peer that ignores the
   close keeps it open. Details, numbers, what no cap can stop, and the
   deploy commands: `server-city/README.md`.
+
+## The ground at street level (gfx/ground): js/groundglsl.js, streetdetail.js, orthodetail.js
+Material-only: no geometry attribute, no draw call, worker/main parity untouched
+except one data vote in meshes.js. Two ground materials share the GLSL in
+`js/groundglsl.js`:
+- **precise world xz** (`atcWrapXZ`): the chunk origin wrapped by 4 800 m (a
+  whole number of every class's tile) plus the local position. Raw world xz at
+  Prague (x ≈ −95 km) has 8 mm float steps, so every texture was a jittered
+  mosaic. The slow noises restart on the 4.8 km grid lines (a soft seam there).
+- **js/streetdetail.js** `atcStreetDetail`: a per-class multiplier the surface
+  shader applies over the 256 px tile, drawn from world position so it has no
+  period: asphalt blotches, bitumen age tint, binder stones; every slab, sett
+  and paver its own shade from its WORLD unit index (`atcUnit`), walked-on
+  dirt and weathering; dry and lush patches on grass; a kerb face 20 % darker.
+  Every fine term fades by pixel footprint. Tyre tracks and drip line deepen.
+- **js/orthodetail.js** on every ortho supertile Lambert: near the camera the
+  photo is calmed (an explicit-LOD 1.6 m blur, dark blots lifted toward the
+  4 m surround, only for a camera under ~20–60 m) and the synthesised setts,
+  chippings or grass (classified from the photo's own colour) give albedo
+  detail and normal relief, faded out by 25 cm pixels.
+- **meshes.js**: a plaza/pedestrian area (or any area tagged cobble) is laid in
+  its own stone over the photo like a car park; the derived square plates are
+  setts where the walked ways in the 3 × 3 chunks round are mostly sett.
+- Switch: `GROUND_DETAIL` (one shared uniform object). Preset key
+  `groundDetail` (off on low), panel row "Detail povrchů zblízka", console
+  A/B `__atc.groundDetail.value = 0 / 1` (no rebuild, no recompile).

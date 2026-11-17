@@ -19,11 +19,13 @@ const AREAS = {
   parking: { _id: 1, _home: '0,0', t: 'parking', o: [[10, 10], [110, 10], [110, 60], [10, 60]] },
   lawn:    { _id: 2, _home: '0,0', t: 'grass',   o: [[10, 70], [110, 70], [110, 110], [10, 110]] },
   plaza:   { _id: 3, _home: '0,0', t: 'plaza',   o: [[10, 150], [110, 150], [110, 190], [10, 190]] },
+  // a forecourt: paved, but neither a square nor a car park
+  yard:    { _id: 4, _home: '0,0', t: 'yard',    o: [[10, 200], [110, 200], [110, 215], [10, 215]] },
 };
 
 function build(withPhoto) {
   const cell = { buildings: [], roads: [], rails: [], water: [],
-    green: [AREAS.lawn], paved: [AREAS.parking, AREAS.plaza],
+    green: [AREAS.lawn], paved: [AREAS.parking, AREAS.plaza, AREAS.yard],
     trees: [], signs: [], crossings: [] };
   const city = { chunkIndex: new Map([['0,0', cell]]), tile: 4800, pois: [], waterways: [] };
   const mats = makeMaterials();
@@ -61,10 +63,17 @@ test('with the aerial ground ON, the car park still gets real asphalt', () => {
     + 'of somebody else\'s cars');
 });
 
-test('…and the lawn and the plaza are still left to the photo', () => {
+test('…and the lawn and the yard are still left to the photo', () => {
   const at = build(true);
   assert.equal(at(12, 72, 108, 108), 0, 'flat green was painted over the aerial lawn');
-  assert.equal(at(12, 152, 108, 188), 0, 'flat grey was painted over the aerial plaza');
+  assert.equal(at(12, 202, 108, 213), 0, 'flat grey was painted over the aerial yard');
+});
+
+// A square is the second exception (meshes.js laidUnderPhoto): from the ground
+// its photograph is a haze with the morning's tourists in it as dark blots.
+test('…but a town square is laid in its own stone over the photo', () => {
+  const at = build(true);
+  assert.ok(at(12, 152, 108, 188) > 200, 'the plaza was left to a photograph of it');
 });
 
 test('with the aerial ground OFF nothing changed — every fill is drawn', () => {

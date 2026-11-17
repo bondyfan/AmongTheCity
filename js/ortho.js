@@ -29,6 +29,7 @@ import * as THREE from 'three';
 import { CHUNK, ORTHO, COLORS } from './config.js';
 import { quayLiftArray } from './quayground.js';
 import { GRID_SNAP } from './quayedge.js';
+import { orthoDetail } from './orthodetail.js';
 
 // GetMap BBOX needs the local-meters ↔ WGS84 mapping. These constants mirror
 // the data pipeline EXACTLY (scripts/fetch-region.mjs → manifest/city JSON:
@@ -171,9 +172,11 @@ export function initOrtho(terrain = null) {
     // needsUpdate recompiles the shader with the map define — once per
     // supertile, cheap. (Both callbacks fire async, so `entry` exists.)
     const stale = coarserTex(sx, sz, px);
-    const mat = new THREE.MeshLambertMaterial(stale
+    // (orthoDetail: up close the photo gives the colour and synthesised stone
+    // the sharpness, js/orthodetail.js)
+    const mat = orthoDetail(new THREE.MeshLambertMaterial(stale
       ? { map: stale, color: 0xffffff }          // wear the blurry one meanwhile
-      : { color: COLORS.groundBase });
+      : { color: COLORS.groundBase }));
     const tex = loader.load(tileUrl(sx, sz, px),
       () => {
         if (tiles.get(key) !== entry) { tex.dispose(); return; } // evicted mid-flight

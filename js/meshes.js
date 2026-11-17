@@ -564,6 +564,41 @@ const ROAD_SURF = {
   runway: SURF.concrete, taxiway: SURF.concrete, taxilane: SURF.concrete, airstrip: SURF.gravel,
 };
 const surfOfRoad = (f) => (f.d ? TAGGED[f.s] : ROAD_TAGGED[f.s]) ?? ROAD_SURF[f.t] ?? SURF.asphalt;
+// A town SQUARE is the second fill worth more than its photograph (the car
+// park is the first, see the paved fills in buildChunkMeshes). Seen from the
+// ground the photo of Staroměstské náměstí is a grey haze with the morning's
+// tourists in it as dark blots, patched with the derived paving wherever
+// sealed.js closed a footway loop: three surfaces on one square. The data says
+// what it is laid with (a plaza tagged sett, a pedestrian street of slabs), so
+// that is what is laid, whole, as one surface. Any other paved area keeps the
+// photo, which js/orthodetail.js now sharpens up close.
+const SQUARE_KINDS = new Set(['plaza', 'pedestrian']);
+const laidUnderPhoto = (f) => SQUARE_KINDS.has(f.t) || f.s === 'cobble';
+// Is the walked network round this chunk mostly sett? Counted over the ways
+// that are walked AND hard-surfaced (a residential street in asphalt says
+// nothing about the square beside it), over the 3 x 3 chunks round it and not
+// the chunk alone: a square spans several chunks, and a vote per chunk laid
+// setts on one side of a chunk border and slabs on the other wherever the edge
+// chunk caught only two paths. The 3 x 3 is exactly what the mesh worker's
+// spec carries (chunkspec neededKeys), so both sides count the same ways; a
+// way listed in several of the nine cells is the same object there (one
+// structured clone) and is counted once.
+const WALKED = new Set(['footway', 'pedestrian', 'path', 'steps', 'living_street']);
+function settSquare(city, cx, cz) {
+  let sett = 0, hard = 0;
+  const seen = new Set();
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const c = city.chunkIndex.get((cx + dx) + ',' + (cz + dz));
+    if (!c) continue;
+    for (const r of c.roads) {
+      if (!WALKED.has(r.t) || !r.s || seen.has(r)) continue;
+      seen.add(r);
+      if (r.s === 'cobble') { sett++; hard++; }
+      else if (r.s === 'paving' || r.s === 'concrete' || r.s === 'asphalt') hard++;
+    }
+  }
+  return hard >= 3 && sett * 2 > hard;
+}
 
 // ---- shared small helpers ----
 
@@ -6403,7 +6438,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
         () => !orthoGround],
       [cell.paved, LAYER_Y.paved,
         (f) => COLORS.paved[f.t] ?? COLORS.paved.plaza, surfOfPaved,
-        (f) => !orthoGround || f.t === 'parking'],
+        (f) => !orthoGround || f.t === 'parking' || laidUnderPhoto(f)],
     ];
     // The drivable decks a fill must stay under — from EVERY chunk the fill
     // reaches, not just this one. A fill is drawn whole from its home chunk,
@@ -6474,6 +6509,13 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       const ceded = !orthoGround && mats.ground
         ? (x, z) => mats.ground.classAt(x, z) > 0 : null;
       const rects = sealedRects(cell, cx, cz, ceded, mats.terrain);
+      // …laid in what the paths across it are laid in: setts where most of
+      // the walked ways here say sett (Staroměstské, Pernštýnská), slabs
+      // otherwise. Slabs everywhere left an old-town square a patchwork of
+      // two floors, sett ribbons threaded through concrete plates.
+      const settled = rects.length && settSquare(city, cx, cz);
+      const plateSurf = settled ? SURF.cobble : SURF.paving;
+      const plateHex = settled ? COLORS.paved.plaza : COLORS.inferred.paving;
       if (rects.length) {
         // Clamped against `corr` — the SAME wide corridor list the base ground
         // uses — and not a narrow kerb-only list. The ground inside a corridor
@@ -6491,7 +6533,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
           });
           const g = yield* clampUnderRoadsGen(quayDrape(quayRefine(terrainTess(shapePoly(
             [[r.x0, r.z0], [r.x1, r.z0], [r.x1, r.z1], [r.x0, r.z1]],
-            null, LAYER_Y.inferred, COLORS.inferred.paving, SURF.paving),
+            null, LAYER_Y.inferred, plateHex, plateSurf),
           nearRoad ? 3.5 : undefined)), mats.terrain), corr, mats.terrain);
           if (g) flat.push(g);
         }
