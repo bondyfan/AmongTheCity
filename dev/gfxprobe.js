@@ -205,11 +205,23 @@ const G = {
    * sink (a tiny HTTP server that writes it to disk). Fire and forget: nothing
    * here awaits, so it is safe while the hidden-tab pump runs.
    */
-  shot(name, sink = 'http://127.0.0.1:5499/') {
-    const A = window.__atc;
+  // The frame is drawn at a FIXED size (default 1728 x 1000, pixel ratio 1)
+  // whatever the pane is doing, then the canvas goes back to its own size: two
+  // shots of one spot from two sessions compare pixel for pixel.
+  shot(name, w = 1728, h = 1000, sink = 'http://127.0.0.1:5499/') {
+    const A = window.__atc, r = A.renderer, cam = A.camera;
     G.frame();
     if (A.postfx && !G._pf) return 'no post frame captured yet, call again';
-    const url = A.renderer.domElement.toDataURL('image/jpeg', 0.92);
+    const pr = r.getPixelRatio(), cw = r.domElement.width / pr, ch = r.domElement.height / pr;
+    const aspect = cam.aspect;
+    r.setPixelRatio(1); r.setSize(w, h, false);
+    cam.aspect = w / h; cam.updateProjectionMatrix();
+    A.postfx?.setSize(w, h);
+    G.frame();
+    const url = r.domElement.toDataURL('image/jpeg', 0.92);
+    r.setPixelRatio(pr); r.setSize(cw, ch, false);
+    cam.aspect = aspect; cam.updateProjectionMatrix();
+    A.postfx?.setSize(r.domElement.width, r.domElement.height);
     fetch(sink + name, { method: 'POST', body: url }).catch(() => {});
     return name + ' ' + Math.round(url.length / 1024) + ' kB';
   },
