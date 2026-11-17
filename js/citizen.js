@@ -47,6 +47,7 @@ import { makeGait } from './gait.js';
 import { addBlob, removeBlob, blobsIn, disposeBlobs } from './groundblob.js';
 import { makePoses } from './poses.js';
 import { lampDirectPatch } from './lampmap.js';
+import { BATCH, onBatchFlag } from './batchflags.js';
 
 // Where the distance variant takes over, metres from the rendering camera,
 // with a gap so a person standing at the line does not flicker between two.
@@ -111,8 +112,42 @@ function pickLod(renderer, scene, camera) {
   if (far === u.far) return;
   u.far = far;
   this.geometry.setDrawRange(far ? g.farStart : 0, far ? g.farCount : g.nearCount);
-  this.castShadow = !far;
+  this.castShadow = !far && u.shNear !== false;
 }
+
+// ---- who casts into the sun's shadow map ------------------------------------
+// pickLod above only runs for a person the CAMERA drew, so everybody behind
+// it or beside it kept whatever castShadow they last had: true from birth for
+// most of a crowd, and the shadow box (js/sky.js, 230 m across on medium and
+// leading the view) takes in a good deal of what is behind the camera. Each
+// of them was a whole skinned draw call in the shadow pass, for a shadow a
+// few texels long on a 2048 map. Every live body is listed here and, once a
+// frame (main.js, before the render), casts only within `r` of the camera,
+// with 3 m of give either way so a person standing at the line does not
+// flicker. The contact blob under the feet (js/groundblob.js) is drawn at any
+// distance, so a far figure is still grounded; past 45 m the sun's own shadow
+// of a walker is a smudge of some ten pixels. `__batch.shadows = false`
+// (js/batchflags.js) puts back cast-at-any-distance.
+const _bodies = new Set();
+const SH_GIVE = 3;
+
+/** Once a frame: people farther than `r` metres from the camera stop casting. */
+export function cullPeopleShadows(camera, r = 45) {
+  if (!BATCH.shadows || !camera) return;
+  const c = camera.matrixWorld.elements, cx = c[12], cy = c[13], cz = c[14];
+  const rIn = (r - SH_GIVE) ** 2, rOut = (r + SH_GIVE) ** 2;
+  for (const m of _bodies) {
+    const u = m.userData, e = m.matrixWorld.elements;
+    const dx = e[12] - cx, dy = e[13] - cy, dz = e[14] - cz, d2 = dx * dx + dy * dy + dz * dz;
+    const near = u.shNear ? d2 < rOut : d2 < rIn;
+    u.shNear = near;
+    m.castShadow = near && !u.far;
+  }
+}
+onBatchFlag('shadows', (on) => {
+  if (on) return;                         // the next cull sets them
+  for (const m of _bodies) { m.userData.shNear = true; m.castShadow = !m.userData.far; }
+});
 
 // how far a bulky top holds the arms off the ribs, radians
 const TOPSY = { puffer: 0.07, coat: 0.04, jacket: 0.03, hoodie: 0.03 };
@@ -212,7 +247,9 @@ export function makeCitizen(look = {}) {
   mesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, D.hipY, 0), 1.35 * k);
   mesh.userData.far = false;
   mesh.userData.force = null;
+  mesh.userData.shNear = true;            // until the first cullPeopleShadows
   mesh.onBeforeRender = pickLod;
+  _bodies.add(mesh);
   const shade = addBlob(group, mesh);
   // …and only now the resting angles, so the bind pose stays the modelled one
   const rest = (0.05 + D.s.belly * 0.7 + (D.s.hip - 1) * 0.15) + ((TOPSY[o.top] ?? 0));
@@ -258,6 +295,7 @@ export function makeCitizen(look = {}) {
   // minutes, so an owner that does `scene.remove(group)` and stops leaks both.
   const dispose = () => {
     group.parent?.remove(group);
+    _bodies.delete(mesh);
     removeBlob(shade);
     geo.dispose();
     skeleton.dispose();

@@ -91,6 +91,9 @@ import { exitHudText, setExitLine } from './mwhud.js';
 import { MwRetro } from './mwretro.js';
 import { setMotorwayAtlasScale } from './mwatlas.js';
 import { installSceneGraphPolicy } from './scenegraph.js';
+import { cullPeopleShadows } from './citizen.js';                 // people cast only near the camera
+import { setWordmarkRenderer } from './wordmarkatlas.js';         // a new shop label uploads only its slot
+import './batchflags.js';                                          // __batch: the A/B switches of the draw-call batching
 
 const $id = (id) => document.getElementById(id);
 
@@ -100,6 +103,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+setWordmarkRenderer(renderer);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = EXPOSURE_DAY;   // sky.js drives it from here on (it opens up at night)
@@ -3109,6 +3113,9 @@ function tick(src) {
     setCoverage(renderer, wantPost && postfx ? 4 : null);   // alpha to coverage needs MSAA: js/coverage.js
     renderer.shadowMap.autoUpdate = false;                  // moon shadows at half rate: js/shadowpace.js
     renderer.shadowMap.needsUpdate = shadowDue(gs, sky?.nightK ?? 0);
+    // a person farther than this from the camera casts no sun shadow (js/citizen.js);
+    // the finer 4096 map of the high preset shows a walker's shadow farther out
+    if (renderer.shadowMap.needsUpdate) cullPeopleShadows(camera, gs.shadowRes >= 4096 ? 60 : 45);
     if (wantPost && postfx) {
       postfx.setSize(renderer.domElement.width, renderer.domElement.height);
       let rays = null;
