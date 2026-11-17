@@ -44,6 +44,14 @@ const MAX_OCCUPANTS = 90;       // citizens indoors across the whole city
 const OCC_SPEED = 1.05, OCC_FLEE = 4.6;
 const LEDGE_R = 1.5;            // how far a falling person reaches for an edge
 const LEDGE_T = [3.5, 7];       // seconds they can hang before their grip goes
+// Residents are only DRAWN and WALKED while the player is this close to their
+// building (m from the footprint's bounding box). Measured on Václavské
+// náměstí: 80 to 90 people indoors cost 2.1 ms of every frame to walk and pose,
+// and their skinned bodies were drawn and shadowed behind walls, while 13 of
+// them were inside the view and you can make out somebody through a window from
+// the pavement in front of it, not from across the square. Past this they stand
+// where they are, hidden, and carry on the moment you come back.
+const OCC_SEE_R = 28;
 const _w = { x: 0, z: 0 };
 const TWO_PI = Math.PI * 2;
 // A frame's share of furnishing ONE building's rooms, and of dressing the
@@ -739,9 +747,18 @@ export class Interiors {
     // the most. Anyone fleeing, falling or hanging, and everyone in a building
     // that has been hit, still asks every frame: that is where a floor can go.
     const tick = this._occTick = ((this._occTick ?? 0) + 1) & 1023;
+    const fo = this.focus;
     for (let i = this.occupants.length - 1; i >= 0; i--) {
       const o = this.occupants[i];
       if (!this.models.has(o.model.f._id)) { this._despawn(i); continue; }
+      // out of sight (OCC_SEE_R): hidden and still, unless something is
+      // happening to them, which only a blast or a broken floor starts
+      if (fo && !o.hang && o.flee <= 0 && o.vy === 0 && !o.model.damaged
+        && bbDist(o.model.bb, fo.x, fo.z) > OCC_SEE_R) {
+        if (o.mesh.visible) o.mesh.visible = false;
+        continue;
+      }
+      if (!o.mesh.visible) { o.mesh.visible = true; o.chk = true; }
       const plan = o.model.plan;
       const careful = o.flee > 0 || o.vy !== 0 || !!o.model.damaged || o.chk !== false
         || ((i + tick) & 3) === 0;
