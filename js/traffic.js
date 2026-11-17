@@ -369,7 +369,7 @@ import * as MW from './mwtraffic.js';
 import { laneTick, laneOffset, blinkOf, bodyLane, bodyAdopt } from './mwlanes.js';
 import { horn } from './audio.js';   // safe headless — no-ops without an AudioContext
 import { worldT } from './worldclock.js';
-import { sigAssets as sigModel, LAMP_Y, LAMP_Z, PED_Y, PED_X } from './signalmodel.js';
+import { SignalBatch } from './signalbatch.js';
 
 // AI-local tuning (config.js owns the player-facing numbers)
 const ACCEL = 4.0;            // gentle m/s² — commuters, not street racers
@@ -1205,12 +1205,9 @@ function poseAt(edge, s, seg) {
   return _pose;
 }
 
-// ---- shared traffic-light assets: js/signalmodel.js (mast, heads, lenses) ----
-// One geometry + material set for EVERY pole in the region; a light "changes"
-// by swapping the material reference on its lens meshes, nothing else. `_S` is
-// that set once the first pole has asked for it (headless tests never do).
-let _S = null;
-function sigAssets() { return (_S ??= sigModel()); }
+// ---- traffic-light meshes: js/signalbatch.js ----
+// Every standing mast in range is one instance of one InstancedMesh, and a
+// light "changes" by writing one float per pole (see that file's header).
 
 // How long the stripe is, following the flank rather than the axis. This is
 // the denominator of every u below and of the canvas aspect, and measuring it
@@ -1489,6 +1486,7 @@ export class Traffic {
     this._junctions = [];           // traffic-light controllers (grow with tiles)
     this._jgrid = new Buckets();    // …indexed by position (see Buckets above)
     this._sigLive = [];             // …those in render range (_cullSignals)
+    this._sigBatch = new SignalBatch(vehicles?.scene);   // …and their masts, as one draw call
     this._sigNext = [];             // (its double buffer, no per-cull allocation)
     this._sigMark = 0;
     this._egrid = new Buckets();    // every edge, in every cell its polyline crosses
@@ -2054,8 +2052,7 @@ export class Traffic {
       });
       if (!jn) {
         jn = { x, z, n: 0, off: 0, kx: 0x7fffffff, kz: 0x7fffffff, st0: -1, st1: -1,
-          sigs: [], group: new THREE.Group() };
-        this.vehicles.scene?.add(jn.group);
+          sigs: [], group: this._sigBatch.group() };
         this._junctions.push(jn);
         jn._gk = this._jgrid.add(x, z, jn);
         jn.group.visible = false;   // until _cullSignals finds it in range,
@@ -2265,7 +2262,6 @@ export class Traffic {
   }
 
   _makePole(x, z, group) {
-    const A = sigAssets();
     let best = null, bestD = 25, bestS = 0;
     // the edge grid holds every edge in every cell its polyline crosses, so the
     // 3×3 neighbourhood is a superset of everything inside the 25 m cap
@@ -2320,43 +2316,25 @@ export class Traffic {
       }
       if (!placed) return null;
     }
-    const g = new THREE.Group();
     // ON THE GROUND. This said `0` — and this world is drawn in ABSOLUTE
     // elevation, so every traffic light in the country stood at sea level:
     // 220 m under the asphalt at Pardubice, 380 under Prague. They were built,
     // lit, phase-cycling and parented to the scene the whole time, buried
     // inside the terrain solid. "stále nikde nejsou semafory" was literal.
-    g.position.set(px, this._kerbAt(px, pz), pz);
-    // lamps are authored on the head's −z face; forward of a mesh yawed by h
+    // Lamps are authored on the head's −z face; forward of a mesh yawed by h
     // is (−sin h, −cos h), and we want that pointing AGAINST travel (at the
-    // drivers rolling up), so sin h = dx, cos h = dz
-    g.rotation.y = Math.atan2(dx, dz);
-    const lamps = [];
-    g.add(new THREE.Mesh(A.pole, A.poleMat), new THREE.Mesh(A.head, A.headMat));
-    for (let i = 0; i < 3; i++) {                // red / amber / green, top down
-      const L = new THREE.Mesh(A.lamp, i === 0 ? A.redOff : i === 1 ? A.ambOff : A.grnOff);
-      L.position.set(0, LAMP_Y[i], LAMP_Z);      // on the head's front face, under its hood
-      g.add(L);
-      lamps.push(L);
-    }
-    // the pedestrian head: stop over walk, facing the far kerb (lamps[3], [4])
-    for (let i = 0; i < 2; i++) {
-      const L = new THREE.Mesh(A.ped, i === 0 ? A.redOn : A.grnOff);
-      L.position.set(PED_X, PED_Y[i], 0);
-      g.add(L);
-      lamps.push(L);
-    }
-    // hundreds of static poles: freeze every matrix once, render for free after
-    for (const c of g.children) { c.updateMatrix(); c.matrixAutoUpdate = false; }
-    g.updateMatrix(); g.matrixAutoUpdate = false;
-    group.add(g);
+    // drivers rolling up), so sin h = dx, cos h = dz. The mast itself is one
+    // instance of js/signalbatch.js's mesh, drawn while its junction is in range.
+    const sg = this._sigBatch.pole(px, this._kerbAt(px, pz), pz, Math.atan2(dx, dz));
+    sg.x = x; sg.z = z; sg.b = Math.abs(dz) >= Math.abs(dx) ? 0 : 1;
     // …and it is an OBJECT: solid to drive against, felled above 12 km/h, and
     // it stays down for the session — the lights are the schedule's, so a
     // junction with its mast in the gutter still cycles and cars still stop.
     const up = this.world?.poles?.registerOne?.(
-      'sig', px, g.position.y, pz, () => { g.visible = false; }, 'signal', g.rotation.y);
-    if (up === false) g.visible = false;      // felled earlier this session
-    return { x, z, b: Math.abs(dz) >= Math.abs(dx) ? 0 : 1, lamps, mesh: g };
+      'sig', px, sg.mesh.position.y, pz, () => this._sigBatch.fell(sg), 'signal', sg.mesh.rotation.y);
+    if (up === false) sg._down = true;        // felled earlier this session
+    group.add(sg);
+    return sg;
   }
 
   // govern edge `e` by junction `jn` if e ENDS at it and no closer junction
@@ -2548,8 +2526,8 @@ export class Traffic {
     return t < SIG_GREEN ? 0 : t < SIG_GREEN + SIG_AMBER ? 1 : 2;
   }
 
-  // advance lamp visuals — pure arithmetic per junction per frame, material
-  // swaps only on the ~11 s state flips, and only on ≤3 meshes per pole.
+  // advance lamp visuals: pure arithmetic per junction per frame, and one
+  // float per pole (js/signalbatch.js) only on the ~11 s state flips.
   // Only the junctions _cullSignals left visible: a pole nobody can see has
   // no lamp to light (Prague alone brings 700 controllers per four tiles).
   _tickSignals(wt) {
@@ -2557,18 +2535,11 @@ export class Traffic {
       const s0 = this._phase(jn, 0, wt), s1 = this._phase(jn, 1, wt);
       if (s0 === jn.st0 && s1 === jn.st1) continue;
       jn.st0 = s0; jn.st1 = s1;
-      for (const sg of jn.sigs) {
-        const st = sg.b ? s1 : s0;
-        sg.lamps[0].material = st === 2 ? _S.redOn : _S.redOff;
-        sg.lamps[1].material = st === 1 ? _S.ambOn : _S.ambOff;
-        sg.lamps[2].material = st === 0 ? _S.grnOn : _S.grnOff;
-        // people cross THIS approach while its cars are held at red
-        if (sg.lamps[3]) {
-          sg.lamps[3].material = st === 2 ? _S.redOff : _S.redOn;
-          sg.lamps[4].material = st === 2 ? _S.grnOn : _S.grnOff;
-        }
-      }
+      // (people cross THIS approach while its cars are held at red: the
+      // pedestrian lenses read the same state, see signalbatch.js)
+      for (const sg of jn.sigs) this._sigBatch.state(sg, sg.b ? s1 : s0);
     }
+    this._sigBatch.flush();
   }
 
   // ---- the light bar, per frame -------------------------------------------
@@ -4820,9 +4791,9 @@ export class Traffic {
   /** What a mast stands on: the pavement where the street has one, else the ground. */
   _kerbAt(x, z) { return this.world?.walkY?.(x, z) ?? this._groundAt(x, z); }
 
-  // Poles freeze their matrix (hundreds of static meshes render for free that
-  // way), so re-seating one means writing position.y AND updating the matrix
-  // by hand — a plain assignment would move nothing on screen.
+  // A pole is an instance of js/signalbatch.js's mesh, so re-seating one means
+  // writing position.y AND rewriting its instance matrix (reseat); a plain
+  // assignment would move nothing on screen.
   // `t` = { tx, tz } of the height map that landed: only the junctions on that
   // tile (with a 100 m margin) are re-seated. Without it, all of them.
   _regroundSignals(t) {
@@ -4836,7 +4807,7 @@ export class Traffic {
         const m = s.mesh;
         if (!m) continue;
         const y = this._kerbAt(m.position.x, m.position.z);
-        if (Math.abs(y - m.position.y) > 0.05) { m.position.y = y; m.updateMatrix(); }
+        if (Math.abs(y - m.position.y) > 0.05) { m.position.y = y; this._sigBatch.reseat(s); }
       }
     }
   }
@@ -5016,7 +4987,7 @@ export class Traffic {
       for (const jn of off) {
         this._jgrid.remove(jn._gk, jn);
         if (!this._jgrid.m.get(jn._gk)?.length) this._jgrid.m.delete(jn._gk);
-        jn.group.parent?.remove(jn.group);
+        jn.group.dispose();
       }
       for (let i = 0; i < this.edges.length; i++) {
         const e = this.edges[i];
