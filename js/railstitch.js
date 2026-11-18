@@ -48,7 +48,9 @@ function inDir(p, e) {
  * the direction of travel there). `rails` is any list of tile rail ways
  * ({ p, t }); trams are ignored. Returns { cut, pts, len, ways }: cut the
  * route after tail[cut], then append pts (which start at that vertex); or
- * null when no path exists in what is loaded.
+ * null when no path exists in what is loaded. `at[i]` is [way, arclength]
+ * of pts[i] on the way it came from (null for the route's own vertex), so the
+ * splice can be graded like any chained track (trains.gradedPath).
  */
 export function stitchPath(rails, tail, tx, tz, { weld = WELD, turn = MAX_TURN } = {}) {
   if (!tail?.length) return null;
@@ -163,14 +165,17 @@ export function stitchPath(rails, tail, tx, tz, { weld = WELD, turn = MAX_TURN }
   for (let id = best; id >= 0; id = prev[id]) chain.push(id);
   chain.reverse();
   const k = from[chain[0]];
-  const pts = [[tail[k].x, tail[k].z]], used = [];
+  const pts = [[tail[k].x, tail[k].z]], used = [], at = [null];
   let hx = tail[k].hx, hz = tail[k].hz;
   for (const id of chain) {
     const o = ways[id >> 1], p = o.w.p, n = p.length, rev = (id & 1) === 1;
     used.push(o.w);
+    const cum = [0];
+    for (let j = 1; j < n; j++) cum.push(cum[j - 1] + Math.hypot(p[j][0] - p[j - 1][0], p[j][1] - p[j - 1][1]));
     let fresh = true;
     for (let j = 0; j < n; j++) {
-      const q = p[rev ? n - 1 - j : j], last = pts[pts.length - 1];
+      const ix = rev ? n - 1 - j : j;
+      const q = p[ix], last = pts[pts.length - 1];
       const dx = q[0] - last[0], dz = q[1] - last[1], L = Math.hypot(dx, dz);
       if (L < 0.4) continue;
       // a weld can overlap: the next way may begin a few metres BEHIND where
@@ -178,10 +183,11 @@ export function stitchPath(rails, tail, tx, tz, { weld = WELD, turn = MAX_TURN }
       if (fresh && dx * hx + dz * hz <= 0) continue;
       fresh = false;
       pts.push(q);
+      at.push([o.w, cum[ix]]);
       hx = dx / L; hz = dz / L;
     }
   }
-  return { cut: k, pts, len: wayLen(pts), ways: used };
+  return { cut: k, pts, at, len: wayLen(pts), ways: used };
 }
 
 function nearestOn(p, x, z) {

@@ -289,6 +289,52 @@ const railY = (w, d, len, q) => {
 export function railHeadAt(x, z) {
   return (_terrain ? _terrain.heightAt(x, z) : 0) + RAILHEAD;
 }
+/** The railhead on way w at arclength s (the drawn steel), at (x, z) for the fallback. */
+export function railHeadOn(w, s, x, z) {
+  return railY(w, s, wayCum(w).at(-1), [x, z]);
+}
+
+// THE RIDE IS SAMPLED EVERY SAMPLE_STEP m (round 10). It used to be read at
+// the OSM vertices alone, which on this network are 11 to 119 m apart, and
+// interpolated straight between them: over a vertical curve the wheels rode
+// up to 2.2 m off the drawn rail (Karlin), and even a smooth line read at
+// 119 m chords is 0.9 m out. The points added lie ON the segment between two
+// vertices, so the route's arclength, its stops and every co-op train
+// position (route arc + the shared clock) are unchanged; L^2/8R at R 2000 m
+// is 6 mm. Each point also remembers its way and arclength (R.wy / R.ws), so
+// a vertex chained before its height tile arrived can be graded once it has.
+const SAMPLE_STEP = 10;
+/**
+ * A spliced path (js/railstitch.js) graded like a chain: `at[i]` is [way, s]
+ * for a point that lies on a way, or null (the route's own vertex it starts
+ * from, a straight join across a weld). Between two points of one way the
+ * rail is sampled every SAMPLE_STEP m; a join is interpolated between its
+ * ends. `y0` is the height of pts[0]. Returns { pts, ys, wy, ws }.
+ */
+export function gradedPath(pts, at, y0) {
+  const out = { pts: [], ys: [], wy: [], ws: [] };
+  const yOf = (i) => (at[i] ? railHeadOn(at[i][0], at[i][1], pts[i][0], pts[i][1]) : null);
+  let yPrev = y0;
+  out.pts.push(pts[0]); out.ys.push(y0); out.wy.push(at[0]?.[0] ?? null); out.ws.push(at[0]?.[1] ?? 0);
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const yb = yOf(i) ?? yPrev;
+    const same = at[i - 1] && at[i] && at[i - 1][0] === at[i][0];
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]), k = Math.ceil(L / SAMPLE_STEP);
+    for (let m = 1; m < k; m++) {
+      const u = m / k, q = [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+      if (same) {
+        const w = at[i][0], sw = at[i - 1][1] + (at[i][1] - at[i - 1][1]) * u;
+        out.pts.push(q); out.ys.push(railHeadOn(w, sw, q[0], q[1])); out.wy.push(w); out.ws.push(sw);
+      } else {
+        out.pts.push(q); out.ys.push(yPrev + (yb - yPrev) * u); out.wy.push(null); out.ws.push(0);
+      }
+    }
+    out.pts.push(b); out.ys.push(yb); out.wy.push(at[i]?.[0] ?? null); out.ws.push(at[i]?.[1] ?? 0);
+    yPrev = yb;
+  }
+  return out;
+}
 
 // direction leaving endpoint `end` of way w, INTO the way (unit)
 function endDir(w, end, out) {
@@ -368,22 +414,35 @@ export function chainRailWays(ways) {
 // append one way's points to a chain, reversing its point ORDER when we
 // entered through its far end — without this, half of every chain runs
 // backwards and the polyline zig-zags between fragment ends
-function appendWay(pts, ys, w, rev, skipFirst) {
+function appendWay(pts, ys, w, rev, skipFirst, wy, ws) {
   const p = w.p, n = p.length, cum = wayCum(w), len = cum[n - 1];
-  for (let j = 0; j < n; j++) {
-    if (j === 0 && skipFirst) continue;         // the shared joint, already in
-    const i = rev ? n - 1 - j : j;
-    const q = p[i];
+  const put = (q, s) => {
     const last = pts[pts.length - 1];
-    if (last && Math.hypot(q[0] - last[0], q[1] - last[1]) < MIN_STEP) continue;
+    if (last && Math.hypot(q[0] - last[0], q[1] - last[1]) < MIN_STEP) return;
     pts.push(q);
-    ys.push(railY(w, cum[i], len, q));
+    ys.push(railY(w, s, len, q));
+    wy?.push(w); ws?.push(s);
+  };
+  let prev = -1;
+  for (let j = 0; j < n; j++) {
+    const i = rev ? n - 1 - j : j;
+    if (prev >= 0) {
+      // the rail between two vertices, every SAMPLE_STEP m (on the segment)
+      const a = p[prev], b = p[i], L = Math.abs(cum[i] - cum[prev]), k = Math.ceil(L / SAMPLE_STEP);
+      for (let m = 1; m < k; m++) {
+        const u = m / k;
+        put([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u], cum[prev] + (cum[i] - cum[prev]) * u);
+      }
+    }
+    prev = i;
+    if (j === 0 && skipFirst) continue;         // the shared joint, already in
+    put(p[i], cum[i]);
   }
 }
 
 function walkChain(w0, startEnd, index) {
-  const pts = [], ys = [], used = [];
-  appendWay(pts, ys, w0, startEnd === 1, false);
+  const pts = [], ys = [], used = [], wy = [], ws = [];
+  appendWay(pts, ys, w0, startEnd === 1, false, wy, ws);
   w0._trUsed = true;
   used.push(w0);
   for (;;) {
@@ -408,12 +467,12 @@ function walkChain(w0, startEnd, index) {
     if (!best) break;
     best.w._trUsed = true;
     used.push(best.w);
-    appendWay(pts, ys, best.w, best.end === 1, true);
+    appendWay(pts, ys, best.w, best.end === 1, true, wy, ws);
   }
   let len = 0;
   for (let i = 1; i < pts.length; i++)
     len += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
-  return { pts, ys, ways: used, len };
+  return { pts, ys, wy, ws, ways: used, len };
 }
 
 // cumulative lengths + bbox, recomputed whenever a route grows
@@ -651,6 +710,8 @@ export class Trains {
   // ahead was put down there and drowned. Once a second, such vertices are
   // set to the ground now known (plus the railhead; the grade and the bridge
   // decks of railY are lost there, a small error against 220 m).
+  // …and a point that knows its way and arclength (R.wy / R.ws) is given the
+  // rail's own level, grade and decks: railY, as if chained now.
   _reheight() {
     if (!_terrain) return;
     for (const R of this.routes) {
@@ -660,7 +721,8 @@ export class Trains {
         if (R.ys[i] > UNREADY_Y) continue;
         const q = R.pts[i];
         if (_terrain.ready && !_terrain.ready(q[0], q[1])) { left++; continue; }
-        R.ys[i] = _terrain.heightAt(q[0], q[1]) + RAILHEAD;
+        const w = R.wy?.[i];
+        R.ys[i] = w ? railY(w, R.ws[i], wayCum(w).at(-1), q) : _terrain.heightAt(q[0], q[1]) + RAILHEAD;
       }
       R._flat = left;
     }
@@ -699,7 +761,7 @@ export class Trains {
       if (!pair) return;
       const { A, B, rev } = pair;
       const off = A.len, blen = B.len;
-      this._append(A, { pts: B.pts, ys: B.ys }, rev);
+      this._append(A, { pts: B.pts, ys: B.ys, wy: B.wy, ws: B.ws }, rev);
       for (const t of this.trains) {
         if (t.route !== B) continue;
         t.route = A;
@@ -719,18 +781,13 @@ export class Trains {
   }
 
   _addRoute(c) {
-    const R = { id: this._rid++, pts: c.pts, ys: c.ys, stops: [],
+    const R = { id: this._rid++, pts: c.pts, ys: c.ys, wy: c.wy ?? null, ws: c.ws ?? null, stops: [],
       cum: null, len: 0, vf: null, vr: null,
       minX: 0, maxX: 0, minZ: 0, maxZ: 0 };
     measure(R);
-    // bridge decks: sample the world ONCE per vertex, never per frame. Rail
-    // bridges already carry their own ramp from the way's br flag; this only
-    // lifts a route that crosses something the city knows is elevated.
-    if (this.world?.heightAt)
-      for (let i = 0; i < R.pts.length; i++) {
-        const h = this.world.heightAt(R.pts[i][0], R.pts[i][1]);
-        if (h > R.ys[i]) R.ys[i] = h;
-      }
+    // (a route used to be lifted to world.heightAt at every vertex, the
+    // highest surface there: with a world handed in that put a train onto any
+    // overpass above its own track. railY already carries the decks; gone.)
     buildProfile(R);
     this.routes.push(R);
     return R;
@@ -774,6 +831,7 @@ export class Trains {
       if (Math.hypot(c.pts[i][0] - last[0], c.pts[i][1] - last[1]) < MIN_STEP) continue;
       R.pts.push(c.pts[i]);
       R.ys.push(c.ys[i]);
+      if (R.wy) { R.wy.push(c.wy?.[i] ?? null); R.ws.push(c.ws?.[i] ?? 0); }
     }
     measure(R);
     buildProfile(R);
@@ -784,7 +842,7 @@ export class Trains {
   // it keeps its place (s → len − s) and merely counts arc the other way, and
   // its consist labelling (which end the loco is on) is untouched.
   _reverseRoute(R) {
-    R.pts.reverse(); R.ys.reverse();
+    R.pts.reverse(); R.ys.reverse(); R.wy?.reverse(); R.ws?.reverse();
     const len = R.len;
     measure(R);
     buildProfile(R);

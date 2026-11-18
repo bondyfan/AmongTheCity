@@ -328,6 +328,14 @@ export function orthoQuad(cx, cz, plan, terrain, material) {
     // (by a Prague quay wall a vertex is lifted onto the wall's line instead
     // of leaning a wedge out over the quay: js/quayground.js)
     quayLiftArray(a, terrain, ox, oz, GRID_SNAP);
+    // …and the photo follows the vertex there: a snapped vertex kept the uv
+    // of where it stood, and the strip next to the wall wore the photo of
+    // metres away, stretched (the uv is a pure function of x/z, as above)
+    for (let i = 0; i < uv.count; i++) {
+      const u = a[i * 3] / CHUNK + 0.5, v = 0.5 - a[i * 3 + 2] / CHUNK;
+      uv.setXY(i, (lx + u) / S, (S - 1 - lz + v) / S);
+    }
+    uv.needsUpdate = true;
     p.needsUpdate = true;
     geo.computeVertexNormals();
   }

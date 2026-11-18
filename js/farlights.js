@@ -36,6 +36,8 @@
 
 import * as THREE from 'three';
 import { lampPlan } from './meshes.js';
+import { MAST_OUT, MAST_Y } from './streetlamps.js';
+import { mastTint } from './mastlamps.js';
 import { landmarkOf } from './landmarks.js';
 
 const CHUNK = 120;                // m: the streaming cell (config.js CHUNK)
@@ -202,6 +204,18 @@ export function cellPoints(key, cell, terrain, windows = true, city = null) {
     const px = sp[0], pz = sp[1];
     const t = hash2(Math.floor(px / DISTRICT), Math.floor(pz / DISTRICT)) < LED_SHARE ? LED : SODIUM;
     out.push(px, H(px, pz) + PARK_Y, pz, t[0] * PARK_K, t[1] * PARK_K, t[2] * PARK_K);
+  }
+  // the D11's interchange masts (js/mastlamps.js): a point at every head, at
+  // the head's own height, in the interchange's one colour
+  for (const [list, arms] of [[plan.mast, 2], [plan.mast1, 1]]) {
+    for (const sp of list ?? []) {
+      const px = sp[0], pz = sp[1], rx = -Math.sin(sp[2]), rz = -Math.cos(sp[2]);
+      const y = H(px, pz) + MAST_Y, t = mastTint(px, pz);
+      for (let a = 0; a < arms; a++) {
+        const o = a === 0 ? MAST_OUT : -MAST_OUT;
+        out.push(px + rx * o, y, pz + rz * o, t[0], t[1], t[2]);
+      }
+    }
   }
   // ---- windows: one to three on the walls of every other building ----
   // (not where the cell is built in full: there the facades light their own)

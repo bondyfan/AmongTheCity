@@ -1558,6 +1558,21 @@ and merged; these are the rules they agreed on.
   mesh, quay walls, náplavky stamps, bridge supports, the riverbed. Anything
   that builds over the river (Charles Bridge piers go to y 182) must not depend
   on a level of its own. The Labe is unchanged.
+* **Corridor levels** (`js/corridorgeom.js`, `js/corridorfit.js`,
+  `js/corridorlevel.js`, worker safe, round 10). Heavy rail and the motorway,
+  trunk and primary classes (links and bridges included) are not levelled way
+  by way: a corridor (straight-through chain, the two carriageways of a dual
+  road, a bundle of parallel tracks; a pure function of tags, plan and ids)
+  gets one profile along its chainage, from the PRISTINE survey across its
+  whole width, low-passed within class cut and fill bounds, grade-limited
+  symmetrically, with deck headroom as floors. Every member's `_prof` is
+  resampled from it, so `roadGradeY` / `railGradeY` / `bridgeDeckHeight`
+  readers need no change. Each way reads the corridor of its owner (the
+  longest parallel neighbour, transitively), so a bundle agrees exactly. Where
+  two corridors meet, the higher (rail, motorway, trunk, primary, links) is
+  hard (`geo.junctionY`); minor roads, overlaps and level crossings
+  (`js/levelxing.js`) adapt to it. A line is final only once its window's data
+  and height tiles have all answered.
 * **Trams** (`js/trams.js`, `js/tramlines.js`). A tram's position is a pure
   function of route id, trip number and the shared clock: no state that two
   co-op clients could disagree on, no Math.random. A tram yields to a car on its
@@ -1708,9 +1723,20 @@ that the five round 8 packages build on. Read them, never re-derive them.
   walker's `opts.yLo`), thick behind the face so 130 km/h does not tunnel.
   `js/mwtall.js` draws the two green bridges (the chunk holding each anchor)
   and the procedural noise walls (`NOISE_RUNS`, official km), in the shell
-  tier too. The town lamp rule plants nothing along a D11 / D35 way outside
-  `motorwayLit` (250 m round an exit's or rest area's slip nodes), so
-  farlights follows. D11 bridge decks get concrete edge kerbs instead of the
+  tier too. The town lamp rule plants nothing along a D11 / D35 way, nor
+  along a slip road reaching `motorwayLit` (250 m round an exit's or rest
+  area's slip nodes): those are lit by `js/mastlamps.js` (round 9), 12 m
+  masts walked from each way's first vertex every 40 m inside `motorwayLit`,
+  kind `mast` (two arms, the motorway's outer side, 2.75 m past the asphalt,
+  only where the rail before it stands, never in a sign's keep-out box) and
+  `mast1` (one arm, beside a slip). meshes.js `lampSpots` returns them as
+  `plan.mast` / `plan.mast1`, `lampBatch` names them `mastPosts` /
+  `mast1Posts` (city.js `LAMP_BATCHES`), lightpools.js throws a pool under
+  each head and farlights.js a point at each, in one colour per interchange
+  (`mastTint`). The delineator glows (`js/mwretro.js`) use the lamp glow
+  shader with `uFloorPx` 5 and `uGive` 0 (every lamp glow: 1.1 and 1),
+  and replan a cell when its road count changes.
+  D11 bridge decks get concrete edge kerbs instead of the
   dark parapet, and their piers stand at shared official km
   (`mwPierStations`), side by side under both decks.
 * **Horizon** (round 8, HORIZON). A tile arrival is indexed in slices in

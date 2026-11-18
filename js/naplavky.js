@@ -97,23 +97,44 @@ function way(name, mode, pts, base, l, r, { e0 = 1, e1 = 2, fl = 0, fr = 0 } = {
 }
 // A straight flight of steps, floor end first, carried 2.5 m on at the top to
 // meet the pavement. `wall`: which side of travel the quay wall is on ('L' or
-// 'R'): the band reaches 2.4 m back to it, and on the open side is 1.2 m flat
-// and slopes away over 3.5 m. No wall: a flight cut into the wall, walled both
-// sides, 1.4 m either way.
+// 'R'): the band reaches 2.4 m back to it and 1.2 m out on the open side. No
+// wall: a flight cut into the wall, walled both sides, 1.4 m either way.
 // 'set', not 'raise': several OSM flights run just on the street side of the
 // stamped wall line (Vyšehradská, Výtoň north, Dvořákovo east), and a raise
 // cannot lower the pavement there, so those flights stood at street level
 // and never reached the quay. Set cuts them into the embankment on that side
 // and builds them up on the quay side, the same flight either way.
+//
+// The stamp is the ground UNDER the flight; the steps themselves are stone
+// (js/quaystairs.js draws them from STAIRS, below). Both sides are hard edges:
+// the open side of a wall flight used to slope away over 3.5 m, a fan of
+// ground the aerial photo, projected straight down, smeared over in the
+// wall's own dark shadow ("a dark cave" under every flight). Now the flight
+// stands on its own side wall with a parapet, as the real ones do.
+// The ground keeps under the treads: each tread's back edge lies on the line
+// from the foot to the top, and the ground drawn in 2 m triangles across the
+// foot (a concave kink) reads above that line by up to half its slope, so it
+// stood up through the lowest steps. So the ground falls away from the tread
+// line just past the foot and comes back to it at the top (`stairDip`).
+export const STAIRS = [];
+export const STAIR_RUN_TOP = 2.5;           // m of level run-on past the top step
+export const STAIR_DIP_AT = 1.0;            // m up the flight where the ground lies lowest under it
+/** The ground's drop under the tread line at STAIR_DIP_AT (m), for a flight rising q per metre. */
+export function stairDip(q, L) {
+  const s1 = Math.min(STAIR_DIP_AT, L / 3);
+  return { s1, dip: Math.min(0.5, 0.78 * q * s1) };
+}
 function stair(name, a, b, y0, y1, wall = null) {
-  const o = { e0: 1, e1: 2.5 };
-  if (!wall) return way(name, 'set', [a, b], [y0, y1], 1.4, 1.4, o);
   // (against the wall the flights mostly come in pairs from one landing, and
-  // one's run-on past its foot was the other's lowest steps: set to the floor
-  // there, a 0.6 m riser at the bottom of the second flight)
-  o.e0 = 0.1;
-  return wall === 'L' ? way(name, 'set', [a, b], [y0, y1], 2.4, 1.2, { ...o, fr: 3.5 })
-    : way(name, 'set', [a, b], [y0, y1], 1.2, 2.4, { ...o, fl: 3.5 });
+  // one's run-on past its foot was the other's lowest steps: kept short)
+  const e0 = wall ? 0.1 : 1, e1 = STAIR_RUN_TOP;
+  const l = wall === 'L' ? 2.4 : wall ? 1.2 : 1.4, r = wall === 'R' ? 2.4 : wall ? 1.2 : 1.4;
+  const L = Math.hypot(b[0] - a[0], b[1] - a[1]), ux = (b[0] - a[0]) / L, uz = (b[1] - a[1]) / L;
+  const q = (y1 - y0) / L, { s1, dip } = stairDip(q, L);
+  STAIRS.push({ name, a, b, y0, y1, l, r, wall, e0, e1, L, ux, uz });
+  const at = (s) => [a[0] + ux * s, a[1] + uz * s];
+  return { name, mode: 'set', prof: band(l, r), capped: false, snap: true,
+    pts: [at(-e0), a, at(s1), b, at(L + e1)], base: [y0, y0, y0 + q * s1 - dip, y1, y1] };
 }
 
 // Set before the quay is dug: ramps that run down BEHIND a quay wall.
@@ -180,7 +201,9 @@ export const NAPLAVKA_AFTER = [
   // and the shorter ones to Dvořákovo nábřeží, against the wall's face
   stair('Dvořákovo stairs west', [-95747.2, -6797.6], [-95757.1, -6794.4], FLOOR_C, 190.0, 'L'),
   stair('Dvořákovo stairs', [-95661.5, -6816.5], [-95651.4, -6818], FLOOR_C, 188.5, 'R'),
-  stair('Dvořákovo stairs east', [-95564.4, -6831.4], [-95558.2, -6832.2], FLOOR_C, 188.9, 'R'),
+  // (its foot is on the ramp, 27 m up from the quay: the OSM footway from the
+  // ramp's line at x -95567 joins it; set to the floor it sat in a 0.9 m pit)
+  stair('Dvořákovo stairs east', [-95564.4, -6831.4], [-95558.2, -6832.2], FLOOR_C + (189.3 - FLOOR_C) * 27.5 / 99.2, 188.9, 'R'),
   // the pair from the quay up to the ramp's level middle
   stair('ramp stairs west', [-95487, -6845.2], [-95495.7, -6844.6], FLOOR_C, 189.3, 'L'),
   stair('ramp stairs east', [-95487, -6845.2], [-95478.2, -6845.8], FLOOR_C, 189.3, 'R'),

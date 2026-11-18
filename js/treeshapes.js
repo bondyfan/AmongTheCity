@@ -52,7 +52,7 @@ export const SPECIES = [
   { name: 'birch',    h: [9, 16],  b: 0.30, a: [0.50, 0.62], tau: 0.058, crown: 0x6d9446, bark: 0xe6e3d8 },
   // (the spruce was 0x3a6445, which read teal once the far tier wore pictures:
   // a real spruce is the darkest green in the street)
-  { name: 'spruce',   h: [14, 26], b: 0.10, a: [0.22, 0.28], tau: 0.085, crown: 0x30583a, bark: 0x7d685a },
+  { name: 'spruce',   h: [14, 26], b: 0.10, a: [0.22, 0.28], tau: 0.085, crown: 0x2f5531, bark: 0x7d685a },
   { name: 'pine',     h: [13, 22], b: 0.58, a: [0.95, 1.25], tau: 0.062, crown: 0x4a6d44, bark: 0xa9764f },
   { name: 'fruit',    h: [3.6, 6], b: 0.30, a: [0.95, 1.15], tau: 0.060, crown: 0x639040, bark: 0x7e6c5d },
   { name: 'shrub',    h: [0.9, 1.7], b: 0.02, a: [1.15, 1.55], tau: 0.0, crown: 0x4a7436, bark: 0x5a4d40 },
@@ -400,7 +400,19 @@ export function farTemplate() {
 // the template: the template's trunk is a placeholder (the real one runs to
 // the ground, up to 3.8 crown radii below the crown) and the picture may be
 // 1.75 crown radii wide, so the computed sphere is too small by a tree.
+// FAR_BOUND_PAD is the floor; farBoundPad(spec) is what one tree needs, and a
+// batch takes the larger (a 36 m surveyed pine reaches past 14 m).
 export const FAR_BOUND_PAD = 14;
+const SQRT2 = Math.SQRT2;
+/**
+ * How far one tree reaches past the sphere three computes for it from the
+ * template (sqrt 2 times its larger crown radius round the crown's centre):
+ * the trunk down to the ground and under it, or the picture's half width.
+ */
+export function farBoundPad(spec) {
+  const m = Math.max(spec.rx, spec.ry);
+  return Math.max(groundOf(spec.sp) * spec.ry + TRUNK_SINK, 1.75 * m) - SQRT2 * m;
+}
 
 // How far under the ground a far trunk starts, so a slope cannot show daylight
 // under its downhill side (the far shader sinks its trunk by the same metres).

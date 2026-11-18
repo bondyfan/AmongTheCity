@@ -171,7 +171,8 @@ test('species and size survive the worker: the same trees from both paths', () =
   const ref = new THREE.InstancedMesh(a.geometry, a.material, a.count);
   ref.instanceMatrix.copy(a.instanceMatrix);
   ref.computeBoundingSphere();
-  assert.ok(Math.abs(a.boundingSphere.radius - ref.boundingSphere.radius - S.FAR_BOUND_PAD) < 1e-3, 'main thread: no pad');
+  assert.ok(a.userData.boundPad >= S.FAR_BOUND_PAD, 'main thread: the pad is under its floor');
+  assert.ok(Math.abs(a.boundingSphere.radius - ref.boundingSphere.radius - a.userData.boundPad) < 1e-3, 'main thread: no pad');
   assert.ok(Math.abs(b.boundingSphere.radius - a.boundingSphere.radius) < 0.05, 'worker: the pad was lost');
   assert.equal(b.name, 'trees-far');
   const ma = new THREE.Matrix4(), mb = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Vector3();

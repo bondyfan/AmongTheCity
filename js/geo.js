@@ -9,7 +9,7 @@
 // polygon, segment distance, bridge ramps) live here too — meshes, traffic
 // and player all share one geometry truth.
 
-import { stampPartyWalls } from './partywalls.js';
+import { stampPartyWallsSteps } from './partywalls.js';
 import { withRoadPatches } from './roadpatches.js';
 import { servicesInto } from './d11services.js';
 import { CHUNK, BRIDGE_Y, BRIDGE_RAMP } from './config.js';
@@ -20,6 +20,10 @@ import { releaseStructures } from './underpassrelease.js';
 import { workTurn as workTurnOn, queueJob as queueJobOn, guarded, addAllSteps, compactSteps, RELEASE_STATS } from './tilework.js';
 import { onQuay } from './quayedge.js';
 import { applyDip, underCap } from './dipchain.js';
+import { corridorLevel, sameCorridor, inScope as corridorScope, outranks, surveyOf } from './corridorlevel.js';
+import { applyPins } from './corridorfit.js';
+import { parallel as corridorParallel } from './corridorgeom.js';
+import { indexLevelCrossings } from './levelxing.js';
 
 // how far ahead of the focus a tile starts loading. View streams ±600 m, so
 // 2600 m of headroom means even 130 km/h driving gives a fetch ~55 s before
@@ -262,6 +266,13 @@ function hardFloor(y, ground, ds, hardPins, keep) {
   }
 }
 const KEEP_TAPER = 10;        // m
+const CORRIDOR_CUT = 4;       // m a side road may follow a corridor down into its cutting
+// m between a corridor and a way lying across it in plan only (an `_ovl`
+// node, no shared OSM node) beyond which the two are on different levels
+// (an untagged ramp, a carriageway on an embankment beside a slip under a
+// bridge) and the overlap is no junction: the slip road was hauled 9 m up
+// the trunk's bank 10 m past the deck it passes under.
+const OVL_APART = 1.5;
 
 /** One Gaussian pass over a 1-D profile, reflecting at the ends. */
 function blurPass(y, out, sigma, ds) {
@@ -306,7 +317,8 @@ function blurPass(y, out, sigma, ds) {
  */
 export function junctionY(node, terrain) {
   if (node._ny !== undefined && node._nyT === terrain
-    && (node._nyOk || node._nyL === (terrain._loads ?? 0))) return node._ny;
+    && (node._nyOk || (node._nyL === (terrain._loads ?? 0)
+      && (node._nyF === undefined || !_streets || node._nyF === featStamp())))) return node._ny;
   node._nyT = terrain;
   // recursion guard: bridgeClearance below can wander back into this very
   // node via an approach road's pins — mid-computation reads must take the
@@ -314,7 +326,41 @@ export function junctionY(node, terrain) {
   // (and the real readiness) replace it at the end
   node._nyOk = true;
   node._cones = null;
+  node._nyF = undefined;
   node._ny = terrain.heightAt(node.x, node.z);
+  // A node on a CORRIDOR (js/corridorlevel.js: heavy rail, the main roads)
+  // is at the level of the highest corridor way meeting it, not at an
+  // average: the slip road, the side street, the service road lying across
+  // a carriageway and the road at a level crossing come to the corridor,
+  // never the other way. (An average with a metre between the two pulled
+  // the rychlodráha up and down every 20 m: survey 13, roads.md 2.3.)
+  if (_streets) {
+    let tp = null, ts = 0, top = null, lift = 0;
+    if (node._xing) {
+      const p = levelWay(node._xing, terrain, null, true);
+      if (p?.cor) { tp = p; ts = node._xingS; lift = node._xingLift ?? 0; }
+    }
+    if (!tp) for (const arm of node.arms) {
+      if (!corridorScope(arm.r) || (top && !outranks(arm.r, top))) continue;
+      const p = levelWay(arm.r, terrain, null, true);
+      if (!p?.cor) continue;
+      top = arm.r; tp = p; ts = arm.s ?? 0;
+    }
+    if (tp) {
+      node._ny = sampleProfile(tp, ts) + lift;
+      node._apart = false;
+      if (node._ovl) for (const arm of node.arms) {
+        if (arm.r === top) continue;
+        const p = levelWay(arm.r, terrain, null, true);
+        if (p && Math.abs(sampleProfile(p, arm.s ?? 0) - node._ny) > OVL_APART) node._apart = true;
+      }
+      node._nyOk = !!tp.ready;
+      node._nyL = terrain._loads ?? 0;
+      node._nyF = featStamp();
+      if (!tp.ready) terrain.missed = true;
+      return node._ny;
+    }
+  }
   let a = 0, n = 0, allReady = true;
   // (a deck is not levelled like a road, and its draped line pulled the
   // approach down into a dip at the very abutment: the roads decide)
@@ -419,6 +465,13 @@ let _vergeHold = 0;
 /** +1 to stop roadProfile deriving verges, -1 to let it again. Always paired. */
 export function holdVerges(d) { _vergeHold += d; }
 
+// A corridor's line (js/corridorlevel.js) reads every data tile in a window
+// round its way, so a guess must also be retired when a DATA tile lands, not
+// only a height map: the index's tile counter is the second stamp. A mesh
+// worker has no city and no counter, and takes what travelled.
+const featStamp = () => INDEX_STATS.tiles;
+const corridorFresh = (c) => c.fl === undefined || !_streets || c.fl === featStamp();
+
 export function roadProfile(way, terrain) {
   if (!terrain || !way?.p || way.p.length < 2) return null;
   // Every consumer of a way comes through here first, and so does chunkspec.js
@@ -428,7 +481,7 @@ export function roadProfile(way, terrain) {
   if (way._vg && way._vg.lv === undefined && _streets) levelVerge(way, _lvT = terrain);
   const c = way._prof;
   if (c && c.terrain === terrain
-    && (c.ready || c.loads === (terrain._loads ?? 0))) return c;
+    && (c.ready || (c.loads === (terrain._loads ?? 0) && corridorFresh(c)))) return c;
   const prof = levelWay(way, terrain, way._pins ?? null);
   // Terrain answers with a guess while a height tile is still on the way.
   // The guess used to be thrown away — which meant the 24-pass levelling ran
@@ -461,7 +514,40 @@ function levelWay(way, terrain, pinList, noDip = false) {
   const ok = applyDip(way, y, base.ds, terrain);
   return { ...base, y, ready: base.ready && ok };
 }
+// The pins a corridor way keeps: a node where a way of ANOTHER corridor that
+// outranks it meets it (a link at its motorway, a road at a level crossing).
+// Junctions with minor roads and overlaps with its own carriageways are not
+// pins for it at all: they are where the others come to it.
+function pinCorridor(way, cor, pinList, terrain) {
+  const fl = featStamp(), keep = [];
+  let ready = cor.ready;
+  for (const pin of pinList) {
+    const node = pin.node;
+    let hi = null;
+    if (node._xing) hi = node._xing;
+    else for (const a of node.arms ?? []) {
+      if (a.r === way || !corridorScope(a.r)) continue;
+      if (!hi || outranks(a.r, hi)) hi = a.r;
+    }
+    if (!hi || !outranks(hi, way) || sameCorridor(way, hi, terrain, _streets, fl)) continue;
+    const J = junctionY(node, terrain);
+    if (node._apart === true) continue;
+    if (!node._nyOk) ready = false;
+    keep.push({ s: pin.s, J });
+  }
+  if (!keep.length) return cor;
+  const y = Float64Array.from(cor.y);
+  const pins = keep.map((k) => ({ s: k.s, d: k.J - sampleProfile(cor, k.s) }));
+  applyPins(y, cor.ds, pins, (d) => Math.max(PIN_TAPER, Math.abs(d) / 0.03));
+  return { ...cor, y: Float32Array.from(y), ready };
+}
 function levelWayBase(way, terrain, pinList) {
+  // A way of a CORRIDOR (heavy rail, the main road classes) reads its
+  // corridor's one line, and only a higher corridor meeting it may bend it
+  // (js/corridorlevel.js). The pins are the residual against what that
+  // higher way finally lies at; everything else it meets adapts to it.
+  const cor = _streets && corridorScope(way) ? corridorLevel(way, terrain, _streets, featStamp()) : null;
+  if (cor) return pinList ? pinCorridor(way, cor, pinList, terrain) : cor;
   const rc = way._raw;
   if (!pinList && rc && rc.terrain === terrain
     && (rc.ready || rc.loads === (terrain._loads ?? 0))) return rc;
@@ -473,6 +559,12 @@ function levelWayBase(way, terrain, pinList) {
   const gx = new Float32Array(n), gz = new Float32Array(n);
   const top = new Float32Array(n);          // highest ground each sample answers for
   let ready = true;
+  // The PRISTINE survey, wherever the earthworks have already moved the grid:
+  // a way levelled after its tile was baked read the bake (its neighbours'
+  // grades), one levelled before read the survey, so the same street came out
+  // two ways by the order the tiles happened to arrive in (a co-op client
+  // against another). js/corridorlevel.js surveyOf.
+  const sv = surveyOf(terrain);
   // walk the polyline once, sampling at even arclength
   let seg = 0, acc = 0;
   let ax = way.p[0][0], az = way.p[0][1];
@@ -490,7 +582,7 @@ function levelWayBase(way, terrain, pinList) {
     const x = ax + (bx - ax) * t, z = az + (bz - az) * t;
     gx[i] = x; gz[i] = z;
     if (terrain.ready && !terrain.ready(x, z)) ready = false;
-    y[i] = terrain.heightAt(x, z);
+    y[i] = sv.heightAt(x, z);
     // The floor is the HIGHEST ground this sample answers for, not the ground
     // exactly under it. roadGradeY reads the profile linearly between samples,
     // so a hummock sitting between two of them would be missed entirely and
@@ -501,7 +593,7 @@ function levelWayBase(way, terrain, pinList) {
     for (let k = -2; k <= 2; k++) {
       if (!k) continue;
       const o = (k / 2) * (ds / 2);
-      const h = terrain.heightAt(x + dx * o, z + dz * o);
+      const h = sv.heightAt(x + dx * o, z + dz * o);
       if (h > hi) hi = h;
     }
     top[i] = hi;
@@ -569,6 +661,9 @@ function levelWayBase(way, terrain, pinList) {
   // either side is bent by centimetres over tens of metres instead of being
   // kinked. Neighbouring pins clip each other's reach so their tapers cannot
   // overlap and fight.
+  // (an overlap with a corridor on another level is no pin at all, and must
+  // not clip the reach of the real ones beside it: junctionY marks it)
+  if (pinList?.length && _streets) pinList = pinList.filter((pin) => (junctionY(pin.node, terrain), pin.node._apart !== true));
   if (pinList?.length) {
     const idx = pinList.map((pin) => Math.max(0, Math.min(n - 1, Math.round(pin.s / ds))));
     const order = idx.map((_, k) => k).sort((p, q) => idx[p] - idx[q]);
@@ -579,6 +674,8 @@ function levelWayBase(way, terrain, pinList) {
       let J = junctionY(node, terrain);
       // a side road meeting a street inside its underpass meets it down there
       if (node._dipChain && way._dipChain !== node._dipChain) J = underCap(node._dipChain, node._dipU, J, terrain);
+      // (an overlap with a corridor on another level is no junction: junctionY)
+      if (node._apart === true) continue;
       // A HARD pin is a bridge abutment: the deck has to clear a railway, so
       // this road is the embankment that gets it up there. It used to be one
       // more taper in this loop, and a taper is clipped at half the distance
@@ -597,20 +694,30 @@ function levelWayBase(way, terrain, pinList) {
       const d = J - y[i];
       if (!Number.isFinite(d) || Math.abs(d) < 1e-4) continue;
       // never reach past a neighbouring pin, or past the end of the road
-      const prev = o > 0 ? idx[order[o - 1]] : -Infinity;
-      const next = o < order.length - 1 ? idx[order[o + 1]] : Infinity;
+      // (a corridor's node only past another corridor node: a driveway's
+      // overlap a few metres on clipped the climb onto the main road to 6 m;
+      // the minor pins after it land on the bent line, so all still land)
+      const corTop = node._nyF !== undefined;
+      let prev = -Infinity, next = Infinity;
+      for (let q = o - 1; q >= 0; q--) if (!corTop || pinList[order[q]].node._nyF !== undefined) { prev = idx[order[q]]; break; }
+      for (let q = o + 1; q < order.length; q++) if (!corTop || pinList[order[q]].node._nyF !== undefined) { next = idx[order[q]]; break; }
       // (a side road meeting a bank climbs onto it at a ramp's grade, and may
       // be filled as high as the bank is)
       const bank = node._bank === true || hardNode;
-      const span = bank ? Math.max(reach, Math.round(Math.abs(d) / BRIDGE_GRADE / ds)) : reach;
+      // A node ON A CORRIDOR (junctionY: its level is the corridor's, which is
+      // hard) is reached like a bank: at a ramp's grade, past this road's own
+      // fill and cut, or a side road a metre off the main road's level met it
+      // in a 30 m kink, or stopped at its own 1.6 m cap with a step left over.
+      const span = bank || corTop ? Math.max(reach, Math.round(Math.abs(d) / BRIDGE_GRADE / ds)) : reach;
       const back = Math.min(span, i, Math.floor((i - prev) / 2));
       const fwd = Math.min(span, n - 1 - i, Math.floor((next - i) / 2));
       for (let j = -back; j <= fwd; j++) {
         const w = j === 0 ? 1
           : 0.5 + 0.5 * Math.cos(Math.PI * Math.min(1, Math.abs(j) / (j < 0 ? back : fwd)));
         const v = y[i + j] + d * w;
-        const cap = bank ? ground[i + j] + BRIDGE_FILL : hi[i + j];
-        y[i + j] = v < lo[i + j] ? lo[i + j] : v > cap ? cap : v;
+        const cap = bank || corTop ? ground[i + j] + BRIDGE_FILL : hi[i + j];
+        const low = corTop ? ground[i + j] - CORRIDOR_CUT : lo[i + j];
+        y[i + j] = v < low ? low : v > cap ? cap : v;
       }
     }
     if (hardPins.length) hardFloor(y, ground, ds, hardPins, keepPins);
@@ -863,6 +970,11 @@ const FOOT_BRIDGE = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestrian
 export function bridgeDeckHeight(way, dist, terrain) {
   const total = way?._len ?? polylineLength(way?.p ?? []);
   if (!terrain || !way?.p?.length) return bridgeElevation(dist, total);
+  // A deck of a CORRIDOR lies on its corridor's line, which carries the
+  // headroom over what it crosses and the ground under its span as floors
+  // (js/corridorlevel.js): approach and deck are one curve. (The worker
+  // reads the same line, which travelled as `_prof`.)
+  if (corridorScope(way) && roadProfile(way, terrain)?.cor) return roadGradeY(way, dist, terrain);
 
   // ---- a chained bridge reads the CHAIN's grade, not its own --------------
   // One grade for the whole viaduct: anchored on the real approaches at its
@@ -1322,6 +1434,8 @@ function* linkOverlaps(roads, at) {
     for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {
       const A = segs[i].r, B = segs[j].r;
       if (A === B || (A.l ?? 0) !== (B.l ?? 0)) continue;
+      // the two carriageways of one corridor read one line: nothing to agree
+      if (corridorScope(A) && corridorScope(B) && corridorParallel(A, B)) continue;
       const reach = (A.w + B.w) / 2;
       const hit = segDist(segs[i].ax, segs[i].az, segs[i].bx, segs[i].bz,
         segs[j].ax, segs[j].az, segs[j].bx, segs[j].bz);
@@ -2455,7 +2569,8 @@ function* indexPayloadSteps(city, data, touched, slot = 0, heavyOnly = false, ke
   let landJ = null;            // indexJunctions' landing half, run when the roads land
   const buildings = stamp(data.buildings);
   yield;
-  stampPartyWalls(buildings);   // f._pw: shared walls, this tile only (partywalls.js)
+  // f._pw: shared walls, this tile only, a few thousand edges a step (partywalls.js)
+  yield* stampPartyWallsSteps(buildings);
   yield;
   // trees are bare [x,z] pairs — wrap so they can carry _home/_id like the rest
   const trees = (data.trees ?? []).map(t => ({ p: [t], _id: ++next }));
@@ -2485,6 +2600,8 @@ function* indexPayloadSteps(city, data, touched, slot = 0, heavyOnly = false, ke
     yield* stepEach(rails, (r) => { r.p = smoothBends(r.p, r.br); });
     landJ = yield* indexJunctionsSteps(roads);
     yield* indexBridgeCrossingsSteps(roads, rails);
+    yield;
+    indexLevelCrossings(roads, rails);   // the railway wins at grade (js/levelxing.js)
     yield;
     indexRoundabouts(roads);
     yield;

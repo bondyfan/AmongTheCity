@@ -56,6 +56,8 @@ import * as THREE from 'three';
 import { LampMap, SHAPES_GLSL, LAMP_DIRECT_U } from './lampmap.js';
 import { FarLights } from './farlights.js';
 import { addLandmarkLamps } from './landmarklamps.js';
+import { MAST_OUT, MAST_Y } from './streetlamps.js';
+import { mastTint } from './mastlamps.js';
 
 const MAX = 2048;                 // instances; a full ring of the city holds ~1500
 const RANGE = 430;                // m: pools and glows fade out by here
@@ -74,6 +76,10 @@ const PARK_Y = 4.0, PARK_POOL = 8.5;
 // 34 m apart, so 15 m of half-length leaves a visible dark neck between two
 // pools, which is what makes a street read as a CHAIN of them.
 const POOL_LONG = 17, POOL_WIDE = 13, POOL_OUT = 3.4;
+// A motorway mast (js/mastlamps.js, kinds 'mast' and 'mast1'): heads at 12 m
+// on 3 m arms spread wider and longer pools, 40 m apart, centred past the
+// head over the carriageway. A two-armed mast throws one pool per arm.
+const MAST_LONG = 24, MAST_WIDE = 17, MAST_POOL_OUT = MAST_OUT + 2.0;
 // Direct path only: height of the quads above the road surface. They have to
 // clear the lane paint and any kerb or raised pavement (KERB_H 0.12 plus the
 // paving), and a quad cannot follow a kerb.
@@ -191,6 +197,8 @@ const GLOW_VERT = /* glsl */`
   uniform float uPx;        // world metres per pixel at one metre of depth
   uniform float uSize;      // the glow's real radius, m
   uniform float uNear;      // farlights.js only: nothing nearer than this (0 = off)
+  uniform float uFloorPx;   // the quad's least radius, px (1.1: every lamp glow)
+  uniform float uGive;      // 1: what the floor adds in area it gives back in brightness
   varying vec2 vP;
   varying vec3 vCol;
   varying float vK;
@@ -202,11 +210,13 @@ const GLOW_VERT = /* glsl */`
     float depth = max(0.1, -mvPosition.z);
     // never smaller than about two pixels across, so a far lamp stays a point
     // of light instead of flickering in and out between samples; what it
-    // gains in area it gives back in brightness
-    float size = max(uSize, depth * uPx * 1.1);
+    // gains in area it gives back in brightness. (js/mwretro.js asks for a
+    // wider floor and no give-back: a delineator in the beams is a point that
+    // keeps its brightness to the beam's end, see there.)
+    float size = max(uSize, depth * uPx * uFloorPx);
     float fade = 1.0 - smoothstep(uRange * 0.80, uRange, depth);
     if (uNear > 0.0) fade *= smoothstep(uNear * 0.80, uNear, depth);
-    vK = fade * min(1.0, (uSize * uSize) / (size * size) * 3.0);
+    vK = fade * mix(1.0, min(1.0, (uSize * uSize) / (size * size) * 3.0), uGive);
     mvPosition.xy += position.xy * size;
     gl_Position = projectionMatrix * mvPosition;
     #include <fog_vertex>
@@ -280,6 +290,7 @@ export class LightPools {
     this.glowMat = new THREE.ShaderMaterial({
       vertexShader: GLOW_VERT, fragmentShader: GLOW_FRAG,
       uniforms: { ...fogU(), uOn: { value: 0 }, uDirect: { value: 0 }, uLevel: { value: 1 }, uNear: { value: 0 },
+        uFloorPx: { value: 1.1 }, uGive: { value: 1 },
         uRange: { value: RANGE }, uPx: { value: 0.001 }, uSize: { value: 1.15 } },
       fog: true, transparent: true, depthWrite: false, depthTest: true,
       blending: THREE.AdditiveBlending,
@@ -523,26 +534,7 @@ export class LightPools {
         // registry's own record, so a rebuild after the first is a copy.
         let s = p._pool;
         if (!s) s = p._pool = poolSpot(p, world);
-        // pool: columns are (along the road) × length, the plane's normal,
-        // (across the road) × width; translation is the pool's centre
-        _x.set(s.ax, s.slope, s.az).normalize();
-        _z.set(-s.az, 0, s.ax);                  // along × +Y, flat
-        _y.crossVectors(_z, _x);
-        _m.set(
-          _x.x * s.pl, _y.x, _z.x * s.pw, s.x,
-          _x.y * s.pl, _y.y, _z.y * s.pw, s.y,
-          _x.z * s.pl, _y.z, _z.z * s.pw, s.z,
-          0, 0, 0, 1);
-        this.pools.setMatrixAt(k, _m);
-        _m.makeTranslation(s.hx, s.hy, s.hz);
-        this.glows.setMatrixAt(k, _m);
-        const t = s.led ? LED : SODIUM;
-        // a park lantern is a smaller lamp on a lower post: at a street
-        // column's output the ground at its foot was a white spot
-        const v = s.var * (s.pl === PARK_POOL ? 0.7 : 1);
-        this.pools.setColorAt(k, _c.setRGB(t[0] * v, t[1] * v, t[2] * v));
-        this.glows.setColorAt(k, _c.setRGB(t[0], t[1], t[2]));
-        k++;
+        for (let a = s; a && k < MAX; a = a.twin) k = this._put(k, a);
       }
     }
     // the lanterns of the landmark models (Charles Bridge), which are no masts
@@ -554,25 +546,62 @@ export class LightPools {
       m.instanceColor.needsUpdate = true;
     }
   }
+
+  // one pool and its glow into instance k; returns k + 1
+  _put(k, s) {
+    // pool: columns are (along the road) × length, the plane's normal,
+    // (across the road) × width; translation is the pool's centre
+    _x.set(s.ax, s.slope, s.az).normalize();
+    _z.set(-s.az, 0, s.ax);                  // along × +Y, flat
+    _y.crossVectors(_z, _x);
+    _m.set(
+      _x.x * s.pl, _y.x, _z.x * s.pw, s.x,
+      _x.y * s.pl, _y.y, _z.y * s.pw, s.y,
+      _x.z * s.pl, _y.z, _z.z * s.pw, s.z,
+      0, 0, 0, 1);
+    this.pools.setMatrixAt(k, _m);
+    _m.makeTranslation(s.hx, s.hy, s.hz);
+    this.glows.setMatrixAt(k, _m);
+    const t = s.tint ?? (s.led ? LED : SODIUM);
+    // a park lantern is a smaller lamp on a lower post: at a street
+    // column's output the ground at its foot was a white spot
+    const v = s.var * (s.pl === PARK_POOL ? 0.7 : 1);
+    this.pools.setColorAt(k, _c.setRGB(t[0] * v, t[1] * v, t[2] * v));
+    this.glows.setColorAt(k, _c.setRGB(t[0], t[1], t[2]));
+    return k + 1;
+  }
 }
 
 // Everything about one mast's pool that does not change while it stands.
+// A two-armed motorway mast gets a second record, `twin`, for its back arm.
 function poolSpot(p, world) {
   const rot = p.posts.userData?.spots?.[p.i * 3 + 2] ?? 0;
+  if (p.kind === 'mast' || p.kind === 'mast1') {
+    const tint = mastTint(p.x, p.z);
+    const s = pool(p, world, rot, 'mast', tint);
+    if (p.kind === 'mast') s.twin = pool(p, world, rot + Math.PI, 'mast', tint);
+    return s;
+  }
+  return pool(p, world, rot, p.kind === 'park' ? 'park' : 'street', null);
+}
+
+// one pool under one head of mast p, whose arm points along heading `rot`
+function pool(p, world, rot, kind, tint) {
   // The mast's local axes in the world (a Y rotation by rot): +x runs ALONG
   // the kerb, and −z points at the carriageway it was placed beside (rot is a
   // heading, and a heading's forward is −z).
   const ax = Math.cos(rot), az = -Math.sin(rot);        // along the road
   const rx = -Math.sin(rot), rz = -Math.cos(rot);       // toward the road
-  const park = p.kind === 'park';
-  const out = park ? 0 : POOL_OUT, ho = park ? 0 : HEAD_OUT;
+  const park = kind === 'park', mast = kind === 'mast';
+  const out = park ? 0 : mast ? MAST_POOL_OUT : POOL_OUT, ho = park ? 0 : mast ? MAST_OUT : HEAD_OUT;
+  const wide = mast ? MAST_WIDE : POOL_WIDE;
   let x = p.x + rx * out, z = p.z + rz * out;
   // surfaceY hands back ONE reused object: take the number, not the object.
   // It is told where the mast's foot is (p.y), so a lamp on the street UNDER
   // a viaduct lights the street and not the deck over its head.
   const ground = world.terrain?.heightAt?.(x, z) ?? p.y;
   const y0 = world.surfaceY?.(x, z, p.y)?.y ?? ground;
-  let pw = park ? PARK_POOL : POOL_WIDE;
+  let pw = park ? PARK_POOL : wide;
   if (!park && world.surfaceY && y0 - ground > DECK_UP) {
     const a = deckEdge(world, x, z, rx, rz, y0), b = deckEdge(world, x, z, -rx, -rz, y0);
     if (a + b < 2 * POOL_WIDE) {
@@ -597,10 +626,11 @@ function poolSpot(p, world) {
     // otherwise the whole layer ladder over bare ground
     y: Math.max(y0 + LIFT, ground + 0.20 + LIFT),
     // the head hangs TOWARD the road (it used to be drawn along the kerb)
-    hx: p.x + rx * ho, hy: p.y + (park ? PARK_Y : HEAD_Y) - 0.12, hz: p.z + rz * ho,
-    pl: park ? PARK_POOL : POOL_LONG, pw,
-    led: hash2(cellI, cellJ) < LED_SHARE,
+    hx: p.x + rx * ho, hy: p.y + (park ? PARK_Y : mast ? MAST_Y : HEAD_Y) - 0.12, hz: p.z + rz * ho,
+    pl: park ? PARK_POOL : mast ? MAST_LONG : POOL_LONG, pw,
+    led: hash2(cellI, cellJ) < LED_SHARE, tint,
     var: 0.88 + 0.24 * hash2(Math.round(p.x * 10), Math.round(p.z * 10)),
+    twin: null,
   };
 }
 

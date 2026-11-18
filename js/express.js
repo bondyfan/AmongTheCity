@@ -22,8 +22,9 @@ import { worldT, tod } from './worldclock.js';
 import { DAY_LENGTH } from './config.js';
 import { tilesReady } from './startplace.js';
 import { stitchPath } from './railstitch.js';
-import { railHeadAt } from './trains.js';
+import { gradedPath } from './trains.js';
 import { HLN, posAt, transferRoute, towardPrague } from './expressroute.js';
+import { untiledAt, throughHole, loaded, until, sleep } from './expresshole.js';
 
 export const EXPRESS_NAME = 'R Pardubice – Praha';
 const ORIGIN = 'Pardubice hlavní nádraží';
@@ -63,6 +64,7 @@ export class Express {
     this._stitchT = 0;
     this._stitched = new Set(); // route ids spliced into Praha hl.n.
     this.skipping = false;
+    this.fade = screenFade;     // the fade a pass through the untiled ground runs under
   }
 
   /** Where Pardubice hl.n. is on the main line through it, or null. The
@@ -86,6 +88,12 @@ export class Express {
     // that and vitals billed it as a fatal fall (seen in game)
     const rt = this.trains.riding;
     if (rt) this._land(rt);
+    // …and where the line runs over ground no tile covers (line 010 from
+    // west of Prelouc to Kolin, d11left (d)), the ride is not shown: the
+    // screen fades and the train is skipped on to tiled ground (see through)
+    if (rt && !this.skipping && !rt.halted && !rt.hold && untiledAt(this.city, rt.x, rt.z)) {
+      this.through(this.fade).catch(() => {});
+    }
     this._t -= dt;
     this._stitchT -= dt;
     if (this._stitchT <= 0) { this._stitchT = STITCH_EVERY; this._stitch(); }
@@ -173,8 +181,12 @@ export class Express {
       for (const t of tr.trains) if (t.route === R && t.s > R.cum[cut] - t.length) return;
       this._stitched.add(R.id);
       R.pts.length = cut + 1; R.ys.length = cut + 1;
-      const ys = res.pts.map((q) => railHeadAt(q[0], q[1]));
-      tr._append(R, { pts: res.pts, ys }, false);   // re-measures, re-profiles, rescans stops
+      if (R.wy) { R.wy.length = cut + 1; R.ws.length = cut + 1; }
+      // graded like the rest of the line (round 10): the rail's own level and
+      // its decks, sampled every 10 m, not the bare ground under each vertex
+      // (the splice rode 12 m under the Nove spojeni viaduct's deck)
+      const g = gradedPath(res.pts, res.at ?? res.pts.map(() => null), R.ys[cut]);
+      tr._append(R, g, false);   // re-measures, re-profiles, rescans stops
       for (const w of res.ways) { w._trDone = true; if (w._id !== undefined) tr._wids?.set(w._id, R); }
       return;
     }
@@ -185,6 +197,9 @@ export class Express {
   transfer(t) { return transferRoute(this.trains, t); }
   /** At a station, take the route that leads to Praha hl.n. (see towardPrague). */
   towardPrague(t) { return towardPrague(this.trains, t); }
+
+  /** Fade through ground no tile covers to tiled ground again (js/expresshole.js). */
+  through(fade) { return throughHole(this, fade); }
 
   // ---- the skip -------------------------------------------------------------
   /** Skip the ridden train to its next station. Resolves true when it got there. */
@@ -290,27 +305,6 @@ function tailOf(R, len) {
     out.push({ x: b[0], z: b[1], hx: (b[0] - a[0]) / L, hz: (b[1] - a[1]) / L });
   }
   return { base, pts: out };
-}
-
-// Every manifest tile within r of (x, z) indexed. Unlike startplace.tilesReady
-// NO tile at all counts as loaded: line 010 between Přelouč and Kolín runs
-// along the corridor's edge, outside the world's tiles (measured: x -24 900,
-// no manifest tile), and a skip waited 25 s at every step there.
-function loaded(city, x, z, r) {
-  const tiles = city?.manifestTiles, T = city?.tile;
-  if (!tiles || !T) return tilesReady(city, x, z, r);
-  for (const q of tiles) {
-    const dx = Math.max(q.tx * T - x, 0, x - (q.tx + 1) * T);
-    const dz = Math.max(q.tz * T - z, 0, z - (q.tz + 1) * T);
-    if (dx * dx + dz * dz <= r * r && q.state !== 2) return false;
-  }
-  return true;
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function until(test, maxMs) {
-  const t0 = performance.now();
-  while (!test() && performance.now() - t0 < maxMs) await sleep(120);
 }
 
 // ---- the fade a skip runs under ----------------------------------------------

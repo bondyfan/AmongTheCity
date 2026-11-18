@@ -9,8 +9,16 @@
 //
 // So, as the town's far lamps and the trams do (js/farlights.js,
 // js/tramglow.js): one camera-facing glow per reflector with the lamp glows'
-// shader (js/lightpools.js), so it keeps a two-pixel floor and goes through
-// the same bloom and haze. Unlike a lamp it is not a light: its brightness is
+// shader (js/lightpools.js), so it goes through the same bloom and haze. Not
+// with the lamps' floor, though (round 9): theirs keeps the QUAD two pixels
+// across and dims it for the area it adds, and the Gaussian inside has its
+// half-max at a third of the quad, so past 60 m (100 m at 1080p) the bright
+// core of a lit reflector was under one pixel, sampled at 0.3 to 0.7 of its
+// peak and shimmering as it moved. Only the nearest one crossed the bloom's
+// threshold; the rest of the chain were faint dots (FIXLOOK, km 29.6). Here
+// the floor is FLOOR_PX and nothing is given back: every lit reflector is a
+// core at least two pixels wide at full brightness, and the chain recedes by
+// retroGain's distance term instead. Unlike a lamp it is not a light: its brightness is
 // worked out each frame from the player's car, the only car whose driver we
 // are (main.js builds its two beams), as a retroreflector sends the light
 // back to where it came from:
@@ -39,11 +47,18 @@ const RANGE = 600;             // m: the glow shader's fade-out (BEAM_FAR is our
 // was invisible past 40 m, at 0.12 a dot lost in the frame (seen in game);
 // 0.28 reads as the row of points a driver sees, full strength to the beam's end.
 const SIZE = 0.28;
+// px: the glow quad's least radius (the lamps' is 1.1). Seen at km 29 and 58
+// at night: at 3 the chain past 80 m still sank into the town lights on the
+// horizon; at 5 each reflector is a point about the size of the nearest one
+const FLOOR_PX = 5.0;
 const BEAM_FAR = 230;          // m: dipped beams on retroreflective sheeting
 const CONE0 = 0.955, CONE1 = 0.992;   // cos of the beam's edge and its core (17 and 7 degrees)
-// brightness in the core of the beam: about a street lamp's glow core, which
-// is what a delineator in dipped beams looks like from the driver's seat
-const GAIN = 3.5;
+// brightness in the core of the beam: a little over a street lamp's glow
+// core, so with the lamps' level (TUNE.glow 0.42) a lit reflector peaks over
+// the bloom's threshold (1.0) out to about 170 m and gets its small halo:
+// what a delineator in dipped beams looks like from the driver's seat
+const GAIN = 4.8;
+const FADE_D = 180;            // m: the returned light falls as 1 / (1 + (d / FADE_D)^2)
 const POST_BACK = 0.12;        // mwdress.js: the post stands behind the beam
 // linear colours of the sheeting: amber Z 11a on the right, white Z 11b
 const AMBER = [1.0, 0.42, 0.05], WHITE = [0.95, 0.95, 0.9];
@@ -88,7 +103,9 @@ export function retroGain(x, y, z, tx, tz, lx, ly, lz, fx, fz) {
   if (dy > 0.25) return 0;
   const c = Math.min(1, (cone - CONE0) / (CONE1 - CONE0));
   const far = dh < BEAM_FAR * 0.7 ? 1 : 1 - (dh - BEAM_FAR * 0.7) / (BEAM_FAR * 0.3);
-  return c * c * (3 - 2 * c) * far * Math.min(1, (face - 0.5) * 4);
+  // the beam's light on the sheeting thins with distance: the chain recedes
+  const fall = 1 / (1 + (dh / FADE_D) * (dh / FADE_D));
+  return c * c * (3 - 2 * c) * far * fall * Math.min(1, (face - 0.5) * 4);
 }
 
 export class MwRetro {
@@ -108,6 +125,8 @@ export class MwRetro {
     mat.uniforms.uRange.value = RANGE;
     mat.uniforms.uSize.value = SIZE;
     mat.uniforms.uNear.value = NEAR;
+    mat.uniforms.uFloorPx.value = FLOOR_PX;
+    mat.uniforms.uGive.value = 0;
     const m = new THREE.InstancedMesh(new THREE.PlaneGeometry(2, 2), mat, MAX);
     m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX * 3), 3);
     m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -151,8 +170,14 @@ export class MwRetro {
         const loads = world.terrain._loads ?? 0;
         const e = this.cells.get(key);
         if (!cell) { if (e) this.cells.delete(key); continue; }
-        if (e && e.cell === cell && e.loads === loads) continue;
-        this.cells.set(key, { cell, loads, cx: ccx + dx, cz: ccz + dz,
+        // the road count too (as js/mwsolid.js keys its memo): a cell on a
+        // tile border gets the other carriageway's ways when the neighbouring
+        // tile arrives, into the SAME cell object, and a plan kept from before
+        // held half the delineators (seen at km 29: the chain facing the car
+        // was missing past the nearest reflector until the cell was replanned)
+        const nr = cell.roads?.length ?? 0;
+        if (e && e.cell === cell && e.loads === loads && e.nr === nr) continue;
+        this.cells.set(key, { cell, loads, nr, cx: ccx + dx, cz: ccz + dz,
           pts: reflectorsOf(barrierPlan(cell, key, world.terrain, 0)) });
         planned++;
       }

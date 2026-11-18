@@ -407,8 +407,12 @@ test('on a path whose ground the earthworks raised, feet are on the slab that is
   assert.ok(terrain.heightAt(60, 60) - slab > 0.4, 'the fixture did not raise the grid over the path');
   assert.ok(Math.abs(w.walkY(60, 60) - slab) < 0.01, `feet on the path stand ${(w.walkY(60, 60) - slab).toFixed(2)} m over its slab, on ground that is not drawn`);
   assert.ok(Math.abs(w.walkY(60, 60.9) - slab) < 0.01, 'the edge of the strip is the strip too');
-  // beside the path the ground is the ground
-  assert.ok(Math.abs(w.walkY(60, 64) - terrain.heightAt(60, 64)) < 0.01, 'off the path feet left the ground');
+  // beside the path the ground is the ground AS DRAWN (round 10, js/batter.js
+  // groundUnder): the mesher caps it flat 4.5 m past the strip, so 3 m off
+  // the path feet stand on that cap, and only beyond the corridor on the grid
+  // (this pinned the raw grid here, which is ground the mesh does not draw)
+  assert.ok(Math.abs(w.walkY(60, 64) - Math.min(terrain.heightAt(60, 64), slab - 0.05)) < 0.01, 'off the path feet left the drawn ground');
+  assert.ok(Math.abs(w.walkY(60, 72.5) - terrain.heightAt(60, 72.5)) < 0.01, 'past the corridor feet left the ground');
   // and where the ground is UNDER the slab nothing changed: the slab
   for (let j = 2; j <= 4; j++) for (let i = 2; i <= 4; i++) grid[j * terrain.n + i] -= 12;
   assert.ok(Math.abs(w.walkY(60, 60) - slab) < 0.01);

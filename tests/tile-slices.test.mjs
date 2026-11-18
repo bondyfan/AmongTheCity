@@ -29,8 +29,9 @@ globalThis.requestAnimationFrame = (cb) => { setImmediate(() => cb(0)); return 0
 
 // the D11 on the open straight at km 30 and by Jirny at km 10: tiles -12 and
 // -16 to -15, rows -3 and -2, interchanges and bridges included. (A TOWN tile
-// still has one long step: stampPartyWalls, 20 to 80 ms in Poděbrady or
-// Prague, js/partywalls.js, and the JSON.parse before it.)
+// used to have one long step, stampPartyWalls, 20 to 80 ms in Poděbrady or
+// Prague; since round 9 it is cut too, tests/partywalls-steps.test.mjs. The
+// JSON.parse before the indexing is still one piece.)
 const AT = [[-55100, -9687], [-74108, -10302]];
 
 const r3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);

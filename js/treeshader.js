@@ -58,12 +58,19 @@ const F = (x) => x.toFixed(4);
 // constants: the ground in crown radii, the trunk radius at the ground over
 // the crown radius, where the trunk ends (a spruce and a poplar keep their
 // leader well into the crown) and the bark colour, linear like instanceColor.
+// TREE_PICK is how much darker a species' picture is drawn than it was baked:
+// a needle crown is dense right through and swallows the light a broadleaf's
+// gaps give back, but the picture's normal lights it as fully. The spruce's
+// own darkening is baked into its cells (js/treeimpostor.js uNeedle), so it
+// only takes a touch here; the pine's clumped top is baked like a broadleaf.
+const pictureShade = (i) => (i === SP.PINE ? 0.86 : i === SP.SPRUCE ? 0.94 : 1);
 const _bc = new THREE.Color();
 const glslFloats = (f) => SPECIES.map((S, i) => f(S, i).toFixed(4)).join(', ');
 const TABLES = /* glsl */`
 const float TREE_G[ ${SPECIES.length} ] = float[]( ${glslFloats((S, i) => groundOf(i))} );
 const float TREE_TAU[ ${SPECIES.length} ] = float[]( ${glslFloats((S) => S.tau)} );
 const float TREE_TOP[ ${SPECIES.length} ] = float[]( ${glslFloats((S, i) => (i === SP.SPRUCE || i === SP.POPLAR ? 0.6 : 0))} );
+const float TREE_PICK[ ${SPECIES.length} ] = float[]( ${glslFloats((S, i) => pictureShade(i))} );
 const vec3 TREE_BARK[ ${SPECIES.length} ] = vec3[]( ${SPECIES.map((S) => {
   _bc.setHex(S.bark);
   return `vec3( ${_bc.r.toFixed(4)}, ${_bc.g.toFixed(4)}, ${_bc.b.toFixed(4)} )`;
@@ -176,6 +183,7 @@ varying float vTreeFade;
 	// xy: where in the atlas, zw: where in the picture (0..1), or -1 on the trunk
 	varying vec4 vImp;
 	varying vec3 vTreeBark;
+	varying float vTreePick;
 	${TABLES}
 	#ifdef USE_INSTANCING_COLOR
 		// the tag in the colour's low bits (js/treeshapes.js crownColor)
@@ -323,18 +331,8 @@ float tSp = 0.0;
 	}
 #endif`;
 
-const PARS_F = /* glsl */`
-uniform mediump sampler3D uLeafTex;
-uniform vec4 uTreeK;
-uniform vec4 uTreeK2;
-varying vec3 vTreePos;
-varying float vTreeFade;
-uniform float uCoverage;
-#ifdef TREE_NEAR
-	varying vec3 vTreeN;
-	varying float vTreeLeaf;
-#endif
-#ifdef TREE_CROWN
+// The picture lookup the colour pass and the shadow pass share.
+const IMP_FETCH = /* glsl */`
 	uniform sampler2D uTreeImp;
 	uniform float uTreeImpLod;
 	varying vec4 vImp;
@@ -348,9 +346,24 @@ uniform float uCoverage;
 		lod = clamp( 0.5 * log2( max( max( dot( dx, dx ), dot( dy, dy ) ), 1e-8 ) ), 0.0, uTreeImpLod );
 		return textureLod( uTreeImp, uv, lod );
 	}
-	float treeImpCover( float a, float lod ) { return a * ( 1.0 + 0.22 * lod ); }
+	float treeImpCover( float a, float lod ) { return a * ( 1.0 + 0.22 * lod ); }`;
+
+const PARS_F = /* glsl */`
+uniform mediump sampler3D uLeafTex;
+uniform vec4 uTreeK;
+uniform vec4 uTreeK2;
+varying vec3 vTreePos;
+varying float vTreeFade;
+uniform float uCoverage;
+#ifdef TREE_NEAR
+	varying vec3 vTreeN;
+	varying float vTreeLeaf;
+#endif
+#ifdef TREE_CROWN
+	${IMP_FETCH}
 	uniform vec4 uTreeAB;
 	varying vec3 vTreeBark;
+	varying float vTreePick;
 	vec3 tImpN = vec3( 0.0, 0.0, 1.0 );
 #endif
 float treeAlpha = 1.0;
@@ -393,7 +406,7 @@ const COLOR_F = /* glsl */`
 		tImpN.z = sqrt( max( 0.0, 1.0 - dot( tImpN.xy, tImpN.xy ) ) );
 		// a texel half leaf and half wood is drawn half of each
 		float tPx = smoothstep( ${F(IMP_WOOD1)}, ${F(IMP_LEAF0)}, tT.b );
-		float tAo = max( 0.0, tT.b - ${F(IMP_LEAF0)} ) * ${F(IMP_AO_MAX / (1 - IMP_LEAF0))};
+		float tAo = max( 0.0, tT.b - ${F(IMP_LEAF0)} ) * ${F(IMP_AO_MAX / (1 - IMP_LEAF0))} * vTreePick;
 		// the lit tips a little yellower, as the near model's clumps are
 		vec3 tCol = diffuseColor.rgb * tAo;
 		tCol = mix( tCol, tCol * vec3( 1.14, 1.06, 0.72 ), smoothstep( 1.05, 1.6, tAo ) * 0.6 );
@@ -495,20 +508,7 @@ if ( uLampDK.x > 0.5 ) {
 // The shadow of a far crown is the picture's, not the quad's.
 const DEPTH_PARS_F = /* glsl */`
 #ifdef TREE_CROWN
-	uniform sampler2D uTreeImp;
-	uniform float uTreeImpLod;
-	varying vec4 vImp;
-	// The atlas at the mip the picture's own footprint asks for, but never
-	// coarser than the one where a cell is 16 texels across (past it the
-	// neighbours bleed in). lod comes back for the coverage, which the mips
-	// thin out: a far crown would otherwise shrink to its densest clumps.
-	vec4 treeImp( vec2 uv, out float lod ) {
-		vec2 sz = vec2( textureSize( uTreeImp, 0 ) );
-		vec2 dx = dFdx( uv * sz ), dy = dFdy( uv * sz );
-		lod = clamp( 0.5 * log2( max( max( dot( dx, dx ), dot( dy, dy ) ), 1e-8 ) ), 0.0, uTreeImpLod );
-		return textureLod( uTreeImp, uv, lod );
-	}
-	float treeImpCover( float a, float lod ) { return a * ( 1.0 + 0.22 * lod ); }
+	${IMP_FETCH}
 #endif`;
 const DEPTH_F = /* glsl */`
 #ifdef TREE_CROWN
@@ -537,7 +537,8 @@ function patch(kind) {
     } else if (kind === 'crown') {
       // the trunk takes its species' bark; the picture keeps the leaf colour
       shader.vertexShader = shader.vertexShader.replace('#include <color_vertex>',
-        '#include <color_vertex>\n\tvTreeBark = TREE_BARK[ int( treeSpecies() + 0.5 ) ];'
+        '#include <color_vertex>\n\tint tSpI = int( treeSpecies() + 0.5 );'
+        + '\n\tvTreeBark = TREE_BARK[ tSpI ]; vTreePick = TREE_PICK[ tSpI ];'
         + '\n\tif ( normal.y > -0.5 ) vColor.rgb = color * vTreeBark;');
     }
     if (shader.fragmentShader.includes('#include <color_fragment>')) {

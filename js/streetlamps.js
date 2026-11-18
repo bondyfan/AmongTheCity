@@ -7,6 +7,11 @@
 //           lens looks straight down at the road.
 //   PARK    the short column of footways, squares and parks: four metres of
 //           slim shaft and a round lantern on top, lit all the way round.
+//   MAST    the tall galvanised mast of a lit motorway interchange (round 9):
+//           twelve metres of tapered octagonal shaft on a bolted flange, and
+//           at the top two arms, one over the carriageway and one back over
+//           the verge or the slip road beside it, each with a flat LED head.
+//   MAST1   the same mast with the one arm, beside a slip road.
 //
 // Frame of both: y up, the column on the origin, and the STREET arm reaching
 // toward local -z. A lamp instance is yawed by a heading, and a heading's
@@ -27,6 +32,10 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 export const HEAD_OUT = 1.8, HEAD_Y = 7.42;
 /** Where the PARK lantern sits: on the column axis, this high. */
 export const PARK_Y = 4.0;
+/** Where a MAST's lenses sit: metres out along each arm, and up. */
+export const MAST_OUT = 3.0, MAST_Y = 12.05;
+/** The kinds a lamp batch can be (meshes.lampBatch names its meshes after them). */
+export const LAMP_KINDS = Object.freeze(['street', 'park', 'mast', 'mast1']);
 
 const _cache = new Map();
 
@@ -69,6 +78,38 @@ function park() {
   return [post, plain(glass)];
 }
 
+// A Czech motorway lighting mast (stožár veřejného osvětlení, 12 m, žárově
+// zinkovaný): an octagonal cone on a square flange, a cap, and the arms bent
+// up out of the top. `arms` 2 puts the second arm at 180 degrees (local +z).
+function mast(arms) {
+  const parts = [];
+  parts.push(new THREE.BoxGeometry(0.5, 0.04, 0.5).translate(0, 0.02, 0));
+  // the anchor bolts' nuts, four dark lumps on the flange
+  for (const [bx, bz] of [[-0.19, -0.19], [0.19, -0.19], [-0.19, 0.19], [0.19, 0.19]]) {
+    parts.push(new THREE.BoxGeometry(0.05, 0.05, 0.05).translate(bx, 0.065, bz));
+  }
+  const top = MAST_Y - 0.35;
+  parts.push(new THREE.CylinderGeometry(0.075, 0.165, top - 0.04, 8, 1).translate(0, 0.04 + (top - 0.04) / 2, 0));
+  parts.push(new THREE.CylinderGeometry(0.085, 0.085, 0.16, 8, 1).translate(0, top, 0));
+  for (let a = 0; a < arms; a++) {
+    const s = a === 0 ? -1 : 1;           // the first arm over the road (local -z)
+    const arm = new THREE.CubicBezierCurve3(
+      new THREE.Vector3(0, top - 0.05, 0), new THREE.Vector3(0, top + 0.3, s * 0.05),
+      new THREE.Vector3(0, MAST_Y + 0.1, s * 0.9), new THREE.Vector3(0, MAST_Y + 0.12, s * (MAST_OUT - 0.45)));
+    parts.push(new THREE.TubeGeometry(arm, 8, 0.045, 6, false));
+    // the head: a long flat LED luminaire, tipped up five degrees off the road
+    parts.push(new THREE.BoxGeometry(0.34, 0.1, 0.86).rotateX(-s * 0.09).translate(0, MAST_Y + 0.07, s * MAST_OUT));
+  }
+  const post = mergeGeometries(parts.map(plain), false);
+  const lenses = [];
+  for (let a = 0; a < arms; a++) {
+    const s = a === 0 ? -1 : 1;
+    lenses.push(plain(new THREE.PlaneGeometry(0.26, 0.66).rotateX(Math.PI / 2).rotateX(-s * 0.09)
+      .translate(0, MAST_Y - 0.0, s * (MAST_OUT + 0.01))));
+  }
+  return [post, lenses.length > 1 ? mergeGeometries(lenses, false) : lenses[0]];
+}
+
 // position + normal only, non-indexed: one attribute set for every part, which
 // is what the merge needs and all the two lamp materials read
 function plain(g) {
@@ -80,7 +121,8 @@ function plain(g) {
 /** [post, lens] templates for a kind. Shared: CLONE before handing to a chunk. */
 export function lampGeoms(kind) {
   let g = _cache.get(kind);
-  if (!g) _cache.set(kind, g = kind === 'park' ? park() : street());
+  if (!g) _cache.set(kind, g = kind === 'park' ? park() : kind === 'mast' ? mast(2)
+    : kind === 'mast1' ? mast(1) : street());
   return g;
 }
 

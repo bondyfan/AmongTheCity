@@ -41,6 +41,7 @@ import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
 import { furnitureInto } from './furniture.js';
 import { lampGeoms } from './streetlamps.js';
+import { mastKind, mastsAlong } from './mastlamps.js';
 import { DecoSink, drum as kitDrum, post as kitPost, bar as kitBar } from './propkit.js';
 import { SIGN_M } from './signfaces.js';
 import { streetDecoMaterial } from './signatlas.js';
@@ -65,18 +66,22 @@ import { facadeAtlas, buildFacadeMaterial, facadeNight } from './facadeatlas.js'
 import { landmarkOf, LandmarkBatch, landmarkBarrier, landmarkClear, SWITCH as LANDMARK_SWITCH } from './landmarks.js';
 import { landmarkExtras, landmarkBridge, inLandmark } from './landmarks.js';
 import { landmarkMaterial, landmarkNight } from './landmarksmat.js';
-import { farTemplate, FAR_BOUND_PAD, treeSpec, treeMatrices, crownColor, mappedTree } from './treeshapes.js';
+import { farTemplate, FAR_BOUND_PAD, farBoundPad, treeSpec, treeMatrices, crownColor, mappedTree } from './treeshapes.js';
 import { farTreeMaterials } from './treeshader.js';
 import { treePitsInto } from './treepits.js';
 import { riverLevelAt, isPooled, isCulvert } from './riverpools.js';
 import { quayPiece, embankmentNear, QUAY_MIN } from './quaywall.js';
 import { refineNearWeirs, paintFlow, weirSillsInto } from './weirs.js';
 import { quaySnap, GRID_SNAP, stampShaped } from './quayedge.js';
+import { roadCorr, railCorr, floorOf, vergeFaced, kerbedAt, vergeFacesInto, railShouldersInto, edgeNear } from './batter.js';
 import { vysehradInto } from './vysehrad.js';
+import { quayStairsInto } from './quaystairs.js';
+import { balustradeAt } from './quaybalustrade.js';
+import { isQuayStairWay } from './quayflights.js';
 import { forecourtFrame, islandsOf } from './forecourt.js';
 import { quayRefine, quayRefineArray, quayLiftArray, quayDrape } from './quayground.js';
 import { mwPainted, motorwayPaint } from './mwpaint.js';
-import { cwOf, motorwayLit, osmBarrierReplaced, mwPierStations, BRIDGE_KERB as MW_BRIDGE_KERB, BRIDGE_IN as MW_BRIDGE_IN } from './mwplan.js';
+import { cwOf, osmBarrierReplaced, mwPierStations, BRIDGE_KERB as MW_BRIDGE_KERB, BRIDGE_IN as MW_BRIDGE_IN } from './mwplan.js';
 import { motorwayDressInto } from './mwdress.js';
 import { motorwayTallInto } from './mwtall.js';
 import { endsIndex } from './lanes.js';
@@ -1151,7 +1156,7 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
     // a cross-slope grew the reported green tongue out of its median.
     let minCap = Infinity, maxFloor = -Infinity;
     for (let ui = 0; ui < use.length; ui++) {
-      const { r, bb, hw, lay, flare } = use[ui];
+      const ent = use[ui], { r, bb, hw, lay, flare } = ent;
       const reach = hw + (flare ?? 0);
       if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
       const rc2 = reach * reach;
@@ -1175,8 +1180,10 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
             // flat within the corridor; beyond it the cap RISES at 55 % so
             // the bench meets the hillside as a bank, not as a one-step
             // cliff of stretched grass ("a co toto?")
+            // (a track's ceiling climbs at the 1:1.5 batter past its bed,
+            // js/batter.js: a lower track beside it no longer pulls it down)
             const d = Math.sqrt(d2);
-            const over = d > hw ? (d - hw) * 0.55 : 0;
+            const over = d > hw ? (d - hw) * (ent.rise ?? 0.55) : 0;
             const top = gy + (lay ?? LAYER_Y.road);
             const cap = top - 0.05 + over;
             if (cap < minCap) minCap = cap;
@@ -1186,8 +1193,12 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
             // under the deck edge, falling away at the same 55 % — exactly
             // the earthwork a real road stands on. Only for flared entries
             // (the ground quad); bridges never enter this list.
+            // (outside the streets the body falls at the 1:1.5 batter from
+            // just under the deck edge, the slope the verge face is drawn
+            // at: js/batter.js floorOf)
             if (flare) {
-              const floor = top - 0.45 - (d > hw ? (d - hw) * 0.55 : 0);
+              const floor = ent.bat === undefined ? top - 0.45 - (d > hw ? (d - hw) * 0.55 : 0)
+                : floorOf(ent, gy, d);
               if (floor > maxFloor) maxFloor = floor;
             }
           }
@@ -1360,7 +1371,7 @@ function waterLevelAt(f, x, z, terrain) {
   }
 }
 
-function skirtRing(sink, ring, key, inward, r, g, b, terrain, wyAt, quayRoads) {
+function skirtRing(sink, ring, key, inward, r, g, b, terrain, wyAt, quayRoads, fine = true) {
   const sgn = (polygonArea(ring) > 0 ? 1 : -1) * (inward ? 1 : -1);
   // The ring is the WHOLE body — the Labe carries 1 447 vertices running for
   // kilometres — and every chunk it touches used to subdivide all of them just
@@ -1400,7 +1411,10 @@ function skirtRing(sink, ring, key, inward, r, g, b, terrain, wyAt, quayRoads) {
           const par = embankmentNear(quayRoads, (p0x + p1x) / 2, (p0z + p1z) / 2,
             Math.max(t0, t1), (x, z) => terrain.heightAt(x, z));
           sink.at(SURF.paving);
-          quayPiece(sink, p0x, p0z, p1x, p1z, t0, t1, wy, fx, fz, par);
+          // (a balustrade where the real embankment has one; the far shell
+          // keeps the solid wall, which reads the same from up there)
+          const bal = par && fine && balustradeAt((p0x + p1x) / 2, (p0z + p1z) / 2);
+          quayPiece(sink, p0x, p0z, p1x, p1z, t0, t1, wy, fx, fz, par, bal ? 'balustrade' : null);
           sink.at(SURF.dirt);
         } else wallQuad2(sink, p0x, p0z, p1x, p1z, t0, t1, wy - 0.4, fx, fz, r, g, b);
       } else wallQuad(sink, p0x, p0z, p1x, p1z, BANK_TOP, BANK_DEPTH, fx, fz, r, g, b);
@@ -1682,6 +1696,10 @@ function kerbRun(sink, A, B, t, terrain, c) {
   }
 }
 
+// the verge face of a road outside the streets (js/batter.js): the grass of an
+// embankment, a shade drier than a town verge
+let _faceCol = null;
+const faceCol = () => _faceCol ??= (_c.setHex(0x5f6a45), [_c.r, _c.g, _c.b]);
 let _kerbCols = null;
 function kerbCols() {
   if (_kerbCols) return _kerbCols;
@@ -2476,6 +2494,16 @@ function roadRibbon(sink, f, terrain, cell, key, city) {
   };
   // a D11 deck: concrete edge kerbs carry the steel rails js/mwdress.js draws
   const mwBr = f.br && !isFoot && !!cwOf(f);
+  // outside the streets a road's edge is a sloped verge face, not the kerb body
+  // below (js/batter.js; a kerbed street keeps its kerb, vergeInto)
+  const faced = graded && vergeFaced(f);
+  // which side of station i a point is on, as streets.vergeAt numbers it, and
+  // whether the street is kerbed there (its kerb body below, no verge face)
+  const sideAt = (i, x, z) => {
+    const j = Math.min(i, q.length - 2);
+    return (x - q[j][0]) * (q[j + 1][1] - q[j][1]) - (z - q[j][1]) * (q[j + 1][0] - q[j][0]) >= 0 ? 1 : 0;
+  };
+  const kerbedSide = faced ? (i, x, z) => kerbedAt(f, along[i] + s0, sideAt(i, x, z)) : null;
   for (let i = 0; i < q.length - 1; i++) {
     const y0 = ys[i], y1 = ys[i + 1];
     const [pax, paz] = per[i], [pbx, pbz] = per[i + 1];
@@ -2521,6 +2549,8 @@ function roadRibbon(sink, f, terrain, cell, key, city) {
       sink.at(SURF.concrete);
       for (const e of [-1, 1]) {
         const X0 = ax + pax * hw * e, Z0 = az + paz * hw * e;
+        // (outside a kerbed stretch the edge is a sloped verge face instead)
+        if (faced && !kerbedSide(i, X0, Z0) && !kerbedSide(i + 1, X0, Z0)) continue;
         const X1 = bx + pbx * hw * e, Z1 = bz + pbz * hw * e;
         // the ribbon is fixed (absolute), so the kerb bottom samples the
         // ground itself — 5 cm into it, so a crease cannot open a slit
@@ -2581,6 +2611,13 @@ function roadRibbon(sink, f, terrain, cell, key, city) {
   if (!capOff(0)) capDisc(sink, q[0][0], ys[0], q[0][1], hw, cr, cg, cb);
   if (!capOff(q.length - 1)) capDisc(sink, q[q.length - 1][0], ys[q.length - 1], q[q.length - 1][1], hw, cr, cg, cb);
   if (bridge && !landmarkBridge(f)) bridgeSupports(sink, f, fr, ys, hw, cell, terrain, isFoot);
+  if (faced) {
+    // the embankment's own slope, down to the ground drawn beside it, and
+    // nothing where the edge lies on a sibling carriageway's deck
+    sink.at(SURF.meadow);
+    vergeFacesInto(sink, f, q, per, ys, hw, terrain, edgeNear(city, f, bboxOfLine), stampShaped, faceCol(), kerbedSide);
+    sink.at(surf);
+  }
   if (f._isl && graded) roundIslandInto(sink, f._isl[0], f._isl[1], f._isl[2], ys[0], terrain);
   // The deck at a distance along the frame, read off the ribbon's OWN stations.
   // The levelled profile is a curve and the ribbon is its chords: in a sag the
@@ -3230,7 +3267,7 @@ function taxiPaint(sink, fr, yAt) {
 const BED_HW = 1.35, BED_FOOT = 2.25;          // ballast: half width of the top, of the foot
 const TRAM_HW = 1.2, TRAM_UP = 0.03;           // tram panel: half width, lift over the road deck
 const TRAM_WIRE_H = WIRE_H;                    // contact wire over the panel (js/trambody.js)
-function railWay(sink, f, terrain, cell, masts = true) {
+function railWay(sink, f, terrain, cell, masts = true, city = null) {
   const railBridge = !!f.br && !!terrain;
   const fr = ribbonFrame(f.br ? bridgeResample(f.p) : terrainResample(f.p, terrain));
   if (!fr) return;
@@ -3333,8 +3370,15 @@ function railWay(sink, f, terrain, cell, masts = true) {
     _c.setHex(COLORS.railBed);
     const br2 = _c.r, bg2 = _c.g, bb2 = _c.b;
     strip(-BED_HW, base - 0.025, BED_HW, base - 0.025, br2, bg2, bb2, false);
-    strip(-BED_HW, base - 0.025, -BED_FOOT, 0, br2 * 0.86, bg2 * 0.86, bb2 * 0.86, true);
-    strip(BED_HW, base - 0.025, BED_FOOT, 0, br2 * 0.86, bg2 * 0.86, bb2 * 0.86, true);
+    if (railGraded) {
+      // sloped shoulders down to the drawn ground, and one bed with a track
+      // beside it (js/batter.js): no inner shoulders between them
+      railShouldersInto(sink, f, q, per, g, terrain, edgeNear(city, f, bboxOfLine), stampShaped,
+        [br2 * 0.86, bg2 * 0.86, bb2 * 0.86]);
+    } else {
+      strip(-BED_HW, base - 0.025, -BED_FOOT, 0, br2 * 0.86, bg2 * 0.86, bb2 * 0.86, true);
+      strip(BED_HW, base - 0.025, BED_FOOT, 0, br2 * 0.86, bg2 * 0.86, bb2 * 0.86, true);
+    }
   }
   if (!tram) {
     sink.at(SURF.concrete);
@@ -5604,18 +5648,17 @@ function lampInHouse(houses, x, z) {
   return false;
 }
 
-// a D11 way's rule lamps: the outer side only (see the rule loop)
-const MW_LAMP_SIDE = [1];
 /**
- * Every lamp this chunk owns, as two lists of [x, z, rot]: STREET columns (rot
- * faces the carriageway, the arm reaches over it) and PARK lanterns.
+ * Every lamp this chunk owns, as lists of [x, z, rot]: STREET columns (rot
+ * faces the carriageway, the arm reaches over it), PARK lanterns, and the
+ * D11's interchange masts, MAST (two arms) and MAST1 (one; js/mastlamps.js).
  *
  * Three sources, in order of trust: the lamps OSM surveyed (cell.furniture,
  * which used to be drawn as bare unlit masts), the every-34-metres rule along
  * the wider carriageways, and lanterns along pedestrian and living streets.
  */
 function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
-  const street = [], park = [], mapped = [];
+  const street = [], park = [], mapped = [], mast = [], mast1 = [];
   for (const f of cell.furniture ?? []) if (f.k === 'lamp') mapped.push(f.p[0][0], f.p[0][1]);
   const nearMapped = (x, z) => {
     for (let i = 0; i < mapped.length; i += 2) {
@@ -5712,10 +5755,11 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
   // main roads, cut into short ways at every junction, were lit, and the long
   // residential streets between them were not.) The walk is the same from the
   // way's first vertex whichever cell does it, so the cells agree on the spots.
+  // (the D11 / D35 and their slip roads: the tall masts of js/mastlamps.js)
+  const mastGuards = { near, inRoad: lampInRoad, onPad, inHouse, nearMapped, mast, mast1 };
   for (const r of cell.roads) {
+    if (mastsAlong(r, mastKind(r), x0, z0, x1, z1, mastGuards)) continue;
     if (!r.d || r.w < LAMP_MIN_W || !r.p) continue;
-    // the open D11 / D35 is dark; only its interchanges are lit (js/mwplan.js)
-    const mwDark = r.t === 'motorway' && !!cwOf(r);
     // on a bridge the column stands on the deck's edge, not in the air beside it
     const half = r.br ? r.w / 2 - 0.25 : r.w / 2 + 0.7;   // else just off the kerb
     let carry = (r._id % 17) * 2;            // stagger so junctions aren't twinned
@@ -5730,7 +5774,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
         const px = ax + dx * d, pz = az + dz * d;
         const first = ((nth++ + (r._id % 2)) & 1) ? 1 : -1; // alternate kerbs
         if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue; // this cell only
-        if (nearMapped(px, pz) || (mwDark && !motorwayLit(px, pz))) continue;
+        if (nearMapped(px, pz)) continue;
         // A LAMP STANDS ON THE KERB, NEVER IN THE ROAD. The offset is
         // perpendicular to THIS way, and wherever another carriageway runs
         // close (a junction, a slip road, the far half of a dual
@@ -5748,9 +5792,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
         // in the bay where the bus pulls in (32 of the 80 lay-bys on the
         // Pardubice tile). The offset steps out with the kerb. bayAt counts
         // sides by the ribbon's perpendicular, the opposite of `side` here.
-        // (a D11 interchange lamp stands behind the OUTER rail only: on the
-        // left it stood on the median barrier)
-        for (const side of mwDark ? MW_LAMP_SIDE : [first, -first]) {
+        for (const side of [first, -first]) {
           const nx = -dz * side, nz = dx * side;
           const off = half + (r.br ? 0 : bayAt(r, run + d, -side));
           const lx = px + nx * off, lz = pz + nz * off;
@@ -5799,7 +5841,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
       run += L;
     }
   }
-  return { street, park };
+  return { street, park, mast, mast1 };
 }
 
 /**
@@ -5855,8 +5897,10 @@ function lampBatch(group, spots, kind, mats, stand) {
   // find them, plain numbers so they survive the worker codec, and in
   // instance order so row i here is pole i there. `ys` is each base height
   // (lightpools.js hangs the glow from it), `kind` the shape that falls.
-  posts.name = kind === 'park' ? 'parkPosts' : 'lampPosts';
-  heads.name = kind === 'park' ? 'parkHeads' : 'lampHeads';
+  // (a motorway mast: 'mastPosts' / 'mast1Posts', js/city.js LAMP_BATCHES)
+  const stem = kind === 'street' ? 'lamp' : kind;
+  posts.name = stem + 'Posts';
+  heads.name = stem + 'Heads';
   posts.userData.spots = flat;
   posts.userData.ys = ys;
   posts.userData.kind = kind;
@@ -6282,9 +6326,9 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // skirts ride the ORIGINAL rings — the clipped ones grew artificial edges
     // along the cell border that would dam the river with earth walls
     const qr = isPooled(f) ? (quayRoads ??= nearRoads(city, cell, cx, cz)) : null;
-    skirtRing(sink, f.o, key, true, kr, kg, kb, mats.terrain, wyAt, qr);
+    skirtRing(sink, f.o, key, true, kr, kg, kb, mats.terrain, wyAt, qr, !shell);
     for (const h of f.i ?? []) if (h.length >= 3)
-      skirtRing(sink, h, key, false, kr, kg, kb, mats.terrain, wyAt, qr);
+      skirtRing(sink, h, key, false, kr, kg, kb, mats.terrain, wyAt, qr, !shell);
     yield;
   }
   if (mats.terrain && cell.water.some(isPooled)) {
@@ -6295,6 +6339,11 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   if (mats.terrain) {
     sink.at(SURF.gravel);
     vysehradInto(sink, x0, z0, x1, z1, mats.terrain);   // the tunnel under the rock
+    sink.at(SURF.dirt);
+  }
+  if (mats.terrain && !roadsOnly) {
+    sink.at(SURF.paving);
+    quayStairsInto(sink, x0, z0, x1, z1, mats.terrain);  // stone steps and walls down to the lower quays
     sink.at(SURF.dirt);
   }
   if (mats.terrain) sink.fixFrom(bankMark);   // bank skirts resolved absolutely
@@ -6329,13 +6378,12 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       for (const r of c2.roads) {
         if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
         seen.add(r);
-        corr.push({ r, bb: bboxOfLine(r), hw: (r.w ?? 3) / 2 + 4.5, flare: 5,
-          lay: FOOT_CLASSES.has(r.t) ? LAYER_Y.footway : LAYER_Y.road });
+        corr.push(roadCorr(r, bboxOfLine(r)));
       }
       for (const r of c2.rails) {
         if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
         seen.add(r);
-        corr.push({ r, bb: bboxOfLine(r), hw: 2.2 + 4.5, flare: 5, lay: LAYER_Y.rail });
+        corr.push(railCorr(r, bboxOfLine(r)));
       }
     }
   }
@@ -6572,8 +6620,9 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   // has every road in it, at better fidelity than the ribbon, and the ribbon is
   // the single most expensive thing in a rural chunk.
   if (!shell) {
-    for (const f of cell.roads) if (f._home === key) { roadRibbon(sink, f, mats.terrain, cell, key, city); yield; }
-    for (const f of cell.rails) if (f._home === key) { railWay(sink, f, mats.terrain, cell, mats.tramMasts !== false); yield; }
+    // (a quay flight's OSM line is drawn in stone by js/quaystairs.js)
+    for (const f of cell.roads) if (f._home === key && !isQuayStairWay(f)) { roadRibbon(sink, f, mats.terrain, cell, key, city); yield; }
+    for (const f of cell.rails) if (f._home === key) { railWay(sink, f, mats.terrain, cell, mats.tramMasts !== false, city); yield; }
     // …and the surfaces where they meet, filling what the trims left behind
     const js = junctionsIn(key);
     if (js) for (const j of js) junctionPad(sink, j, mats.terrain, cell);
@@ -6735,6 +6784,8 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     const plan = lampSpots(cell, key, x0, z0, x1, z1, mats.terrain, city);
     lampBatch(group, plan.street, 'street', mats, stand);
     lampBatch(group, plan.park, 'park', mats, stand);
+    lampBatch(group, plan.mast, 'mast', mats, stand);
+    lampBatch(group, plan.mast1, 'mast1', mats, stand);
   }
 
   // -- road signs: dej přednost, stop, hlavní silnice ----------------------
@@ -6752,6 +6803,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   // impostor with the trunk folded into its template (js/treeshapes.js).
   if (trees.length) {
     const crown = new THREE.InstancedMesh(farTemplate(), mats.crown, trees.length);
+    let pad = FAR_BOUND_PAD;
     for (let i = 0; i < trees.length; i++) {
       // instancing is cheap per tree, but a floodplain cell holds thousands:
       // every scratch var below is fully re-set each iteration, so the slice
@@ -6770,12 +6822,14 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       // the leaf colour carries the species in its low bits: that is how the
       // far shader and the near models learn it (see crownColor)
       crown.setColorAt(i, crownColor(spec, _c));
+      pad = Math.max(pad, farBoundPad(spec));
     }
     // instance matrices live in world space, so rebase() recomputes the bounds
     // (or the whole batch frustum-culls against the template's origin-sized
     // sphere) and grows them by this pad: the template only holds a
-    // placeholder of the trunk the shader stands under every crown
-    crown.userData.boundPad = FAR_BOUND_PAD;
+    // placeholder of the trunk the shader stands under every crown (the
+    // tallest tree's reach, never under FAR_BOUND_PAD)
+    crown.userData.boundPad = pad;
     crown.name = 'trees-far';
     crown.castShadow = crown.receiveShadow = true;
     group.add(crown);

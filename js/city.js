@@ -19,14 +19,17 @@ import { railGradeY } from './geo.js';
 import { takeMeshPool, prewarmMeshPool } from './meshpool.js';
 import { Poles } from './poles.js';
 import { barrierCollide } from './mwsolid.js';
+import { quayStairY, isQuayStairWay, quayStairsCollide } from './quayflights.js';
 import { sweepBrandMats } from './meshes.js';
 import { sweepWordmarks } from './destructible.js';
 import { computeVergeGen } from './streets.js';
-const LAMP_BATCHES = [['lampPosts', 'lampHeads'], ['parkPosts', 'parkHeads']];
+const LAMP_BATCHES = [['lampPosts', 'lampHeads'], ['parkPosts', 'parkHeads'],
+  ['mastPosts', 'mastHeads'], ['mast1Posts', 'mast1Heads']];   // (js/mastlamps.js)
 import { Interiors } from './interiorsim.js';
 import { landmarkSolids, solidHas } from './landmarks.js';
 import { Terrain, groundFor } from './terrain.js';
 import { stampShaped, onQuay } from './quayedge.js';
+import { BATTER, roadCorr, railCorr, groundUnder, railBedded, railBedY } from './batter.js';
 import { Canopy } from './canopy.js';
 import { GroundClass } from './groundclass.js';
 import { mwCollide } from './mwsolids.js';
@@ -85,6 +88,46 @@ const lineBB = (f) => {
 };
 const _surf = { y: 0, road: false };   // surfaceY's reusable answer
 const _pull = { w: 0, t: 0 };          // _footPull's
+const _gEnt = [], _noEnt = [];         // _groundEntries' reusable lists
+// The nearest segment of way r to (x, z) within `reach`: returns its arclength
+// s there and leaves the distance and the side in _near.
+const _near = { d: Infinity, e: 1 };
+function nearestSeg(r, x, z, reach) {
+  let along = 0, bd = Infinity, bs = 0, be = 1;
+  const p = r.p;
+  for (let i = 0; i < p.length - 1; i++) {
+    const ax = p[i][0], az = p[i][1], bx = p[i + 1][0], bz = p[i + 1][1];
+    const L = Math.hypot(bx - ax, bz - az);
+    const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
+    if (d < reach && d < bd) {
+      bd = d; bs = along + L * _closest.t;
+      be = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
+    }
+    along += L;
+  }
+  _near.d = bd; _near.e = be;
+  return bs;
+}
+// Another pass of the same way under or over (x, z): a segment whose
+// UNCLAMPED projection lies within the half width, further along the way than
+// a carriageway's width from the nearest one (a slip looping over itself).
+function otherPasses(r, x, z, bs, half, terrain, ground) {
+  let along = 0;
+  const p = r.p;
+  for (let i = 0; i < p.length - 1; i++) {
+    const ax = p[i][0], az = p[i][1], dx = p[i + 1][0] - ax, dz = p[i + 1][1] - az;
+    const L2 = dx * dx + dz * dz || 1e-9, L = Math.sqrt(L2);
+    const t = ((x - ax) * dx + (z - az) * dz) / L2;
+    if (t > 0 && t < 1) {
+      const s = along + L * t;
+      if (Math.abs(s - bs) > 2 * half + 2 && Math.hypot(x - ax - dx * t, z - az - dz * t) < half) {
+        const gy = r.br ? bridgeDeckHeight(r, s, terrain) : (roadGradeY(r, s, terrain) ?? ground);
+        levels.add(gy + LAYER_Y.road);
+      }
+    }
+    along += L;
+  }
+}
 // How far a kerbed street's verge can reach past its carriageway edge (a lawn
 // strip out to a mapped footway, js/streets.js), and how far past a junction's
 // outline its corner pavement can: the widening of the bbox rejects below.
@@ -154,8 +197,20 @@ const HIT_IDS_MAX = 8192;          // dedupe set ceiling — see _rememberHit
 // The pristine survey is kept per tile, because roads arrive by data tile and
 // a later tile can add roads over ground already shaped — the re-bake starts
 // from the survey, not from the previous bake.
-const CONFORM_FALL = 14;      // m of shoulder blending deck grade into survey
-const CONFORM_FOOT = 5;       // …for footways, which move far less earth
+// The shoulder of a road or a railway is a BATTER (round 10): the ground
+// leaves the grade at 1 in BATTER (js/batter.js) and meets the survey where
+// that slope reaches it, with BAT_TOE metres of rounding, so it is as wide as
+// the height it has to bridge: a road at grade moves next to no earth, a 3 m
+// embankment has a 6.5 m bank. A fixed 14 m smoothstep spread every
+// embankment's crest over a whole grid cell and more.
+const BAT_TOE = 2;            // m of rounding at crest and toe (fall = BAT_TOE + BATTER x height)
+const BAT_HMAX = 10;          // m: the tallest bank the stamp reaches for
+const CONFORM_FALL = BAT_TOE + BATTER * BAT_HMAX;   // the farthest any batter reaches
+const CONFORM_FOOT = 5;       // …for footways, which move far less earth (smoothstep)
+// Between the two carriageways of a dual road, or two tracks of one bed, the
+// ground is the median: it takes the level of the two edges either side of it
+// (interpolated), not whichever shoulder claimed it harder.
+const MEDIAN_ROAD = 14, MEDIAN_RAIL = 8;   // m: the widest gap between the edges that counts
 
 // every road touching a terrain tile, via the chunk index (which is cross-tile)
 function tileRoads(city, x0, z0, T) {
@@ -229,12 +284,13 @@ function* conformTileGen(terrain, city, tx, tz, list, st) {
 
   // Road-major stamping: per segment, visit only the grid samples its
   // corridor + shoulder can reach, and keep the strongest claim per sample.
-  const tBest = new Float32Array(n * n);
-  const hBest = new Float32Array(n * n);
+  const B = stampBooks(n);
   for (const r of roads) {
     if ((++step & 3) === 0) yield;
-    stampWay(r, terrain, x0, z0, n, res, tBest, hBest);
+    stampWay(r, terrain, x0, z0, n, res, B, raw);
   }
+  medianFill(B, n);
+  const tBest = B.t, hBest = B.h;
   yield;
   // from here to the marks below is one piece: the grid and its books move together
   if (st) st.applied = true;
@@ -287,10 +343,28 @@ function* conformTileGen(terrain, city, tx, tz, list, st) {
 // the interpreter. Measured over the sixteen tiles round the spawn, CPU time
 // of a cold bake: 9.1 to 9.2 s with the loops inline, 8.9 s like this, and
 // 8.7 to 9.0 s for the function this generator replaced.
-function stampWay(r, terrain, x0, z0, n, res, tBest, hBest) {
-  const fall = r.d ? CONFORM_FALL : r.t ? CONFORM_FOOT : 8;   // rails: 8 m bed
+// The claims on every grid sample, kept as plain arrays: the strongest claim
+// (t, h, its plan distance past its own edge `e`, its way `w`, the unit
+// direction to its line `u`), and the strongest claim of a DIFFERENT
+// median-capable way (`2` arrays) for medianFill. `w` is an index into `ways`.
+function stampBooks(n) {
+  const N = n * n;
+  return { t: new Float32Array(N), h: new Float32Array(N), e: new Float32Array(N), w: new Int32Array(N).fill(-1),
+    ux: new Float32Array(N), uz: new Float32Array(N),
+    t2: new Float32Array(N), h2: new Float32Array(N), e2: new Float32Array(N), w2: new Int32Array(N).fill(-1),
+    ux2: new Float32Array(N), uz2: new Float32Array(N), ways: [] };
+}
+// a carriageway of a dual road or a heavy-rail track: what a median lies between
+const RAIL_T = new Set(['rail', 'light_rail', 'narrow_gauge', 'subway']);
+const medianKind = (r) => (r.d && r.ow) ? 1 : (!r.d && RAIL_T.has(r.t)) ? 2 : 0;
+const FOOT_T = new Set(['footway', 'path', 'steps', 'cycleway', 'pedestrian', 'track', 'bridleway']);
+function stampWay(r, terrain, x0, z0, n, res, B, raw) {
+  const foot = !r.d && FOOT_T.has(r.t);
   const hw = (r.w ?? 3) / 2;
-  const reach = hw + fall;
+  const reach = hw + (foot ? CONFORM_FOOT : CONFORM_FALL);
+  const mk = medianKind(r);
+  const wi = B.ways.length;
+  B.ways.push(r);
   let along = 0;
   for (let k = 0; k < r.p.length - 1; k++) {
     const [ax, az] = r.p[k], [bx, bz] = r.p[k + 1];
@@ -305,17 +379,80 @@ function stampWay(r, terrain, x0, z0, n, res, tBest, hBest) {
         const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
         if (d >= reach) continue;
         const o = j * n + i;
-        let t = d <= hw ? 1 : 1 - (d - hw) / fall;
-        t = t * t * (3 - 2 * t);                    // smooth shoulder
-        if (t <= tBest[o]) continue;
+        const e = d - hw;
+        let t;
+        if (foot) {
+          t = d <= hw ? 1 : 1 - e / CONFORM_FOOT;
+          t = t * t * (3 - 2 * t);                  // a footway's smooth shoulder
+          if (t < B.t[o] || (t === B.t[o] && !(e < B.e[o]))) continue;
+        } else if (e > 0) {
+          // the strongest this claim could be (the tallest bank), before
+          // asking the grade: most samples a shoulder reaches are taken
+          const tUp = 1 - e / CONFORM_FALL;
+          if (tUp < B.t[o] && !(mk && B.w2[o] !== wi && tUp > B.t2[o])) continue;
+        }
         const s2 = along + Math.hypot(_closest.x - ax, _closest.z - az);
         const gy = roadGradeY(r, s2, terrain);
         if (gy === null || gy === undefined) continue;
-        tBest[o] = t;
-        hBest[o] = gy;
+        if (!foot) {
+          if (e <= 0) t = 1;
+          else {
+            // the batter: as wide as the height it bridges
+            const h0 = raw[o] === -32768 ? gy : raw[o] / 10;
+            const H = Math.min(BAT_HMAX, Math.abs(gy - h0));
+            t = Math.max(0, 1 - e / (BAT_TOE + BATTER * H));
+            // (a carriageway or a track still marks a sample its batter does
+            // not reach, if a median could lie there: medianFill decides)
+            if (t <= 0) { if (mk && e < MEDIAN_ROAD) t = 1e-6; else continue; }
+          }
+        }
+        const ex = _closest.x - x, ez = _closest.z - z, eL = Math.hypot(ex, ez) || 1;
+        claim(B, o, wi, mk, t, gy, e, ex / eL, ez / eL);
       }
     }
     along += segLen;
+  }
+}
+// One claim on sample o. The stronger wins; a TIE (a sample inside two
+// carriageways at once, where both say t = 1) goes to the way whose edge the
+// sample lies deeper inside, then to the lower level: never to whichever was
+// stamped first, which made the grid under one carriageway carry its twin's
+// grade (feet stood 0.94 m over the rychlodraha's asphalt on that).
+function claim(B, o, wi, mk, t, h, e, ux, uz) {
+  const bt = B.t[o];
+  const wins = B.w[o] < 0 || t > bt || (t === bt && (e < B.e[o] || (e === B.e[o] && h < B.h[o])));
+  if (B.w[o] === wi) {
+    if (wins) { B.t[o] = t; B.h[o] = h; B.e[o] = e; B.ux[o] = ux; B.uz[o] = uz; }
+    return;
+  }
+  if (wins) {
+    // the old best becomes the runner-up if it can stand beside a median
+    const ow = B.w[o];
+    if (ow >= 0 && medianKind(B.ways[ow])) {
+      B.t2[o] = bt; B.h2[o] = B.h[o]; B.e2[o] = B.e[o]; B.w2[o] = ow; B.ux2[o] = B.ux[o]; B.uz2[o] = B.uz[o];
+    }
+    B.t[o] = t; B.h[o] = h; B.e[o] = e; B.w[o] = wi; B.ux[o] = ux; B.uz[o] = uz;
+    if (B.w2[o] === wi) B.w2[o] = -1;
+    return;
+  }
+  if (mk && (B.w2[o] === wi ? t > B.t2[o] : (B.w2[o] < 0 || t > B.t2[o]))) {
+    B.t2[o] = t; B.h2[o] = h; B.e2[o] = e; B.w2[o] = wi; B.ux2[o] = ux; B.uz2[o] = uz;
+  }
+}
+// A sample OUTSIDE both edges with the two ways' lines on opposite sides of it
+// and the edges at most MEDIAN_* apart lies in a median (or between two
+// tracks of one bed): it takes the two edges' levels, interpolated across.
+function medianFill(B, n) {
+  for (let o = 0; o < n * n; o++) {
+    const a = B.w[o], b = B.w2[o];
+    if (a < 0 || b < 0) continue;
+    const ka = medianKind(B.ways[a]), kb = medianKind(B.ways[b]);
+    if (!ka || ka !== kb) continue;
+    const ea = B.e[o], eb = B.e2[o];
+    if (!(ea > 0 && eb > 0) || ea + eb > (ka === 1 ? MEDIAN_ROAD : MEDIAN_RAIL)) continue;
+    if (B.ux[o] * B.ux2[o] + B.uz[o] * B.uz2[o] > -0.7) continue;    // not between them
+    B.h[o] = (B.h[o] * eb + B.h2[o] * ea) / (ea + eb);
+    B.t[o] = 1;
   }
 }
 function applyStamp(g, raw, tBest, hBest, n, changed) {
@@ -1641,25 +1778,26 @@ export class CityWorld {
       // in the lane is inside the carriageway of the segment beside it and
       // "a metre past the kerb" of the one before, measured to that one's end:
       // judged segment by segment, every bend had a phantom kerb in its lane.
-      let along = 0, bd = Infinity, bs = 0, be = 1;
-      for (let i = 0; i < r.p.length - 1; i++) {
-        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
-        const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-        if (d < reach) {
-          const s = along + Math.hypot(_closest.x - ax, _closest.z - az);
-          const e = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
-          if (d < bd) { bd = d; bs = s; be = e; }
-          const bay = r._bays ? bayAt(r, s, e) : 0;
-          if (d < half + bay) {
-            // The HIGHER of the ground and the graded profile: the same max()
-            // meshes.js laid the ribbon at, so the wheels are on the surface that
-            // was drawn and not on either of the two things it was made from.
-            const gy = r.br ? bridgeDeckHeight(r, s, this.terrain)
-              : (roadGradeY(r, s, this.terrain) ?? ground);
-            levels.add(gy + LAYER_Y.road);
-          }
+      // The DECK too is asked of the nearest segment (round 10). Asked of every
+      // segment within the half width, the next segment's clamped projection
+      // read the deck at its first vertex, up to half a carriageway AHEAD of
+      // the wheel, and on a climb or a ripple the higher won: a car on the
+      // rychlodraha rode 0.33 m over its asphalt on a vertex 5 m ahead.
+      // (Another pass of the same way, a ramp looping back over itself, is
+      // still a deck of its own: segmentDecks.)
+      const bs = nearestSeg(r, x, z, reach);
+      const bd = _near.d, be = _near.e;
+      if (bd < reach) {
+        const bay = r._bays ? bayAt(r, bs, be) : 0;
+        if (bd < half + bay) {
+          // The HIGHER of the ground and the graded profile: the same max()
+          // meshes.js laid the ribbon at, so the wheels are on the surface that
+          // was drawn and not on either of the two things it was made from.
+          const gy = r.br ? bridgeDeckHeight(r, bs, this.terrain)
+            : (roadGradeY(r, bs, this.terrain) ?? ground);
+          levels.add(gy + LAYER_Y.road);
         }
-        along += Math.hypot(bx - ax, bz - az);
+        otherPasses(r, x, z, bs, half, this.terrain, ground);
       }
       if (vg && bd < reach && !inZone(r, bs)) {
         const xo = bd - r.w / 2 - (r._bays ? bayAt(r, bs, be) : 0);
@@ -1704,6 +1842,17 @@ export class CityWorld {
       if (!r.p || r.p.length < 2) continue;
       const bb = lineBB(r);
       if (x < bb[0] - 2.6 || x > bb[2] + 2.6 || z < bb[1] - 2.6 || z > bb[3] + 2.6) continue;
+      // heavy rail on its bed: the sleepers, then the shoulder the mesh draws
+      // down at the 1:1.5 batter, or the ballast between it and a track of
+      // the same bed (js/batter.js railBedY), asked of the nearest segment
+      if (railBedded(r)) {
+        const bs = nearestSeg(r, x, z, 2.6);
+        if (_near.d < 2.6) {
+          const y = railBedY(r, bs, _near.d, x, z, this._groundEntries(x, z), this.terrain);
+          if (y !== null) levels.add(y);
+        }
+        continue;
+      }
       let dist = 0;
       for (let i = 0; i < r.p.length - 1; i++) {
         const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
@@ -1743,6 +1892,9 @@ export class CityWorld {
     // one edge of a lifted footway feet stood a hand deep in the paving.
     let footOwn = -Infinity, fcx = 0, fcz = 0, onRoad = false;
     for (const r of cell.roads) {
+      // (not a quay flight's OSM line or a stub into it: its slab is not
+      // drawn, the stone steps are, and they are offered below)
+      if (!r.d && isQuayStairWay(r)) continue;
       // Bridges, yes — but ALSO embanked ordinary roads: a levelled deck may
       // ride up to GRADE_FILL above the terrain, and feet that only knew the
       // terrain sank into it to the knees on a fill and to the neck on a big
@@ -1772,22 +1924,12 @@ export class CityWorld {
                   footOwn = gy + LAYER_Y.footway; fcx = _closest.x; fcz = _closest.z;
                 }
               } else {
+                // (the deck itself is asked of the nearest segment, below)
                 const e = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
                 if (d < bd) { bd = d; bs = along; be = e; }
-                const xo = d - half - (r._bays ? bayAt(r, along, e) : 0);   // metres past the kerb line
-                if (xo < 0.35) levels.add(gy + LAYER_Y.road);
-                if (xo < 0.3) onRoad = true;
               }
-              // the embankment bank the mesh draws beside the deck is
-              // standable — snug under the edge, falling at 55 %
-              if (d < half + 5) {
-                const bank = gy + LAYER_Y.road - 0.45
-                  - (d > half ? (d - half) * 0.55 : 0);
-                // (not over ground a stamp shaped: the mesh draws no bank onto
-                // a Prague lower quay or its stairs, meshes.clampUnderRoadsGen,
-                // and feet at the foot of a quay stair stood on the air 4 m up)
-                if (bank > ground && !stampShaped(this.terrain, x, z)) levels.add(bank);
-              }
+              // (the embankment bank beside the deck is the ground as the mesh
+              // draws it, offered at the foot of this function: groundUnder)
             }
           }
         }
@@ -1798,6 +1940,11 @@ export class CityWorld {
         if (gy !== null && gy !== undefined) {
           const bay = r._bays ? bayAt(r, bs, be) : 0;
           const xo = bd - half - bay;
+          // the carriageway, of its NEAREST segment (see surfaceY), a hand
+          // past the kerb line; and another pass of the same way over here
+          if (xo < 0.35) levels.add(gy + LAYER_Y.road);
+          if (xo < 0.3) onRoad = true;
+          if (xo < 0.35) otherPasses(r, x, z, bs, half, this.terrain, ground);
           const v = vg ? vergeAt(r, bs, be > 0 ? 1 : 0) : null;
           // the generated pavement itself
           // (…but not out over a flight or ramp a stamp cut down to a Prague
@@ -1824,12 +1971,58 @@ export class CityWorld {
     // the flyover by Kaufland once the kerb pull stopped lifting that path
     // (2.8 km of path within 2.4 km of the spawn had the grid over 15 cm
     // above its slab). On a path's strip the slab is what is there.
-    if (slab === -Infinity || ground <= slab) levels.add(ground);
+    //
+    // …and the ground is offered as the mesh DRAWS it (round 10): under every
+    // way's ceiling and over its embankment floor (js/batter.js groundUnder,
+    // the per-vertex rule of meshes.clampUnderRoadsGen). The baked 20 m grid
+    // is a bicubic of stamped claims and stood up to 0.94 m over the
+    // rychlodraha's asphalt where the twin carriageway's grade was stamped
+    // into it; feet stood on that invisible ground half a metre over the road.
+    const drawn = groundUnder(x, z, ground, this._groundEntries(x, z), this.terrain, this._shapedAt);
+    if (slab === -Infinity || drawn <= slab) levels.add(drawn);
+    // the stone steps down to a Prague lower quay (js/quayflights.js)
+    const qs = quayStairY(x, z);
+    if (qs !== null) levels.add(qs);
     // (a junction's pad and corner pavement do not reach down a flight to a
     // Prague lower quay: the Trojická corner stood 2 m over its stairs)
     if (!onQuay(x, z)) this._padLevels(x, z);
-    return levels.value(ground);
+    return levels.value(drawn);
   }
+
+  // The ground corridors (js/batter.js roadCorr / railCorr) the mesher clamps
+  // the ground under at (x, z): those of its cell, and of the neighbours when
+  // the point is near enough a border for theirs to reach (a corridor answers
+  // up to ~20 m past its line). Built once per cell list.
+  _groundEntries(x, z) {
+    const ci = Math.floor(x / CHUNK), cj = Math.floor(z / CHUNK);
+    const lx = x - ci * CHUNK, lz = z - cj * CHUNK, M = 22;
+    const own = this._cellEntries(ci, cj);
+    if (lx >= M && lx <= CHUNK - M && lz >= M && lz <= CHUNK - M) return own;
+    const out = _gEnt;
+    out.length = 0;
+    for (const e of own) out.push(e);
+    const xs = lx < M ? -1 : lx > CHUNK - M ? 1 : 0, zs = lz < M ? -1 : lz > CHUNK - M ? 1 : 0;
+    for (const [dx, dz] of [[xs, 0], [0, zs], [xs, zs]]) {
+      if (!dx && !dz) continue;
+      for (const e of this._cellEntries(ci + dx, cj + dz)) out.push(e);
+    }
+    return out;
+  }
+  _cellEntries(ci, cj) {
+    const cell = this.city.chunkIndex.get(ci + ',' + cj);
+    if (!cell) return _noEnt;
+    this._gEntMemo ??= new WeakMap();
+    let m = this._gEntMemo.get(cell);
+    const nr = cell.roads.length, nl = cell.rails?.length ?? 0;
+    if (!m || m.nr !== nr || m.nl !== nl) {
+      const list = [];
+      for (const r of cell.roads) if (!r.br && r.p && r.p.length >= 2) list.push(roadCorr(r, lineBB(r)));
+      for (const r of cell.rails ?? []) if (!r.br && r.p && r.p.length >= 2) list.push(railCorr(r, lineBB(r)));
+      this._gEntMemo.set(cell, m = { nr, nl, list });
+    }
+    return m.list;
+  }
+  get _shapedAt() { return (this.__shaped ??= (x, z) => stampShaped(this.terrain, x, z)); }
 
   // The strongest pull of a carriageway on a footway whose centreline passes
   // (x, z), into _pull: the pavement level of a kerbed street out to 6 m and
@@ -2029,7 +2222,8 @@ export class CityWorld {
   _registerPoles(key, group) {
     if (!this.poles) return;
     if (!group) { this.poles.unregister(key); return; }
-    // two batches at most: street columns and park lanterns (meshes.lampBatch)
+    // four batches at most: street columns, park lanterns, motorway masts with
+    // two arms and with one (meshes.lampBatch)
     let n = 0;
     for (const [pn, hn] of LAMP_BATCHES) {
       const posts = group.getObjectByName(pn), heads = group.getObjectByName(hn);
@@ -2099,6 +2293,8 @@ export class CityWorld {
     pushed = barrierCollide(this, pos, radius, opts) || pushed;
     // …and so are the D11 gantry legs and sign posts (js/mwsolids.js), never fellable
     pushed = mwCollide(pos, radius, opts?.aboveY, this) || pushed;
+    // …and a flight of steps down to a Prague lower quay is a wall to a car
+    pushed = quayStairsCollide(pos, radius, opts) || pushed;
     const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
     if (!cell) return pushed;
     const walker = !!opts?.interior;

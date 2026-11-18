@@ -10,6 +10,7 @@ import { buildSloup, sloupSolids, buildHus, HUS } from './landmarks-sloup.js';
 import { buildOtbt, otbtSolids, buildMlst, mlstSolids, buildJudita, juditaSolids, buildMlstBrana, mlstBranaSolids } from './landmarks-mostecke.js';
 import { buildKarluv, KARLUV_BOX, KARLUV_ZONES } from './landmarks-karluv.js';
 import { buildPrasna, prasnaSolids, buildPrasnaSpoj, buildObecniDum, obecniSolids, buildMarkyza } from './landmarks-prasna.js';
+import { MLYN_KOLO_EXTRA } from './landmarks-certovka.js';
 
 const P = 'praha';
 
@@ -46,6 +47,8 @@ export const LANDMARKS_OLD = [
 export const EXTRAS_OLD = [
   { id: 'hus', region: P, box: [HUS[0] - 10, HUS[1] - 10, HUS[0] + 10, HUS[1] + 10], build: buildHus },
   { id: 'karluv-most', region: P, box: KARLUV_BOX, build: buildKarluv },
+  // the Velkopřevorský mlýn's wheel on the Čertovka (js/landmarks-certovka.js)
+  MLYN_KOLO_EXTRA,
 ];
 /** Where those draw their own props: capsules [ax, az, bx, bz, r] (js/landmarks.js ZONES). */
 export const ZONES_OLD = [

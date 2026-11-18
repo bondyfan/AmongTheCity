@@ -32,7 +32,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { sfxAt } from './audio.js';   // safe headless — no-ops without a context
-import { lampFallGeom } from './streetlamps.js';
+import { lampFallGeom, LAMP_KINDS } from './streetlamps.js';
 import { sigAssets } from './signalmodel.js';
 
 const CELL = 20;                       // m — spatial grid for collision queries
@@ -218,7 +218,7 @@ export class Poles {
     }
     // …and into the world as a real, falling object
     const mesh = new THREE.Mesh(
-      p.look ? p.look.geo : p.kind === 'signal' ? signalGeom() : lampFallGeom(p.kind === 'park' ? 'park' : 'street'),
+      p.look ? p.look.geo : p.kind === 'signal' ? signalGeom() : lampFallGeom(LAMP_KINDS.includes(p.kind) ? p.kind : 'street'),
       p.look ? p.look.mat : p.kind === 'signal' ? this.signalMaterial() : this.material());
     // A signal is registered when its tile is indexed, which can be before the
     // ground under it has loaded: its recorded height is then a guess (zero),

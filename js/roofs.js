@@ -255,7 +255,7 @@ export function roofInto(sink, f, typ, roof, topY, wallRGB, storeys, opts) {
     // a block with holes: one slope per ring, the yard left open (roofholes.js)
     if (f.i?.length)
       capRise = roofCapHoled(sink, f.o, f.i, topY, rr[0], rr[1], rr[2], roof.ov, !!opts?.soffit,
-        tag, opts?.tri, roof.old ? 1.2 : 0.78, praguePlace(f));
+        tag, opts?.tri, roof.old ? 1.2 : 0.78, praguePlace(f), wallRGB);
     // a light well may sit under the plain cap; a courtyard falls back flat,
     // where the caller's deck leaves it open
     // (a Prague mansard's attic gets dormers, roofgrammar.js, where the

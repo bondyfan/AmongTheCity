@@ -61,6 +61,7 @@ const FRAG = /* glsl */`
   uniform vec4 uTreeK;
   uniform vec4 uTreeK2;
   uniform float uFoot;
+  uniform float uNeedle;
   uniform vec3 uSeed;
   varying vec3 vN; varying vec3 vG; varying vec3 vCol; varying vec3 vP; varying float vLeaf;
   void main() {
@@ -73,6 +74,17 @@ const FRAG = /* glsl */`
       if ( tEdge < 0.0 ) discard;
       float f = ( 1.0 + uTreeK2.z * ( tA.r - 0.42 ) ) * ( 1.0 + uTreeK2.w * ( tB.r - 0.4 ) );
       float ao = vCol.g * 1.15 * f;
+      // A spruce's tiers. Its vertex shade only runs 0.8 at a rim to 0.55 under
+      // the next one, and from the side the rims are nearly all you see: baked
+      // as it was, the cone came out one flat pale shade (lit whole by the
+      // picture's normal, it read mint at street distance). Stretched, the
+      // band under every bough goes dark, and the front of each skirt, where
+      // the eye looks into the needles, is darker than the tips at its sides.
+      // About 0.7 of the old mean, which is what the dark old cone had.
+      if ( uNeedle > 0.5 ) {
+        float side = clamp( abs( n.x ) / 0.88, 0.0, 1.0 );
+        ao = 1.15 * f * ( 0.25 + 1.5 * max( vCol.g - 0.5, 0.0 ) ) * mix( 0.78, 1.0, side );
+      }
       gl_FragColor = vec4( n.xy * 0.5 + 0.5, ${IMP_LEAF0.toFixed(2)} + ${(1 - IMP_LEAF0).toFixed(2)} * clamp( ao / ${IMP_AO_MAX.toFixed(2)}, 0.0, 1.0 ), 1.0 );
     } else {
       // the trunk under the crown is the far template's own
@@ -134,7 +146,7 @@ export function buildImpostors(renderer, cell = 256) {
   });
   const uniforms = {
     uLeafTex: { value: leafNoise() }, uTreeK: TREE_U.uTreeK, uTreeK2: TREE_U.uTreeK2,
-    uFoot: { value: -1 }, uSeed: { value: new THREE.Vector3() },
+    uFoot: { value: -1 }, uNeedle: { value: 0 }, uSeed: { value: new THREE.Vector3() },
   };
   // NoBlending on both: the alpha is data here, and blending would multiply
   // the colour by it a second time
@@ -156,38 +168,52 @@ export function buildImpostors(renderer, cell = 256) {
 
   const was = renderer.getRenderTarget(), auto = renderer.autoClear, alpha = renderer.getClearAlpha();
   const clear = new THREE.Color(); renderer.getClearColor(clear);
-  renderer.autoClear = false;
-  renderer.setClearColor(0x000000, 0);
-  renderer.setRenderTarget(rt);
-  renderer.clear(true, false, false);
-  const cells = TREE_U.uTreeImpCell.value;
-  for (let sp = 0; sp < SPECIES.length; sp++) {
-    for (let v = 0; v < 2; v++) {
-      const geo = sp === SP.SHRUB ? shrubModel(v) : nearModel(sp, v);
-      if (!geo) continue;
-      const k = sp * 2 + v, f = impostorFrame(geo);
-      cells[k].set(f.half, f.yc, 0, 0);
-      cam.left = -f.half; cam.right = f.half; cam.bottom = f.yc - f.half; cam.top = f.yc + f.half;
-      cam.updateProjectionMatrix();
-      uniforms.uFoot.value = f.foot;
-      uniforms.uSeed.value.set(k * 3.1, k * 1.7, k * 2.3);
-      mesh.geometry = geo;
-      renderer.setRenderTarget(big);
-      renderer.clear(true, true, false);
-      renderer.render(scene, cam);
-      const x = (k % IMP_COLS) * cell, y = Math.floor(k / IMP_COLS) * cell;
-      rt.viewport.set(x, y, cell, cell); rt.scissor.set(x, y, cell, cell); rt.scissorTest = true;
-      renderer.setRenderTarget(rt);
-      renderer.render(copyScene, cam);
-      geo.dispose();
+  // Whatever happens mid-bake (a lost context, an allocation that fails), the
+  // renderer goes back as it was: js/trees.js catches the error and carries on
+  // with the A/B balls, and the next frame must not draw into the atlas with
+  // autoClear off and a clear colour of transparent black.
+  let ok = false;
+  try {
+    renderer.autoClear = false;
+    renderer.setClearColor(0x000000, 0);
+    renderer.setRenderTarget(rt);
+    renderer.clear(true, false, false);
+    const cells = TREE_U.uTreeImpCell.value;
+    for (let sp = 0; sp < SPECIES.length; sp++) {
+      for (let v = 0; v < 2; v++) {
+        const geo = sp === SP.SHRUB ? shrubModel(v) : nearModel(sp, v);
+        if (!geo) continue;
+        try {
+          const k = sp * 2 + v, f = impostorFrame(geo);
+          cells[k].set(f.half, f.yc, 0, 0);
+          cam.left = -f.half; cam.right = f.half; cam.bottom = f.yc - f.half; cam.top = f.yc + f.half;
+          cam.updateProjectionMatrix();
+          uniforms.uFoot.value = f.foot;
+          uniforms.uNeedle.value = sp === SP.SPRUCE ? 1 : 0;
+          uniforms.uSeed.value.set(k * 3.1, k * 1.7, k * 2.3);
+          mesh.geometry = geo;
+          renderer.setRenderTarget(big);
+          renderer.clear(true, true, false);
+          renderer.render(scene, cam);
+          const x = (k % IMP_COLS) * cell, y = Math.floor(k / IMP_COLS) * cell;
+          rt.viewport.set(x, y, cell, cell); rt.scissor.set(x, y, cell, cell); rt.scissorTest = true;
+          renderer.setRenderTarget(rt);
+          renderer.render(copyScene, cam);
+        } finally {
+          geo.dispose();
+        }
+      }
     }
+    ok = true;
+  } finally {
+    rt.scissorTest = false;
+    rt.viewport.set(0, 0, W, H); rt.scissor.set(0, 0, W, H);
+    renderer.setRenderTarget(was);
+    renderer.setClearColor(clear, alpha);
+    renderer.autoClear = auto;
+    mat.dispose(); copy.dispose(); quad.geometry.dispose(); big.dispose();
+    if (!ok) rt.dispose();
   }
-  rt.scissorTest = false;
-  rt.viewport.set(0, 0, W, H); rt.scissor.set(0, 0, W, H);
-  renderer.setRenderTarget(was);
-  renderer.setClearColor(clear, alpha);
-  renderer.autoClear = auto;
-  mat.dispose(); copy.dispose(); quad.geometry.dispose(); big.dispose();
   TREE_U.uTreeImp.value = rt.texture;
   return rt;
 }

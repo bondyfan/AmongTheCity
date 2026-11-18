@@ -197,7 +197,12 @@ test('every vertex lands within the documented 3 mm', () => {
   // int8 normals: 1/127 a component, so a third of a degree at worst
   assert.ok(Math.acos(1 - worstN) < 0.5 * Math.PI / 180,
     `normals turned by ${(Math.acos(1 - worstN) * 180 / Math.PI).toFixed(2)}°`);
-  assert.ok(worstNL < 0.005, `an int8 normal came back ${worstNL.toFixed(4)} off unit length`);
+  // (each component rounds by up to 0.5/127, so a normal far from every axis,
+  // like the 1:1.5 verge faces of round 10 on a diagonal road, can come back
+  // up to sqrt(3) x 0.5/127 = 0.68 % long; the old 0.5 % line was what the
+  // geometry of the day happened to reach, not the codec's bound. The shader
+  // normalizes the interpolated normal.)
+  assert.ok(worstNL < Math.sqrt(3) * 0.5 / 127 + 1e-4, `an int8 normal came back ${worstNL.toFixed(4)} off unit length`);
   // uint8 colour and uint16 uv are exactly one step of their own quantisation
   assert.ok(worstC <= 1 / 255 / 2 + 1e-6, `colour drifted by ${worstC}`);
   assert.ok(worstUV <= 1 / 65535 / 2 + 1e-6, `uv drifted by ${worstUV}`);

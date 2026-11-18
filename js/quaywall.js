@@ -29,10 +29,11 @@ function face(sink, ax, az, bx, bz, ta, tb, ba, bb, fx, fz, c) {
 /**
  * One piece of quay wall from (p0x, p0z) to (p1x, p1z). t0/t1: ground at each
  * end (absolute), wy: the water level, (fx, fz): toward the water (any length).
- * `parapet`: a street runs along the top. The sink's surface layer is the
- * caller's (stone slabs read best mapped up the wall).
+ * `parapet`: a street runs along the top; `style` 'balustrade' draws it as
+ * one (js/quaybalustrade.js says where), anything else as a solid wall. The
+ * sink's surface layer is the caller's (stone slabs read best mapped up the wall).
  */
-export function quayPiece(sink, p0x, p0z, p1x, p1z, t0, t1, wy, fx, fz, parapet) {
+export function quayPiece(sink, p0x, p0z, p1x, p1z, t0, t1, wy, fx, fz, parapet, style = null) {
   const L = Math.hypot(fx, fz) || 1, nx = fx / L, nz = fz / L;
   const foot = wy - 0.4, wet = wy + WET_BAND;
   // stained band at the waterline, dressed stone above it, up to the coping
@@ -50,6 +51,7 @@ export function quayPiece(sink, p0x, p0z, p1x, p1z, t0, t1, wy, fx, fz, parapet)
   // its back edge, down into the ground that may rise behind it
   face(sink, bx0, bz0, bx1, bz1, c0, c1, t0 - 0.2, t1 - 0.2, -nx, -nz, CAP);
   if (!parapet || Math.max(t0, t1) - wy < PARAPET_MIN) return;
+  if (style === 'balustrade') { balustradeInto(sink, p0x, p0z, p1x, p1z, c0, c1, nx, nz); return; }
   // the parapet stands flush with the water face, on the coping
   const qx0 = p0x - nx * PARAPET_T, qz0 = p0z - nz * PARAPET_T;
   const qx1 = p1x - nx * PARAPET_T, qz1 = p1z - nz * PARAPET_T;
@@ -58,6 +60,63 @@ export function quayPiece(sink, p0x, p0z, p1x, p1z, t0, t1, wy, fx, fz, parapet)
   face(sink, qx0, qz0, qx1, qz1, h0, h1, c0 - 0.05, c1 - 0.05, -nx, -nz, STONE);
   sink.triFacing(p0x, h0, p0z, p1x, h1, p1z, qx1, h1, qz1, 0, 1, 0, CAP[0], CAP[1], CAP[2]);
   sink.triFacing(p0x, h0, p0z, qx1, h1, qz1, qx0, h0, qz0, 0, 1, 0, CAP[0], CAP[1], CAP[2]);
+}
+
+// ---- the balustrade -------------------------------------------------------------
+// A granite plinth and top rail the parapet's thickness, a pedestal every
+// PED_EVERY (the piece's own start carries one, so a joint has exactly one),
+// and square balusters between, centred in the thickness. About 30
+// triangles a metre against the solid wall's 3.
+const PLINTH_H = 0.24, RAIL_H = 0.16, PED_EVERY = 2.4, PED_W = 0.44, PED_PROUD = 0.05;
+const BAL_GAP = 0.3, BAL_W = 0.13;
+const BAL = [0.60, 0.57, 0.51];
+
+// a vertical box from (ax, az) to (bx, bz) along u, `w0..w1` deep behind the
+// water face (along -n), between y0 and y1 at its ends: its four sides and lid
+function stoneBox(sink, ax, az, bx, bz, w0, w1, ya0, ya1, yb0, yb1, nx, nz, c, lid) {
+  const fx0 = ax - nx * w0, fz0 = az - nz * w0, fx1 = bx - nx * w0, fz1 = bz - nz * w0;
+  const kx0 = ax - nx * w1, kz0 = az - nz * w1, kx1 = bx - nx * w1, kz1 = bz - nz * w1;
+  face(sink, fx0, fz0, fx1, fz1, ya1, yb1, ya0, yb0, nx, nz, c);
+  face(sink, kx0, kz0, kx1, kz1, ya1, yb1, ya0, yb0, -nx, -nz, c);
+  const ux = bx - ax, uz = bz - az;
+  face(sink, fx0, fz0, kx0, kz0, ya1, ya1, ya0, ya0, -ux, -uz, c);
+  face(sink, fx1, fz1, kx1, kz1, yb1, yb1, yb0, yb0, ux, uz, c);
+  if (lid) {
+    sink.triFacing(fx0, ya1, fz0, fx1, yb1, fz1, kx1, yb1, kz1, 0, 1, 0, lid[0], lid[1], lid[2]);
+    sink.triFacing(fx0, ya1, fz0, kx1, yb1, kz1, kx0, ya1, kz0, 0, 1, 0, lid[0], lid[1], lid[2]);
+  }
+}
+
+function balustradeInto(sink, p0x, p0z, p1x, p1z, c0, c1, nx, nz) {
+  const L = Math.hypot(p1x - p0x, p1z - p0z);
+  if (L < 0.05) return;
+  const ux = (p1x - p0x) / L, uz = (p1z - p0z) / L;
+  const at = (t) => [p0x + ux * t, p0z + uz * t, c0 + (c1 - c0) * t / L];
+  // plinth and rail, end to end
+  stoneBox(sink, p0x, p0z, p1x, p1z, 0, PARAPET_T, c0 - 0.05, c0 + PLINTH_H, c1 - 0.05, c1 + PLINTH_H, nx, nz, STONE, CAP);
+  stoneBox(sink, p0x, p0z, p1x, p1z, 0, PARAPET_T, c0 + PARAPET_H - RAIL_H, c0 + PARAPET_H,
+    c1 + PARAPET_H - RAIL_H, c1 + PARAPET_H, nx, nz, STONE, CAP);
+  // (the rail's underside, seen between the balusters)
+  const ra = c0 + PARAPET_H - RAIL_H, rb = c1 + PARAPET_H - RAIL_H;
+  const kx0 = p0x - nx * PARAPET_T, kz0 = p0z - nz * PARAPET_T, kx1 = p1x - nx * PARAPET_T, kz1 = p1z - nz * PARAPET_T;
+  sink.triFacing(p0x, ra, p0z, p1x, rb, p1z, kx1, rb, kz1, 0, -1, 0, STONE[0], STONE[1], STONE[2]);
+  sink.triFacing(p0x, ra, p0z, kx1, rb, kz1, kx0, ra, kz0, 0, -1, 0, STONE[0], STONE[1], STONE[2]);
+  const m = Math.max(1, Math.round(L / PED_EVERY)), span = L / m;
+  for (let j = 0; j < m; j++) {
+    // the pedestal at this bay's start, a touch proud of both faces
+    const t0 = j * span, a = at(Math.max(0, t0 - PED_W / 2)), b = at(Math.min(L, t0 + PED_W / 2));
+    stoneBox(sink, a[0], a[1], b[0], b[1], -PED_PROUD, PARAPET_T + PED_PROUD, a[2], a[2] + PARAPET_H + 0.06,
+      b[2], b[2] + PARAPET_H + 0.06, nx, nz, STONE, CAP);
+    // the balusters of the bay
+    const g0 = t0 + PED_W / 2, g1 = t0 + span - PED_W / 2, nb = Math.floor((g1 - g0) / BAL_GAP);
+    for (let i = 0; i < nb; i++) {
+      const tc = g0 + (g1 - g0) * (i + 0.5) / nb;
+      const p = at(tc - BAL_W / 2), q = at(tc + BAL_W / 2);
+      const w0 = (PARAPET_T - BAL_W) / 2, w1 = w0 + BAL_W;
+      stoneBox(sink, p[0], p[1], q[0], q[1], w0, w1, p[2] + PLINTH_H, p[2] + PARAPET_H - RAIL_H,
+        q[2] + PLINTH_H, q[2] + PARAPET_H - RAIL_H, nx, nz, BAL, null);
+    }
+  }
 }
 
 /**

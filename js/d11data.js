@@ -176,20 +176,32 @@ export const EXITS = deepFreeze([
     W: {
       div: { x: 957.6, z: -19326.1, km: 90.464 },
       mer: { x: 561.2, z: -18284.1, km: 89.31 },
-      to: ['Hradec Králové-Kukleny', 'Nový Bydžov'], refs: ['II/324', 'II/611'], thru: ['Praha'],  // FALLBACK: no destination tag; mirrors the E slip
+      to: ['Nový Bydžov', 'Hradec Králové-Kukleny'], refs: ['II/324', 'II/611'], thru: ['Praha'],
+      // to: the slip (516619101) carries no tag, but it is a collector road:
+      // it gives off the Nový Bydžov branch first (977859736 "Chlumec nad
+      // Cidlinou;Nový Bydžov", to the II/611), then the Kukleny one (781623695
+      // "Opatovice nad Labem;Hradec Králové - Kukleny", destination:ref
+      // 324;611), and runs on as the links tagged ref D11 to the merge below.
+      // Read from data/raw-region in round 9; the order of the E slip's tag.
     },
   },
   { id: 'd11-95', road: 'D11', n: 95, name: 'Plotiště', kind: 'junction', km: 94.999, cross: ['D35', 'I/11', 'I/35'],
     E: {
       div: { x: 1295, z: -22989.2, km: 94.649 },
       mer: { x: 1700.1, z: -23671.8, km: 95.48 },
-      to: ['Hradec Králové', 'Jičín'], refs: ['D35', 'I/35'], thru: ['Trutnov', 'Jaroměř'],  // FALLBACK: no destination tag; the D35 to Jičín and the city
+      to: ['Hradec Králové', 'Jičín'], refs: ['I/11', 'I/35'], thru: ['Trutnov', 'Jaroměř'],
+      // to: the slip (977835780 -> 941692566) carries no tag and ends on the
+      // I/35 roundabout (primary ref 35), whose arms are signed "Šumperk;Hradec
+      // Králové" destination:ref 11 and "Liberec;Jičín" destination:ref 35.
+      // No D35 north of here in the data: the shield was the I/35's (round 9).
       // thru: FALLBACK (no tag on the through way past 84, but "Trutnov" on the D35 joining it)
     },
     W: {
       div: { x: 1689, z: -23679.3, km: 95.479 },
       mer: { x: 1224, z: -22828.1, km: 94.452 },
-      to: ['Hradec Králové', 'Jičín'], refs: ['D35', 'I/35'], thru: ['Praha'],  // FALLBACK: no destination tag
+      to: ['Hradec Králové', 'Jičín'], refs: ['I/11', 'I/35'], thru: ['Praha'],
+      // to: the slip (881442253 -> 977835764) ends on the same I/35
+      // roundabout; its arms as for 95 E (round 9)
     },
   },
   { id: 'd11-104', road: 'D11', n: 104, name: 'Smiřice', kind: 'exit', km: 104.001, cross: ['I/33'], outside: true,

@@ -41,10 +41,69 @@ const MAX_CELLS = 1 << 18;
  * the first cell the two spans share (two flag bits per record say whether
  * this is the edge's first column and first row). Each pair is then tested
  * both ways with the same tests as before, so the walls found are the same.
+ *
+ * That still came to 21.5 ms warm on a dense Prague tile and 50 to 65 ms on
+ * the first tiles of a session (measured), in ONE step of geo.js's sliced
+ * indexing, so the 4 ms slicer could not cut it. stampPartyWallsSteps is the
+ * same pass with a yield every few thousand edges, records or buildings:
+ * geo.js calls it with yield*, and this function is its drain. The loops stay
+ * in plain range functions over module state (V8 optimises a big loop inside
+ * a generator body worse: 30 to 50 % slower cold, measured), and each range
+ * continues exactly where the last one stopped, so every sum is taken in the
+ * same order and the output is the same to the bit.
  */
-const REC = 8;           // per edge in a cell: ux, uz, ax, az, L, edge, owner * 4 + first-cell flags, run end
+export function stampPartyWalls(buildings) {
+  const it = stampPartyWallsSteps(buildings);
+  while (!it.next().done);
+}
+
+// work between two yields (a few tenths of a millisecond warm on a dense
+// Prague tile, under a millisecond or two cold). The pairs are counted as
+// records plus the pairs a cell holds, since a crowded cell costs the square
+// of its records (a country tile's grid has bigger cells).
+const EDGE_STEP = 2048, PAIR_STEP = 8192, BLD_STEP = 512;
+
+/** The pass in steps: yields between ranges, returns when every f._pw is written. */
+export function* stampPartyWallsSteps(buildings) {
+  const my = begin(buildings);
+  if (!my) return;
+  yield;                // (the first tiles of a session grow the scratch here)
+  if (_run !== my) return stampPartyWalls(buildings);
+  // (tile indexing is serialised, geo.js workTurn, so nothing else runs this
+  // pass between two of our steps; if something ever did, the scratch is no
+  // longer ours and the pass starts over in one go rather than mix two tiles)
+  const lost = () => _run !== my;
+  for (let k = 0; k < _nb;) { k = edgeRange(k, EDGE_STEP); yield; if (lost()) return stampPartyWalls(buildings); }
+  gridInit();
+  for (let a = 0; a < _ne; a += EDGE_STEP) {
+    gridCount(a, Math.min(_ne, a + EDGE_STEP)); yield; if (lost()) return stampPartyWalls(buildings);
+  }
+  gridPrefix();
+  yield; if (lost()) return stampPartyWalls(buildings);
+  for (let a = 0; a < _ne; a += EDGE_STEP) {
+    gridFill(a, Math.min(_ne, a + EDGE_STEP)); yield; if (lost()) return stampPartyWalls(buildings);
+  }
+  gridShift();
+  for (let k = 0; k < _nb; k += BLD_STEP) {
+    slabRange(k, Math.min(_nb, k + BLD_STEP)); yield; if (lost()) return stampPartyWalls(buildings);
+  }
+  _cov.fill(0, 0, _ne); _low.fill(Infinity, 0, _ne);
+  for (let c = 0; c < _nc;) { c = pairRange(c, PAIR_STEP); yield; if (lost()) return stampPartyWalls(buildings); }
+  _e = 0;
+  for (let k = 0; k < _nb; k += BLD_STEP) {
+    writeRange(k, Math.min(_nb, k + BLD_STEP)); yield; if (lost()) return stampPartyWalls(buildings);
+  }
+  slabNames();
+  _B = null;
+}
+
+// per edge in a cell, a record in two halves: the geometry the tests read
+// (ux, uz, ax, az, L) and the integers that steer the walk (edge, owner * 4 +
+// first-cell flags, end of the owner's run); split, the walk is 8 to 10 %
+// faster than with one 64-byte record of doubles (measured), same answers
+const RG = 5, RM = 3;
 let _cap = 0, AX, AZ, UX, UZ, LN, C0, C1, R0, R1, OWN, COV, LOW;
-let _lcap = 0, LR;
+let _lcap = 0, LG, LM;
 let _start = new Int32Array(0);
 function scratch(ne, nl) {
   if (ne > _cap) {
@@ -57,20 +116,34 @@ function scratch(ne, nl) {
   }
   if (nl > _lcap) {
     _lcap = Math.max(nl, Math.ceil(_lcap * 1.25));
-    LR = new Float64Array(_lcap * REC);
+    LG = new Float64Array(_lcap * RG); LM = new Int32Array(_lcap * RM);
   }
+  _cov = COV; _low = LOW;
 }
 
-export function stampPartyWalls(buildings) {
+// the pass in flight: its buildings, sizes, grid and cursors
+let _run = 0, _B = null, _nb = 0, _ne = 0, _e = 0, _total = 0;
+let _x0 = 0, _z0 = 0, _x1 = 0, _z1 = 0, _cell = 0, _w = 0, _nc = 0;
+let _slabF = null, _up = null, _hb = null, _ids = null, _cov = null, _low = null;
+
+function begin(buildings) {
   const nb = buildings.length;
   let ne = 0;
   for (let k = 0; k < nb; k++) { const o = buildings[k].o; if (o && o.length >= 3) ne += o.length; }
-  if (!ne) return;
+  if (!ne) return 0;
   scratch(ne, 0);
-  // flat edge table: endpoint, unit direction, length, owner (L 0: a jog)
-  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
-  let e = 0;
-  for (let k = 0; k < nb; k++) {
+  _B = buildings; _nb = nb; _ne = ne; _e = 0; _total = 0;
+  _x0 = Infinity; _z0 = Infinity; _x1 = -Infinity; _z1 = -Infinity;
+  return ++_run;
+}
+
+// flat edge table: endpoint, unit direction, length, owner (L 0: a jog), from
+// building k on until `lim` edges are in; returns the next building
+function edgeRange(k, lim) {
+  const buildings = _B, nb = _nb;
+  let x0 = _x0, z0 = _z0, x1 = _x1, z1 = _z1, e = _e;
+  const stop = e + lim;
+  for (; k < nb && e < stop; k++) {
     const o = buildings[k].o;
     if (!o || o.length < 3) continue;
     const n = o.length;
@@ -87,22 +160,30 @@ export function stampPartyWalls(buildings) {
       LN[e] = L; UX[e] = dx / L; UZ[e] = dz / L;
     }
   }
-  // A uniform grid over the tile in compressed rows (count, prefix, fill):
-  // small integer cells and typed arrays, because a Map keyed on world cells
-  // cost half a second on a Prague tile.
-  // A country tile spreads its houses over 24 km, where 12 m cells made a
-  // 4.8-million-cell grid (two 20 MB arrays per tile arrival); the cell grows
-  // there so the grid stays near MAX_CELLS. Which edges pair up does not depend
-  // on the cell size, only how many candidates each cell lists.
-  const CELL = Math.max(CELL0, Math.sqrt((x1 - x0 + 2 * CELL0) * (z1 - z0 + 2 * CELL0) / MAX_CELLS));
-  x0 -= CELL; z0 -= CELL;
-  const W = Math.max(1, Math.ceil((x1 - x0) / CELL) + 2), H = Math.max(1, Math.ceil((z1 - z0) / CELL) + 2);
+  _x0 = x0; _z0 = z0; _x1 = x1; _z1 = z1; _e = e;
+  return k;
+}
+
+// A uniform grid over the tile in compressed rows (count, prefix, fill):
+// small integer cells and typed arrays, because a Map keyed on world cells
+// cost half a second on a Prague tile.
+// A country tile spreads its houses over 24 km, where 12 m cells made a
+// 4.8-million-cell grid (two 20 MB arrays per tile arrival); the cell grows
+// there so the grid stays near MAX_CELLS. Which edges pair up does not depend
+// on the cell size, only how many candidates each cell lists.
+function gridInit() {
+  const CELL = Math.max(CELL0, Math.sqrt((_x1 - _x0 + 2 * CELL0) * (_z1 - _z0 + 2 * CELL0) / MAX_CELLS));
+  _x0 -= CELL; _z0 -= CELL;
+  const W = Math.max(1, Math.ceil((_x1 - _x0) / CELL) + 2), H = Math.max(1, Math.ceil((_z1 - _z0) / CELL) + 2);
   const NC = W * H;
   if (_start.length < NC + 1) _start = new Int32Array(NC + 1);
-  const start = _start;
-  start.fill(0, 0, NC + 1);
-  let total = 0;
-  for (let a = 0; a < ne; a++) {
+  _start.fill(0, 0, NC + 1);
+  _cell = CELL; _w = W; _nc = NC; _total = 0;
+}
+function gridCount(a0, a1) {
+  const start = _start, W = _w, CELL = _cell, x0 = _x0, z0 = _z0;
+  let total = _total;
+  for (let a = a0; a < a1; a++) {
     const L = LN[a];
     if (!L) continue;
     const ax = AX[a], az = AZ[a], bx = ax + UX[a] * L, bz = az + UZ[a] * L;
@@ -112,65 +193,95 @@ export function stampPartyWalls(buildings) {
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) start[r * W + c + 1]++;
     total += (c1 - c0 + 1) * (r1 - r0 + 1);
   }
+  _total = total;
+}
+function gridPrefix() {
+  const start = _start, NC = _nc;
   for (let i = 0; i < NC; i++) start[i + 1] += start[i];
-  scratch(ne, total);
-  const R = LR;
-  // (the fill cursor runs on each cell's own start, which then holds the
-  // next cell's start, so the table shifts back by one)
-  for (let a = 0; a < ne; a++) {
+  scratch(_ne, _total);
+}
+// (the fill cursor runs on each cell's own start, which then holds the
+// next cell's start, so the table shifts back by one in gridShift)
+function gridFill(a0, a1) {
+  const start = _start, W = _w, G = LG, M = LM;
+  for (let a = a0; a < a1; a++) {
     if (!LN[a]) continue;
     const c0 = C0[a], r0 = R0[a], c1 = C1[a], r1 = R1[a], ok = OWN[a] * 4;
     const ux = UX[a], uz = UZ[a], ax = AX[a], az = AZ[a], L = LN[a];
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
-      const q = start[r * W + c]++ * REC;
-      R[q] = ux; R[q + 1] = uz; R[q + 2] = ax; R[q + 3] = az; R[q + 4] = L; R[q + 5] = a;
-      R[q + 6] = ok + (c === c0 ? 2 : 0) + (r === r0 ? 1 : 0);
+      const q = start[r * W + c]++, g = q * RG, m = q * RM;
+      G[g] = ux; G[g + 1] = uz; G[g + 2] = ax; G[g + 3] = az; G[g + 4] = L;
+      M[m] = a; M[m + 1] = ok + (c === c0 ? 2 : 0) + (r === r0 ? 1 : 0);
     }
   }
-  for (let i = NC; i > 0; i--) start[i] = start[i - 1];
+}
+function gridShift() {
+  const start = _start;
+  for (let i = _nc; i > 0; i--) start[i] = start[i - 1];
   start[0] = 0;
-  // Panel slabs are mapped section by section, and each section used to pick
-  // its own colour. Sections of one slab (flat, four storeys and up, the same
-  // height within a storey's half) are joined here, and f._slab names the
-  // slab by its smallest id, which is what its colour is hashed from.
-  // (heights and ids copied out once: the records come in many shapes, and a
-  // property read on them in the pair loop is a slow megamorphic lookup)
-  const slab = new Uint8Array(nb), up = new Int32Array(nb), hb = new Float64Array(nb), ids = new Float64Array(nb);
-  for (let k = 0; k < nb; k++) {
+  const nb = _nb;
+  _slabF = new Uint8Array(nb); _up = new Int32Array(nb); _hb = new Float64Array(nb); _ids = new Float64Array(nb);
+}
+
+// Panel slabs are mapped section by section, and each section used to pick
+// its own colour. Sections of one slab (flat, four storeys and up, the same
+// height within a storey's half) are joined here, and f._slab names the
+// slab by its smallest id, which is what its colour is hashed from.
+// (heights and ids copied out once: the records come in many shapes, and a
+// property read on them in the pair loop is a slow megamorphic lookup)
+function slabRange(k0, k1) {
+  const buildings = _B, slab = _slabF, up = _up, hb = _hb, ids = _ids;
+  for (let k = k0; k < k1; k++) {
     const f = buildings[k];
     up[k] = k;
     hb[k] = f.h ?? 6;
     ids[k] = f._id ?? k;
     slab[k] = (!f.r || f.r === 'flat') && (f.lv ?? (f.h ?? 0) / 3.1) >= 4 && !(f.i?.length) ? 1 : 0;
   }
-  const root = (k) => { while (up[k] !== k) { up[k] = up[up[k]]; k = up[k]; } return k; };
-  // the root is always the section with the smallest id, whatever order the
-  // list came in, so the slab's name does not depend on it
-  const join = (a, b) => { a = root(a); b = root(b); if (a !== b) { if (ids[a] < ids[b]) up[b] = a; else up[a] = b; } };
-  COV.fill(0, 0, ne); LOW.fill(Infinity, 0, ne);
-  for (let cell = 0; cell < NC; cell++) {
-    const s0 = start[cell] * REC, s1 = start[cell + 1] * REC;
-    if (s1 - s0 < 2 * REC) continue;
+}
+function root(k) {
+  const up = _up;
+  while (up[k] !== k) { up[k] = up[up[k]]; k = up[k]; }
+  return k;
+}
+// the root is always the section with the smallest id, whatever order the
+// list came in, so the slab's name does not depend on it
+function join(a, b) {
+  a = root(a); b = root(b);
+  if (a !== b) { if (_ids[a] < _ids[b]) _up[b] = a; else _up[a] = b; }
+}
+
+// the pairs, cell by cell from `cell` on until `lim` records and pairs are
+// walked; returns the next cell
+function pairRange(cell, lim) {
+  const start = _start, G = LG, M = LM, NC = _nc, COVa = _cov, LOWa = _low;
+  const slab = _slabF, up = _up, hb = _hb;
+  let done = 0;
+  for (; cell < NC && done < lim; cell++) {
+    const s0 = start[cell], s1 = start[cell + 1];
+    if (s1 - s0 < 2) continue;
+    const nr = s1 - s0;
+    done += nr + nr * (nr - 1) / 2;
     // A building's own edges sit in one run (the list is in edge order): each
     // record learns where its run ends, so the pairs skip it in one step.
-    for (let q = s1 - REC, end = s1, own = -1; q >= s0; q -= REC) {
-      const o = (R[q + 6] | 0) >> 2;
-      if (o !== own) { own = o; end = q + REC; }
-      R[q + 7] = end;
+    for (let q = s1 - 1, end = s1, own = -1; q >= s0; q--) {
+      const o = M[q * RM + 1] >> 2;
+      if (o !== own) { own = o; end = q + 1; }
+      M[q * RM + 2] = end;
     }
-    for (let qa = s0; qa < s1 - REC; qa += REC) {
-      const fa = R[qa + 6] | 0, oa = fa >> 2, ux = R[qa], uz = R[qa + 1];
-      for (let qb = R[qa + 7]; qb < s1; qb += REC) {
+    for (let qa = s0; qa < s1 - 1; qa++) {
+      const ga = qa * RG, fa = M[qa * RM + 1], oa = fa >> 2, ux = G[ga], uz = G[ga + 1];
+      for (let qb = M[qa * RM + 2]; qb < s1; qb++) {
         // parallel (either direction: neighbours wind their rings their own way)
-        const vx = R[qb], vz = R[qb + 1];
+        const gb = qb * RG, vx = G[gb], vz = G[gb + 1];
         if (Math.abs(ux * vz - uz * vx) > PAR) continue;
         // each pair once, in the first cell both spans share: this cell is
         // the later of the two first columns and of the two first rows
-        const fb = R[qb + 6] | 0;
+        const fb = M[qb * RM + 1];
         if (!((fa | fb) & 2) || !((fa | fb) & 1)) continue;
         const ob = fb >> 2;
-        const ax = R[qa + 2], az = R[qa + 3], L = R[qa + 4], a = R[qa + 5];
-        const bx = R[qb + 2], bz = R[qb + 3], Lb = R[qb + 4], b = R[qb + 5];
+        const ax = G[ga + 2], az = G[ga + 3], L = G[ga + 4], a = M[qa * RM];
+        const bx = G[gb + 2], bz = G[gb + 3], Lb = G[gb + 4], b = M[qb * RM];
         let hit = false;
         // b on a's line: both ends of b within the tolerance, overlapping a
         let px = bx - ax, pz = bz - az, qx = px + vx * Lb, qz = pz + vz * Lb;
@@ -178,8 +289,8 @@ export function stampPartyWalls(buildings) {
           const t0 = px * ux + pz * uz, t1 = qx * ux + qz * uz;
           const lo = Math.max(0, Math.min(t0, t1)), hi = Math.min(L, Math.max(t0, t1));
           if (hi - lo >= 0.3) {
-            COV[a] += hi - lo;
-            if (hb[ob] < LOW[a]) LOW[a] = hb[ob];
+            COVa[a] += hi - lo;
+            if (hb[ob] < LOWa[a]) LOWa[a] = hb[ob];
             hit = true;
           }
         }
@@ -189,8 +300,8 @@ export function stampPartyWalls(buildings) {
           const t0 = px * vx + pz * vz, t1 = qx * vx + qz * vz;
           const lo = Math.max(0, Math.min(t0, t1)), hi = Math.min(Lb, Math.max(t0, t1));
           if (hi - lo >= 0.3) {
-            COV[b] += hi - lo;
-            if (hb[oa] < LOW[b]) LOW[b] = hb[oa];
+            COVa[b] += hi - lo;
+            if (hb[oa] < LOWa[b]) LOWa[b] = hb[oa];
             hit = true;
           }
         }
@@ -198,22 +309,32 @@ export function stampPartyWalls(buildings) {
       }
     }
   }
-  // write back per building
-  e = 0;
-  for (let k = 0; k < nb; k++) {
+  return cell;
+}
+
+// write back per building (the edge cursor _e runs on from range to range)
+function writeRange(k0, k1) {
+  const buildings = _B;
+  let e = _e;
+  for (let k = k0; k < k1; k++) {
     const f = buildings[k], o = f.o;
     if (!o || o.length < 3) continue;
     let pw = null;
     for (let i = 0; i < o.length; i++, e++) {
       const L = LN[e];
-      if (L && COV[e] >= COVER * L) {
+      if (L && _cov[e] >= COVER * L) {
         pw ??= new Array(o.length).fill(0);
-        pw[i] = Math.max(0.1, Math.round(LOW[e] * 10) / 10);
+        pw[i] = Math.max(0.1, Math.round(_low[e] * 10) / 10);
       }
     }
     if (pw) f._pw = pw; else if (f._pw) delete f._pw;
   }
-  // the slab's name: the smallest id among its sections
+  _e = e;
+}
+
+// the slab's name: the smallest id among its sections
+function slabNames() {
+  const buildings = _B, nb = _nb, slab = _slabF, ids = _ids;
   const many = new Uint8Array(nb);
   for (let k = 0; k < nb; k++) if (root(k) !== k) many[root(k)] = 1;
   for (let k = 0; k < nb; k++) {
@@ -223,80 +344,6 @@ export function stampPartyWalls(buildings) {
   }
 }
 
-/**
- * The party value of edge i, or 0. A ring with a different vertex count from
- * the stamp (a footprint rewritten after indexing) reads as all free.
- */
-export const partyOf = (f, i) => (f._pw && f._pw.length === f.o.length ? f._pw[i] : 0);
-
-/**
- * blockCorner(f) -> index of the block-corner vertex, or -1: a convex corner
- * whose two walls are both free (not party), at least 7 m long, and meet at
- * 60..120 degrees; the longest such. Where a perimeter block turns a street
- * corner: the corner turret (roofgrammar.js) and the corner shop (typology.js).
- */
-export function blockCorner(f) {
-  const ring = f.o, n = ring.length;
-  // (a house that shares no wall is not a block corner, it is a villa)
-  if (n > 40 || !f._pw) return -1;
-  const sgn = ringSign(ring);
-  let best = -1, bestL = 0;
-  for (let i = 0; i < n; i++) {
-    const p = ring[(i - 1 + n) % n], c = ring[i], q = ring[(i + 1) % n];
-    if (partyOf(f, (i - 1 + n) % n) > 0 || partyOf(f, i) > 0) continue;
-    const ax = c[0] - p[0], az = c[1] - p[1], bx = q[0] - c[0], bz = q[1] - c[1];
-    const la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
-    if (la < 7 || lb < 7) continue;
-    const cr = (ax * bz - az * bx) / (la * lb), dt = (ax * bx + az * bz) / (la * lb);
-    // convex: the turn has the ring's own winding; 60..120 degrees between walls
-    if (cr * sgn <= 0) continue;
-    if (Math.abs(dt) > 0.5) continue;
-    if (la + lb > bestL) { bestL = la + lb; best = i; }
-  }
-  return best;
-}
-
-/**
- * chamferCorner(f) -> index of the edge that cuts a block corner off, or -1:
- * a free wall of 2 to 7 m between two free walls of at least 7 m, turning about
- * 45 degrees (30..60) the same way at both its ends, so the long walls meet at
- * 60..120 degrees across it; the longest such pair. The corner of a Zizkov or
- * Vinohrady block is as often cut off as square (26 of 100 corner houses in
- * Zizkov, measured), and the oriel stands over the cut.
- */
-export function chamferCorner(f) {
-  const ring = f.o, n = ring.length;
-  if (n > 40 || n < 5 || !f._pw) return -1;
-  const sgn = ringSign(ring);
-  const dir = (i) => {
-    const a = ring[(i + n) % n], b = ring[(i + 1 + n) % n];
-    const dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz);
-    return [dx / L, dz / L, L];
-  };
-  let best = -1, bestL = 0;
-  for (let i = 0; i < n; i++) {
-    const [cx, cz, cl] = dir(i);
-    if (cl < 2 || cl > 7) continue;
-    const ip = (i - 1 + n) % n, inx = (i + 1) % n;
-    if (partyOf(f, ip) > 0 || partyOf(f, i) > 0 || partyOf(f, inx) > 0) continue;
-    const [px, pz, pl] = dir(ip), [qx, qz, ql] = dir(inx);
-    if (pl < 7 || ql < 7) continue;
-    // each end turns 30..60 degrees, convex (the ring's own winding)
-    const c1 = px * cx + pz * cz, c2 = cx * qx + cz * qz;
-    if (c1 < 0.5 || c1 > 0.866 || c2 < 0.5 || c2 > 0.866) continue;
-    if ((px * cz - pz * cx) * sgn <= 0 || (cx * qz - cz * qx) * sgn <= 0) continue;
-    // and the two long walls meet at 60..120 degrees
-    if (Math.abs(px * qx + pz * qz) > 0.5) continue;
-    if (pl + ql > bestL) { bestL = pl + ql; best = i; }
-  }
-  return best;
-}
-
-function ringSign(ring) {
-  let a = 0;
-  for (let i = 0; i < ring.length; i++) {
-    const p = ring[i], q = ring[(i + 1) % ring.length];
-    a += p[0] * q[1] - q[0] * p[1];
-  }
-  return a > 0 ? 1 : -1;
-}
+// what the stamp says about one building (its corners, its shared edges) lives
+// in js/partycorners.js; the roof and facade modules import it from here
+export { partyOf, blockCorner, chamferCorner } from './partycorners.js';
