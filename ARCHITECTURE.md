@@ -2023,6 +2023,70 @@ hora) has something to stand on. Small modules round `js/player.js`:
 * **Looking at it**: `dev/moves.html` stages one car and the player on a flat
   floor (`?scene=enter|locked|exit|jump|vault|getup|busted&t=…&strip=…`).
 
+## The sound of cars (js/caraudio.js, public/worklets/, Nov 2026)
+
+The engine used to be an oscillator playing one stored cycle of cylinder pulses
+(js/audio.js `buildPiston`). Every cycle was the same cycle, the spectrum fell
+away above 600 Hz, and revs were a straight function of road speed. It sounded
+like a synthesiser because it was one. It is still there as the fallback; what
+plays now is this.
+
+* **One door** (`js/caraudio.js`): main.js calls `carStart(kind)`, `carStop()`,
+  `carDrive(dt, car, load, gas, handbrake, city)` at the wheel and
+  `carAudioFrame(dt, traffic, ears..., cabin, city)` every frame. It feeds the
+  recorded layers that stay in audio.js (tyre roll, wind, skid) and drives the
+  synthesised ones below.
+* **Revs and gears** (`js/drivetrain.js`, pure): real ratios per kind (km/h per
+  1000 rpm), a box that shifts by revs and pedal (early under a light foot,
+  kickdown under a heavy one, down through the gears under braking, held in a
+  slide), a clutch that slips pulling away, revs that fall through an upshift
+  and blip on the way down, fuel cut on the overrun and a limiter that cuts in
+  bursts. Traffic has no pedal, so `throttleFromMotion` guesses it from how the
+  speed is changing.
+* **Which engine** (`js/enginekinds.js`): `eng` (how it sounds) and `box` (how
+  it is geared) per vehicle kind. The electric kinds and the tram are
+  `ROLLING_KINDS`: no engine voice from the mixer, only the road layer. Tesla
+  and trolleybus keep the motor whine of audio.js `buildEV`.
+* **The voices** (`js/carvoices.js`, pure): one drivetrain per voice, the voice
+  budget (`js/voicebudget.js`: eight traffic voices, ranked by loudness at the
+  ears, sticky, stable slots) and one `Float32Array` a frame to the mixer.
+  `post` is a MessagePort in the game and a function call in node, so tests and
+  offline renders run the code the game runs.
+* **The synthesis** (`public/worklets/`, loaded by `audioWorklet.addModule`, so
+  it must be served as it stands: that is why it is not in js/):
+  * `enginedsp.js`: the crank turns and the events of the four-stroke cycle
+    happen as impulses (burn, exhaust valve, intake valve, valve ticks), each
+    with its own random strength and timing. They pass through fixed things: a
+    header pipe (quarter-wave delay loop), a silencer, a tailpipe, an intake
+    resonator, the block. Noise is multiplied by the gas flow and by each burn.
+    Turbo whistle with lag, blow-off, afterfire pops, cabin colouring.
+  * `roaddsp.js`: tyre band for traffic, setts (a train of knocks into two body
+    resonances, 12 cm apart), brake rub and the squeal of a last metre, brake
+    air, tram rail rumble; `Impacts` is a collision as noise through detuned
+    sheet-metal modes, re-struck while it crumples.
+  * `carmixer.js`: slot 0 is the player (dead centre), the others are traffic:
+    inverse-distance level, an air lowpass, equal-power pan, and Doppler from a
+    delay line read distance/c seconds late, so everything bends together.
+  * `car-worklet.js`: the AudioWorkletProcessor wrapper, nothing else.
+* **The cabin**: `audio.js setCabin()` closes a lowpass and lifts a low shelf on
+  the whole `master` bus while the camera is in the driver's seat; story
+  dialogue goes round it on the `dry` bus. Both follow `setVolume`, so volume 0
+  is still silence.
+* **Setts**: `js/roadsurface.js cobbleAt()` asks the map whether the point is on
+  a drivable street tagged `s: 'cobble'`. The player is probed ten times a
+  second, one voiced traffic car per frame.
+* **Cost**: nine voices render in 2 to 4 % of real time on one core of the
+  audio thread; nothing is allocated per block. The main thread adds one
+  drivetrain step per voice and one postMessage a frame.
+* **Listening without sound** (the game runs muted in the built-in browser):
+  `dev/audioscenes.js` scripts short drives; `node dev/render-car-audio.mjs
+  <dir>` renders the synthesis alone, and `dev/audiorender.html?engine=old|new`
+  renders the whole mix through the real audio.js into an OfflineAudioContext
+  (`dev/audiorender-save.mjs` receives the WAV files).
+* **Tests**: `tests/drivetrain.test.mjs`, `tests/voicebudget.test.mjs`,
+  `tests/caraudio.test.mjs` (firing rate, no two cycles alike, load, Doppler,
+  pan, distance, budget, brake air, setts, impacts, cost).
+
 ## The small life of a street (js/streetlife.js, Nov 2026)
 
 Birds, the dogs people walk, prams, and what a passer-by has in a hand. main.js

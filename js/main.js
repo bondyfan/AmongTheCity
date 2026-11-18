@@ -23,11 +23,11 @@ import { Traffic } from './traffic.js';
 import { RoadWorks } from './mwworksmesh.js';
 import { makeSky, updateSky, todClock, EXPOSURE_DAY } from './sky.js';
 import { Minimap } from './minimap.js';
-import { initAudio, sfx, sfxOr, sfxAt, setListener, engineVoices, engineVoicesStop,
-  engineStart, engineStop, engineSet, tireSet, setVolume, skidSet, carAudioStop,
+import { initAudio, sfx, sfxOr, sfxAt, setListener, setVolume,
   heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
-  windStart, windStop, windSet, windLoad, roadWindSet, roadWindStop,
-  ambientStart, nearbyTrafficHum, horn } from './audio.js';
+  windStart, windStop, windSet, windLoad,
+  ambientStart, nearbyTrafficHum } from './audio.js';
+import { carStart, carStop, carDrive, carAudioFrame, carHorn } from './caraudio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
 import { GROUND_DETAIL } from './groundglsl.js';
@@ -245,6 +245,7 @@ const _overVltava = (x, z) => { const l = poolLevelAt(x, z); return l !== null &
 const openness = new Openness();  // how open the view is here (js/openness.js)
 const _earDir = new THREE.Vector3();
 const _voiceCars = [];            // reused every frame — the pool never keeps it
+const _noTrams = [];
 const VOICE_SCAN2 = 140 * 140;    // m² — wider than the pool's own 95 m cutoff,
                                   // so a car arriving fast is already a candidate
 // Every machine parked at Pardubice and at Prague. `heli` stays as the one
@@ -1325,7 +1326,7 @@ input.onKey('KeyE', () => {
         // diesel for the bus, motor whine for the Tesla. Without the kind it
         // would fall back to the Octavia four for everything.
         setTimeout(() => {
-          if (game.car === car) { sfx('engine_start', 0.7); engineStart(car.kind); }
+          if (game.car === car) { sfx('engine_start', 0.7); carStart(car.kind); }
         }, 350);
       },
       // walked-up-and-it-vanished: a stolen car must stay enterable
@@ -1347,8 +1348,7 @@ function leaveCar() {
   claimParked(c, false);
   $id('speedo').classList.add('hidden');
   hideCarName();
-  engineStop();
-  carAudioStop();          // roll, wind and any skid still running, in one call
+  carStop();               // engine, roll, wind and any skid, in one call
   stepOutOfCar();
 }
 
@@ -1527,7 +1527,7 @@ let _hornCd = 0;
 input.onKey('KeyH', () => {
   if (game.mode !== 'play' || !game.car || _hornCd > 0) return;
   _hornCd = 0.45;                  // hold the key down, get one beep, not forty
-  horn();                          // no coordinates: this one is your own wheel
+  carHorn();                       // your own wheel: this car's one horn
   chatter?.honk(game.car.x, game.car.z);
 });
 
@@ -3251,8 +3251,7 @@ async function boot() {
       game.car = null;
       parked.includes(c) || parked.push(c);
       claimParked(c, false);
-      engineStop();
-      carAudioStop();
+      carStop();
     }
     // LET GO OF THE CAR PROPERLY. `player.inCar = null` was not enough and the
     // symptom was the worst kind: "objeví se u nemocnice, ale nemá tělo, může
@@ -3483,8 +3482,7 @@ function ejectDriver(c) {
   claimParked(c, false);
   $id('speedo').classList.add('hidden');
   hideCarName();
-  engineStop();
-  carAudioStop();
+  carStop();
   sfx('glass_break', 1.0);
   world.crashDebris?.(c.x - Math.sin(c.heading) * c.len * 0.2, (c.y ?? 0) + 1.0,
     c.z - Math.cos(c.heading) * c.len * 0.2, 0xc9d6dc, 8, v * 0.4);
@@ -3594,34 +3592,11 @@ function stepGame(dt) {
       brake: input.keys.has('Space') ? 1 : 0,
     }, dt, world, _crashList());
     player.update(dt, { input, camYaw, world }); // keeps player glued to the car
-    // ABSOLUTE m/s, not a 0..1 — the fix for the engine hanging at redline.
-    // CAR.vmax is the generic 38 m/s (137 km/h) from config.js, but the KINDS
-    // that vehicles.js actually drives run to 64 (Octavia), 69 (BMW), 72
-    // (Tesla), so |speed|/CAR.vmax saturated at 137 km/h and every tone above
-    // that froze — the last 90 km/h of an Octavia was one held note. main.js
-    // cannot divide by the right number either (car objects carry no vmax and
-    // vehicles.js exports none), but audio.js was told the KIND at
-    // engineStart() and has the top speed in its own table, so the caller now
-    // hands over metres per second and audio.js normalizes per kind. Shift
-    // points and the ducking thresholds live there in m/s and are unchanged.
-    engineSet(Math.abs(game.car.speed), engineLoad(game.car, gas));
-    // Everything below is fed GROUND speed, not car.speed. car.speed is the
-    // component along the nose, and a car crossing a junction sideways out of a
-    // drift has almost none of it — the tyres would go quiet and the wind would
-    // drop at the exact moment both should be loudest. The engine above is the
-    // exception and correctly so: revs follow the wheels, which roll forwards.
-    const vg = game.car.vGround ?? Math.abs(game.car.speed);
-    // Tyre roll under the engine — asphalt or gravel, banded by speed inside
-    // audio.js. Fed raw m/s for the same reason engineSet is: only audio.js
-    // knows where its own band boundaries are.
-    tireSet(vg, game.car.offroad ?? 0);
-    // …and over the top of both, the air. audio.js owns where the wind starts
-    // (36 km/h) and where it is everything (223), because those are properties
-    // of moving through air rather than of this car.
-    roadWindSet(vg);
-    // …and the tyres letting go. driveStep measured the actual contact-patch
-    // scrub; audio.js turns it into a squeal on tarmac or a spray on dirt.
-    skidSet(game.car.slip01 ?? 0, game.car.offroad ?? 0);
+    // Everything the car is heard doing goes through js/caraudio.js: the engine
+    // (revs, gears and load worked out there from speed and pedal), the tyres,
+    // the wind, the slide and the surface under the wheels. It is handed the
+    // car as it is, in metres per second; nothing here divides by a top speed.
+    carDrive(dt, game.car, engineLoad(game.car, gas), gas, input.keys.has('Space'), world.city);
     if (shouldEject(game.car)) ejectDriver(game.car);
   } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt)) {
     player.update(dt, { input, camYaw, world });
@@ -3654,8 +3629,13 @@ function stepGame(dt) {
           x: c.x, z: c.z, speed: Math.abs(c.speed), load: engineLoad(c, 0.35) });
       }
     }
-    engineVoices(_voiceCars);
-  } else engineVoicesStop();
+    // a tram is traffic to the ear as well: steel wheels and a traction whine
+    for (const tr of cityLife?.trams?.list ?? _noTrams) {
+      const dx = tr.x - ears.x, dz = tr.z - ears.z;
+      if (dx * dx + dz * dz < VOICE_SCAN2) _voiceCars.push({ id: tr, kind: 'tram', x: tr.x, z: tr.z, speed: Math.abs(tr.v ?? 0) });
+    }
+    carAudioFrame(dt, _voiceCars, ears.x, ears.z, _earDir.x, _earDir.z, fpView, world.city);
+  } else carAudioFrame(dt, null, ears.x, ears.z, _earDir.x, _earDir.z, fpView, world.city);
   vehicles.update(dt);
   // The peers' cars move BEFORE anything that reads them this frame: the AI
   // traffic brakes for them (traffic.actors), the seat resolver hangs remote

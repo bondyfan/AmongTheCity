@@ -30,6 +30,11 @@
 let ctx = null;      // the one AudioContext (created on first gesture)
 let master = null;   // master gain — setVolume() scales everything at once
 let volume = 1;      // remembered so setVolume() before initAudio() sticks
+// Inside a car the world is heard through glass and steel: everything on
+// `master` passes a lowpass and a low shelf that setCabin() closes. `dry` is
+// the way round them for what is said INSIDE the car (story dialogue), and it
+// carries the volume too, so volume 0 is silence whichever way a sound went.
+let cabinLp = null, cabinShelf = null, dry = null, cabinK = -1;
 const buffers = new Map();   // name → AudioBuffer, or null = known missing
 const loading = new Map();   // name → in-flight fetch+decode Promise
 
@@ -40,7 +45,14 @@ export function initAudio() {
     ctx = new AC();
     master = ctx.createGain();
     master.gain.value = volume;
-    master.connect(ctx.destination);
+    cabinLp = ctx.createBiquadFilter();
+    cabinLp.type = 'lowpass'; cabinLp.frequency.value = CABIN.open; cabinLp.Q.value = 0.6;
+    cabinShelf = ctx.createBiquadFilter();
+    cabinShelf.type = 'lowshelf'; cabinShelf.frequency.value = 150; cabinShelf.gain.value = 0;
+    master.connect(cabinLp); cabinLp.connect(cabinShelf); cabinShelf.connect(ctx.destination);
+    dry = ctx.createGain();
+    dry.gain.value = volume;
+    dry.connect(ctx.destination);
   }
   // we are called FROM user gestures, so resume() is legal here (and a no-op
   // once running) — this is the whole trick that satisfies autoplay policy
@@ -54,7 +66,32 @@ export function initAudio() {
 export function setVolume(v) {
   volume = v < 0 ? 0 : v > 1 ? 1 : v;
   if (master) master.gain.setTargetAtTime(volume, ctx.currentTime, 0.03);
+  if (dry) dry.gain.setTargetAtTime(volume, ctx.currentTime, 0.03);
 }
+
+// ---- hooks for js/caraudio.js ---------------------------------------------------
+// The car voices (engine, traffic, setts, brakes, impacts) are synthesised in an
+// AudioWorklet that caraudio.js owns. It needs the context and the bus to plug
+// into, and three things only this file can do for it.
+/** The running context and the master bus, or null before the first gesture. */
+export function audioGraph() {
+  return ctx && ctx.state === 'running' ? { ctx, master } : null;
+}
+const CABIN = { open: 20000, shut: 1700, shelf: 1.5 };   // Hz, Hz, dB at 150 Hz
+/** 0 = outside, 1 = in the driver's seat with the doors shut. */
+export function setCabin(k) {
+  k = k > 0 ? (k < 1 ? k : 1) : 0;
+  if (!cabinLp || Math.abs(k - cabinK) < 0.01) return;
+  cabinK = k;
+  const t = ctx.currentTime;
+  cabinLp.frequency.setTargetAtTime(CABIN.open * Math.pow(CABIN.shut / CABIN.open, k), t, 0.08);
+  cabinShelf.gain.setTargetAtTime(CABIN.shelf * k, t, 0.08);
+}
+/** The street ducks under a fast car whichever engine voice is running. */
+export function engineDuck(speedMS) { if (ctx) duckSpeed(speedMS > 0 ? speedMS : 0); }
+let crashSynth = null;
+/** f(k) plays the collision and returns true, or returns false to decline. */
+export function setCrashSynth(f) { crashSynth = f; }
 
 // ---- one-shot samples --------------------------------------------------
 export function sfx(name, vol = 1, rate = 1) {
@@ -1942,7 +1979,7 @@ const ROLL = {
 };
 const ROLL_ASPH = [['roll_asph_low', 8], ['roll_asph_mid', 24], ['roll_asph_high', 46]];
 const ROLL_DIRT = [['roll_dirt_low', 7], ['roll_dirt_high', 20]];
-let rollA = null, rollD = null, rollV = -1, rollO = -1;
+let rollA = null, rollD = null, rollV = -1, rollO = -1, rollS = 1;
 
 /**
  * speed in METRES PER SECOND (engineSet and roadWindSet were converted for the
@@ -1950,14 +1987,17 @@ let rollA = null, rollD = null, rollV = -1, rollO = -1;
  * dividing by a top speed it had to guess is how the engine ended up frozen at
  * redline). offroad01 is driveStep's own eased 0..1.
  */
-export function tireSet(speedMS, offroad01 = 0) {
+export function tireSet(speedMS, offroad01 = 0, cobble01 = 0) {
   if (!ctx || ctx.state !== 'running') return;
   const v = Math.abs(speedMS) || 0;
   const o = offroad01 < 0 ? 0 : offroad01 > 1 ? 1 : offroad01;
+  // On setts the smooth hiss of tarmac gives way to the knocking that
+  // caraudio.js synthesises; folded into the level so the gate below sees it.
+  const sett = 1 - 0.4 * (cobble01 > 0 ? (cobble01 < 1 ? cobble01 : 1) : 0);
   // Change gate: this is called every frame and every setTargetAtTime is a
   // scheduled event the audio thread has to walk.
-  if (Math.abs(v - rollV) < 0.05 && Math.abs(o - rollO) < 0.02) return;
-  rollV = v; rollO = o;
+  if (Math.abs(v - rollV) < 0.05 && Math.abs(o - rollO) < 0.02 && sett === rollS) return;
+  rollV = v; rollO = o; rollS = sett;
   if (!rollA) {
     if (v < ROLL.gate) return;                   // parked: build nothing
     rollA = bandLayer(ROLL_ASPH, ROLL.rate, master);
@@ -1969,7 +2009,7 @@ export function tireSet(speedMS, offroad01 = 0) {
     * (ROLL.floor + (1 - ROLL.floor) * Math.min(1, v / ROLL.full));
   // equal power across the surface too — a kerb hop crosses this in 0.3 s and
   // a linear pair would dip on the way over
-  bandSet(rollA, v, env * Math.sqrt(1 - o), t, ROLL.tau);
+  bandSet(rollA, v, env * sett * Math.sqrt(1 - o), t, ROLL.tau);
   bandSet(rollD, v, env * ROLL.dirt * Math.sqrt(o), t, ROLL.tau);
 }
 
@@ -2378,6 +2418,10 @@ export function crash(k = 0.5) {
   if (now < _crashCd) return;                    // two crunches a frame is one crash
   _crashCd = now + 0.12;
   const v = k < 0.05 ? 0.05 : k > 1 ? 1 : k;
+  if (crashSynth && crashSynth(v)) {             // the sheet-metal model has it
+    if (v > 0.55) sfx('debris_crash', v * 0.8);
+    return;
+  }
   const src = ctx.createBufferSource();
   src.buffer = noiseBuffer();
   src.playbackRate.value = 0.9 + Math.random() * 0.4;
@@ -2652,7 +2696,7 @@ export function storyRecording(id, {level = 1, phone = false, loop = false, mete
     gain = ctx.createGain();
     gain.gain.value = level;
     output.connect(gain);
-    gain.connect(master);
+    gain.connect(dry ?? master);                   // said in the car, not outside it
     source.onended = () => { gain.disconnect(); if (!stopped) end?.(); };
     source.start();
   });
