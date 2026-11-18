@@ -5530,6 +5530,11 @@ function signInto(sink, deco, stand, px, pz, dx, dz, a, b) {
 // one SURVEYED sign (an OSM node, which sits on the way at the stop line):
 // pushed to the right kerb of the travel it governs, facing the oncoming driver
 function signPost(sink, deco, sg, cell, stand) {
+  const q = surveyedSign(sg, cell);
+  signInto(sink, deco, stand, q[0], q[1], q[2], q[3], q[4]);
+}
+// where a surveyed sign's post stands and the travel it speaks to: [px, pz, dx, dz, face]
+function surveyedSign(sg, cell) {
   const [x, z] = sg.p[0];
   // face against the travel of the nearest drivable road, from its right kerb
   let dx = 0, dz = -1, hw = 3;
@@ -5552,8 +5557,30 @@ function signPost(sink, deco, sg, cell, stand) {
     }
   }
   const px = x - dz * (hw + 0.75), pz = z + dx * (hw + 0.75);   // right of travel
-  signInto(sink, deco, stand, px, pz, dx, dz,
-    sg.k === 'give_way' ? 'give_way' : sg.k === 'stop' ? 'stop' : 'main_road');
+  return [px, pz, dx, dz, sg.k === 'give_way' ? 'give_way' : sg.k === 'stop' ? 'stop' : 'main_road'];
+}
+
+/**
+ * The top edge of the road signs of chunk `key`, for whoever wants to sit on
+ * one (js/birdperches.js): [[x, z, yTop, dx, dz], ...], (dx, dz) the travel the
+ * plate speaks to. The surveyed posts and the planned ones, from the same
+ * functions and the same standing height the mesher draws them with; the
+ * crossing plates a zebra adds while it is painted are not listed.
+ */
+export function signPerches(city, key, terrain) {
+  const cell = city?.chunkIndex?.get(key), out = [];
+  if (!cell || !terrain) return out;
+  const stand = standingOn(cell, key, terrain);
+  const put = (px, pz, dx, dz, two) => out.push([px, pz,
+    stand.heightAt(px, pz) + (two ? SIGN_H2 : SIGN_H) + SIGN_M / 2, dx, dz]);
+  for (const sg of cell.signs ?? []) {
+    if (sg._home !== key) continue;
+    const q = surveyedSign(sg, cell);
+    put(q[0], q[1], q[2], q[3], false);
+  }
+  const offRoad = (px, pz, r) => onCarriageway(cell, r, px, pz, 0.3);
+  for (const q of plannedSigns(cell, key, junctionsIn(key), offRoad, chunkKey)) put(q[0], q[1], q[2], q[3], !!q[5]);
+  return out;
 }
 
 const LAMP_STEP = 34, LAMP_MIN_W = 5.4;

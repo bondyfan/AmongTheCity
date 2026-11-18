@@ -83,14 +83,16 @@ function rig({ stars = 1, seed = 7 } = {}) {
   const wanted = { stars: () => heat, add() {} };
   const said = [];
   let t = 1000;
+  const arrests = [], tackles = [];
   const pol = new Police({ traffic, vehicles, wanted, city: null, scene: null,
-    rnd: rng(seed), say: (s) => said.push(s), vitals });
+    rnd: rng(seed), say: (s) => said.push(s), vitals,
+    onArrest: (r) => arrests.push(r), onTackle: (r) => tackles.push(r) });
   pol.clock = () => t;
   const me = { kind: 'octavia', x: 0, z: 0, y: 0, heading: EAST, speed: 0, steer: 0,
     len: 4.6, wid: 1.82, _lat: 0, yaw: 0, mesh: { userData: {} } };
   const ctx = { x: 0, z: 0, car: me, onFoot: false, y: NaN };
   return {
-    pol, traffic, vehicles, built, me, said, wanted,
+    pol, traffic, vehicles, built, me, said, wanted, arrests, tackles,
     setStars(s) { heat = s; },
     now: () => t,
     /** One 1/60 s step: the player's physics first (as in main.js), then the police. */
@@ -225,9 +227,45 @@ test('three stars: a PIT turns the player car', () => {
 
 // ---- 4. stop, step out, shoot, die -----------------------------------------
 
+test('two stars: nobody shoots; they come to the door and arrest a driver who has stopped', () => {
+  vitals.reset();
+  assert.ok(!tune.tierFor(1).lethal && !tune.tierFor(2).lethal && tune.tierFor(3).lethal, 'pistols from three stars');
+  assert.ok(tune.tierFor(2).box, 'the second car goes ahead to block');
+  const R = rig({ stars: 2, seed: 9 });
+  cruise(R, 15, 40);
+  const hp0 = vitals.hp();
+  for (let i = 0; i < 60 * 60 && !R.arrests.length; i++) { R.step(-1); R.me.speed = Math.max(0, R.me.speed); }
+  assert.ok(R.pol.stats.deploys > 0, 'nobody got out');
+  assert.ok(R.said.length && R.said[0].includes('Policie'), 'no warning');
+  assert.equal(R.pol.gunfire.stats.shots, 0, 'a shot was fired at two stars');
+  assert.ok(R.arrests.length > 0, 'a driver sitting in a stopped car was never arrested');
+  assert.equal(vitals.hp(), hp0, 'an arrest cost health');
+  vitals.reset();
+});
+
+test('two stars on foot: stand still and you are arrested, run and you are brought down', () => {
+  const run = (moving) => {
+    vitals.reset();
+    const R = rig({ stars: 2, seed: 4 });
+    cruise(R, 12, 30);
+    R.me.speed = 0;
+    let x = R.me.x;
+    for (let i = 0; i < 60 * 40 && !R.arrests.length && !R.tackles.length; i++) {
+      // a slow jog: slower than an officer after you, far too fast to cuff
+      if (moving) { x += 3.0 / 60; R.me.x = x; }
+      R.step(0, true);
+    }
+    return { arrests: R.arrests.length, tackles: R.tackles.length, shots: R.pol.gunfire.stats.shots };
+  };
+  const still = run(false), fleeing = run(true);
+  assert.ok(still.arrests > 0 && still.shots === 0, `standing: ${JSON.stringify(still)}`);
+  assert.ok(fleeing.tackles > 0 && fleeing.arrests === 0 && fleeing.shots === 0, `running: ${JSON.stringify(fleeing)}`);
+  vitals.reset();
+});
+
 test('stop the car: they pull up, get out, warn, shoot, and it can kill you', () => {
   vitals.reset();
-  const R = rig({ stars: 2, seed: 9 });
+  const R = rig({ stars: 3, seed: 9 });
   cruise(R, 15, 40);                                 // the chase arrives
   // now stop dead and stay in the car
   let deployedAt = -1, firstShot = -1, warnedAt = -1;
@@ -258,7 +296,7 @@ test('stop the car: they pull up, get out, warn, shoot, and it can kill you', ()
 test('on foot you can be shot, and running away makes them miss more', () => {
   const run = (moving) => {
     vitals.reset();
-    const R = rig({ stars: 2, seed: 4 });
+    const R = rig({ stars: 3, seed: 4 });
     cruise(R, 12, 30);
     R.me.speed = 0;
     const hp0 = vitals.hp();

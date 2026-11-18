@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <title>Among The City: zvuk aut do souboru (dev)</title>
+  <!-- the game loads its sounds and its worklet by paths relative to the site
+       root ("assets/sounds/...", "worklets/..."); from /dev/ they would all miss -->
+  <base href="/">
+  <style>
+    body { margin: 16px; background: #15181c; color: #dfe5ea; font: 13px/1.5 ui-monospace, monospace; }
+    a { color: #8fd0ff; }
+  </style>
+</head>
+<body>
+  <!--
+    Dev-only page, not linked from the game. It makes NO sound: every scene of
+    dev/audioscenes.js is rendered through the real js/audio.js and
+    js/caraudio.js into an OfflineAudioContext and comes out as a WAV file.
+      ?engine=new|old      which engine voice (default new)
+      &scenes=a,b,c        which scenes (default all)
+      &save=http://127.0.0.1:5393   POST the files to dev/audiorender-save.mjs
+                                    (without it each file is a download link)
+  -->
+  <pre id="log"></pre>
+  <script type="module" src="/dev/audiorender.js"></script>
+</body>
+</html>

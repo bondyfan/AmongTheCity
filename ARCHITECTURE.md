@@ -2003,3 +2003,177 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
 * **Three paces** (js/player.js `_pace`, config `WALK`): a walk, the run on
   Shift, and a sprint on a double tap of Shift that spends `stamina`
   (js/stamina.js draws the bar).
+
+## Doors, locks, jumps and arrests: the step before part two (Nov 2026)
+
+Stealing a car and moving a body, so that part two (the theft at Kunětická
+hora) has something to stand on. Small modules round `js/player.js`:
+
+* **Locks** (`js/carlocks.js`): 99 parked cars in 100 refuse the handle. The
+  draw is hashed from the car (its fleet index, or the spot it stood on), so it
+  never changes and is the same on every co-op screen. Never locked: `owned`
+  (the garage), `unlocked` (Vašek's estate, a dev spawn, any car the player has
+  sat in), and a car in traffic (that is a carjacking, below). You find out at
+  the handle: main.js's E handler passes `locked` to `boardVehicle`, and the
+  hint only says "zamčeno" once that handle has been tried.
+* **The door** (`js/cardoor.js`): a car is one mesh with no door node. An open
+  door is the body drawn with the door's outline discarded (the hole), the same
+  geometry drawn again on a hinge with everything else discarded (the leaf),
+  and a card for the leaf's inside. Both are uniforms on the one body program
+  (`js/carglass.js doorIn`, keyed into `bodyMatFor` as a fifth key), so opening
+  a door compiles nothing and costs two draws for one car. `doorSpec(kind,
+  seat)` reads the outline off the same shape cardetail.js draws its shut lines
+  on. Truck and bus have none and keep the old slide.
+* **The cabin** is in twice. Behind every window of every car it is DRAWN, not
+  built: a fragment of glass (`cpbr.z > 2`) follows its view ray into the car's
+  frame and meets boxes and ellipsoids placed from `cabinSpec` (seats,
+  headrests, dash, wheel, far door and windows, a driver when the lamps are on
+  or `setDriver` says so). No geometry, no draw call. The real one
+  (`attachCabin`, six meshes) goes in for the car whose door is open or whose
+  driver's eyes are in use (main.js `fpCabin`), with `js/cabinkit.js` seats and
+  one of three steering wheels; `cabinVariant(kind, colour)` picks the wheel
+  and the upholstery for both, so what the glass shows is what the door opens
+  onto. The two front door cards are meshes of their own and hide while that
+  door is open.
+* **Getting in and out** (`js/carentry.js`, called by player.js): walk to
+  `door.stand`, reach, then either `tug` (locked: two pulls, `onLocked`, walk
+  away) or open, `jack` (somebody in the seat: `onJack`), enter round the door,
+  sit, and `player.doorAnim` pulls the door shut (`onShut`). Out is the same
+  backwards. `player.doorCar` is whose door is open.
+* **Poses** (`js/bodymoves.js`): records of joint angles blended over a base
+  pose with `pose(parts, p, w)`. Reach, tug, haul, duck, jump, land, vault,
+  the two get-ups, hands on the head.
+* **Space** (`js/leap.js`) is a jump, or a vault when something low is right in
+  front and there is ground behind it (asked of the walker's own collider at
+  two heights; a car's bonnet by name). A jump is only an upward start for the
+  gravity the walker already had. Space no longer punches: that is the mouse.
+* **Getting up** (`js/ejection.js riseCurve`, `bodymoves.getUpPose`): a thrown
+  body gets up with hands and knees, one way from its front and another from
+  its back. `player.tumble()` throws the body down without a crash.
+* **Carjacking** (`js/carjack.js`): the driver leaves through the door as a
+  ragdoll, lies, gets up, runs. `witnessed()` is the rule: a person or a lit
+  window within 100 m makes it `prepadeni`, two stars at once.
+* **Arrest** (`js/policetune.js lethal`, `js/policecops.js` 'seize'): below
+  three stars nobody shoots. Officers run at the player (to the driver's door
+  of a stopped car), bring a runner down (`onTackle`), and arrest one who holds
+  still (`onArrest`). main.js `busted()` kneels the player (`player.held`),
+  shows ZATČEN and steps back to the last save (`career.reloadLast`); in the
+  campaign, which is not saved, it is the campaign's own restart.
+* **Sounds**: `scripts/gen-move-audio.mjs` (ElevenLabs, run only when asked).
+  Until the files exist `audio.sfxOr` plays the old door pair instead.
+* **Looking at it**: `dev/moves.html` stages one car and the player on a flat
+  floor (`?scene=enter|locked|exit|jump|vault|getup|busted&t=…&strip=…`).
+
+## The sound of cars (js/caraudio.js, public/worklets/, Nov 2026)
+
+The engine used to be an oscillator playing one stored cycle of cylinder pulses
+(js/audio.js `buildPiston`). Every cycle was the same cycle, the spectrum fell
+away above 600 Hz, and revs were a straight function of road speed. It sounded
+like a synthesiser because it was one. It is still there as the fallback; what
+plays now is this.
+
+* **One door** (`js/caraudio.js`): main.js calls `carStart(kind)`, `carStop()`,
+  `carDrive(dt, car, load, gas, handbrake, city)` at the wheel and
+  `carAudioFrame(dt, traffic, ears..., cabin, city)` every frame. It feeds the
+  recorded layers that stay in audio.js (tyre roll, wind, skid) and drives the
+  synthesised ones below.
+* **Revs and gears** (`js/drivetrain.js`, pure): real ratios per kind (km/h per
+  1000 rpm), a box that shifts by revs and pedal (early under a light foot,
+  kickdown under a heavy one, down through the gears under braking, held in a
+  slide), a clutch that slips pulling away, revs that fall through an upshift
+  and blip on the way down, fuel cut on the overrun and a limiter that cuts in
+  bursts. Traffic has no pedal, so `throttleFromMotion` guesses it from how the
+  speed is changing.
+* **Which engine** (`js/enginekinds.js`): `eng` (how it sounds) and `box` (how
+  it is geared) per vehicle kind. The electric kinds and the tram are
+  `ROLLING_KINDS`: no engine voice from the mixer, only the road layer. Tesla
+  and trolleybus keep the motor whine of audio.js `buildEV`.
+* **The voices** (`js/carvoices.js`, pure): one drivetrain per voice, the voice
+  budget (`js/voicebudget.js`: eight traffic voices, ranked by loudness at the
+  ears, sticky, stable slots) and one `Float32Array` a frame to the mixer.
+  `post` is a MessagePort in the game and a function call in node, so tests and
+  offline renders run the code the game runs.
+* **The synthesis** (`public/worklets/`, loaded by `audioWorklet.addModule`, so
+  it must be served as it stands: that is why it is not in js/):
+  * `enginedsp.js`: the crank turns and the events of the four-stroke cycle
+    happen as impulses (burn, exhaust valve, intake valve, valve ticks), each
+    with its own random strength and timing. They pass through fixed things: a
+    header pipe (quarter-wave delay loop), a silencer, a tailpipe, an intake
+    resonator, the block. Noise is multiplied by the gas flow and by each burn.
+    Turbo whistle with lag, blow-off, afterfire pops, cabin colouring.
+  * `roaddsp.js`: tyre band for traffic, setts (a train of knocks into two body
+    resonances, 12 cm apart), brake rub and the squeal of a last metre, brake
+    air, tram rail rumble; `Impacts` is a collision as noise through detuned
+    sheet-metal modes, re-struck while it crumples.
+  * `carmixer.js`: slot 0 is the player (dead centre), the others are traffic:
+    inverse-distance level, an air lowpass, equal-power pan, and Doppler from a
+    delay line read distance/c seconds late, so everything bends together.
+  * `car-worklet.js`: the AudioWorkletProcessor wrapper, nothing else.
+* **The cabin**: `audio.js setCabin()` closes a lowpass and lifts a low shelf on
+  the whole `master` bus while the camera is in the driver's seat; story
+  dialogue goes round it on the `dry` bus. Both follow `setVolume`, so volume 0
+  is still silence.
+* **Setts**: `js/roadsurface.js cobbleAt()` asks the map whether the point is on
+  a drivable street tagged `s: 'cobble'`. The player is probed ten times a
+  second, one voiced traffic car per frame.
+* **Cost**: nine voices render in 2 to 4 % of real time on one core of the
+  audio thread; nothing is allocated per block. The main thread adds one
+  drivetrain step per voice and one postMessage a frame.
+* **Listening without sound** (the game runs muted in the built-in browser):
+  `dev/audioscenes.js` scripts short drives; `node dev/render-car-audio.mjs
+  <dir>` renders the synthesis alone, and `dev/audiorender.html?engine=old|new`
+  renders the whole mix through the real audio.js into an OfflineAudioContext
+  (`dev/audiorender-save.mjs` receives the WAV files).
+* **Tests**: `tests/drivetrain.test.mjs`, `tests/voicebudget.test.mjs`,
+  `tests/caraudio.test.mjs` (firing rate, no two cycles alike, load, Doppler,
+  pan, distance, budget, brake air, setts, impacts, cost).
+
+## The small life of a street (js/streetlife.js, Nov 2026)
+
+Birds, the dogs people walk, prams, and what a passer-by has in a hand. main.js
+builds one `StreetLife` next to the crowd and calls `update()` after
+`peds.update()`; `peds.panic` is chained into `streetLife.scare`, so every bang
+that makes people run also puts the birds up.
+
+* **Four draw calls for all of it.** Birds, dogs and prams are each rows of one
+  InstancedMesh; the leads are one small dynamic mesh. Wings, legs, heads and
+  tails move in the vertex shader off per-row attributes (`birdmodel.js`,
+  `dogmodel.js`), so a seated bird costs no script at all and its peck is a
+  clock uniform. The bag in a hand and the phone at an ear are a few triangles
+  in the walker's own skinned mesh (`bodyextras.js`), never a draw call.
+* **Birds** (`birds.js` and its parts). `birdperches.js` lists, per streaming
+  cell, the places a bird could sit: lamp arms and park lanterns (from
+  `poles.js`), the top edge of road signs (`meshes.signPerches`, the mesher's
+  own plan), the trolley wire, the eaves and parapets of roofs, patches of
+  footway and quiet street, fields in open country. `birdsites.js` (pure, no
+  imports) decides for each candidate, from its position alone, whether a flock
+  lives there, of which species (pigeons and sparrows in town, crows at the
+  edges and in fields, gulls within 70 m of water) and where each bird sits.
+  `birdflight.js` (pure) is the steering that takes a bird from a seat into the
+  air and onto another. Flocks get rows inside 105 m of the player and give
+  them back past 140 m; the pool is 260 rows including the flocks that only
+  pass overhead (`birdsky.js`, a closed form of the shared clock).
+* **What scares them.** The player on foot (a hop of a few metres when
+  strolling, the whole flock up when running), any car by its speed, a walker
+  passing through (a hop), and any bang. A bird on a lamp, a wire or a roof
+  ignores the street and goes only for a bang. Scared flocks land on a free
+  perch nearby or leave for a minute; flocks also move about on their own.
+* **Dogs** (`dogs.js`, `dogwalk.js`). A dog belongs to its owner's body and
+  arrives and leaves with it, under the crowd's own no-pop rule. It heels,
+  pulls until the lead is tight, stops to sniff and is waited for, sits when
+  the owner stops, and waits by an owner who is down. The lead is drawn from
+  the owner's wrist bone to the collar and is a hard length in the simulation.
+* **Hands with a job** (`pedprops.js`, pure). `propFor(seed, archetype)` gives
+  a bag, a phone, a pram, a dog or nothing, off the citizen's own seed through
+  its own salt, so it never disturbs the wardrobe draw. `js/gait.js` holds the
+  arm (`HOLD`), standing and walking; the man with the stick keeps his stick
+  and takes the lead in the other hand.
+* **Co-op.** SHARED, because pure in the map, the seed and the shared clock:
+  where flocks live and what they are, the flocks overhead, who carries what,
+  which dog and which colours. LOCAL: a flock in the air and where it landed
+  (it is back on its shared seat when it next comes into range), where a dog
+  is sniffing this second, and the on/off switches.
+* **For the campaign and anything else:** `__atc.life.birds.scare(x, z, r)`,
+  `.flockNear(x, z, r)`, `.flush(flock, x, z, hard)`; `life.birds.enabled`,
+  `life.dogs.enabled` and `life.prams.enabled` switch a part off in a running
+  game, which is how its frame cost is measured.

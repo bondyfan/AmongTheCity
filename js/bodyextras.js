@@ -42,6 +42,18 @@ export function buildExtras(M, D, o, t) {
       M.fan(v.slice().reverse(), shade(c, 0.7), BONE.handL, { normal: [1, 0, 0] });
     }
   }
+  // ---- in the right hand (js/pedprops.js): a bag of shopping, a phone ----
+  if (o.prop === 'bag' && !o.cane) {
+    // a carrier bag: narrow where the handles gather it, full and squarish below
+    const x = D.shoulderX + 0.004 * k, y = D.wristY - 0.30 * k, c = o.propTint ?? 0xe9e7e0;
+    const R = (yy, sx, sz) => ({ x, y: yy, z: -0.005 * k, rx: 0.05 * k * sx, rz: 0.13 * k * sz, c, p: 3.0 });
+    M.tube([{ ...R(y + 0.19 * k, 0, 0), rx: 0, rz: 0 }, R(y + 0.185 * k, 0.25, 0.3), R(y + 0.09 * k, 0.8, 0.82), R(y, 1.1, 1),
+      R(y - 0.11 * k, 1.15, 1.04), { ...R(y - 0.125 * k, 0, 0), rx: 0, rz: 0 }], { segs: 8, b: BONE.handR, far: [0, 2, 3, 5] });
+  } else if (o.prop === 'phone' && !o.cane) {
+    // a dark slab in the palm, lying along the hand
+    const x = D.shoulderX - 0.012 * k, y = D.wristY - 0.085 * k;
+    M.blob(x, y, -0.004 * k, 0.012 * k, 0.074 * k, 0.038 * k, 0x16181c, BONE.handR, { segs: 4, rings: 3 });
+  }
   if (o.cane) {
     // hangs straight down from the right hand in the bind pose; its own bone
     // lets the walk keep it planted while the arm moves

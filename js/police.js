@@ -548,6 +548,7 @@ export class Police {
       los: (ax, az, bx, bz, d) => d <= SEE_NEAR * 0.5 || this._los(ax, az, bx, bz, d),
       blocked: (x, z) => this._blocked(x, z),
       makeBody: opts.makeBody, say: opts.say ?? null, wanted: this.wanted, rnd: this.rnd,
+      onArrest: opts.onArrest ?? null, onTackle: opts.onTackle ?? null,
     });
     this._ramGateAt = 0;          // the force-wide gap between two shunts
     /** Standing hulls for traffic.blockers (main.js): a stopped unit and the
@@ -557,7 +558,7 @@ export class Police {
     this._blk = [];
     for (let i = 0; i < POOL_N + 12; i++) this._blk.push({ x: 0, z: 0, half: 0 });
     this._notOurs = (c) => !!(c.ai && c.ai.edge && c.ai.edge.pts);
-    this._copCtx = { t: 0, px: 0, pz: 0, py: 0, pcar: null, onFoot: true, pspeed: 0, tier: null, down: false };
+    this._copCtx = { t: 0, px: 0, pz: 0, py: 0, pcar: null, onFoot: true, pspeed: 0, tier: null, down: false, lying: false };
   }
 
   _now() { return this.clock ? this.clock() : worldT(); }
@@ -656,8 +657,11 @@ export class Police {
       // to one side, so the greedy router brings them in from in front.
       let ax = tx, az = tz;
       if (this.sees && pcar && !u.release) {
-        if (u.role === 1) { ax = px + P.fx * lead * 2; az = pz + P.fz * lead * 2; }
-        else if (u.role >= 2 && tier && tier.box) {
+        // (with only two cars out, at two stars, the second is the one that
+        // goes ahead to block: there is no third to do it)
+        const boxer = tier && tier.box && u.role >= Math.min(2, tier.units - 1);
+        if (u.role === 1 && !boxer) { ax = px + P.fx * lead * 2; az = pz + P.fz * lead * 2; }
+        else if (boxer) {
           const ahead = Math.min(160, 30 + P.speed * 5);
           const side = (u.role & 1) ? 22 : -22;
           ax = px + P.fx * ahead + P.rx * side;
@@ -674,6 +678,7 @@ export class Police {
     cc.t = this._t; cc.px = px; cc.pz = pz; cc.py = P.y; cc.pcar = pcar;
     cc.onFoot = onFoot; cc.pspeed = P.speed; cc.tier = tier;
     cc.down = typeof this.vitals?.down === 'function' ? !!this.vitals.down() : false;
+    cc.lying = !!ctx.lying;        // thrown to the ground: he is not going anywhere
     this.officers.update(step, cc);
     this.gunfire.update(step);
     // An officer on foot who has you is the unit having you: wanted.js reads

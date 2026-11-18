@@ -240,6 +240,9 @@ const CRIMES = Object.freeze({
   ujeti:   Object.freeze({ key: 'ujeti',   heat: 18, noun: 'ujetí od nehody' }),
   kradez:  Object.freeze({ key: 'kradez',  heat: 24, noun: 'krádež auta' }),
   naraz:   Object.freeze({ key: 'naraz',   heat: 50, noun: 'náraz do policie' }),
+  // pulling a driver out of his car where somebody can see it: two stars on
+  // the spot (46 is one over the second line), and they come to arrest you
+  prepadeni: Object.freeze({ key: 'prepadeni', heat: 46, noun: 'přepadení řidiče' }),
 });
 export { CRIMES };
 

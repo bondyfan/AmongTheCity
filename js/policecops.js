@@ -22,6 +22,12 @@
 //           and shot at on the move (with the moving scatter penalty).
 //   back    you drove off, or got too far: they run back, get in, and the
 //           unit drives again.
+//   seize   below three stars (the tier's `lethal` is false) there is no cover
+//           and no pistol at all: they run straight at you, to the driver's
+//           door if you sit in a car. A man on foot who keeps moving with one
+//           of them on him is brought down (onTackle); hold still for a second
+//           with one beside you, or sit in a stopped car with one at the door,
+//           and you are under arrest (onArrest).
 //   down    run one over and he goes down for good (ragdoll pose, flat on the
 //           road), and that is the crime of running down a person.
 //
@@ -54,6 +60,11 @@ const LEASH = 150;              // m from the car past which they give up and go
 const RECALL_V = 7;             // m/s of player car speed that means "he is leaving"
 const RECALL_R = 22;            // …once he is this far from the car
 const RUNOVER_V = 4;            // m/s of car speed that knocks an officer down
+const SEIZE_V = 6.3;            // m/s: after a man they mean to catch (a jog is 5.6)
+const SEIZE_R = 1.5;            // m: close enough to lay hands on him
+const CUFF_T = 1.0;             // s of him holding still beside an officer
+const CUFF_CAR_T = 1.8;         // …or of his car standing with one at the door
+const TACKLE_CD = 4;            // s before the same officer brings him down again
 const GUN_Y = 1.42;             // m: muzzle height of a raised pistol
 const GUN_FWD = 0.55;
 
@@ -108,6 +119,8 @@ export class Officers {
     this.blocked = opts.blocked ?? null;
     this.makeBody = opts.makeBody ?? (this.scene ? defaultBody : null);
     this.say = opts.say ?? null;
+    this.onArrest = opts.onArrest ?? null;   // fn(officer): hands laid on a still player
+    this.onTackle = opts.onTackle ?? null;   // fn(officer): a runner brought down
     this.wanted = opts.wanted ?? null;
     this.rnd = typeof opts.rnd === 'function' ? opts.rnd : Math.random;
     this._t = 0;
@@ -123,7 +136,7 @@ export class Officers {
     return {
       free: true, unit: null, body: null, slot: 0, x: 0, z: 0, y: 0, heading: 0,
       state: '', stAt: 0, aimK: 0, nextShot: 0, burst: 0, walkT: 0, speed: 0,
-      cx: 0, cz: 0, coverAt: 0, sightAt: 0, sees: false,
+      cx: 0, cz: 0, coverAt: 0, sightAt: 0, sees: false, cuffT: 0, tackleAt: 0,
     };
   }
 
@@ -169,7 +182,7 @@ export class Officers {
       r.y = this._ground(r.x, r.z, car.y ?? 0);
       r.heading = h; r.state = 'exit'; r.stAt = this._t + EXIT_T + k * 0.25;
       r.aimK = 0; r.nextShot = 0; r.burst = 0; r.speed = 0; r.walkT = this.rnd() * 6;
-      r.coverAt = 0; r.sightAt = 0; r.sees = false;
+      r.coverAt = 0; r.sightAt = 0; r.sees = false; r.cuffT = 0; r.tackleAt = 0;
       r.body = this._takeBody();
       this._pose(r, 0);
       made++;
@@ -292,6 +305,32 @@ export class Officers {
       goX = car.x + rx * off * side + fx * 0.35; goZ = car.z + rz * off * side + fz * 0.35;
       v = RUN_V;
       if (dist(goX - r.x, goZ - r.z) < 0.6) { this._free(r); return; }
+    } else if (tier && tier.lethal === false) {
+      // ---- they want him alive: straight at him, hands free ----
+      r.state = 'seize';
+      let tx = px, tz = pz;
+      if (pcar) {
+        // the driver's door: left of the nose, right of dir(h) being (cos h, -sin h)
+        const h = pcar.heading ?? 0, off = (pcar.wid ?? 1.8) / 2 + 0.75;
+        tx = pcar.x - Math.cos(h) * off; tz = pcar.z + Math.sin(h) * off;
+      }
+      // the partner comes up beside the first man, not through him
+      if (r.slot) { const a = Math.atan2(tx - r.x, tz - r.z) + Math.PI / 2; tx += Math.sin(a) * 0.8; tz += Math.cos(a) * 0.8; }
+      const dT = dist(tx - r.x, tz - r.z);
+      // (the last metres at a walk only if he is standing: a man walking away
+      // is still caught up with)
+      if (dT > SEIZE_R * 0.6) {
+        goX = tx; goZ = tz;
+        v = dT > 4 ? SEIZE_V : Math.min(SEIZE_V, Math.max(WALK_V, pcar ? 0 : (ctx.pspeed || 0) + 1.6));
+      }
+      const still = pcar ? Math.abs(pcar.speed ?? 0) < 1.5 : (ctx.lying || ctx.pspeed < 1.2);
+      if (dT < SEIZE_R && !ctx.down) {
+        if (!still && !pcar && this.onTackle && t >= r.tackleAt) { r.tackleAt = t + TACKLE_CD; this.onTackle(r); }
+        r.cuffT = still ? r.cuffT + dt : Math.max(0, r.cuffT - dt * 2);
+        if (r.cuffT >= (pcar ? CUFF_CAR_T : CUFF_T)) { r.cuffT = 0; this.onArrest?.(r); }
+      } else r.cuffT = Math.max(0, r.cuffT - dt);
+      const u = r.unit;
+      if (u && !u.warned && dP < 30) { u.warned = true; this.say?.(pcar ? 'Policie! Vystupte z vozu!' : 'Policie! Stůjte!'); }
     } else {
       // cover, or on foot after you
       if (ctx.onFoot && dCarP > CHASE_START) r.state = 'chase';
@@ -328,7 +367,9 @@ export class Officers {
     r.heading = angWrap(r.heading + angWrap(want - r.heading) * Math.min(1, TURN * dt));
 
     // ---- sight and the gun ----------------------------------------------
-    if (!wantAim) r.sees = false;
+    // (an officer running you down has you in sight as much as one aiming)
+    const look = wantAim || r.state === 'seize';
+    if (!look) r.sees = false;
     else if (t >= r.sightAt) {
       r.sightAt = t + SIGHT_DT;
       r.sees = !this.los || this.los(r.x, r.z, px, pz, dP);
