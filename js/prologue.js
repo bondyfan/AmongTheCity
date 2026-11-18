@@ -92,6 +92,11 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     hudWait = 0;
     if (next === 'station') {
       trip.remaining = DEPARTS_IN;
+      // Pardubice starts downloading while he runs for the train, so skipping
+      // the ride does not wait on forty kilometres of map over a slow line.
+      const end = railPose(lineLength);
+      world.city.ensureTiles(end.x, end.z).catch(() => {});
+      world.terrain.ensure(end.x, end.z);
     }
     if (next === 'arrival') guideTo(stationExit);
     save(next);
@@ -400,7 +405,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
           skipped = null;
           hud.travel(false);
           arrive();
-        } else if (skipped.elapsed > 25) {
+        } else if (skipped.elapsed > 70) {
           metres = skipped.from;
           skipped = null;
           place();
