@@ -42,6 +42,7 @@
 import * as THREE from 'three';
 import { U, SKY_GLSL, headMat, tailMat, brakeMat } from './carpaint.js';
 import { lampDirectPatch } from './lampmap.js';
+import { GLASS_VERT_DECL, GLASS_VERT, GLASS_FRAG_DECL, glassFrag, glassUniforms } from './carglass.js';
 
 // Shared by every body program. The lamp values are GETTERS onto the lamp
 // materials main.js and lightpools.js already drive, so nothing outside this
@@ -116,6 +117,9 @@ function build(opt) {
   // buffer; the distance dress is coarser and its patches stand further off.
   const uPull = { value: inst ? 1.6e-4 : 6e-5 };
   const decal = opt.decal ?? null;
+  // the cabin behind the glass and the door region (js/carglass.js): per car only
+  const glassU = inst ? null : glassUniforms(opt.key ?? '', opt.hex, opt.door ?? null, opt.tint ?? null);
+  m.userData.glassU = glassU;
   m.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, BODY_U);
     sh.uniforms.uCarSky = U.uCarSky;
@@ -124,15 +128,16 @@ function build(opt) {
     sh.uniforms.uBrake = uBrake;
     sh.uniforms.uPull = uPull;
     if (decal) sh.uniforms.uDecal = { value: decal };
+    if (glassU) Object.assign(sh.uniforms, glassU);
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
         attribute vec4 cpbr; attribute vec4 cfx; attribute vec3 duv;
         varying vec4 vPbr; varying vec4 vFx; varying vec3 vDuv;
         uniform float uPull;
-        ${inst ? 'attribute vec4 iPaint; varying vec4 vPaint;' : ''}`)
+        ${inst ? 'attribute vec4 iPaint; varying vec4 vPaint;' : GLASS_VERT_DECL}`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vPbr = cpbr; vFx = cfx; vDuv = duv;
-        ${inst ? 'vPaint = iPaint;' : ''}`)
+        ${inst ? 'vPaint = iPaint;' : GLASS_VERT}`)
       .replace('#include <project_vertex>', `#include <project_vertex>
         // the depth rung: slide the vertex toward the eye along its own view
         // ray, so it lands on the same pixel a hair nearer (mvPosition itself,
@@ -146,7 +151,7 @@ function build(opt) {
       .replace('#include <common>', `#include <common>
         varying vec4 vPbr; varying vec4 vFx; varying vec3 vDuv;
         uniform vec3 uHeadC, uTailC, uBrakeC; uniform float uHeadE, uTailE, uLit, uBrake, uCarNight;
-        ${inst ? 'varying vec4 vPaint;' : ''}
+        ${inst ? 'varying vec4 vPaint;' : GLASS_FRAG_DECL}
         ${decal ? 'uniform sampler2D uDecal;' : ''}
         ${SKY_GLSL}
         ${CITY_GLSL}`)
@@ -164,6 +169,7 @@ function build(opt) {
           cPaint = mix(cPaint, 1.0 - dt.a, vDuv.z);
         }` : ''}
         diffuseColor.rgb = cBase;
+        ${inst ? '' : glassFrag(LIT)}
         float cTail = vFx.z * (2.0 - vFx.z), cBrake = vFx.z * (vFx.z - 1.0) * 0.5;`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         ${inst ? `roughnessFactor = mix(vPbr.x, mix(0.5, 0.38, ${METAL}), cPaint);`
@@ -205,7 +211,7 @@ function build(opt) {
         #endif`);
     lampDirectPatch(sh);
   };
-  m.customProgramCacheKey = () => 'carbody2|' + (inst ? 'i' : 'c') + (decal ? 'd' : '');
+  m.customProgramCacheKey = () => 'carbody3|' + (inst ? 'i' : 'c') + (decal ? 'd' : '');
   return m;
 }
 
@@ -216,10 +222,14 @@ function build(opt) {
 // brakes, just swaps between them (carmesh.js setCarState). Four materials a
 // colour at most, each a few uniforms.
 const _mats = new Map();
-export function bodyMatFor(key, hex, decal, lit = true, brake = false) {
-  const k = key + '|' + (lit ? 1 : 0) + (brake ? 1 : 0);
+// `door` (js/cardoor.js: { id, A, B, C }) is a fifth key: the same car with a
+// door's region cut out, or with nothing BUT that region. Uniforms again, so
+// these too are materials on the one program.
+// `tint` ({ id, D }) is who the glass shows at the wheel (js/carglass.js).
+export function bodyMatFor(key, hex, decal, lit = true, brake = false, door = null, tint = null) {
+  const k = key + '|' + (lit ? 1 : 0) + (brake ? 1 : 0) + (door ? '|' + door.id : '') + (tint ? '|' + tint.id : '');
   let m = _mats.get(k);
-  if (!m) _mats.set(k, m = build({ hex, decal, lit, brake }));
+  if (!m) _mats.set(k, m = build({ key, hex, decal, lit, brake, door, tint }));
   return m;
 }
 

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <title>Among The City: moves (dev)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body { margin: 0; height: 100%; background: #20242a; overflow: hidden; font: 12px/1.4 system-ui, sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hud { position: fixed; left: 8px; top: 6px; color: #e8edf2; text-shadow: 0 1px 2px #000; white-space: pre; pointer-events: none; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "../libs/three.module.js" } }
+  </script>
+</head>
+<body>
+  <!--
+    Dev-only page, not linked from the game: the player, one car and a flat
+    floor, to look at a move without booting a city. The same js/player.js,
+    js/cardoor.js and js/vehicles.js the game runs.
+      ?scene=enter|locked|exit|jump|runjump|vault|getup|getup2|glass|busted
+      &t=1.2        seconds into the scene to show
+      &strip=6      that many moments side by side, from &t0= to &t= (default 0)
+      &kind=octavia &color=54695d
+      &view=q|rq|side|front|rear|top|door|in   &dist=6
+      &night=1
+  -->
+  <div id="hud"></div>
+  <script type="module" src="./moves.js"></script>
+</body>
+</html>

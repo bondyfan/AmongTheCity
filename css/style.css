@@ -1068,6 +1068,48 @@ html, body { overscroll-behavior: none; touch-action: none; }
 .story-over.on {
   opacity: 1;
 }
+/* ZATČEN: the street stays on screen, drained of colour, under the word; then
+   it goes to black while the game steps back to the last save (js/main.js). */
+.busted-card {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  text-align: center;
+  color: #e9eef7;
+  background: rgba(6, 12, 28, 0);
+  transition: background 0.7s ease, backdrop-filter 0.7s ease;
+}
+.busted-card.on {
+  background: rgba(6, 12, 28, 0.42);
+  backdrop-filter: grayscale(0.9) contrast(1.08);
+}
+.busted-card.out {
+  background: #05070a;
+}
+.busted-card strong {
+  display: block;
+  font: 800 clamp(44px, 8.5vw, 128px) / 1 system-ui, sans-serif;
+  letter-spacing: 0.14em;
+  opacity: 0;
+  transform: scale(1.3);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  text-shadow: 0 0 28px rgba(70, 130, 255, 0.65), 0 2px 0 rgba(0, 0, 0, 0.5);
+}
+.busted-card.on strong {
+  opacity: 1;
+  transform: scale(1);
+}
+.busted-card span {
+  display: block;
+  margin-top: 18px;
+  font: 500 clamp(13px, 1.2vw, 17px) system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #9fb4d8;
+}
 .story-over strong {
   display: block;
   font: 300 clamp(26px, 3.6vw, 52px) / 1.2 Georgia, 'Times New Roman', serif;

@@ -390,6 +390,31 @@ export function save() {
   return store.save(snapshot());
 }
 
+/**
+ * Arrested: the game goes back to what was last written to disk. Money, body
+ * and the job board are read back, the player stands where the save stood
+ * them, and the record is clean. Returns the saved spot, or null when there is
+ * nothing to go back to (then nothing was touched).
+ */
+export function reloadLast() {
+  if (!applied || !h || storyRunning()) return null;
+  const s = store.load().state;
+  if (!(s?.savedAt > 0) || !s.pos) return null;
+  wallet.setMoney(s.money);
+  vitals.restore(s.vitals);
+  try { jobs.load(s.jobs); } catch { /* an older save's board: keep the live one */ }
+  wanted.clear();
+  const p = h.player;
+  p.pos.x = s.pos.x; p.pos.z = s.pos.z;
+  if (Number.isFinite(s.pos.h)) p.heading = s.pos.h;
+  pendingStand = { x: s.pos.x, z: s.pos.z, y: Number.isFinite(s.pos.y) ? s.pos.y : NaN, t: 0 };
+  if (Number.isFinite(s.pos.y)) { p.y = s.pos.y; p.vy = 0; }
+  lastSafe = { ...s.pos };
+  lastX = lastZ = null;
+  saveT = SAVE_EVERY;
+  return s.pos;
+}
+
 // ---- verbs ----------------------------------------------------------------------
 
 function buyFood(plate) {
