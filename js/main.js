@@ -1455,8 +1455,9 @@ function carSfx(what, vol) {
 // a jump's landing and a hand coming down on a bonnet (silent until recorded)
 function leapSfx(what) {
   if (what === 'land') sfxOr('jump_land', null, 0.5);
-  else if (what === 'vault') sfxOr('vault', null, 0.6);
-  else if (what === 'rise') sfxOr('getup', null, 0.5);
+  // (these two came out quiet: peaks of a tenth of full scale, so they play flat out)
+  else if (what === 'vault') sfxOr('vault', null, 1);
+  else if (what === 'rise') sfxOr('getup', null, 1);
 }
 // Out through the door: it opens now and is heard coming shut behind you. A
 // machine without a door of its own (a bus, a lorry) keeps the old pair.
