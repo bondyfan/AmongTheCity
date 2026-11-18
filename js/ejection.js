@@ -76,7 +76,11 @@ const BOUNCE = 0.3;       // the crowd's restitution: one bounce, then slide
 const WALL_E = 0.15;      // a body meeting masonry mostly stops
 const SLIDE = 7;          // m/s² of road rash
 const LIE_T = 1.6;        // s face down before trying to get up
-const RISE_T = 0.75;      // s from flat to standing
+// Getting up is a person's move, not a figure tipping upright: js/bodymoves.js
+// getUpPose has the limbs, riseCurve() below the turn and the height that go
+// with them. From the front it is quicker than from the back.
+export const RISE_PRONE = 1.45;   // s: hands, all fours, one knee, up
+export const RISE_SUPINE = 1.6;   // s: sit up, feet under, squat, up
 const HIP = 0.9;          // m, feet to the middle of the body (scaled by the caller)
 const MAX_STEP = 0.2;     // m of travel per substep: walls stay walls
 const BONNET = 0.95;      // m above the car's ground a body comes to rest on it
@@ -151,15 +155,24 @@ export function stepBody(st, dt, world, hit) {
   if (!(dt > 0)) return true;
   st.t += dt;
   if (st.phase === 'lie') {
-    if (!st.stay && st.t >= LIE_T) { st.phase = 'rise'; st.t = 0; st.p0 = st.pitch; st.r0 = st.roll; }
+    if (!st.stay && st.t >= LIE_T) {
+      st.phase = 'rise'; st.t = 0;
+      // Lying rolled right over is the same pose as lying the other way up
+      // with the head at the other end: (yaw, p, pi) = (yaw + pi, pi - p, 0).
+      // Say it that way, so getting up only ever has a pitch to undo.
+      if (Math.abs(st.roll) > HALF_PI) { st.yaw = wrap(st.yaw + Math.PI); st.pitch = wrap(Math.PI - st.pitch); }
+      st.roll = 0;
+      st.faceUp = st.pitch > 0;
+      st.riseT = st.faceUp ? RISE_SUPINE : RISE_PRONE;
+    }
     return true;
   }
   if (st.phase === 'rise') {
-    const k = Math.min(1, st.t / RISE_T);
-    const e = k * k * (3 - 2 * k);
-    st.pitch = st.p0 * (1 - e);
-    st.roll = st.r0 * (1 - e);
-    st.y = st.gy + LIE + (st.hip - LIE) * e;
+    const k = Math.min(1, st.t / st.riseT);
+    riseCurve(k, st.faceUp, _rise);
+    st.pitch = _rise.pitch;
+    st.rise = k;
+    st.y = st.gy + LIE + (st.hip - LIE) * _rise.h;
     return k < 1;
   }
   // ---- flying or sliding ----
@@ -234,6 +247,28 @@ export function stepBody(st, dt, world, hit) {
     st.pitch = HALF_PI; st.roll = 0; st.ap = st.ar = 0; st.phase = 'lie'; st.t = 0;
   }
   return true;
+}
+
+// ---- the turn and the height of getting up --------------------------------------
+// Keyframes [k, pitch, h]: pitch of the whole figure (-pi/2 face down, +pi/2 on
+// the back, 0 upright) and h, how far the hips have come up from lying (0) to
+// standing (1). They are the body's side of js/bodymoves.js getUpPose, key for
+// key: face down the trunk stays level while the hips come up onto the knees,
+// then tips up over one planted foot; on the back the trunk sits up first and
+// the hips only leave the ground from the squat.
+const PRONE = [[0, -HALF_PI, 0], [0.20, -HALF_PI, 0.02], [0.48, -HALF_PI, 0.38], [0.72, -0.50, 0.44], [1, 0, 1]];
+const SUPINE = [[0, HALF_PI, 0], [0.30, 0.22, 0], [0.62, -0.35, 0.30], [1, 0, 1]];
+const _rise = { pitch: 0, h: 0 };
+export function riseCurve(k, faceUp, out = {}) {
+  const K = faceUp ? SUPINE : PRONE;
+  let i = 1;
+  while (i < K.length - 1 && k > K[i][0]) i++;
+  const a = K[i - 1], b = K[i];
+  let t = (k - a[0]) / (b[0] - a[0]);
+  t = t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
+  out.pitch = a[1] + (b[1] - a[1]) * t;
+  out.h = a[2] + (b[2] - a[2]) * t;
+  return out;
 }
 
 /**

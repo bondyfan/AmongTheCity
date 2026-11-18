@@ -22,9 +22,9 @@ const TARGET_WAIT = 6;         // s to wait for the world to offer a target
 // nowhere else; every name that comes from the map goes through textContent.
 const TEXT = {
   walk: { icon: '👟', title: 'Rozhlédni se',
-    keys: '<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> chůze · <kbd>Shift</kbd> sprint · <kbd>myš</kbd> kamera' },
+    keys: '<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> chůze · <kbd>Shift</kbd> sprint · <kbd>Mezerník</kbd> skok · <kbd>myš</kbd> kamera' },
   car: { icon: '🚗', title: 'Nastup do auta',
-    keys: 'Dojdi k autu a stiskni <kbd>E</kbd>' },
+    keys: 'Dojdi k autu a stiskni <kbd>E</kbd>. Zaparkovaná bývají zamčená: <kbd>B</kbd> koupit' },
   drive: { icon: '📍', title: 'Dojeď ke značce',
     keys: '<kbd>W</kbd> plyn · <kbd>S</kbd> brzda a zpátečka · <kbd>Mezerník</kbd> brzda · <kbd>M</kbd> mapa' },
   board: { icon: '💼', title: 'Najdi si práci',

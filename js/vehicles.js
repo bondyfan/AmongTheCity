@@ -44,6 +44,8 @@ import { buildCar } from './cardetail.js';
 import { ATLAS, mergedBodies } from './carmerge.js';
 import { BODY_U } from './carbodymat.js';
 import { dressCar, bindCar, setCarState, carMergeOn } from './carmesh.js';
+import { seatParts, benchParts, wheelParts, cabinVariant, SEATS } from './cabinkit.js';
+import { setCabinLookup } from './carglass.js';
 import { hookScene, setCarInstancing, carInstancingOn, carInstanceStats } from './carinstances.js';
 import { attachTrailer, updateTrailer, updateBlink } from './semitrailer.js';   // round 8: the articulated lorry, indicators
 import { crash, sfxAt, skidChirp, skidBark } from './audio.js';   // no-ops headless — safe for node --check/tests
@@ -2218,6 +2220,12 @@ const rimMat = new THREE.MeshLambertMaterial({ color: 0x1a1c21, emissive: 0x0b0c
 // the only bright thing in the cabin: cluster + centre screen, lit like a
 // screen rather than shaded like plastic, so night driving has a face to it
 const screenMat = new THREE.MeshLambertMaterial({ color: 0x0c1a26, emissive: 0x2f6b9e, emissiveIntensity: 0.75, toneMapped: false });
+// upholstery: one Lambert per colour of js/cabinkit.js SEATS, made on first use
+const _seatMats = [];
+function seatMatFor(i) {
+  const row = SEATS[i] ?? SEATS[0];
+  return _seatMats[i] ?? (_seatMats[i] = new THREE.MeshLambertMaterial({ color: row[1], emissive: row[2] }));
+}
 // name → material, in the order the meshes get added (one draw call each)
 const CABIN_MATS = [['trim', trimMat], ['liner', linerMat], ['seat', seatMat],
   ['rim', rimMat], ['screen', screenMat], ['chrome', chromeMat]];
@@ -2355,32 +2363,21 @@ function wallAt(K, g, z, y) {
 // contract (player.js walks to it, the net layer seats remote riders on it,
 // eyeAnchor rides off it) and must not move, so the FURNITURE slides inboard
 // instead: at most ~13 cm on the narrowest kinds, invisible from the seat.
-function seatBox(d, K, g, ax, z, cy, fy, w) {
+function seatFit(K, g, ax, z, cy, w) {
   const sgn = ax < 0 ? -1 : 1;
   const shoulder = wallAt(K, g, z, cy + 0.56) - 0.03;
   const hw = Math.min(w / 2, shoulder * 0.48);
-  const x = sgn * Math.min(Math.abs(ax), Math.max(0.12, shoulder - hw));
-  const ww = hw * 2;
-  // …and the same story overhead: a rear bench sits under a fastback's DROPPING
-  // backlight, so the backrest and the headrest are capped by the roof at
-  // their own station rather than by a nominal seat height.
-  const roofAt = (zz) => stationAt(g ? g.sts : K.hull.sts, zz, 2) - 0.05;
-  B(d.seat, ww, 0.10, ww * 1.02, x, cy - 0.05, z);
-  B(d.trim, ww * 0.66, Math.max(0.06, cy - 0.10 - fy), ww * 0.72, x, (fy + cy - 0.10) / 2, z);
-  const brTop = Math.min(cy + 0.545, roofAt(z + 0.34)), brBot = cy - 0.02;
-  if (brTop > brBot + 0.1)
-    B(d.seat, ww, (brTop - brBot) * 0.95, 0.11, x, (brTop + brBot) / 2 - 0.025, z + 0.30, 0, 0.20);
-  const hrTop = Math.min(cy + 0.685, roofAt(z + 0.40));
-  if (hrTop > brTop - 0.06)
-    B(d.seat, ww * 0.50, 0.17, 0.10, x, hrTop - 0.085, z + 0.40);
+  return { x: sgn * Math.min(Math.abs(ax), Math.max(0.12, shoulder - hw)), ww: hw * 2 };
 }
 
 // The whole interior for one kind, merged per material — a cabin is six meshes
 // plus the wheel badge, and it is built at most once per kind for the lifetime
 // of the tab (cached beside the exterior geometry in _geo).
-function buildCabin(kind) {
+function buildCabin(kind, wheelType = 0) {
   const s = cabinSpec(kind);
-  const d = { trim: [], liner: [], seat: [], rim: [], screen: [], chrome: [] };
+  // doorL / doorR: the two FRONT door cards, meshes of their own so that an
+  // open door (js/cardoor.js) can take its card with it
+  const d = { trim: [], liner: [], seat: [], rim: [], screen: [], chrome: [], doorL: [], doorR: [] };
   const { beltY, cowlZ, hdrZ, scrY, roofY, backZ, linerY, iwF, iwR, iwT, dw, dwHi,
     sillY, floorY, seatX, seatZ, wheelY, wheelZ, wheelR, rake, dashZ, sw } = s;
   // each panel's own half-thickness has to clear the shell too
@@ -2391,12 +2388,24 @@ function buildCabin(kind) {
   B(d.trim, iwF * 2, Math.max(0.10, beltY - 0.24 - floorY), 0.05,
     0, (floorY + beltY - 0.24) / 2, cowlZ + 0.04);
   B(d.liner, iwT * 1.96, 0.026, backZ - hdrZ, 0, linerY + 0.013, (hdrZ + backZ) / 2);
-  pairB(d.trim, 0.045, Math.max(0.12, sillY - floorY - 0.02), cardL,
-    cardX, (floorY + sillY) / 2, (cowlZ + backZ) / 2 + 0.05);
-  if (sillY < beltY - 0.03)                                    // the sill strip
-    pairB(d.trim, 0.04, beltY - sillY, cardL, sillX, (sillY + beltY) / 2, (cowlZ + backZ) / 2 + 0.05);
-  pairB(d.trim, 0.085, 0.055, Math.min(0.60, backZ - cowlZ - 0.3),
-    cardX - 0.05, sillY - 0.10, seatZ - 0.05);                 // armrests
+  // Each side is two lengths: the front door's, which leaves with the door
+  // when it opens, and everything behind the B-pillar, which stays.
+  const cz0 = (cowlZ + backZ) / 2 + 0.05 - cardL / 2, cz1 = cz0 + cardL;
+  const czM = clamp(s.bpillarZ, cz0 + 0.2, cz1 - 0.05);
+  for (const sg of [-1, 1]) {
+    const door = sg < 0 ? d.doorL : d.doorR;
+    for (const [za, zb, to] of [[cz0, czM, door], [czM, cz1, d.trim]]) {
+      if (zb - za < 0.02) continue;
+      B(to, 0.045, Math.max(0.12, sillY - floorY - 0.02), zb - za, sg * cardX, (floorY + sillY) / 2, (za + zb) / 2);
+      if (sillY < beltY - 0.03)                                // the sill strip
+        B(to, 0.04, beltY - sillY, zb - za, sg * sillX, (sillY + beltY) / 2, (za + zb) / 2);
+    }
+    // armrest, a pull handle above it and a speaker grille low in the door
+    const al = Math.min(0.60, czM - cz0 - 0.2);
+    B(door, 0.085, 0.055, al, sg * (cardX - 0.05), sillY - 0.10, seatZ - 0.05);
+    B(door, 0.03, 0.03, 0.16, sg * (cardX - 0.035), sillY - 0.045, seatZ - 0.12);
+    B(door, 0.02, 0.14, 0.20, sg * (cardX - 0.028), floorY + 0.20, seatZ - 0.30);
+  }
 
   // ---- dashboard ----------------------------------------------------------
   // NOTHING here rises above the beltline. At the cowl station the greenhouse
@@ -2426,17 +2435,9 @@ function buildCabin(kind) {
   // ---- steering wheel: built flat in its own plane, then raked into place --
   // A torus in the XY plane has its axis on +z; rotateX(−rake) tips that axis
   // up and REARWARD, which is exactly where a driver's chest is.
-  const tube = Math.max(0.017, wheelR * 0.095);
-  const parts = [new THREE.TorusGeometry(wheelR, tube, 6, 18)];
-  const hub = new THREE.CylinderGeometry(wheelR * 0.30, wheelR * 0.30, 0.05, 10);
-  hub.rotateX(Math.PI / 2);
-  parts.push(hub);
-  for (const a of [0, Math.PI, -Math.PI / 2]) {   // 3-spoke: two across, one down
-    const sp = new THREE.BoxGeometry(wheelR * 0.80, 0.030, 0.024);
-    sp.translate(wheelR * 0.46, 0, 0);
-    sp.rotateZ(a);
-    parts.push(sp);
-  }
+  // one of three designs (js/cabinkit.js): round, flat-bottomed, four-spoke
+  const wk = wheelParts(wheelType, wheelR), tube = wk.tube;
+  const parts = [...wk.rim, ...wk.pad];
   // same inboard rule as the seat: on the wide-cabin kinds the rim would clip
   // the door glass if it stayed square on an anchor meant for a head
   const wx = -Math.min(seatX,
@@ -2498,13 +2499,22 @@ function buildCabin(kind) {
     0, (floorY + linerY) / 2, backZ - 0.03);
 
   // ---- seats ---------------------------------------------------------------
-  for (let i = 0; i < s.nSeats; i++) {
-    const a = seatAnchor({ kind }, i);
-    seatBox(d, s.K, s.K.green, a.x, a.z, a.y, floorY, sw);
+  // The front two are seats of their own; a saloon's rear pair is one bench.
+  const roofAt = (zz) => stationAt(s.K.green ? s.K.green.sts : s.K.hull.sts, zz, 2) - 0.05;
+  for (let i = 0; i < Math.min(2, s.nSeats); i++) {
+    const a = seatAnchor({ kind }, i), f = seatFit(s.K, s.K.green, a.x, a.z, a.y, sw);
+    seatParts(d.seat, d.trim, f.x, a.z, a.y, floorY, f.ww, Math.min(roofAt(a.z + 0.34), roofAt(a.z + 0.40)));
+  }
+  if (s.nSeats > 2) {
+    const a = seatAnchor({ kind }, 2);
+    const half = Math.min(wallAt(s.K, s.K.green, a.z, a.y + 0.40), wallAt(s.K, s.K.green, a.z + 0.3, a.y + 0.50)) - 0.07;
+    benchParts(d.seat, d.trim, a.z, a.y, floorY, half, Math.min(roofAt(a.z + 0.34), roofAt(a.z + 0.42)));
   }
 
   const out = {};
   for (const [key] of CABIN_MATS) out[key] = d[key].length ? mergeGeoms(d[key]) : null;
+  out.doorL = d.doorL.length ? mergeGeoms(d.doorL) : null;
+  out.doorR = d.doorR.length ? mergeGeoms(d.doorR) : null;
   // the marque on the wheel boss, reusing the cached badge texture the nose
   // already wears — one extra draw call, and the only colour in the cabin
   const K = KIND[kind] ?? KIND.octavia;
@@ -2530,10 +2540,14 @@ export function attachCabin(car) {
   if (group.userData.cabin) return group.userData.cabin;
   const kind = ALIAS[car.kind] ?? car.kind;
   const geo = geomFor(kind);
-  const cab = geo.cabin ?? (geo.cabin = buildCabin(KIND[kind] ? kind : 'octavia'));
+  // which wheel and which upholstery: a function of the kind and the paint
+  const v = cabinVariant(kind, car.color ?? 0);
+  const cabs = geo.cabins ?? (geo.cabins = []);
+  const cab = cabs[v.wheel] ?? (cabs[v.wheel] = buildCabin(KIND[kind] ? kind : 'octavia', v.wheel));
   const g = new THREE.Group();
-  for (const [key, mat] of CABIN_MATS) {
+  for (const [key, mat0] of CABIN_MATS) {
     if (!cab[key]) continue;
+    const mat = key === 'seat' ? seatMatFor(v.seat) : mat0;
     const m = new THREE.Mesh(cab[key], mat);
     // never casts (it would shadow itself into a black box and leak stripes
     // out through the glass) and never receives (the car's own shadow falls
@@ -2541,6 +2555,15 @@ export function attachCabin(car) {
     m.castShadow = m.receiveShadow = false;
     g.add(m);
   }
+  // the two front door cards: [left, right], hidden by js/cardoor.js while
+  // that door stands open (the leaf carries a card of its own)
+  g.userData.doorCards = [cab.doorL, cab.doorR].map((geo2) => {
+    if (!geo2) return null;
+    const m = new THREE.Mesh(geo2, trimMat);
+    m.castShadow = m.receiveShadow = false;
+    g.add(m);
+    return m;
+  });
   if (cab.badge) {
     const b = cab.badge;
     const m = new THREE.Mesh(planeGeoFor(b.size, b.size), badgeMatFor(b.brand));
@@ -2567,6 +2590,47 @@ export function detachCabin(car) {
 
 // Test/debug hook: the derived interior dimensions for a kind, no THREE needed.
 export { cabinSpec };
+
+// For js/cardoor.js and js/carglass.js, which build on a kind's own surface:
+// the carbody.js shape and the KIND row, or null for a kind nobody knows.
+export function carShape(kind) {
+  kind = ALIAS[kind] ?? kind;
+  if (!KIND[kind]) return null;
+  const g = geomFor(kind);
+  return { S: g.shape, K: g.K };
+}
+// What the glass shader draws behind every window (js/carglass.js): the same
+// cabin, as five rows of numbers. Cab-over kinds have no greenhouse to look
+// into and keep their dark glass.
+const _seatCol = new THREE.Color();
+function cabinGlass(kind, hex) {
+  kind = ALIAS[kind] ?? kind;
+  const K = KIND[kind];
+  if (!K || !K.green) return null;
+  const s = cabinSpec(kind), v = cabinVariant(kind, hex ?? 0);
+  const a = seatAnchor({ kind }, 0), f = seatFit(K, K.green, a.x, a.z, a.y, s.sw);
+  const tube = Math.max(0.017, s.wheelR * 0.095);
+  const wx = -Math.min(s.seatX, Math.max(0.12, wallAt(K, K.green, s.wheelZ,
+    s.wheelY + s.wheelR * Math.cos(s.rake) * 0.55) - 0.03 - s.wheelR - tube));
+  let rear = 0;
+  if (s.nSeats > 2) {
+    const r = seatAnchor({ kind }, 2);
+    rear = Math.max(0.1, Math.min(wallAt(K, K.green, r.z, r.y + 0.40), wallAt(K, K.green, r.z + 0.3, r.y + 0.50)) - 0.07);
+  }
+  _seatCol.set(SEATS[v.seat][1]);
+  return {
+    A: [s.dw - 0.02, s.floorY, s.beltY, s.linerY],
+    B: [s.cowlZ, s.dashZ, s.backZ, s.seatZ],
+    C: [Math.abs(f.x), a.y, f.ww / 2, 1],
+    W: [wx, s.wheelY, s.wheelZ, s.wheelR],
+    S: [_seatCol.r, _seatCol.g, _seatCol.b, rear],
+  };
+}
+setCabinLookup(cabinGlass);
+export { cabinGlass };
+
+/** The cabin's interior trim material (door cards, dash): shared, never disposed. */
+export const cabinTrimMat = trimMat;
 
 // The traffic AI drives its near cars on the same tyres (js/aidriver.js, js/traffic.js).
 export { tyreStep, kindOf };

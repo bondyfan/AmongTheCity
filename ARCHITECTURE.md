@@ -1963,6 +1963,66 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
   Shift, and a sprint on a double tap of Shift that spends `stamina`
   (js/stamina.js draws the bar).
 
+## Doors, locks, jumps and arrests: the step before part two (Nov 2026)
+
+Stealing a car and moving a body, so that part two (the theft at Kunětická
+hora) has something to stand on. Small modules round `js/player.js`:
+
+* **Locks** (`js/carlocks.js`): 99 parked cars in 100 refuse the handle. The
+  draw is hashed from the car (its fleet index, or the spot it stood on), so it
+  never changes and is the same on every co-op screen. Never locked: `owned`
+  (the garage), `unlocked` (Vašek's estate, a dev spawn, any car the player has
+  sat in), and a car in traffic (that is a carjacking, below). You find out at
+  the handle: main.js's E handler passes `locked` to `boardVehicle`, and the
+  hint only says "zamčeno" once that handle has been tried.
+* **The door** (`js/cardoor.js`): a car is one mesh with no door node. An open
+  door is the body drawn with the door's outline discarded (the hole), the same
+  geometry drawn again on a hinge with everything else discarded (the leaf),
+  and a card for the leaf's inside. Both are uniforms on the one body program
+  (`js/carglass.js doorIn`, keyed into `bodyMatFor` as a fifth key), so opening
+  a door compiles nothing and costs two draws for one car. `doorSpec(kind,
+  seat)` reads the outline off the same shape cardetail.js draws its shut lines
+  on. Truck and bus have none and keep the old slide.
+* **The cabin** is in twice. Behind every window of every car it is DRAWN, not
+  built: a fragment of glass (`cpbr.z > 2`) follows its view ray into the car's
+  frame and meets boxes and ellipsoids placed from `cabinSpec` (seats,
+  headrests, dash, wheel, far door and windows, a driver when the lamps are on
+  or `setDriver` says so). No geometry, no draw call. The real one
+  (`attachCabin`, six meshes) goes in for the car whose door is open or whose
+  driver's eyes are in use (main.js `fpCabin`), with `js/cabinkit.js` seats and
+  one of three steering wheels; `cabinVariant(kind, colour)` picks the wheel
+  and the upholstery for both, so what the glass shows is what the door opens
+  onto. The two front door cards are meshes of their own and hide while that
+  door is open.
+* **Getting in and out** (`js/carentry.js`, called by player.js): walk to
+  `door.stand`, reach, then either `tug` (locked: two pulls, `onLocked`, walk
+  away) or open, `jack` (somebody in the seat: `onJack`), enter round the door,
+  sit, and `player.doorAnim` pulls the door shut (`onShut`). Out is the same
+  backwards. `player.doorCar` is whose door is open.
+* **Poses** (`js/bodymoves.js`): records of joint angles blended over a base
+  pose with `pose(parts, p, w)`. Reach, tug, haul, duck, jump, land, vault,
+  the two get-ups, hands on the head.
+* **Space** (`js/leap.js`) is a jump, or a vault when something low is right in
+  front and there is ground behind it (asked of the walker's own collider at
+  two heights; a car's bonnet by name). A jump is only an upward start for the
+  gravity the walker already had. Space no longer punches: that is the mouse.
+* **Getting up** (`js/ejection.js riseCurve`, `bodymoves.getUpPose`): a thrown
+  body gets up with hands and knees, one way from its front and another from
+  its back. `player.tumble()` throws the body down without a crash.
+* **Carjacking** (`js/carjack.js`): the driver leaves through the door as a
+  ragdoll, lies, gets up, runs. `witnessed()` is the rule: a person or a lit
+  window within 100 m makes it `prepadeni`, two stars at once.
+* **Arrest** (`js/policetune.js lethal`, `js/policecops.js` 'seize'): below
+  three stars nobody shoots. Officers run at the player (to the driver's door
+  of a stopped car), bring a runner down (`onTackle`), and arrest one who holds
+  still (`onArrest`). main.js `busted()` kneels the player (`player.held`),
+  shows ZATČEN and steps back to the last save (`career.reloadLast`); in the
+  campaign, which is not saved, it is the campaign's own restart.
+* **Sounds**: `scripts/gen-move-audio.mjs` (ElevenLabs, run only when asked).
+  Until the files exist `audio.sfxOr` plays the old door pair instead.
+* **Looking at it**: `dev/moves.html` stages one car and the player on a flat
+  floor (`?scene=enter|locked|exit|jump|vault|getup|busted&t=…&strip=…`).
+
 ## The sound of cars (js/caraudio.js, public/worklets/, Nov 2026)
 
 The engine used to be an oscillator playing one stored cycle of cylinder pulses
