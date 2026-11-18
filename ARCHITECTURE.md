@@ -1851,3 +1851,35 @@ except one data vote in meshes.js. Two ground materials share the GLSL in
 - Switch: `GROUND_DETAIL` (one shared uniform object). Preset key
   `groundDetail` (off on low), panel row "Detail povrchů zblízka", console
   A/B `__atc.groundDetail.value = 0 / 1` (no rebuild, no recompile).
+
+# Cars in one draw (November 2026)
+
+A near car was 11 draw calls (paint, glass, trim, two lamp materials, plates,
+badges, four wheels) plus a brake mesh, a far car 4; at ~6.5 us of CPU a call
+the traffic was a large slice of a CPU-bound frame. Now:
+
+* **`js/carmerge.js`** merges a kind's near parts (paint, glass, trim, head,
+  tail, brake, plates, badges) into ONE geometry; per-vertex `cpbr`
+  (roughness, metalness, env gain, depth rung), `cfx` (paint weight, head,
+  lamp code 1 tail / 2 brake, night gate) and `duv` (decal atlas) say what
+  each vertex is. The depth rung replaces the polygonOffset ladder: draped
+  layers are pulled toward the eye in the vertex shader. The far dress is
+  merged the same way (wheels baked in).
+* **`js/carbodymat.js`** is the one MeshPhysicalMaterial that shades it:
+  clearcoat only where there is paint, decals over the paint by their alpha
+  from a per (kind, colour) atlas (vehicles.js `decalTexFor`), lamps lit from
+  the same `lampMats` main.js drives (getters), a hashed city skyline in every
+  reflection (lit windows at night). Lit / unlit (a parked car is dark) and
+  braking are cached materials on one program: `js/carmesh.js setCarState`.
+* **`js/carinstances.js`**: wheels and the distance dress are pool MEMBERS.
+  The meshes stay where every caller expects them (wheels spin and steer,
+  setCarLod hides and shows) but sit on layer 31; the scene's onBeforeRender
+  copies the matrices of the visible, in-frustum members into one
+  InstancedMesh per kind and side (wheels) and per kind (far dress, colour and
+  lamps per instance in `iPaint`). Pools are named `carpool:*`.
+* **Budget**: near car 1 draw (+1 shadow), wheels and far cars a few draws
+  for the whole fleet. `userData.hulls` is `[body]`, `userData.brake` a plain
+  `{ visible }`, `userData.carState` the swap state.
+* **A/B**: `atcCars.instancing(false|true)` at runtime, `atcCars.city(k)`,
+  `atcCars.stats()`; `?carmerge=0` builds the old eleven-part cars,
+  `?carinst=0` starts with the pools off.

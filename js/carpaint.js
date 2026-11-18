@@ -16,6 +16,10 @@
 //           running strip burns all day, the projectors and the tail clusters
 //           only come up with carNight()
 //
+// The traffic draws with ONE material per car now (js/carbodymat.js, a whole
+// car in one draw); these five stay for the legacy dress (?carmerge=0), the
+// trailer, the wheel pools, and as the lamp handles main.js drives.
+//
 // Reflections come from scene.environment when the game sets one. When it does
 // not (the low preset, or a build without the lighting package) the same
 // shaders fall back to an analytic sky: three colours and a smoothstep, enough
@@ -26,8 +30,9 @@ import { lampDirectPatch } from './lampmap.js';
 
 const lin = (hex) => { const c = new THREE.Color(hex); return new THREE.Vector3(c.r, c.g, c.b); };
 
-// shared by every patched program: one write reaches the whole fleet
-const U = {
+// shared by every patched program: one write reaches the whole fleet (and by
+// the one-draw body material in carbodymat.js, which reads the same three)
+export const U = {
   uCarNight: { value: 0 },
   uCarSky: { value: [lin(0x3f76c4), lin(0xb4c4d6), lin(0x4a4c50)] },   // zenith, horizon, ground
 };
@@ -47,7 +52,7 @@ export function carNight(k) {
 // how far the lamps are up, 0..1
 export const lampsOn = () => U.uCarNight.value;
 
-const SKY_GLSL = /* glsl */`
+export const SKY_GLSL = /* glsl */`
   uniform vec3 uCarSky[3];
   vec3 carSky(vec3 d, float rough) {
     float soft = 0.03 + rough * 0.9;
