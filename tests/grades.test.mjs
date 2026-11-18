@@ -168,6 +168,38 @@ test('a road bridge leaves its approach on the approach’s own grade: no step, 
   assert.ok(worstBend < 0.06, `the grade changes ${(worstBend * 100).toFixed(1)} % per metre`);
 });
 
+test('a returning tile finds crossings with neighbours loaded while its ways were absent', async (t) => {
+  const files = {
+    manifest: { tile: 4800, tiles: [{ tx: 0, tz: 0, f: 'road' }, { tx: 1, tz: 0, f: 'rail' }] },
+    road: { roads: [{ t: 'secondary', w: 8, d: 1, p: [[4700, 2000], [4900, 2000]] }] },
+    rail: { rails: [{ t: 'rail', p: [[4850, 1900], [4850, 2100]] }] },
+  };
+  t.mock.method(globalThis, 'fetch', async url => ({ ok: true, json: () => structuredClone(files[url]) }));
+  for (const first of [0, 1]) {
+    const city = await geo.loadCity('manifest');
+    const views = [100, 9500];
+    const owner = city.manifestTiles[first];
+    await city.ensureTiles(views[first], 2000);
+    // The tile retains its graph objects while its spatial index is empty.
+    for (let i = 0; i < 4 && owner.state !== 0; i++) {
+      await city.ensureTiles(30000, 2000);
+      while (city.releasing) await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.ok(owner.kept);
+    await city.ensureTiles(views[1 - first], 2000);
+    assert.equal(owner.state, 0);
+    await city.ensureTiles(4800, 2000);
+    const [road] = city.roads, [rail] = city.rails;
+    const pins = road._pins?.filter(p => p.node._xing === rail) ?? [];
+    assert.equal(pins.length, 1, 'missing crossing when the ' + owner.f + ' returns');
+    assert.equal(pins[0].s, 150);
+    const terrain = { heightAt: (_x, z) => 220 + 4 * Math.exp(-((z - 2000) ** 2) / 20) };
+    const asphalt = geo.roadGradeY(road, 150, terrain) + 0.20;
+    const track = geo.railGradeY(rail, 100, terrain) + 0.14;
+    assert.ok(Math.abs(asphalt - track) < 0.001, 'road and track do not meet');
+  }
+});
+
 test('a surveyed crossing waits for its railway corridor to finish streaming', async () => {
   const city = await cityFrom({
     roads: [{ t: 'secondary', w: 8, d: 1, p: [[4500, 1000], [4500, 1100]] }],
