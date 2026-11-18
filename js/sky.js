@@ -38,6 +38,7 @@ import * as THREE from 'three';
 // material compiles. sky.js is imported by main.js long before that.
 import { setAirFog, FOG_WALL_START, AFTERGLOW_GLSL } from './heightfog.js';
 import { SkyEnv } from './envmap.js';
+import { LOOK_AB } from './lookab.js';
 
 // ---- the sun's path, and the darkness that FOLLOWS from it ----
 const SUNRISE = 5, SUNSET = 21, SUN_PEAK = 75; // hours, hours, degrees
@@ -78,14 +79,19 @@ const nightAtHour = h =>
 // (The first pair was 0xa9c3d9 over 0x4c86c2, a grey-blue under a pale blue: an
 // overcast afternoon. A clear summer day is cleaner at the horizon and a good
 // deal deeper overhead.)
-const DAY_SKY = { horizon: new THREE.Color(0xa4c8ea), zenith: new THREE.Color(0x3a7ac6) };
+// (Round 11: the zenith went a shade deeper again, 0x3a7ac6 to 0x2c6cc4, and
+// the horizon a touch less white: through the tone curve's shoulder the old
+// pair came out as a washed, nearly white sky over every street.)
+const DAY_SKY = { horizon: new THREE.Color(0x9cc4ec), zenith: new THREE.Color(0x2c6cc4) };
 // NIGHT IS BLUE, NOT BLACK. A clear night under a moon is a deep blue you can
 // see shapes against; pure black is what a monitor shows when nothing was lit.
 // The horizon carries a trace of warmth: a town's own glow in its own haze.
 // (These look tiny. They are seen through the night exposure below, which
 // multiplies everything by about two and a half.)
-const NIGHT_SKY = { horizon: new THREE.Color().setRGB(0.0125, 0.0135, 0.0205),
-                    zenith: new THREE.Color().setRGB(0.0028, 0.0048, 0.0120) };
+// (Round 11: a fifth brighter and bluer overhead, so the roofline stands
+// against the sky at midnight instead of merging with it.)
+const NIGHT_SKY = { horizon: new THREE.Color().setRGB(0.0140, 0.0150, 0.0230),
+                    zenith: new THREE.Color().setRGB(0.0036, 0.0060, 0.0150) };
 // sunset: warm haze along the horizon, pink-violet in the sky above it. The
 // band across the AIR is what actually reads as a sunset; sun colour alone
 // barely registers when most of the frame is facades and asphalt
@@ -93,7 +99,7 @@ const SUNSET_FOG = new THREE.Color(0xe08c4a), SUNSET_SKY = new THREE.Color(0x9c5
 // sun light colour (linear working space): neutral warm-white high up, deep
 // sunset orange at the horizon. GOLDEN_TOP is the elevation where warming starts.
 const GOLDEN_TOP = 30;
-const SUN_DAY = new THREE.Color(1.0, 0.97, 0.92);
+const SUN_DAY = new THREE.Color(1.0, 0.95, 0.87);
 const SUN_LOW = new THREE.Color(1.0, 0.38, 0.13);
 // ---- the moon as a light ----
 // The dome has always drawn a moon opposite the sun. It lit nothing: after
@@ -117,7 +123,47 @@ const MOON_I = 0.085;
 // (The night's 0.14 and the moon's 0.10 came down a seventh when the toe of the
 // tone curve was opened, heightfog.js lookGLSL: that lift does the work the
 // extra light was doing, and roofs were turning red at midnight.)
-const HEMI_DAY = 0.98, HEMI_NIGHT = 0.12;
+// (Round 11, LOOK: 0.98 became 0.70, and the sun 1.8 became 2.25. With the
+// old pair open shade got a third of the light of the sunlit pavement beside
+// it, and a city at noon read as one flat grey: nothing told you where the sun
+// was. A clear sky gives shade about a fifth of the sun's light, and that is
+// roughly where the pair stands now; the sunlit pavement itself is within five
+// percent of where it was, so the exposure did not have to move.)
+// (Then, seen in the game: 0.82 and 2.4. At 0.70 shaded pavement on Legerova
+// came out at 44/255 against 62 before, nearly black under the S-curve, and the
+// sunlit side lost a little. 0.82 with the sun at 2.4 keeps the shade about a
+// fifth of the sunlit ground in light, shaded paving at about 51/255 with its
+// texture, and the sunlit side a touch brighter than it was.)
+// One object, not constants, so the pair can be retuned on a live page by eye
+// (__atc.sky.light) the way heightfog.js HAZE is; `bounce` is BOUNCE below.
+export const LIGHT = { hemiDay: 0.82, sunI: 2.4, bounce: 0.5 };
+const HEMI_NIGHT = 0.12;
+// The fill's SKY colour follows the sky: clear blue by day, the lavender of
+// the sunset sky through the golden hour, moonlit blue at night. Its GROUND
+// colour is light thrown back up off the sunlit streets (BOUNCE below), warm
+// because paving and brick are, on top of a dim grey base for the night.
+const HEMI_SKY_DAY = new THREE.Color().setRGB(0.62, 0.78, 1.0);
+const HEMI_SKY_GOLD = new THREE.Color().setRGB(0.92, 0.70, 0.74);
+const HEMI_SKY_NIGHT = new THREE.Color().setRGB(0.45, 0.58, 0.98);
+const BOUNCE_TINT = new THREE.Color().setRGB(1.0, 0.86, 0.70);
+// BOUNCE (LIGHT.bounce): half of what a 19 % street really sends back up. The
+// full share lights the underside of everything as brightly as the sky does
+// its top, which is true and looks flat. Half keeps the shaded face of a
+// building warm and readable.
+// THE OLD RIG, for the A/B only (js/lookab.js light: false): the sun/fill pair,
+// the sun's colour and the sky before round 11, and the grey fill of updateSky.
+const OLD = {
+  hemiDay: 0.98, sunI: 1.8, sunDay: new THREE.Color(1.0, 0.97, 0.92),
+  day: { horizon: new THREE.Color(0xa4c8ea), zenith: new THREE.Color(0x3a7ac6) },
+  night: { horizon: new THREE.Color().setRGB(0.0125, 0.0135, 0.0205),
+           zenith: new THREE.Color().setRGB(0.0028, 0.0048, 0.0120) },
+};
+// AERIAL PERSPECTIVE (heightfog.js DEEP): thin haze takes the colour of the
+// sky about twelve degrees up, which on the dome's curve is AIR_UP of the way
+// from the horizon colour to the zenith, at AIR_K of full weight by day and
+// less at night, where the zenith is near black and leaning to it would only
+// darken the middle distance.
+const AIR_UP = 0.3, AIR_K = 0.6;
 // peak of the afterglow band, linear (see updateSky)
 const AFTERGLOW = 0.22;
 // ---- exposure: the eye adapts, so the camera does ----
@@ -404,8 +450,8 @@ export function makeSky(scene, renderer = null) {
   scene.add(dome);
   // hemisphere adapted to the city palette: cool daylight from the sky above,
   // asphalt-gray bounce from the streets below (the Woods used forest greens)
-  const hemi = new THREE.HemisphereLight(0xdfe7f0, 0x3a3d42, HEMI_DAY);
-  const sun = new THREE.DirectionalLight(0xfff2dd, 1.8);
+  const hemi = new THREE.HemisphereLight(0xdfe7f0, 0x3a3d42, LIGHT.hemiDay);
+  const sun = new THREE.DirectionalLight(0xfff2dd, LIGHT.sunI);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   // The ortho frustum is sized every frame in updateSky from the map size
@@ -422,15 +468,17 @@ export function makeSky(scene, renderer = null) {
     cloudAmt: 0.82,   // main may thin/hide the DOME's painted clouds (0 = clear);
                       // the 3D cluster field in clouds.js is separate from these
     time: 0, _last: 0, // internal cloud-drift clock (wall time, clamped)
-    sunColor: SUN_DAY.clone(), sunI: 1.8, moonK: 0, warm: 0, after: 0,
+    sunColor: SUN_DAY.clone(), sunI: LIGHT.sunI, moonK: 0, warm: 0, after: 0,
     lightDir: new THREE.Vector3(0.704, 0.557, 0.44),
     _held: new THREE.Vector3(), _half: 0,   // shadow rig state, see updateSky
     env: renderer ? new SkyEnv(renderer, scene, makeEnvDomeMaterial(dome.material)) : null,
     exposure: EXPOSURE_DAY, renderer,
+    light: LIGHT, ab: LOOK_AB,   // live knobs and the A/B switches, for the console
   };
 }
 
 const _horC = new THREE.Color(), _zenC = new THREE.Color(), _gndC = new THREE.Color();
+const _deepC = new THREE.Color();
 const _ld = new THREE.Vector3(), _rt = new THREE.Vector3(), _up = new THREE.Vector3();
 const _fw = new THREE.Vector3();
 // what an average street sends back up, for the lower half of the reflection
@@ -464,22 +512,23 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
   // the road), and an ambient bright enough to stand in for them is what once
   // made the lamps pointless. The old floor of 3.5 % was the other mistake:
   // with no pools and no moon it left a black screen.
-  hemi.intensity = HEMI_DAY + (HEMI_NIGHT - HEMI_DAY) * nightK;
-  hemi.color.setRGB(0.72 - 0.27 * nightK, 0.84 - 0.26 * nightK, 1.0 - 0.02 * nightK);
-  hemi.groundColor.setRGB(0.23 - 0.05 * nightK, 0.24 - 0.09 * nightK, 0.26 - 0.13 * nightK);
+  const ab = LOOK_AB.light;          // false: the old rig, see OLD
+  const hemiDay = ab ? LIGHT.hemiDay : OLD.hemiDay;
+  hemi.intensity = hemiDay + (HEMI_NIGHT - hemiDay) * nightK;
+  // (its colours are set below, once the sun and the golden hour are known)
 
   // ---- the sun, and who holds the light ----
   // the directional sun switches off as it crosses the horizon, fading over
   // the ~4° around it, like the disc sinking in: it must still rake warm light
   // down the streets AT sunset, not switch off a degree early
   const above = Math.max(0, Math.min(1, (sunElev + 2) / 4));
-  const sunI = 1.8 * (1 - 0.94 * nightK) * above;
+  const sunI = (ab ? LIGHT.sunI : OLD.sunI) * (1 - 0.94 * nightK) * above;
   // GOLDEN HOUR, driven purely by how low the sun hangs: neutral warm-white
   // high up, deepening through amber to sunset orange at the horizon. Not
   // gated by nightK: that would cancel the warmth exactly when the sun sits
   // lowest and the light would never actually go gold.
   const warm = smooth01((GOLDEN_TOP - sunElev) / GOLDEN_TOP);
-  sky.sunColor.copy(SUN_DAY).lerp(SUN_LOW, warm);
+  sky.sunColor.copy(ab ? SUN_DAY : OLD.sunDay).lerp(SUN_LOW, warm);
   sky.warm = warm;        // the grade in postfx.js follows the same curve
   sky.sunI = sunI;
   // The moon takes over once the sun is 3° under and is fully up by 13°. The
@@ -508,10 +557,24 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
   const after = AFTERGLOW * smooth01((3 - sunElev) / 7) * smooth01((sunElev + 17) / 11);
   sky.after = after;
 
+  // ---- the fill's colours (see HEMI_SKY_* and BOUNCE above) ----
+  if (ab) {
+    hemi.color.copy(HEMI_SKY_DAY).lerp(HEMI_SKY_GOLD, glowK * 0.55).lerp(HEMI_SKY_NIGHT, nightK);
+    // what the streets send back up, as a share of the fill's own intensity:
+    // the sun's light on the ground times half the street's albedo, plus a
+    // dim grey that is all that is left of it after dark
+    const bounce = LIGHT.bounce * GROUND_ALBEDO * sunI * Math.max(0, dir.y) / Math.max(0.05, hemi.intensity);
+    hemi.groundColor.setRGB(0.17 + BOUNCE_TINT.r * bounce, 0.16 + BOUNCE_TINT.g * bounce, 0.15 + BOUNCE_TINT.b * bounce);
+  } else {
+    hemi.color.setRGB(0.72 - 0.27 * nightK, 0.84 - 0.26 * nightK, 1.0 - 0.02 * nightK);
+    hemi.groundColor.setRGB(0.23 - 0.05 * nightK, 0.24 - 0.09 * nightK, 0.26 - 0.13 * nightK);
+  }
+
   // SUNSET first, then night, applied in that order so the gold gets
   // swallowed by the dark as dusk deepens.
-  _horC.copy(DAY_SKY.horizon).lerp(SUNSET_FOG, glowK * 0.75).lerp(NIGHT_SKY.horizon, nightK);
-  _zenC.copy(DAY_SKY.zenith).lerp(SUNSET_SKY, glowK * 0.62).lerp(NIGHT_SKY.zenith, nightK);
+  const daySky = ab ? DAY_SKY : OLD.day, nightSky = ab ? NIGHT_SKY : OLD.night;
+  _horC.copy(daySky.horizon).lerp(SUNSET_FOG, glowK * 0.75).lerp(nightSky.horizon, nightK);
+  _zenC.copy(daySky.zenith).lerp(SUNSET_SKY, glowK * 0.62).lerp(nightSky.zenith, nightK);
   if (!scene.fog) scene.fog = new THREE.Fog(0, 600, FOG_DAY_FAR);
   // The stock uniform is still fed: a material that never heard of
   // heightfog.js falls back to it, and main.js reads it for the apron.
@@ -533,7 +596,10 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
     scene.fog.near = scene.fog.far * FOG_WALL_START;
   }
   const uDay = 1 - nightK * 0.92;   // sun + bright clouds fade out at night
-  setAirFog(_horC, dir, sky.sunColor, uDay, scene.fog.far ?? FOG_DAY_FAR, groundY, after, sky.fogVis ?? scene.fog.far ?? FOG_DAY_FAR);
+  _deepC.copy(_horC).lerp(_zenC, AIR_UP);
+  const deepK = LOOK_AB.air ? AIR_K * (1 - 0.6 * nightK) : 0;
+  setAirFog(_horC, dir, sky.sunColor, uDay, scene.fog.far ?? FOG_DAY_FAR, groundY, after,
+    sky.fogVis ?? scene.fog.far ?? FOG_DAY_FAR, _deepC, deepK);
   // background still matters behind the dome: postfx passes and clears see it,
   // and if main ever hides the dome the scene collapses to a sane flat sky
   if (!scene.background?.isColor) scene.background = new THREE.Color();

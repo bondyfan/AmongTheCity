@@ -52,6 +52,14 @@ const AIR = new Float32Array([0, 0, 3.4, 0]);
 // w: the afterglow, 0..1 (sky.js): the band the dome paints along the horizon
 // where the sun went down, so the haze on that side glows with it.
 const COL = new Float32Array([0.35, 0.5, 0.65, 0]);
+// AERIAL PERSPECTIVE (round 11, LOOK). rgb: the colour THIN haze takes, the
+// sky a little above the horizon rather than the pale horizon itself; w: how
+// much of it (0 = the old single colour). A building 200 m down the street is
+// seen through a little air and goes a little BLUE; only the last stretch to
+// the wall turns the pale horizon colour. That is what distance looks like on
+// a clear day, and it is what lets the eye read depth along a street that the
+// old one-colour haze greyed evenly.
+const DEEP = new Float32Array([0.3, 0.45, 0.7, 0]);
 // THE FAR HAND-OVER (Prague only, js/landmarksfar.js drives it). Beyond the
 // streamed ring the far skyline draws coarse ground under the castle hill and
 // the Vyšehrad rock, dithered in over 0.70 to 0.90 of the built radius. The
@@ -132,6 +140,7 @@ C.fog_pars_fragment = /* glsl */`
 	uniform vec4 atcFogTint;
 	uniform vec4 atcFogAir;
 	uniform vec4 atcFogCol;
+	uniform vec4 atcFogDeep;
 	uniform vec4 atcHand;
 	uniform vec4 atcHandA;
 	uniform vec4 atcHandB;
@@ -187,16 +196,21 @@ C.fog_pars_fragment = /* glsl */`
 	// horizon colour plus the same sun glow the dome paints (sky.js SKY_FRAG),
 	// so a building that fades out fades into exactly what is behind it
 	` + AFTERGLOW_GLSL + /* glsl */`
-	vec3 atcFogColour() {
+	// fa: the fog amount of this fragment; thin haze leans to the deeper colour
+	vec3 atcFogColour( float fa ) {
 		vec3 rd = normalize( vAtcRay );
 		float sd = max( dot( rd, atcFogSun.xyz ), 0.0 );
-		vec3 c = atcFogCol.rgb
+		vec3 base = mix( atcFogDeep.rgb, atcFogCol.rgb, 1.0 - atcFogDeep.w * ( 1.0 - smoothstep( 0.0, 0.65, fa ) ) );
+		vec3 c = base
 			+ atcFogTint.rgb * ( ( pow( sd, 80.0 ) * 0.6 + pow( sd, 7.0 ) * 0.25 ) * atcFogSun.w );
 		// half of what the dome shows: the far ground under the band takes its
 		// colour without becoming a second sky
 		if ( atcFogCol.a > 0.001 ) c += atcAfterglow( rd, atcFogSun.xyz ) * ( atcFogCol.a * 0.5 );
 		return c;
 	}
+	// the colour of THICK haze, for a caller that mixes by an amount of its own
+	// (js/landmarksmat.js does): the horizon colour, as it always was
+	vec3 atcFogColour() { return atcFogColour( 1.0 ); }
 #endif`;
 
 // ---- the look: what the tone curve leaves undone ----
@@ -209,11 +223,24 @@ C.fog_pars_fragment = /* glsl */`
 // the curve takes out of clean colours, so a lawn is green and a tiled roof
 // red. One function for both render paths: three's own ACES is patched to end
 // with it (below), and postfx.js ends its copy of the curve with the same text.
-export const lookGLSL = (name) => /* glsl */`
+// (Round 11, LOOK) Then a gentle S through the middle of the range: a cubic on
+// sqrt(c), roughly how bright a value LOOKS, that holds black, a mid-grey and
+// white where they are and steepens the stretch between shade and sunlight by
+// a ninth. The open toe stays (shade keeps its detail); what was missing was
+// separation in the middle, where facades, paving and trees all sit, and
+// where the old curve laid everything within a few percent of everything
+// else. LOOK.contrast 0 is the old curve exactly. `k` is the GLSL expression
+// for the amount: the constant by default, baked when the program compiles;
+// postfx.js hands a uniform instead, so its A/B switch needs no recompile.
+export const LOOK = { contrast: 0.22 };
+export const lookGLSL = (name, k = LOOK.contrast.toFixed(3)) => /* glsl */`
 	vec3 ${name}( vec3 c ) {
 		vec3 t = 1.0 - c;
 		t *= t; t *= t; t *= t * sqrt( t );
 		c += c * t * 1.10;
+		vec3 y = sqrt( max( c, 0.0 ) );
+		y += ( ${k} ) * y * ( 1.0 - y ) * ( 2.0 * y - 1.0 );
+		c = y * y;
 		float l = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 		return clamp( mix( vec3( l ), c, 1.14 ), 0.0, 1.0 );
 	}`;
@@ -233,7 +260,8 @@ C.tonemapping_fragment = /* glsl */`
 	#define ATC_FOG_DONE
 	if ( atcFogAir.w > 0.5 ) {
 		if ( atcHandOut() ) discard;
-		gl_FragColor.rgb = mix( gl_FragColor.rgb, atcFogColour(), atcFogAmount() );
+		float atcFa = atcFogAmount();
+		gl_FragColor.rgb = mix( gl_FragColor.rgb, atcFogColour( atcFa ), atcFa );
 	}
 #endif
 ` + C.tonemapping_fragment;
@@ -254,7 +282,8 @@ C.fog_fragment = /* glsl */`
 	#ifndef ATC_FOG_DONE
 	else {
 		if ( atcHandOut() ) discard;
-		gl_FragColor.rgb = mix( gl_FragColor.rgb, atcFogColour(), atcFogAmount() );
+		float atcFa = atcFogAmount();
+		gl_FragColor.rgb = mix( gl_FragColor.rgb, atcFogColour( atcFa ), atcFa );
 	}
 	#endif
 #endif`;
@@ -264,7 +293,7 @@ C.fog_fragment = /* glsl */`
 // patched too, for a ShaderMaterial that merges it later (the water does).
 const shared = () => ({
   atcFogSun: { value: SUN }, atcFogTint: { value: TINT },
-  atcFogAir: { value: AIR }, atcFogCol: { value: COL },
+  atcFogAir: { value: AIR }, atcFogCol: { value: COL }, atcFogDeep: { value: DEEP },
   atcHand: { value: HAND }, atcHandA: { value: HAND_A }, atcHandB: { value: HAND_B },
   atcEdge: { value: EDGE },
 });
@@ -284,9 +313,13 @@ for (const k of Object.keys(THREE.ShaderLib)) {
  *   baseY    height of the ground under the camera, metres
  *   vis      the distance the HAZE is scaled to (round 8): the wall's far
  *            distance unless the view is open, see sky.js
+ *   deep     THREE.Color, linear: the colour thin haze takes (see DEEP)
+ *   deepK    how much of it, 0..1
  */
-export function setAirFog(colour, sunDir, sunColor, glow, far, baseY, after = 0, vis = far) {
+export function setAirFog(colour, sunDir, sunColor, glow, far, baseY, after = 0, vis = far, deep = null, deepK = 0) {
   COL[0] = colour.r; COL[1] = colour.g; COL[2] = colour.b; COL[3] = after;
+  if (deep) { DEEP[0] = deep.r; DEEP[1] = deep.g; DEEP[2] = deep.b; }
+  DEEP[3] = deep ? deepK : 0;
   SUN[0] = sunDir.x; SUN[1] = sunDir.y; SUN[2] = sunDir.z; SUN[3] = glow;
   TINT[0] = sunColor.r; TINT[1] = sunColor.g; TINT[2] = sunColor.b; TINT[3] = 1 / SCALE_H;
   AIR[0] = HAZE.k / Math.max(50, vis);

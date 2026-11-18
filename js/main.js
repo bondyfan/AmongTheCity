@@ -42,6 +42,7 @@ import { toast as policeToast } from './toasts.js';
 import { Ambulance } from './ambulance.js';
 import { ChatBubbles } from './chatbubbles.js';
 import { PostFX, gradeFor } from './postfx.js';
+import { LOOK_AB } from './lookab.js';
 import { setCoverage } from './coverage.js';
 import { shadowDue } from './shadowpace.js';
 import { LightPools, nightBeams, nightLevels } from './lightpools.js';
@@ -3117,7 +3118,10 @@ function tick(src) {
     // the radius round the camera inside which everyone still casts
     if (renderer.shadowMap.needsUpdate) cullPeopleShadows(camera, gs.shadowRes >= 4096 ? 60 : 45);
     if (wantPost && postfx) {
-      postfx.setSize(renderer.domElement.width, renderer.domElement.height);
+      // the A/B (js/lookab.js): the old post stack draws the frame instead
+      // while it is switched in, with the same options
+      const pf = !LOOK_AB.post && LOOK_AB.legacy ? LOOK_AB.legacy : postfx;
+      pf.setSize(renderer.domElement.width, renderer.domElement.height);
       let rays = null;
       if (gs.rays !== false && sky?.sunDir) {
         // sky.sunI, not sky.sun.intensity: after dark that one light is the
@@ -3127,12 +3131,20 @@ function tick(src) {
         // edge of the frame and full strength laid a milky sheet over every
         // tree crown under it, so the high sun gets a third and the golden
         // hour (sky.warm, 0 at noon and 1 on the horizon) gets all of it.
-        const low = 0.32 + 0.68 * (sky.warm ?? 0);
-        if (dayK > 0.02) rays = { dir: sky.sunDir, color: sky.sunColor, strength: dayK * 0.7 * low };
+        // Above the golden hour (sky.warm under 0.06, the sun higher than about
+        // 25 degrees) the shafts are worth nothing and the pass is skipped:
+        // strength 0 still hands postfx the sun's direction, so the lens flare
+        // keeps tracking it. `full` is the strength without that gate: the
+        // old stack (dev/postfx-legacy.js) draws with it, as it always did.
+        const warm = sky.warm ?? 0;
+        const low = 0.32 + 0.68 * warm;
+        const gate = Math.min(1, Math.max(0, (warm - 0.06) / 0.14));
+        const full = dayK * 0.7 * low;
+        if (dayK > 0.02) rays = { dir: sky.sunDir, color: sky.sunColor, strength: full * gate, full };
       }
       // SSAO was fully built, plumbed through the composite — and hard-coded
       // OFF at this one call site, which is why "ambient occlusion nefunguje".
-      postfx.render(scene, camera, { ssao: gs.ao !== false, bloom: gs.bloom !== false, rays, canopy: trees?.shade() ?? null,
+      pf.render(scene, camera, { ssao: gs.ao !== false, bloom: gs.bloom !== false, rays, canopy: trees?.shade() ?? null,
         lamps: lightPools,   // street light: baked to a map, applied in the composite (js/lampmap.js)
         // The composite does `ao = max(mix(1, ao, aoStrength), aoFloor)`, so
         // aoStrength IS the deepest darkening the effect can ever reach: at
