@@ -26,15 +26,15 @@ const PRESETS = {
   low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 60,
             ortho: false, facades: false, trees: true, grass: false, peds: 12, bloom: false, rays: false,
             ao: false, interiors: false, buildingR: 80, mblur: false, flare: false,
-            tramMasts: false, cloudDist: 'medium' },
+            tramMasts: false, cloudDist: 'medium', facadeFx: false },
   medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 240,
             ortho: true,  facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
             ao: true,  interiors: true, buildingR: 160, mblur: true, flare: true,
-            tramMasts: true, cloudDist: 'medium' },
+            tramMasts: true, cloudDist: 'medium', facadeFx: true },
   high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
             ortho: true,  facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
             ao: true,  interiors: true, buildingR: 280, mblur: true, flare: true,
-            tramMasts: true, cloudDist: 'far' },
+            tramMasts: true, cloudDist: 'far', facadeFx: true },
 };
 const GFX_KEYS = Object.keys(PRESETS.medium);
 
@@ -315,6 +315,9 @@ export function initSettings(apply) {
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
     toggleRow('grass', 'Tráva (3D stébla)'),
     toggleRow('ao', 'Ambient occlusion (stíny v koutech)'),
+    // window reveals, ledge shadows, grime and sky in the glass on every wall
+    // (js/facadefx.js): no draw call, only pixel shading, so off on Low
+    toggleRow('facadeFx', 'Hloubka oken a patina fasád'),
     toggleRow('bloom', 'Bloom (záře světel)'),
     toggleRow('rays', 'Sluneční paprsky'),
     toggleRow('mblur', 'Motion blur (rozmaz při rychlosti)'),

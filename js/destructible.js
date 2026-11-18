@@ -34,6 +34,7 @@ import { DESTRUCTION, INTERIOR } from './config.js';
 import { interiorPieces, interiorPiecesGen, shellPieces } from './pieces.js';
 import { sfxAt } from './audio.js';   // safe headless — no-ops without an AudioContext
 import { NIGHT, PANE_GLOW_GLSL } from './facadeatlas.js';   // the one uniform every lit window reads, and a lit shop front
+import { fxUniforms, FX_PARS, FX_LIGHT, FX_MAP_FRAGMENT, facadeFxApi } from './facadefx.js';   // depth, weather and glass, both tiers
 
 // One material for every model's roof: the geometry carries its own colours, so
 // the only thing that varies between buildings is already in the vertices.
@@ -80,19 +81,43 @@ function unitBox() {
 // after I shoot it": with it, the boxes are painted from the same atlas cells
 // the facade was, so the swap is a change of REPRESENTATION, not of appearance.
 let _shellMat = null;
+// The same batch also carries the building's SOLID pieces (balconies, rails,
+// mullions and, once the rooms exist, every floor tile, partition and chair):
+// an instance whose rect is negative (BOUNCE_RECT) samples the plain plaster
+// texel on every face and adds the interior bounce light the solid material
+// had. That was a second InstancedMesh per building in the main pass AND in
+// the shadow pass, drawn for nothing but a different material constant.
+const BOUNCE_RECT = -1;
+// the plain plaster texel (#edebe4 in linear light), divided back out of a
+// bounce instance's colour so it keeps the colour the solid material gave it
+const PIN_INV = [1 / 0.8469, 1 / 0.8308, 1 / 0.7758];
 function shellMat(atlas, pinU, pinV) {
   if (_shellMat) return _shellMat;
   const m = new THREE.MeshLambertMaterial({ vertexColors: true, map: atlas });
+  const bounce = new THREE.Color(0x24262b);      // the solid material's emissive, linear
   m.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec4 aUvRect;')
+      .replace('#include <common>', '#include <common>\nattribute vec4 aUvRect;\nvarying float vBounce;')
       .replace('#include <uv_vertex>', `
+        vBounce = step(aUvRect.x, ${(BOUNCE_RECT / 2).toFixed(1)});
         vec2 _fuv = vec2(${pinU.toFixed(6)}, ${pinV.toFixed(6)});
-        if (abs(normal.z) > 0.5) _fuv = aUvRect.xy + uv * (aUvRect.zw - aUvRect.xy);
+        if (abs(normal.z) > 0.5 && vBounce < 0.5) _fuv = aUvRect.xy + uv * (aUvRect.zw - aUvRect.xy);
         vMapUv = _fuv;
       `);
+    // The far wall's depth, weather and glass (js/facadefx.js) on the same
+    // atlas address at the same world point, so the grime does not move at
+    // the swap. A real opening here never samples an opening rect; a solid
+    // door or blank bay does, and gets the painted depth the far wall had.
+    Object.assign(shader.uniforms, fxUniforms());
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vBounce;')
+      .replace('#include <lights_lambert_pars_fragment>', '#include <lights_lambert_pars_fragment>' + FX_PARS)
+      .replace('#include <map_fragment>', 'fxSkip = vBounce;\n' + FX_MAP_FRAGMENT)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        totalEmissiveRadiance += vec3(${bounce.r.toFixed(5)}, ${bounce.g.toFixed(5)}, ${bounce.b.toFixed(5)}) * vBounce;`)
+      .replace('#include <aomap_fragment>', FX_LIGHT + '#include <aomap_fragment>');
   };
-  m.customProgramCacheKey = () => 'atc-shell';
+  m.customProgramCacheKey = () => 'atc-shell-fx2';
   return (_shellMat = m);
 }
 
@@ -224,6 +249,7 @@ function mats() {
     // pane also goes nearly opaque: you see the lamp, not the room behind it.
     _glassMat.onBeforeCompile = (sh) => {
       sh.uniforms.uNight = NIGHT;
+      Object.assign(sh.uniforms, fxUniforms());
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>',
           '#include <common>\nattribute vec4 aLit;\nvarying vec4 vLit;\nvarying vec2 vPane;')
@@ -231,6 +257,7 @@ function mats() {
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>',
           '#include <common>\nuniform vec2 uNight;\nvarying vec4 vLit;\nvarying vec2 vPane;' + PANE_GLOW_GLSL)
+        .replace('#include <lights_lambert_pars_fragment>', '#include <lights_lambert_pars_fragment>' + FX_PARS)
         .replace('#include <color_fragment>', `#include <color_fragment>
           // aLit.a is the switch-on rank; +8 marks a pane with no glazing bars
           // (a shop window, a curtain-wall band)
@@ -259,9 +286,18 @@ function mats() {
           // (a pane without bars is a shop front: a room seen through glass,
           // not a card, see facadeatlas.js PANE_GLOW_GLSL)
           totalEmissiveRadiance += vLit.rgb * (litOn * uNight.y * (1.0 - 0.8 * bars))
-            * atcPaneGlow(vPane, -vViewPosition, plain * litOn, room);`);
+            * atcPaneGlow(vPane, -vViewPosition, plain * litOn, room);
+          // The sky in the pane, as the far wall's painted glass reflects it
+          // (js/facadefx.js), so a window keeps its sheen across the swap. The
+          // blend scales what a pane returns by its alpha; a reflection does
+          // not care how clear the glass is, so that is divided back out.
+          {
+            vec3 gWp = cameraPosition + (-vViewPosition) * mat3(viewMatrix);
+            totalEmissiveRadiance += fxReflect(normal, normalize(vViewPosition), gWp, normal * mat3(viewMatrix))
+              * uFx.z * (1.0 - bars) * (1.0 - 0.7 * litOn * min(1.0, uNight.y)) / max(diffuseColor.a, 0.4);
+          }`);
     };
-    _glassMat.customProgramCacheKey = () => 'atc-glass-lit-2';
+    _glassMat.customProgramCacheKey = () => 'atc-glass-lit-3';
   }
   return [_solidMat, _glassMat];
 }
@@ -452,6 +488,24 @@ export class Dust {
 }
 
 // ---- the model -----------------------------------------------------------
+// The near shell's two draw-call savings, as switches for an A/B from the
+// console (window.__atcFacade, js/facadefx.js): `merge` puts the solid pieces
+// in the atlas batch (BOUNCE_RECT, see shellMat), `cull` lets three cull a
+// model's meshes against its bounding sphere (see _install). Both are on; the
+// switches exist to measure them, not to be turned off.
+const SHELL = { cull: true, merge: true };
+const _models = new Set();               // every live model, for the switches
+facadeFxApi.cull = (on = true) => {
+  SHELL.cull = !!on;
+  for (const m of _models) for (const mesh of m._meshes()) mesh.frustumCulled = SHELL.cull;
+  return SHELL.cull;
+};
+facadeFxApi.merge = (on = true) => {
+  SHELL.merge = !!on;
+  for (const m of _models) if (m.pieces.length) m._rebuildMeshes();
+  return SHELL.merge;
+};
+
 // The fields one set of a model's meshes lives in (see BuildingModel._meshSet).
 const MESH_FIELDS = ['_solid', '_glass', '_lit', '_sign', '_words', '_wordIdx', '_wCursor',
   '_shell', '_uvRect'];
@@ -506,6 +560,7 @@ export class BuildingModel {
     this.group = new THREE.Group();
     this.group.matrixAutoUpdate = false;
     scene.add(this.group);
+    _models.add(this);
     if (!opts?.shellOnly) this.ensureInterior();
   }
 
@@ -635,6 +690,7 @@ export class BuildingModel {
         if (!e) wq.set(k, e = { text: p.signText, bg: p.signBg, fg: p.signFg, n: 0 });
         e.n++;
       } else if (p.kind === 'sign') nB++;
+      else if (pinOK && SHELL.merge) nF++;   // rides in the atlas batch (BOUNCE_RECT)
       else nS++;
     }
     const [solidMat, glassMat] = mats();
@@ -678,11 +734,46 @@ export class BuildingModel {
   _install(S) {
     disposeSet(this);
     for (const k of MESH_FIELDS) this[k] = S[k];
+    // Every mesh here was drawn every frame, behind the camera too, in the
+    // main pass and in the shadow pass (frustumCulled = false: the instances
+    // live in world space and three's own bound would be computed once and go
+    // stale). The building cannot grow past what its pieces span, and pieces
+    // only ever leave (to the debris pool, which is its own mesh), so ONE
+    // sphere over every piece it was ever given stays true for its life, and
+    // three can cull against it in both passes.
+    this._bound();
+    for (const m of this._meshes()) {
+      m.boundingSphere = this._sphere;
+      m.frustumCulled = SHELL.cull;
+    }
     if (this._solid) this.group.add(this._solid);
     if (this._shell) this.group.add(this._shell);
     if (this._sign) this.group.add(this._sign);
     if (this._words) for (const m of this._words) this.group.add(m);
     if (this._glass) this.group.add(this._glass);
+  }
+
+  /** The instanced meshes of the installed set (not the roof, which culls itself). */
+  _meshes() {
+    const out = [];
+    for (const m of [this._solid, this._glass, this._shell, this._sign, ...(this._words ?? [])]) if (m) out.push(m);
+    return out;
+  }
+
+  /** One world sphere around every piece this model holds (see _install). */
+  _bound() {
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (const p of this.pieces) {
+      if (p.ax === undefined) continue;
+      if (p.x - p.ax < x0) x0 = p.x - p.ax; if (p.x + p.ax > x1) x1 = p.x + p.ax;
+      if (p.z - p.az < z0) z0 = p.z - p.az; if (p.z + p.az > z1) z1 = p.z + p.az;
+      if (p.bot < y0) y0 = p.bot; if (p.top > y1) y1 = p.top;
+    }
+    const S = (this._sphere ??= new THREE.Sphere());
+    if (x0 > x1) { S.center.set(0, 0, 0); S.radius = 1e9; return; }   // nothing yet: never cull
+    S.center.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+    // a margin for the pitched roof's eaves and a falling piece's first frame
+    S.radius = 0.5 * Math.hypot(x1 - x0, y1 - y0, z1 - z0) + 2;
   }
 
   // Write the survivors into the instance buffers. Called after every change,
@@ -737,6 +828,11 @@ export class BuildingModel {
     } else if (S._solid) {
       const i = cur.iS++;
       S._solid.setMatrixAt(i, _m4); S._solid.setColorAt(i, _c);
+    } else if (S._shell) {
+      const i = cur.iF++;
+      _c.r *= PIN_INV[0]; _c.g *= PIN_INV[1]; _c.b *= PIN_INV[2];
+      S._shell.setMatrixAt(i, _m4); S._shell.setColorAt(i, _c);
+      S._uvRect.setXYZW(i, BOUNCE_RECT, BOUNCE_RECT, BOUNCE_RECT, BOUNCE_RECT);
     }
   }
 
@@ -776,7 +872,7 @@ export class BuildingModel {
     const mat = this.plan.facades !== false && geo.attributes.uv && this.plan.cells?.roofMat;
     this._roof = new THREE.Mesh(geo, mat || roofMaterial());
     this._roof.castShadow = this._roof.receiveShadow = true;
-    this._roof.frustumCulled = false;
+    // (built in world space under an identity group: its own bound is true)
     this.group.add(this._roof);
   }
 
@@ -1177,6 +1273,7 @@ export class BuildingModel {
   }
 
   dispose() {
+    _models.delete(this);
     this.dropRoof();
     this.scene.remove(this.group);
     disposeSet(this);
