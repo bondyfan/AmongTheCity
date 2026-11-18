@@ -46,6 +46,7 @@ import { INTERIOR, ROOF_DARKEN, WALL_AO } from './config.js';
 import { planToWorld } from './interiors.js';
 import { rowFor, edgeRoles, litPane, NOVA_RAIL, signBand, signOverGround, hasParapet,
   cellRect, trimRect, TRIM_BANDS, BAYS } from './typology.js';
+import { glassDepth } from './typologycells.js';
 
 // The facade's own wall colour for this building, stamped onto the plan by
 // interiorsim before anything is built. It comes from meshes.js (which owns the
@@ -441,6 +442,12 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
       if (leaf === 'ext') {
         const yTw = base + wallH;
         const row = rowFor(rows, fi, plan.storeys, roles[ei]);
+        // where a pane of half thickness `hz` sits: its outer face the row's
+        // glass depth behind the face of the wall (typologycells.GLASS_DEPTH),
+        // the depth the far facade traces its painted opening to, so a window
+        // neither sinks nor jumps forward when the boxes take over. Measured
+        // from the wall's centre line, which is where px/pz stand.
+        const paneOff = (hz, r = null) => glassDepth(rows, r) + hz - thick / 2;
         // stamp a pane with the light the far tier gives this very bay
         // (`plain`: a shop window or a curtain-wall band carries no glazing bars)
         const pane = (p, store, plain = store) => {
@@ -525,8 +532,8 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
             flat(gT, yTw, 0, 1, col, kA * 0.94, kA * 1.02);     // floor strip
             flat(gB, gT, 0, 0.045, FRAME_C, 0.96, 1.0);         // band joint
             if (i === n - 1) flat(gB, gT, 0.955, 1, FRAME_C, 0.96, 1.0);
-            pane(push(out, px + inx * thick * 0.22, (gB + gT) / 2,
-              pz + inz * thick * 0.22, pw / 2 - 0.09, (gT - gB) / 2, 0.028,
+            pane(push(out, px + inx * paneOff(0.028), (gB + gT) / 2,
+              pz + inz * paneOff(0.028), pw / 2 - 0.09, (gT - gB) / 2, 0.028,
               yaw, GLASS_C, 'glass', true, 0.9, 1.05), false, true);
           } else {
             const wy0 = base + wallH * 0.20, wy1 = base + wallH * 0.84;
@@ -535,8 +542,8 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
             flat(wy1, yTw, 0, 1, col, kA * 0.94, kA * 1.02);
             flat(wy0, wy1, 0, gj, FRAME_C, 0.94, 1.0);          // dark frame
             flat(wy0, wy1, 1 - gj, 1, FRAME_C, 0.94, 1.0);
-            pane(push(out, px + inx * thick * 0.22, (wy0 + wy1) / 2,
-              pz + inz * thick * 0.22, gFrac * pw / 2 - 0.02, (wy1 - wy0) / 2,
+            pane(push(out, px + inx * paneOff(0.028), (wy0 + wy1) / 2,
+              pz + inz * paneOff(0.028), gFrac * pw / 2 - 0.02, (wy1 - wy0) / 2,
               0.028, yaw, GLASS_C, 'glass', true, 0.9, 1.05), false, true);
           }
           continue;
@@ -563,8 +570,8 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
           flat(wy1, yTw, 0, 1, col, kA * 0.96, kA * 1.04);
           flat(wy0, wy1, 0, gj, col, kA * 0.9, kA * 0.97);
           flat(wy0, wy1, 1 - gj, 1, col, kA * 0.9, kA * 0.97);
-          pane(push(out, px + inx * thick * 0.22, (wy0 + wy1) / 2,
-            pz + inz * thick * 0.22, gFrac * pw / 2 - 0.05, (wy1 - wy0) / 2,
+          pane(push(out, px + inx * paneOff(0.028), (wy0 + wy1) / 2,
+            pz + inz * paneOff(0.028), gFrac * pw / 2 - 0.05, (wy1 - wy0) / 2,
             0.028, yaw, GLASS_C, 'glass', true, 0.9, 1.05), false);
           // the French balcony: a flush dark rail across the pane's lower half
           // — floor-to-ceiling glass on an upper storey NEEDS one to read as a
@@ -647,7 +654,7 @@ function* emitPerimeterGen(out, plan, fi, leaf) {
         // the pane: thin, set into the reveal, and see-through in both
         // directions — this is what lets you look into a lit room from the
         // street without anybody having to fire a rocket at it first
-        const gx = px + inx * thick * 0.22, gz = pz + inz * thick * 0.22;
+        const gx = px + inx * paneOff(0.025, row), gz = pz + inz * paneOff(0.025, row);
         pane(push(out, gx, (wy0 + wy1) / 2, gz, frac * pw / 2, (wy1 - wy0) / 2, 0.025,
           yaw, 0x9fb4c4, 'glass', true, 0.9, 1.05), storefront);
         continue;

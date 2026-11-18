@@ -8,10 +8,12 @@
 //                     lamp behind would shine through, 0 on plaster and frames.
 //   litTexture()      256 x 256, one texel per window bay, the colour of the
 //                     light in that room (typology.litTexel, a pure function).
-//   buildFacadeMaterial()  the Lambert wall material with two additions: roof
+//   buildFacadeMaterial()  the Lambert wall material with three additions: roof
 //                     triangles are tiled in METRES from their own position
 //                     (an atlas cell cannot wrap, a 30 m roof has to) out of
-//                     the roof atlas (js/roofatlas.js), and
+//                     the roof atlas (js/roofatlas.js), a wall is followed
+//                     into its painted openings and weathered (js/facadefx.js:
+//                     window depth, ledge shadows, grime, sky in the glass), and
 //                     emissive = lit colour x window mask x the night.
 //
 // The night itself is ONE shared uniform, NIGHT, set by facadeNight(k) from
@@ -26,6 +28,7 @@ import * as THREE from 'three';
 import { ATLAS_N, ATLAS_M, ATLAS_PX, BAYS, CELL_LIST, FAMILIES, ROOF_ROWS, TRIM_CELL,
   PANEL_BALC, NOVA_RAIL, HOUSE_BLANK, LIT_N, litTexel, rnd } from './typology.js';
 import { roofAtlas, ROOF_GRID, ROOF_CELL, ROOF_PX, ROOF_GUT } from './roofatlas.js';
+import { fxUniforms, FX_PARS, FX_MAP, FX_LIGHT, syncFacadeFx } from './facadefx.js';
 
 const CW = ATLAS_PX / ATLAS_N, CH = ATLAS_PX / ATLAS_M, BAY = CW / BAYS;
 
@@ -44,6 +47,7 @@ const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
 /** Drive every lit window in the city. `k` is sky.nightK, 0 by day, 1 at night. */
 export function facadeNight(k) {
   NIGHT.value.set(ss(0.12, 0.8, k), (0.95 - 0.43 * k) * ss(0.05, 0.4, k));
+  syncFacadeFx();      // the same once-a-frame call carries the depth/weather switch
 }
 
 // ---- a lit shop front, seen from the street --------------------------------
@@ -797,6 +801,7 @@ export function buildFacadeMaterial() {
     sh.uniforms.uRoof = { value: roof.tex };
     sh.uniforms.uRoofAvg = { value: roof.avg };
     sh.uniforms.uRoofM = { value: roof.metres };
+    Object.assign(sh.uniforms, fxUniforms());
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
         #ifndef USE_UV1
@@ -847,8 +852,12 @@ export function buildFacadeMaterial() {
           return mix(mix(roofHash(i), roofHash(i + vec2(1.0, 0.0)), w.x),
             mix(roofHash(i + vec2(0.0, 1.0)), roofHash(i + vec2(1.0, 1.0)), w.x), w.y);
         }`)
+      .replace('#include <lights_lambert_pars_fragment>', '#include <lights_lambert_pars_fragment>' + FX_PARS)
+      .replace('#include <aomap_fragment>', FX_LIGHT + '#include <aomap_fragment>')
       .replace('#include <map_fragment>', `
         float winMask = 0.0;
+        vec3 fxDPx = -dFdx(vViewPosition), fxDPy = -dFdy(vViewPosition);
+        vec2 fxDUx = dFdx(vMapUv), fxDUy = dFdy(vMapUv);
         {
           float rcol = floor(vMapUv.x * ${f(ATLAS_N)});
           vec4 tx;
@@ -876,8 +885,10 @@ export function buildFacadeMaterial() {
             tx.rgb *= 0.925 + 0.11 * roofWeather(vRoofP.xz * 0.17 + vRoofP.y * 0.13)
               + 0.04 * roofWeather(vRoofP.zx * 0.61);
           } else {
-            tx = texture2D(map, vMapUv);
-            winMask = tx.a;
+            // a wall: followed into its window openings (js/facadefx.js)
+            ${FX_MAP}
+            tx = fxTex;
+            winMask = tx.a * step(fxKind, 0.5);
           }
           diffuseColor.rgb *= tx.rgb;
         }`)
@@ -887,6 +898,6 @@ export function buildFacadeMaterial() {
           totalEmissiveRadiance += lt.rgb * (winMask * step(lt.a, uNight.x) * uNight.y);
         }`);
   };
-  mat.customProgramCacheKey = () => 'atc-facade-v4';
+  mat.customProgramCacheKey = () => 'atc-facade-v5';
   return (_mat = mat);
 }

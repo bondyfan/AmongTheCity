@@ -1767,3 +1767,38 @@ SERVER_URL, `GET /health` (the menu, `js/menuhealth.js`) and the WebSocket at
   because a Workers socket cannot be terminated and a peer that ignores the
   close keeps it open. Details, numbers, what no cap can stop, and the
   deploy commands: `server-city/README.md`.
+
+---
+
+## Facade depth, weather and glass; a cheaper near shell (gfx/facades, Nov 2026)
+* **js/facadefx.js** (main thread only) is pixel shading shared by the far
+  chunk wall (`facadeatlas.buildFacadeMaterial`), the near shell's atlas boxes
+  (`destructible.shellMat`) and the near glass (`destructible.mats`). No draw
+  call, no vertex, no attribute: the atlas uv IS the cell address, and a
+  64 x 2 float table (`cellTable`, from typology's FAMILIES) says where each
+  cell's window is. The metres come from screen derivatives, so worker-built
+  chunks need nothing new.
+  * window depth: the ray through a painted opening is followed to the glass
+    `GLASS_DEPTH[family]` (typologycells.js) metres in, or to a jamb, head or
+    sill; the glass is sampled where the ray lands (parallax), the reveal in
+    the wall's paint, and the sun is traced back out (head and jamb shadows).
+    A lit window does not light its own reveal.
+  * ledges: string courses, cornices and sills throw a sun-length shadow.
+  * weather: mottle, rain streaks, sill run-off, rising damp, cornice soot,
+    all hashed from world position (both tiers and both clients agree); the
+    fine terms fade with the pixel footprint.
+  * glass: darkened, sky reflection with Fresnel from the hemisphere light's
+    own colours (follows the time of day), a skyline of the street opposite.
+* The near pane now sits at the same `GLASS_DEPTH` (pieces.js `paneOff`), so
+  the window does not jump at the 160 m swap.
+* Gate: `facadeFx` in settings.js (off on Low, on Medium/High), applied once a
+  frame through `facadeNight -> syncFacadeFx`. Console A/B: `__atcFacade.fx(false)`,
+  `__atcFacade.fx(depth, weather, glass)`, `__atcFacade.fx()` back to the preset.
+* Near shell savings (destructible.js): the solid pieces (balconies, rails,
+  mullions, every interior box) ride in the atlas InstancedMesh as BOUNCE_RECT
+  instances (pin texel, the old bounce emissive, no weather) instead of a
+  second opaque InstancedMesh per building, in the main AND the shadow pass;
+  and every model mesh culls against one sphere over all its pieces (pieces
+  never move inside a model, they only leave to the debris pool). Console:
+  `__atcFacade.merge(false)`, `__atcFacade.cull(false)` for the draw counts.
+* Tests: tests/facadefx.test.mjs.

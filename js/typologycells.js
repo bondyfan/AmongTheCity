@@ -118,3 +118,15 @@ export const NOVA_RAIL = [1, 0, 1, 1];
 // A family house has fewer windows than it has 2.7 m bays: one bay in four is
 // blank wall, a different one per variant. Painter and shell both read this.
 export const HOUSE_BLANK = [[0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1], [1, 0, 0, 0]];
+
+// How deep the glass sits behind the face of the wall, by family (metres). A
+// tenement's masonry is half a metre thick and its windows sit deep; a panel
+// block's sandwich panel is thinner; a curtain wall is nearly flush and a shop
+// window nearly so. The far facade shader (facadefx.js) traces its painted
+// openings to this depth and the near shell (pieces.js) sets its real pane at
+// it, so a window does not jump in or out at the 160 m swap.
+export const GLASS_DEPTH = { panel: 0.14, tenement: 0.24, block: 0.18, functional: 0.15, nova: 0.12,
+  house: 0.16, brick: 0.22, civic: 0.24, officeBands: 0.05, officeGrid: 0.11, store: 0.10 };
+/** The glass depth of a facade row (`rows` from typology.facadeRows). */
+export const glassDepth = (rows, row) =>
+  (row?.store ? GLASS_DEPTH.store : GLASS_DEPTH[rows?.family]) ?? 0.15;
