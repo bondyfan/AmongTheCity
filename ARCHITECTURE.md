@@ -1939,7 +1939,7 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
 * **After the call** the roof is walkable but has an edge (`prologue-ladder.js`
   is a deck for `world.storyCoach`, composed with the train's in prologue.js)
   and the way down is the cat ladder: E takes it, S climbs down.
-* **The run**: 180 seconds (`DEPARTS_IN`). The pin and the column of light
+* **The run**: 120 seconds (`DEPARTS_IN`). The pin and the column of light
   (`prologue-marker.js`) lead to the departure board and no further: the
   platform is read there. `prologue-tracks.js` takes back any step onto the
   rails, in Kolín and in Pardubice, so the underpass is the only way across.

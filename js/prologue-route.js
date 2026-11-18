@@ -11,8 +11,8 @@ export const roof = { x: roofFrame.x, z: roofFrame.z, h: roofFrame.h };
 export const hours = { street: 20 };
 export const platforms = [2, 4, 5];
 export const trackNumber = { 2: 2, 4: 6, 5: 8 };
-// "Poslední vlak ti jede za tři minuty."
-export const DEPARTS_IN = 180;
+// "Poslední vlak ti jede za dvě minuty! Stihni to!"
+export const DEPARTS_IN = 120;
 export function newTrip(previous, random = Math.random) {
   const choices = platforms.filter((p) => p !== previous);
   return { platform: choices[Math.floor(random() * choices.length)], remaining: DEPARTS_IN };

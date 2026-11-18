@@ -94,7 +94,7 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
     const order = ['ring1', 'call1', 'out1', 'card', 'est', 'sms', 'step', 'drop', 'ring2', 'call2', 'done'];
     const next = order[order.indexOf(beat) + 1];
     if (next === 'done') {
-      // he hangs up, and the roof and the three minutes are the player's
+      // he hangs up, and the roof and the two minutes are the player's
       ++token;
       voice?.stop();
       hud.say();

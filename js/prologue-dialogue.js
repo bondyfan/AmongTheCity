@@ -56,9 +56,9 @@ export const friendCall = [
   [
     'friend-05',
     'Vašek',
-    'Platí. Poslední vlak ti jede, koukám, za tři minuty. Stihneš to.',
+    'Platí. Ty vole, počkej, koukám na odjezdy. Poslední vlak ti jede za dvě minuty! Stihni to!',
     'friend',
-    'relieved, hurrying him',
+    'starts calm, then suddenly alarmed, shouting the last two sentences',
   ],
   ['dad-08', 'Ty', 'No nevím. Pokusím se.', 'father', 'exhales, already moving'],
 ];

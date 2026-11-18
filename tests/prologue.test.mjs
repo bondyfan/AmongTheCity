@@ -56,7 +56,7 @@ test('the script: every spoken line has its own recording id and nobody uses a l
   // the price and the deadline are said out loud, and the offer is the same sum
   assert.match(hospitalCall.map((l) => l[2]).join(' '), /zálohu\. Do zítřejší půlnoci\. Dvě stě padesát tisíc/);
   assert.match(friendCall.map((l) => l[2]).join(' '), /Dvě stě padesát tisíc/);
-  assert.match(friendCall.at(-2)[2], /Poslední vlak ti jede, koukám, za tři minuty\. Stihneš to\./);
+  assert.match(friendCall.at(-2)[2], /Poslední vlak ti jede za dvě minuty! Stihni to!/);
   assert.equal(friendCall.at(-1)[2], 'No nevím. Pokusím se.');
   assert.match(hospitalMessage[1] + bankMessage[1], /250 000 Kč/);
 });
@@ -95,7 +95,7 @@ test('every replay selects another connected platform and the countdown survives
     starts.push(route.railPose(0));
     assert.ok(Math.abs(route.lineLength-lineLength)<600);
     assert.deepEqual(route.railPose(route.lineLength),railPose(lineLength));
-    assert.equal(newTrip(platform,()=>0).remaining,180);
+    assert.equal(newTrip(platform,()=>0).remaining,120);
     const trip={platform,remaining:82.5};
     assert.deepEqual(parse(serialize({...blank(),storyTrip:trip})).state.storyTrip,trip);
   }
