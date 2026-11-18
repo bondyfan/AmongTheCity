@@ -487,7 +487,9 @@ export function surfaceMaterial() {
             float pn = atcNoise(w * 0.085 + 31.7) + 0.3 * atcNoise(w * 0.61 + 3.1);
             float fresh = smoothstep(0.83, 0.86, pn);
             float old = 1.0 - smoothstep(0.36, 0.40, pn);
-            tone *= 1.0 - 0.16 * fresh + 0.10 * old;
+            // (deeper with the street-level detail on: at 16 % a repair was
+            // lost from the chase camera, seen in the game)
+            tone *= 1.0 - (0.16 + 0.08 * uGroundDetail) * fresh + 0.10 * old;
             atcSmooth += 0.08 * fresh - 0.05 * old;
             // cracks sealed with tar, in the stretches that have gone. A crack
             // is two centimetres wide, so it is drawn only while a pixel is
@@ -504,7 +506,7 @@ export function surfaceMaterial() {
                 float e = atcCrack(w * 0.36 + vec2(atcNoise(w * 0.9), atcNoise(w * 0.9 + 7.7)) * 0.3);
                 float wd = 0.006 + pxMin * 0.5;
                 float line = (1.0 - smoothstep(wd * 0.4, wd, e)) * gone * (1.0 - px / 0.075);
-                tone *= 1.0 - 0.27 * line;
+                tone *= 1.0 - (0.27 + 0.13 * uGroundDetail) * line;
                 atcSmooth += 0.25 * line;
               }
             }

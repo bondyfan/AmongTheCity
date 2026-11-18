@@ -44,12 +44,19 @@ export const STREET_DETAIL_GLSL = `
       // ---- asphalt ----
       // Blotches at the scales a driver reads: 6 m and 1.4 m, then a
       // half-metre grain that survives the mips the chippings do not.
+      // (seen in the game the first amplitudes were too shy: from the chase
+      // camera a street still read as one flat grey, so the slow term is the
+      // strong one now; it is also the one that cannot shimmer)
       float m1 = atcNoise(w * 0.17 + 5.0), m2 = atcNoise(w * 0.73 + 1.3), m3 = atcNoise(w * 2.1 + 7.0);
-      k *= 0.91 + 0.18 * m1 + 0.12 * (m2 - 0.5) * mid + 0.08 * (m3 - 0.5) * fine;
+      k *= 0.88 + 0.24 * m1 + 0.16 * (m2 - 0.5) * mid + 0.08 * (m3 - 0.5) * fine;
+      // (repairs and sealed cracks are already in the surface shader, under
+      // the same switch they are drawn a shade deeper: js/surfaces.js)
       // bitumen browns and greys as it ages; a fresh lay is blue-black. The
       // bias is warm: a grey road under a blue sky came out blue.
       float age = atcNoise(w * 0.045 + 77.0);
-      k *= mix(vec3(0.97, 0.99, 1.02), vec3(1.07, 1.02, 0.9), age);
+      // (the cool end is neutral now: under the sky light the street still
+      // came out blue in the game with a bluish fresh lay)
+      k *= mix(vec3(1.0, 1.0, 0.99), vec3(1.07, 1.02, 0.9), age);
       // a pale stone in the binder here and there, four centimetres across
       float fl = atcNoise(w * 24.0 + 3.7);
       k *= 1.0 + 0.4 * smoothstep(0.80, 0.93, fl) * (1.0 - smoothstep(0.004, 0.018, px));
@@ -74,17 +81,23 @@ export const STREET_DETAIL_GLSL = `
       k *= 1.0 - 0.15 * smoothstep(0.45, 0.95, d1 * 0.65 + d2 * 0.35);
       // and the slow weathering of a whole square: a dozen metres darker and
       // warmer where the rain runs and the market stands, paler where the sun
-      // bleaches it
+      // bleaches it (near neutral: a warmer tint set the mapped square apart
+      // from the photographed one beside it, which is cool grey)
       float wx = atcNoise(w * 0.07 + 23.0);
-      k *= mix(vec3(1.06, 1.05, 1.03), vec3(0.9, 0.88, 0.85), wx);
+      k *= mix(vec3(1.06, 1.05, 1.04), vec3(0.91, 0.9, 0.88), wx);
       k *= 1.0 - 0.12 * smoothstep(0.86, 0.96, atcNoise(w * 3.1 + 2.0)) * unitK;
     } else if (layer < 1.5) {
       // ---- grass and meadow ----
       float g1 = atcNoise(w * 0.085 + 3.0), g2 = atcNoise(w * 0.41 + 8.0);
       float dry = smoothstep(0.48, 0.8, g1 * 0.7 + g2 * 0.3);
       float lush = 1.0 - smoothstep(0.18, 0.45, g1 * 0.5 + g2 * 0.5);
-      k *= mix(vec3(1.0), vec3(1.2, 1.1, 0.7), dry * 0.75);
-      k *= mix(vec3(1.0), vec3(0.76, 0.9, 0.78), lush * 0.7);
+      k *= mix(vec3(1.0), vec3(1.2, 1.1, 0.7), dry * 0.85);
+      k *= mix(vec3(1.0), vec3(0.76, 0.9, 0.78), lush * 0.75);
+      // a mown verge is never one green: a metre-scale mottle of light and
+      // shade and a touch less chroma, which the 3D blades alone do not give
+      // (in the game a verge still read as a flat painted strip)
+      float gm = atcNoise(w * 0.9 + 4.0);
+      k *= mix(vec3(1.0), vec3(0.84 + 0.32 * gm, 0.86 + 0.26 * gm, 0.84 + 0.3 * gm), mid);
       // clumps, a hand across, and the odd bare patch by a kerb or a path
       k *= 1.0 + 0.4 * (atcNoise(w * 2.4 + 0.5) - 0.5) * fine * (0.6 + 0.4 * atcNoise(w * 0.9 + 4.0));
       k *= mix(vec3(1.0), vec3(1.18, 1.0, 0.78), smoothstep(0.82, 0.95, atcNoise(w * 0.23 + 61.0)) * 0.6);
