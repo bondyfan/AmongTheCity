@@ -1962,3 +1962,53 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
 * **Three paces** (js/player.js `_pace`, config `WALK`): a walk, the run on
   Shift, and a sprint on a double tap of Shift that spends `stamina`
   (js/stamina.js draws the bar).
+
+## The small life of a street (js/streetlife.js, Nov 2026)
+
+Birds, the dogs people walk, prams, and what a passer-by has in a hand. main.js
+builds one `StreetLife` next to the crowd and calls `update()` after
+`peds.update()`; `peds.panic` is chained into `streetLife.scare`, so every bang
+that makes people run also puts the birds up.
+
+* **Four draw calls for all of it.** Birds, dogs and prams are each rows of one
+  InstancedMesh; the leads are one small dynamic mesh. Wings, legs, heads and
+  tails move in the vertex shader off per-row attributes (`birdmodel.js`,
+  `dogmodel.js`), so a seated bird costs no script at all and its peck is a
+  clock uniform. The bag in a hand and the phone at an ear are a few triangles
+  in the walker's own skinned mesh (`bodyextras.js`), never a draw call.
+* **Birds** (`birds.js` and its parts). `birdperches.js` lists, per streaming
+  cell, the places a bird could sit: lamp arms and park lanterns (from
+  `poles.js`), the top edge of road signs (`meshes.signPerches`, the mesher's
+  own plan), the trolley wire, the eaves and parapets of roofs, patches of
+  footway and quiet street, fields in open country. `birdsites.js` (pure, no
+  imports) decides for each candidate, from its position alone, whether a flock
+  lives there, of which species (pigeons and sparrows in town, crows at the
+  edges and in fields, gulls within 70 m of water) and where each bird sits.
+  `birdflight.js` (pure) is the steering that takes a bird from a seat into the
+  air and onto another. Flocks get rows inside 105 m of the player and give
+  them back past 140 m; the pool is 260 rows including the flocks that only
+  pass overhead (`birdsky.js`, a closed form of the shared clock).
+* **What scares them.** The player on foot (a hop of a few metres when
+  strolling, the whole flock up when running), any car by its speed, a walker
+  passing through (a hop), and any bang. A bird on a lamp, a wire or a roof
+  ignores the street and goes only for a bang. Scared flocks land on a free
+  perch nearby or leave for a minute; flocks also move about on their own.
+* **Dogs** (`dogs.js`, `dogwalk.js`). A dog belongs to its owner's body and
+  arrives and leaves with it, under the crowd's own no-pop rule. It heels,
+  pulls until the lead is tight, stops to sniff and is waited for, sits when
+  the owner stops, and waits by an owner who is down. The lead is drawn from
+  the owner's wrist bone to the collar and is a hard length in the simulation.
+* **Hands with a job** (`pedprops.js`, pure). `propFor(seed, archetype)` gives
+  a bag, a phone, a pram, a dog or nothing, off the citizen's own seed through
+  its own salt, so it never disturbs the wardrobe draw. `js/gait.js` holds the
+  arm (`HOLD`), standing and walking; the man with the stick keeps his stick
+  and takes the lead in the other hand.
+* **Co-op.** SHARED, because pure in the map, the seed and the shared clock:
+  where flocks live and what they are, the flocks overhead, who carries what,
+  which dog and which colours. LOCAL: a flock in the air and where it landed
+  (it is back on its shared seat when it next comes into range), where a dog
+  is sniffing this second, and the on/off switches.
+* **For the campaign and anything else:** `__atc.life.birds.scare(x, z, r)`,
+  `.flockNear(x, z, r)`, `.flush(flock, x, z, hard)`; `life.birds.enabled`,
+  `life.dogs.enabled` and `life.prams.enabled` switch a part off in a running
+  game, which is how its frame cost is measured.

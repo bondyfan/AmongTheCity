@@ -48,6 +48,7 @@ import { addBlob, removeBlob, blobsIn, disposeBlobs } from './groundblob.js';
 import { makePoses } from './poses.js';
 import { lampDirectPatch } from './lampmap.js';
 import { BATCH, onBatchFlag } from './batchflags.js';
+import { holdFor } from './pedprops.js';
 
 // Where the distance variant takes over, metres from the rendering camera,
 // with a gap so a person standing at the line does not flicker between two.
@@ -204,6 +205,11 @@ export function makeCitizen(look = {}, { faceDetail = false } = {}) {
     ? { ...src, topColor: pins.jacket ?? src.topColor, bottomColor: pins.pants ?? src.bottomColor,
       skin: pins.skin ?? src.skin, hair: pins.hair ?? src.hair }
     : pickOutfit(a.key, Math.random, pins);
+  // what the hands are busy with (js/pedprops.js): never part of the wardrobe
+  // draw, so giving somebody a dog does not change anybody's coat
+  o.prop = look.prop ?? null;
+  o.propTint = look.propTint ?? null;
+  const hold = holdFor(o.prop, !!o.cane);
   // the one draw that is not clothing: where in the idle sway this person is
   const seed = src ? ((src.topColor ^ src.bottomColor ^ src.hair) & 1023) / 1024 : Math.random();
 
@@ -281,9 +287,16 @@ export function makeCitizen(look = {}, { faceDetail = false } = {}) {
   const J = { group, body, pelvis, torso, chest, head, armL, armR, elbowL, elbowR, handL, handR,
     legL, legR, kneeL, kneeR, footL, footR, cane };
   const gait = makeGait(J, D, { unit: byUid || look.outfit?.player ? 5.6 : 1.4, seed,
-    cane: !!o.cane, carry: o.bag === 'hand' ? 'L' : null });
-  const { stamp, sitPose, ragdollPose, standPose: standBare, punchPose, kickPose, aimPose, handsPose } =
+    cane: !!o.cane, carry: o.bag === 'hand' ? 'L' : null, hold });
+  const { stamp, sitPose: sitBare, ragdollPose, standPose: standFree, punchPose, kickPose, aimPose, handsPose } =
     makePoses(J, { stoop: D.s.stoop, hunch: D.s.hunch, headUp: D.s.headUp, reset: gait.reset });
+  // A hand with a job keeps it standing still (the lead, the pram, the phone),
+  // and the phone stays at the ear on a bench too.
+  const standBare = !hold ? standFree : () => { standFree(); gait.hold(); stamp(); };
+  const sitPose = o.prop !== 'phone' || !hold ? sitBare : (kk = 1, car = 1) => {
+    sitBare(kk, car);
+    if (car < 0.5) { gait.hold(); stamp(); }
+  };
   // THE STICK STANDS ON THE GROUND WHEN ITS OWNER STANDS. The fixed pose hangs
   // both arms straight down a chest stooped half a radian forward, so the man
   // with the stick held it in the air behind his heels whenever he stopped (at
@@ -330,6 +343,7 @@ export function makeCitizen(look = {}, { faceDetail = false } = {}) {
     punchPose, kickPose, aimPose, handsPose,
     look: { jacket: o.topColor, pants: o.bottomColor, skin: o.skin, hair: o.hair },
     outfit: o,
+    prop: o.prop, hold,
     arch: a,
     // feet to the top of the hair or hat, before the owner's scale: name tags
     // and speech bubbles read this rather than assume 1.75

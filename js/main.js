@@ -80,6 +80,7 @@ import { closeNotice, connectNotice } from './netnotice.js';
 import { tod, setEpoch, setSoloTime } from './worldclock.js';
 import { ParkingLots } from './parkinglots.js';
 import { wireCityLife } from './citylife.js';
+import { StreetLife } from './streetlife.js';           // birds, dogs on leads, prams
 import { Cyclists } from './cyclists.js';
 import { inKerbStall } from './kerbparking.js';
 import { parkSpots } from './parkspot.js';
@@ -199,6 +200,7 @@ let roadWorks = null;
 let parkingLots = null;
 let cityLife = null;     // crowd, traffic and buses tied together (js/citylife.js)
 let peds = null;
+let streetLife = null;      // js/streetlife.js: the birds, the dogs and the prams
 let cyclists = null;     // people on bicycles (js/cyclists.js)
 // Where you wake up when you die: the forecourt of the Pardubice hospital
 // campus (28 buildings, centroid 2287,293 — the nearest `hospital` POI is a
@@ -2942,7 +2944,9 @@ async function boot() {
   // learn that a speech module exists. Chaining, not replacing: the panic is
   // what makes people run, and losing it to a bubble would be a poor trade.
   const _pedPanic = peds.panic.bind(peds);
-  peds.panic = (x, z, r) => { _pedPanic(x, z, r); chatter?.bang(x, z, r); };
+  streetLife = new StreetLife(scene, { city, world, peds });
+  // (the birds hear the same bang: every flock in earshot goes up)
+  peds.panic = (x, z, r) => { _pedPanic(x, z, r); chatter?.bang(x, z, r); streetLife?.scare(x, z, r); };
 
   // Somebody leaned on the horn — traffic.js fires this from both of its honk
   // sites, and the player's own H key below goes through the same door, so a
@@ -3513,6 +3517,7 @@ function stepGame(dt) {
   peds.cars = sharedCars();
   peds.playerCar = game.car;
   peds.update(dt, focus);
+  streetLife?.update(dt, focus, view, game.car, peds.cars);   // after the crowd: dogs and prams follow their people
   if (cyclists) { cyclists.setViewer(view); cyclists.update(dt, focus); }   // after the crowd: its crossers list is theirs too
   trains?.update(dt, focus);
   express?.update(dt, focus);
@@ -4019,7 +4024,7 @@ window.__atc = {
   groundDetail: GROUND_DETAIL,
   get player() { return player; }, get world() { return world; },
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
-  get parked() { return parked; }, get peds() { return peds; },
+  get parked() { return parked; }, get peds() { return peds; }, get life() { return streetLife; },
   get cyclists() { return cyclists; },
   get trains() { return trains; }, get worldMap() { return worldMap; },
   // multiplayer session (null in single player). net.onRemoteVehicle is wired

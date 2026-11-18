@@ -161,6 +161,7 @@
 import * as THREE from 'three';
 import { makeCitizen } from './citizen.js';
 import { archetypeAt, ARCH_SALT } from './people.js';
+import { propFor } from './pedprops.js';
 import { PLAYER_SCALE, LAYER_Y, CHUNK } from './config.js';
 import { worldT } from './worldclock.js';
 import { hourAt, isWeekend, crowdK, venueK } from './dayrhythm.js';
@@ -2266,7 +2267,7 @@ export class Pedestrians {
     // REQUEST to the owner of citizen.js: makeCitizen({ rnd }) taking an
     // optional () => 0..1, and this wrapper disappears.
     const real = Math.random;
-    let n = 0, c;
+    let n = 0, c, prop;
     try {
       Math.random = () => rnd01(hash32(s.seed, 0xc17, n++));
       // WHICH BODY is not part of the wardrobe draw and must not ride on it:
@@ -2275,7 +2276,11 @@ export class Pedestrians {
       // hair in the same order. A grandmother has to sound like a grandmother,
       // and that only works if the module choosing her shape and the module
       // choosing her voice reach the same conclusion from the seed alone.
-      c = makeCitizen({ archetype: archetypeAt(rnd01(hash32(s.seed, ARCH_SALT))).key });
+      // …and what their hands are busy with (js/pedprops.js): a bag, a phone,
+      // a pram, a dog. Off the same seed through its own salt, like the body.
+      const arch = archetypeAt(rnd01(hash32(s.seed, ARCH_SALT))).key;
+      prop = propFor(s.seed, arch);
+      c = makeCitizen({ archetype: arch, prop: prop.key, propTint: prop.tint });
     } finally { Math.random = real; }
 
     // people share ONE scale with the player — a half-size hero among
@@ -2300,6 +2305,13 @@ export class Pedestrians {
       // to still be somebody (js/chatter.js keys a voice and a cooldown on it).
       // Copying it here costs one int per body and survives every path.
       pid: s.seed,
+      // What they carry or lead, for js/pedpropdraw.js and js/dogs.js, which
+      // draw the pram and the dog: the kind (PROP.*), its colour, the dog's
+      // breed, and the wrist the lead is held in.
+      prop: prop.kind, propTint: prop.tint, breed: prop.breed,
+      hand: c.hold?.L === 'leash' ? c.parts.handL : c.parts.handR,
+      leadSide: c.hold?.L === 'leash' ? -1 : 1,
+      pramX: NaN, pramY: 0, pramZ: 0, pramH: 0, dog: null,   // theirs to fill in
       // The health bar every blow in the game spends, and the ONE place it is
       // initialised: js/vitals.js's 100, so a weapon does the same arithmetic
       // whichever way it is pointed. Nothing but hurt() may change it. Note

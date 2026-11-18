@@ -99,9 +99,25 @@ function solveLeg(hip, knee, foot, fwd, down, pitch, L1, L2, dx) {
  * J: the joints (group, body, pelvis, torso, chest, head, armL/R, elbowL/R,
  * handR, legL/R, kneeL/R, footL/R, cane). D: js/bodyshape.js dims.
  * opt: { unit: m/s that speedK = 1 means when no speed is passed, seed: 0..1,
- *        cane: bool, carry: 'L' | null (an arm that holds a bag) }.
- * Returns { walk(walkT, speedK, runK, mps), reset() }.
+ *        cane: bool, carry: 'L' | null (an arm that holds a bag),
+ *        hold: { L, R } of a HOLD key or null (js/pedprops.js holdFor): an arm
+ *        that is busy with something instead of swinging }.
+ * Returns { walk(walkT, speedK, runK, mps), reset(), hold() }.
  */
+// An arm with a job: [shoulder forward, elbow, out from the ribs, turned in,
+// how much of the walking swing is left]. The same angles standing and walking.
+const HOLD = {
+  bag: [0.02, 0.10, 0.07, 0, 0.22],         // a bag of shopping hanging from the hand
+  leash: [0.34, 0.46, 0.05, 0, 0.12],       // the lead: the hand forward of the hip
+  push: [0.60, 0.80, 0.02, 0, 0],           // both hands on the handle of a pram
+  phone: [1.12, 2.70, 0.66, -0.05, 0],      // the hand at the ear, the elbow out to the side
+};
+function holdArm(arm, elbow, key, side, swing) {
+  const h = HOLD[key];
+  arm.rotation.set(h[0] + swing * h[4], 0 - h[3] * side, h[2] * side);
+  elbow.rotation.x = h[1];
+}
+
 export function makeGait(J, D, opt) {
   const g = GAIT[D.key] ?? GAIT.m30, s = D.s, k = D.k;
   const L1 = D.thigh, L2 = D.shin, legK = (L1 + L2) / 0.83;
@@ -113,6 +129,8 @@ export function makeGait(J, D, opt) {
   const stand = D.hipY - s.crouch;
 
   const reset = () => { st.lastT = NaN; st.still = 0; };
+  // an arm with a job (the stick has the right hand first)
+  const jobL = opt.hold?.L ?? null, jobR = opt.cane ? null : (opt.hold?.R ?? null);
 
   const walk = (walkT, speedK, runK = 0, mps) => {
     const now = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.001;
@@ -221,8 +239,16 @@ export function makeGait(J, D, opt) {
       J.elbowR.rotation.x = flex;
       J.cane.rotation.x = Math.atan2(dz, hy - tipY) - (up + flex);
     }
+    // ---- an arm with a job keeps to it ----
+    if (jobL) holdArm(J.armL, J.elbowL, jobL, -1, 0 - sw);
+    if (jobR) holdArm(J.armR, J.elbowR, jobR, 1, sw);
   };
-  return { walk, reset, state: st };
+  /** Put the busy arms where they belong on top of a fixed pose (standing, a bench). */
+  const hold = () => {
+    if (jobL) holdArm(J.armL, J.elbowL, jobL, -1, 0);
+    if (jobR) holdArm(J.armR, J.elbowR, jobR, 1, 0);
+  };
+  return { walk, reset, hold, state: st };
 }
 
 // ==== pedalling ===============================================================

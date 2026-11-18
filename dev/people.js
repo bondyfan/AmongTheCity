@@ -20,6 +20,10 @@ const P = {
   lod: q.get('lod') || '',
   dist: q.get('dist') ? parseFloat(q.get('dist')) : 0,
   strip: q.get('strip') ? parseInt(q.get('strip'), 10) : 0,
+  // &prop=bag,phone,pram,dog (or all): what the people carry, in turn; they then
+  // really walk (the camera follows) so a dog has ground to cover
+  prop: q.get('prop') ? (q.get('prop') === 'all' ? ['bag', 'phone', 'pram', 'dog'] : q.get('prop').split(',')) : null,
+  birds: q.get('birds') === '1',      // a row of each bird: seated, pecking, flying
 };
 const CIT = await import('../js/citizen.js');
 const { ARCHETYPES, archetypeAt } = await import('../js/people.js');
@@ -94,10 +98,16 @@ const lend = (seed, fn) => {       // what js/pedestrians.js does: a seeded Math
   const real = Math.random, r = seededRnd(seed);
   try { Math.random = r; return fn(); } finally { Math.random = real; }
 };
+const PROPS = await import('../js/pedprops.js');
+let made = 0;
 const make = (who, seed) => lend(seed, () => {
   if (who === 'police' || who === 'medic') return CIT.makeCitizen({ role: who });
   if (who === 'player') return CIT.makeCitizen({ uid: 'showroom-' + seed });
-  return CIT.makeCitizen({ archetype: who });
+  const prop = P.prop ? P.prop[made++ % P.prop.length] : null;
+  const tint = prop ? PROPS[{ bag: 'BAG_TINTS', pram: 'PRAM_TINTS', dog: 'DOG_TINTS' }[prop]]?.[(seed + made) % 7] ?? 0 : 0;
+  const c = CIT.makeCitizen({ archetype: who, prop, propTint: tint });
+  c.propTint = tint;
+  return c;
 });
 if (P.n > 0) {
   const cols = Math.ceil(Math.sqrt(P.n * 2.2));
@@ -151,8 +161,54 @@ function pose(time, dt) {
     else if (P.pose === 'sit') { c.sitPose(1); c.group.position.y = 0.45 - 0.739; }
     else if (P.pose === 'bench') { c.sitPose(1, 0); c.group.position.y = 0.45 - 0.739; }
   }
-  // the treadmill: the floor goes backwards under the walkers
-  if (P.pose === 'walk' || P.pose === 'run') floorTex.offset.y -= speed * dt / 1;
+  // the treadmill: the floor goes backwards under the walkers. With props the
+  // people walk for real instead and the camera goes with them.
+  const go = P.pose === 'walk' || P.pose === 'run';
+  if (go && !P.prop) floorTex.offset.y -= speed * dt / 1;
+  if (P.prop) {
+    for (const r of recs) {
+      if (go) { r.c.group.position.z -= speed * dt * SCALE; r.z = r.c.group.position.z; }
+      r.speed = go ? speed * SCALE : 0; r.pose = P.pose === 'bench' ? 2 : go ? 0 : 1;
+    }
+    if (go) camera.position.z -= speed * dt * SCALE;
+    scene.updateMatrixWorld(true);
+    dogs.update(dt, recs, { x: 0, z: recs[0]?.z ?? 0 });
+    prams.update(recs);
+  }
+  if (flock) flock(time, dt);
+}
+// ---- what they carry, drawn by the game's own modules ----
+const recs = [];
+let dogs = null, prams = null, flock = null;
+if (P.prop) {
+  dogs = new (await import('../js/dogs.js')).Dogs(scene, { groundY: () => 0 });
+  prams = new (await import('../js/pedpropdraw.js')).Prams(scene);
+  people.forEach((c, i) => recs.push({ c, prop: PROPS.PROP_KEYS.indexOf(c.prop), propTint: c.propTint, breed: i % 4, pid: 1000 + i * 37,
+    x: c.x, z: c.z, heading: 0, speed: 0, state: 'walk', pose: 0, sitDrop: 0, mesh: c.group, dog: null,
+    hand: c.hold?.L === 'leash' ? c.parts.handL : c.parts.handR, leadSide: c.hold?.L === 'leash' ? -1 : 1,
+    pramX: NaN, pramY: 0, pramZ: 0, pramH: 0 }));
+}
+if (P.birds) {
+  // each species three times: seated, pecking on the ground, in the air
+  const { Birds } = await import('../js/birds.js');
+  const { SPECIES } = await import('../js/birdsites.js');
+  const { makeBird, MODE } = await import('../js/birdflight.js');
+  const B = new Birds(scene, { world: { built: new Map() }, hourOf: () => 12 });
+  const list = [];
+  Object.values(SPECIES).forEach((sp, i) => {
+    for (let k = 0; k < 3; k++) {
+      const b = makeBird({ x: (i - 1.5) * 0.7, y: k === 2 ? 0.8 : 0, z: -1.2 - k * 0.5, yaw: 2.4 }, (i * 3 + k) / 12);
+      b.pecks = k === 1;
+      if (k === 2) { b.mode = MODE.FLY; b.spread = 1; b.amp = sp.amp; }
+      list.push(B._add(b, sp, sp.tints[k % sp.tints.length]));
+    }
+  });
+  const { birdClock } = await import('../js/birdmodel.js');
+  flock = (time, dt) => {
+    birdClock.value = time;
+    for (const b of list) { if (b.mode === MODE.FLY) b.phase += dt * b.sp.hz * 6.283; B._write(b); }
+    B.mesh.count = list.length; B.mesh.instanceMatrix.needsUpdate = true; B.flap.needsUpdate = true;
+  };
 }
 if (P.pose === 'sit' || P.pose === 'bench') {
   // something to sit on: a slab at car-cushion height
