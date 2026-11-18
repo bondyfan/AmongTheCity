@@ -118,7 +118,7 @@ export function* releaseStructures(city, gone, keys) {
   // wins, and the released tile's came first), or, for a railway deck in two
   // pieces, on the level of its other end (stitchStructures' rule).
   for (let i = 0; i < relink.length; i += 2) linkEnd(city, relink[i], relink[i + 1], rails.has(relink[i]));
-  for (const w of renode) deckNodes(city, w);
+  for (const w of renode) deckNodes(city, w, rails.has(w));
   yield;
   // The dip chains that ran through the tile are dissolved, not rebuilt: a
   // whole rebuild (dipchain.rebuildChains) is 30 ms and more of one frame in

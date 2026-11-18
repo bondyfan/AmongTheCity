@@ -9,6 +9,7 @@
 
 import { planPose } from './cycleplan.js';
 import { PED_HP } from './pedestrians.js';
+import { sameLevel } from './levelsep.js';
 
 const FAR_OUT = 62;                   // the distance line (js/cyclistride.js, js/citizen.js)
 const HIT_MIN = 1.6, KILL_SPEED = 7;  // m/s: js/pedestrians.js's two thresholds, for the same reasons
@@ -30,6 +31,9 @@ const _blow = { dmg: 0, launch: true, vx: 0, vy: 0, vz: 0, spin: 0, impact: 0, p
 function carHits(car, r, nose) {
   const dx = r.x - car.x, dz = r.z - car.z, len = car.len ?? 4.4;
   if (dx > len || dx < -len || dz > len || dz < -len) return false;
+  // (a car on the deck over the cycle path, or under the bridge the rider
+  // is on, hits nobody: js/levelsep.js)
+  if (!sameLevel(car.y, r.y)) return false;
   const hx = -Math.sin(car.heading), hz = -Math.cos(car.heading);
   const sp = car.speed ?? 0, wid = car.wid ?? 1.8;
   if (nose) {

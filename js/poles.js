@@ -34,6 +34,7 @@ import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 import { sfxAt } from './audio.js';   // safe headless — no-ops without a context
 import { lampFallGeom, LAMP_KINDS } from './streetlamps.js';
 import { sigAssets } from './signalmodel.js';
+import { inBand } from './levelsep.js';
 
 const CELL = 20;                       // m — spatial grid for collision queries
 export const POLE_R = 0.16;            // m — mast radius the car feels
@@ -41,6 +42,8 @@ export const POLE_R = 0.16;            // m — mast radius the car feels
 // nudge should never fell a steel column, and 12 km/h is about where a real one
 // starts to lose.
 const FELL_SPEED = 3.4;                // m/s
+// How far a mast reaches over its foot: what stands higher than that is over it.
+const POLE_TALL = { street: 8, park: 4.6, mast: 14.5, mast1: 14.5, signal: 6.5 };
 const FALL_T = 1.15;                   // s from upright to flat
 // How long a felled mast lies in the street before it is quietly retired. Long
 // enough to drive back and look at it, short enough that an hour of demolition
@@ -156,13 +159,28 @@ export class Poles {
   }
 
   /**
+   * Is something standing at height `y` on this mast's level: between its
+   * foot and its head, or a little under the foot (js/levelsep.js)? A column
+   * on a bridge deck is not in the way of the street below, nor a street
+   * lamp in the way of the traffic on the viaduct over it. Asked without a
+   * height (an old caller), every mast is at every level.
+   */
+  atLevel(p, y) {
+    if (y === undefined) return true;
+    // (a signal's recorded foot may be a guess from before its ground loaded: see fell())
+    const base = p.kind === 'signal' && this.groundAt ? this.groundAt(p.x, p.z) : p.y;
+    return inBand(y, base, POLE_TALL[p.kind] ?? POLE_TALL.street);
+  }
+
+  /**
    * Push a point out of any standing mast — the rigid half of the promise.
    * Mutates `pos` and returns true if it moved, matching world.collide().
    */
-  collide(pos, radius) {
+  collide(pos, radius, y) {
     const rr = POLE_R + radius;
     let pushed = false;
     for (const p of this.near(pos.x, pos.z, rr, _scratch)) {
+      if (!this.atLevel(p, y)) continue;
       const dx = pos.x - p.x, dz = pos.z - p.z;
       const d2 = dx * dx + dz * dz;
       if (d2 >= rr * rr) continue;
@@ -182,13 +200,14 @@ export class Poles {
    * the way, which is the difference between hitting a lamp post and parking
    * against one.
    */
-  strike(x, z, vx, vz, reach = 1.6) {
+  strike(x, z, vx, vz, reach = 1.6, y) {
     const sp = Math.hypot(vx, vz);
     if (sp < FELL_SPEED) return 0;
     let n = 0;
     // its OWN array: fell() splices the grid, so the list being walked must not
     // be the one collide() shares
     for (const p of this.near(x, z, reach + POLE_R, _struck)) {
+      if (!this.atLevel(p, y)) continue;
       this.fell(p, vx / sp, vz / sp, sp);
       n++;
     }

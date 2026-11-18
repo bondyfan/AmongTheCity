@@ -46,6 +46,8 @@ import { BODY_U } from './carbodymat.js';
 import { dressCar, bindCar, setCarState, carMergeOn } from './carmesh.js';
 import { hookScene, setCarInstancing, carInstancingOn, carInstanceStats } from './carinstances.js';
 import { attachTrailer, updateTrailer, updateBlink } from './semitrailer.js';   // round 8: the articulated lorry, indicators
+import { pitchOf } from './roadpose.js';
+import { sameLevel, inBand } from './levelsep.js';
 import { crash, sfxAt, skidChirp, skidBark } from './audio.js';   // no-ops headless — safe for node --check/tests
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
@@ -1244,15 +1246,23 @@ export class Vehicles {
         const dx = this.focus ? car.x - this.focus.x : 0;
         const dz = this.focus ? car.z - this.focus.z : 0;
         if (!this.focus || dx * dx + dz * dz < TILT_R2) {
-          const T = this.world.terrain;
-          const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
-          const hl = car.len * 0.5, hw = car.wid * 0.5;
-          const gp = Math.atan2(
-            T.heightAt(car.x + fx * hl, car.z + fz * hl)
-            - T.heightAt(car.x - fx * hl, car.z - fz * hl), car.len);
-          const gr = Math.atan2(
-            T.heightAt(car.x - fz * hw, car.z + fx * hw)
-            - T.heightAt(car.x + fz * hw, car.z - fx * hw), car.wid);
+          // THE ROAD IT IS ON, not the terrain under it: on a deck that is
+          // the valley below, in an underpass the height grid arching back
+          // over the cutting, and a car at the right height lay along the
+          // wrong slope with its tail in the asphalt (js/roadpose.js).
+          // traffic.js hands over the grade of its road (`sg`); a car with a
+          // driver of another kind asks the surface under its own wheels.
+          let gp, gr = 0;
+          const sg = car.ai.sg;
+          if (sg !== undefined) gp = pitchOf(sg);
+          else {
+            const W = this.world, y = car.y;
+            const at = W.surfaceY ? (x, z) => W.surfaceY(x, z, y).y : (x, z) => W.terrain.heightAt(x, z);
+            const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
+            const hl = car.len * 0.5, hw = car.wid * 0.5;
+            gp = Math.atan2(at(car.x + fx * hl, car.z + fz * hl) - at(car.x - fx * hl, car.z - fz * hl), car.len);
+            gr = Math.atan2(at(car.x - fz * hw, car.z + fx * hw) - at(car.x + fz * hw, car.z - fx * hw), car.wid);
+          }
           const kt = Math.min(1, dt * 5);
           car._gp = (car._gp ?? 0) + (clamp(gp, -0.5, 0.5) - (car._gp ?? 0)) * kt;
           car._gr = (car._gr ?? 0) + (clamp(gr, -0.4, 0.4) - (car._gr ?? 0)) * kt;
@@ -1584,6 +1594,10 @@ function carCarPass(car, others, world) {
     if (o === car) continue;           // the iterable may contain ourselves
     const cdx = car.x - o.x, cdz = car.z - o.z;
     if (cdx * cdx + cdz * cdz > HIT_RANGE2) continue;   // 12 m gate
+    // …and on another LEVEL it is not there at all: the traffic on the deck
+    // overhead, the street under this bridge (js/levelsep.js). A tram's
+    // stand-in is tall, and anything under its roof line is at its level.
+    if (!(o.tallY ? inBand(car.y, o.y, o.tallY) : sameLevel(car.y, o.y))) continue;
     const ofx = -Math.sin(o.heading), ofz = -Math.cos(o.heading);
     const rB = o.wid * 0.62, dB = Math.max(0, o.len / 2 - rB);
     const mB = kindOf(o.kind).mass;
@@ -1659,7 +1673,7 @@ function polePass(car, world) {
   const nose = car.len / 2;
   const felled = world.poles.strike(
     car.x - Math.sin(car.heading) * nose, car.z - Math.cos(car.heading) * nose,
-    vx, vz, car.wid / 2 + 0.4) ?? 0;
+    vx, vz, car.wid / 2 + 0.4, car.y) ?? 0;
   if (felled) {
     // it costs the car something, but nothing like a wall: a lamp column is
     // a thin steel tube and the car walks away with a dent

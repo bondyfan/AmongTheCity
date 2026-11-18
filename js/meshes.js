@@ -75,6 +75,8 @@ import { refineNearWeirs, paintFlow, weirSillsInto } from './weirs.js';
 import { quaySnap, quayGroundY, GRID_SNAP, stampShaped } from './quayedge.js';
 import { roadSegs } from './roadsegments.js';
 import { roadCorr, railCorr, floorOf, vergeFaced, kerbedAt, vergeFacesInto, railShouldersInto, edgeNear } from './batter.js';
+import { drawnGround } from './drawnground.js';
+import { deckOver } from './roadpose.js';
 import { vysehradInto } from './vysehrad.js';
 import { quayStairsInto } from './quaystairs.js';
 import { balustradeAt, rasinovoParapet } from './quaybalustrade.js';
@@ -1863,6 +1865,13 @@ function roundIslandInto(sink, x, z, R, deck, terrain) {
   }
 }
 
+// a quad whose normal points DOWN whatever order its corners came in (a soffit)
+function downQuad(sink, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b) {
+  const ny = (bz - az) * (dx - ax) - (bx - ax) * (dz - az);
+  if (ny < 0) sink.quad(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b);
+  else sink.quad(dx, dy, dz, cx, cy, cz, bx, by, bz, ax, ay, az, r, g, b);
+}
+
 // ---- what a bench stands on ---------------------------------------------------
 // Street furniture is placed at "the ground", and beside a kerbed street the
 // ground a bin stands on is the pavement, 12 cm over the carriageway and a
@@ -1870,12 +1879,14 @@ function roundIslandInto(sink, x, z, R, deck, terrain) {
 // js/furniture.js asks it, with the pavement where there is one: the generated
 // band, a mapped footway lifted to the street's level, the corner round a
 // junction. The same numbers city.js heightAt gives the player's feet.
-function standingOn(cell, key, terrain) {
+function standingOn(cell, key, terrain, drawn = terrain) {
   if (!terrain || !cell) return terrain;
   const pads = [...(junctionsIn(key) ?? []), ...(clustersIn(key) ?? [])];
   return {
     heightAt(x, z) {
-      const ground = terrain.heightAt(x, z);
+      // (the DRAWN ground, js/drawnground.js: in a cutting the grid is metres
+      // over the pavement, and `best` below only ever goes up from here)
+      const ground = drawn.heightAt(x, z);
       let best = ground, footOwn = -Infinity, upW = 0, upT = 0, upX = 0, upB = 0, onRoad = false;
       for (const r of cell.roads) {
         if (r.br || !r.p || r.p.length < 2) continue;
@@ -1947,8 +1958,14 @@ function supportFloor(cell, x, z, terrain) {
   return g;
 }
 
-function bridgeSupports(sink, f, fr, ys, hw, cell, terrain, slim) {
-  if (!terrain) return;
+function bridgeSupports(sink, f, fr, ys, hw, cell, grid, slim) {
+  if (!grid) return;
+  // What the abutments and piers stand on is the ground as it is DRAWN (the
+  // chunk's, js/drawnground.js). Asked of the height grid, the cutting of a
+  // street under a railway is an arch 2 m under the deck: the span read as
+  // "low" and was walled in, and the walls ended in mid air over the
+  // carriageway, a row of grey wedges hanging under the bridge.
+  const terrain = sink.ground ?? grid;
   const { q, per, along, len } = fr;
   const n = q.length;
   _c.setHex(0x8f8c86);
@@ -2552,6 +2569,14 @@ function roadRibbon(sink, f, terrain, cell, key, city) {
       const sr = cr * 0.72, sg = cg * 0.72, sb = cb * 0.72;
       let pr = lr, pg = lg, pb = lb;
       if (isFoot) { _c.setHex(0x93908a); pr = _c.r; pg = _c.g; pb = _c.b; }
+      // THE UNDERSIDE. A deck was its top and two girder faces: from the
+      // street under a bridge you looked up through the carriageway at the
+      // sky, and the traffic crossing it drove on nothing. A soffit between
+      // the feet of the two faces, in the shade of the deck.
+      sink.at(SURF.concrete);
+      downQuad(sink, ax - pax * hw, b0, az - paz * hw, ax + pax * hw, b0, az + paz * hw,
+        bx + pbx * hw, b1, bz + pbz * hw, bx - pbx * hw, b1, bz - pbz * hw, sr * 0.8, sg * 0.8, sb * 0.8);
+      sink.at(surf);
       for (const e of [-1, 1]) {
         const X0 = ax + pax * hw * e, Z0 = az + paz * hw * e;
         const X1 = bx + pbx * hw * e, Z1 = bz + pbz * hw * e;
@@ -4772,6 +4797,15 @@ export function trolleyPlan(city, key, owners = null) {
   return out;
 }
 
+// What a trolley wire hangs TW_H over at arclength `s` of its street: the
+// deck of a bridge, else the street's own levelled deck. It was the height
+// grid, and where the street dips under the railway (Jana Palacha) the grid
+// stays 2.8 m over the carriageway: the pair crossed the bridge above its
+// rails. The ground under the point only where the way has no grade.
+function wireUnder(f, s, x, z, terrain) {
+  const y = f.br ? bridgeDeckHeight(f, s, terrain) : roadGradeY(f, s, terrain);
+  return y === null || y === undefined ? terrain.heightAt(x, z) : y + LAYER_Y.road;
+}
 function trolleyInto(sink, f, terrain, stand = null, key = null, blocked = null, cell = null) {
   if (!f.p || f.p.length < 2 || !terrain) return;
   const mark = sink.mark();
@@ -4784,10 +4818,10 @@ function trolleyInto(sink, f, terrain, stand = null, key = null, blocked = null,
   const offs = half > 4.5 ? [-half * 0.5, half * 0.5] : [0];
   // What a wire is 5.5 m over. On a bridge that is the deck: over the ground
   // under it the pair dived into the valley and came up through the far
-  // abutment. Anywhere else the ground the road was levelled into, as before.
+  // abutment. Anywhere else the street's own levelled deck (wireUnder).
   const lens = [0];
   for (let i = 0; i < f.p.length - 1; i++) lens.push(lens[i] + Math.hypot(f.p[i + 1][0] - f.p[i][0], f.p[i + 1][1] - f.p[i][1]));
-  const under = (i, x, z) => (f.br ? bridgeDeckHeight(f, lens[i], terrain) + LAYER_Y.road : terrain.heightAt(x, z));
+  const under = (i, x, z) => wireUnder(f, lens[i], x, z, terrain);
   if (key === null || f._home === key) for (let i = 0; i < f.p.length - 1; i++) {
     const [ax, az] = f.p[i], [bx, bz] = f.p[i + 1];
     let dx = bx - ax, dz = bz - az;
@@ -4840,8 +4874,8 @@ export function trolleyMastInto(sink, f, m, terrain, g, ox = 0, oy = 0, oz = 0) 
   const L = Math.hypot(bx - ax, bz - az) || 1e-6;
   const px = -(bz - az) / L, pz = (bx - ax) / L;
   let l0 = 0;
-  if (f.br) for (let k = 0; k < i; k++) l0 += Math.hypot(f.p[k + 1][0] - f.p[k][0], f.p[k + 1][1] - f.p[k][1]);
-  const under = (k, x, z) => (f.br ? bridgeDeckHeight(f, l0 + (k ? L : 0), terrain) + LAYER_Y.road : terrain.heightAt(x, z));
+  for (let k = 0; k < i; k++) l0 += Math.hypot(f.p[k + 1][0] - f.p[k][0], f.p[k + 1][1] - f.p[k][1]);
+  const under = (k, x, z) => wireUnder(f, l0 + (k ? L : 0), x, z, terrain);
   const wireY = (c) => {
     const y0 = under(0, ax + px * c, az + pz * c), y1 = under(1, bx + px * c, bz + pz * c);
     return y0 + (y1 - y0) * t + TW_H;
@@ -5333,7 +5367,10 @@ function retainSpan(terrain, x, z, nx, nz, H, g) {
   if (hi - lo >= 0.4) return [lo - 0.1, hi + 0.9];
   return [g - 0.1, Math.min(g - 0.1 + H, hi + 1.4)];
 }
-function barrierInto(sink, f, terrain, city) {
+function barrierInto(sink, f, grid, city, terrain = grid) {
+  // `terrain` is the ground as drawn (js/drawnground.js): a fence along a
+  // cutting stands on the bank that is there, not on the grid's arch over it.
+  // `grid` is the Terrain itself, for the levels of the roads a noise wall reads.
   const spec = BARRIER_SPEC[f.k];
   if (!spec || !f.p || f.p.length < 2 || !terrain) return;
   const H = f.h ?? spec.h;
@@ -5343,7 +5380,7 @@ function barrierInto(sink, f, terrain, city) {
   const balustrade = rasinovoParapet(f);
   const roads = f.k === 'noise' ? wallRoads(city, f) : null;
   const base = (x, z, tx, tz) => roads?.size
-    ? roadsideLevel(roads, x, z, tx, tz, terrain) : terrain.heightAt(x, z);
+    ? roadsideLevel(roads, x, z, tx, tz, grid) : terrain.heightAt(x, z);
   const mark = sink.mark();
   const thin = f.se ? 0.02 : 0.06;          // see-through kinds are a sheet
   for (let i = 0; i < f.p.length - 1; i++) {
@@ -5530,6 +5567,9 @@ const LAMP_NEAR = 18;
 const PARK_STEP = 26;
 // How far from a kerb a surveyed lamp may stand and still be that street's lamp.
 const LAMP_REACH = 5;
+// How tall a street column and a park lantern stand (js/streetlamps.js): no
+// lamp is planted under a bridge deck lower than that.
+const COLUMN_TALL = 7.6, LANTERN_TALL = 4.2;
 
 /**
  * What a mast placed from this cell could be standing in: every carriageway
@@ -5656,6 +5696,16 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
   // (And the pad may be a neighbouring cell's: see lampGround.)
   const { roads: near, pads } = lampGround(city, cell, key, raw);
   const onPad = (x, z) => { const j = inPads(pads, x, z); return !!j && cornerLift(j, x, z) < 0; };
+  // A COLUMN DOES NOT COME UP THROUGH A BRIDGE. A street under a railway or a
+  // flyover is lit like any other, every 34 metres, and where that fell under
+  // the deck a 7.5 m mast stood up through a carriageway 6 m overhead with its
+  // lamp over the traffic of the bridge. No lamp where a deck passes lower
+  // than the column is tall (the decks of this cell: a way lies in every cell
+  // its outline reaches). `base`: the level the lamp would stand at.
+  const decks = terrain ? [...cell.roads, ...(cell.rails ?? [])].filter((r) => r.br && r.p && r.p.length > 1) : [];
+  const underDeck = (x, z, base, tall) => decks.length > 0
+    && deckOver(decks, x, z, base + 1.5, base + tall + 0.8, terrain) !== null;
+  const levelBy = (r, s, x, z) => (r.br ? bridgeDeckHeight(r, s, terrain) : roadGradeY(r, s, terrain)) ?? terrain.heightAt(x, z);
   // A COLUMN DOES NOT COME UP THROUGH A HOUSE. The kerb offset knows nothing of
   // what stands behind the kerb, and where a facade is on the building line a
   // 7.5 m mast grew out of the roof of a 4.3 m house with its arm and its pool
@@ -5702,6 +5752,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
       }
     }
     if (bd >= LAMP_REACH) {
+      if (decks.length && underDeck(x, z, terrain.heightAt(x, z), LANTERN_TALL)) continue;
       park.push([x, z, rnd(Math.abs(Math.round(x * 7 + z * 13)), 3) * Math.PI * 2]);
       continue;
     }
@@ -5721,6 +5772,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
       // rule puts a bridge's own columns: on the deck's edge, at the deck.
       lx = qx + nx * (bh - 0.25); lz = qz + nz * (bh - 0.25);
       if (lampInRoad(near, br, lx, lz, LAMP_CLEAR)) continue;
+      if (decks.length && underDeck(lx, lz, levelBy(br, bs, lx, lz), COLUMN_TALL)) continue;
       const spot = [lx, lz, Math.atan2(-nx, -nz) + Math.PI];
       if (terrain) spot.push(bridgeDeckHeight(br, bs, terrain) + LAYER_Y.road);
       street.push(spot);
@@ -5728,6 +5780,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
     }
     if (bd - bay < 0.5) { lx = qx + nx * (bh + bay + 0.6); lz = qz + nz * (bh + bay + 0.6); }
     if (lampInRoad(near, null, lx, lz, LAMP_CLEAR) || onPad(lx, lz) || inHouse(lx, lz)) continue;
+    if (decks.length && underDeck(lx, lz, levelBy(br, bs, lx, lz), COLUMN_TALL)) continue;
     street.push([lx, lz, Math.atan2(-nx, -nz) + Math.PI]);
   }
   // 2. the rule: along the wider drivable roads, alternating kerbs.
@@ -5786,6 +5839,8 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
           // is 0.7 m away and the clearance 0.45, so that one never objects.
           if (lampInRoad(near, r.br ? r : null, lx, lz, LAMP_CLEAR)
             || (!r.br && (onPad(lx, lz) || inHouse(lx, lz)))) continue;
+          // (under a deck there is no far kerb to try: the other side is under it too)
+          if (decks.length && underDeck(lx, lz, levelBy(r, run + d, lx, lz), COLUMN_TALL)) break;
           // rot faces the road: the post stands on the kerb, the head reaches in
           const spot = [lx, lz, Math.atan2(-nx, -nz) + Math.PI];
           if (r.br && terrain) spot.push(bridgeDeckHeight(r, run + d, terrain) + LAYER_Y.road);
@@ -5818,6 +5873,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
         const o2 = ped ? off : off + bayAt(r, run + d, -side);
         const lx = px - dz * side * o2, lz = pz + dx * side * o2;
         if (nearMapped(lx, lz) || lampInRoad(near, r, lx, lz, LAMP_CLEAR) || onPad(lx, lz) || inHouse(lx, lz)) continue;
+        if (decks.length && underDeck(lx, lz, levelBy(r, run + d, lx, lz), LANTERN_TALL)) continue;
         park.push([lx, lz, rnd(r._id, 40 + nth) * Math.PI * 2]);
       }
       carry = (carry + L) % PARK_STEP;
@@ -6249,9 +6305,45 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     return done();
   }
   const flat = [], water = [], sink = new TriSink();
+  // the road/rail corridors the ground must dive under, used by BOTH ground
+  // kinds. The photo used to skip this and lay its grass over every cutting:
+  // "Proč je někde terén/tráva přes vozovku???" was the aerial photograph,
+  // draped on raw terrain that arches back over a levelled deck.
+  const corr = [];
+  if (cell && !shell && mats.terrain) {
+    // gathered from the 3×3 neighbourhood, not this cell alone: a corridor
+    // reaches ~11 m past its road's bbox (kerb band + flare), so a way whose
+    // bbox stops just across the border still governs ground on THIS side:
+    // missing it left 8 cm of photo grass on the lane at chunk seams
+    const seen = new Set();
+    for (let dx2 = -1; dx2 <= 1; dx2++) for (let dz2 = -1; dz2 <= 1; dz2++) {
+      const c2 = dx2 === 0 && dz2 === 0 ? cell
+        : city.chunkIndex.get((cx + dx2) + ',' + (cz + dz2));
+      if (!c2) continue;
+      // the flat band reaches 4.5 m past the kerb: the ground and the photo
+      // sample every 4 m, and a shorter band let the chord between a capped
+      // vertex and a rising one arch centimetres over the lane edge
+      for (const r of c2.roads) {
+        if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
+        seen.add(r);
+        corr.push(roadCorr(r, bboxOfLine(r)));
+      }
+      for (const r of c2.rails) {
+        if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
+        seen.add(r);
+        corr.push(railCorr(r, bboxOfLine(r)));
+      }
+    }
+  }
+  // …and the ground everything with a height is put down on: the ground as
+  // it is DRAWN, under those corridors, not the 20 m grid that arches back
+  // over a cutting (js/drawnground.js)
+  const ground = drawnGround(mats.terrain, corr,
+    mats.terrain ? (x, z) => stampShaped(mats.terrain, x, z) : null);
   // what a prop stands on here: the pavement where a street has one (one
   // answer for lamps, signs, shelters and benches alike)
-  const stand = standingOn(cell, key, mats.terrain);
+  const stand = standingOn(cell, key, mats.terrain, ground);
+  sink.ground = ground;               // bridgeSupports reads it: what a pier stands on
   // two more buckets beside the ground sink: textured street dressing (sign
   // faces, glass, posters) and café terraces. Both are authored at absolute
   // heights and never draped.
@@ -6340,36 +6432,6 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   // otherwise — both carved with the water holes; a fully flooded cell needs
   // no ground at all (the river surface and its banks are the geometry) --
   let orthoGround = null;
-  // the road/rail corridors the ground must dive under — used by BOTH ground
-  // kinds. The photo used to skip this and lay its grass over every cutting:
-  // "Proč je někde terén/tráva přes vozovku???" was the aerial photograph,
-  // draped on raw terrain that arches back over a levelled deck.
-  const corr = [];
-  if (cell && !shell && mats.terrain) {
-    // gathered from the 3×3 neighbourhood, not this cell alone: a corridor
-    // reaches ~11 m past its road's bbox (kerb band + flare), so a way whose
-    // bbox stops just across the border still governs ground on THIS side —
-    // missing it left 8 cm of photo grass on the lane at chunk seams
-    const seen = new Set();
-    for (let dx2 = -1; dx2 <= 1; dx2++) for (let dz2 = -1; dz2 <= 1; dz2++) {
-      const c2 = dx2 === 0 && dz2 === 0 ? cell
-        : city.chunkIndex.get((cx + dx2) + ',' + (cz + dz2));
-      if (!c2) continue;
-      // the flat band reaches 4.5 m past the kerb: the ground and the photo
-      // sample every 4 m, and a shorter band let the chord between a capped
-      // vertex and a rising one arch centimetres over the lane edge
-      for (const r of c2.roads) {
-        if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
-        seen.add(r);
-        corr.push(roadCorr(r, bboxOfLine(r)));
-      }
-      for (const r of c2.rails) {
-        if (r.br || !r.p || r.p.length < 2 || seen.has(r)) continue;
-        seen.add(r);
-        corr.push(railCorr(r, bboxOfLine(r)));
-      }
-    }
-  }
   if (!flooded && !roadsOnly) {
     yield;
     orthoGround = mats.ortho?.orthoGroundMesh?.(cx, cz) ?? null;
@@ -6668,7 +6730,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // fences, walls, noise barriers — the lines that divide one plot from the
     // next, and the reason a town stops looking like houses dropped in a field
     if (cell.barriers) for (const b of cell.barriers) {
-      if (b._home === key && !landmarkBarrier(b) && !osmBarrierReplaced(b)) { barrierInto(sink, b, mats.terrain, city); yield; }
+      if (b._home === key && !landmarkBarrier(b) && !osmBarrierReplaced(b)) { barrierInto(sink, b, mats.terrain, city, ground); yield; }
     }
     // the D11's median barrier and guard rails, planned per cell (js/mwplan.js)
     if (!roadsOnly) { motorwayDressInto(sink, cell, key, mats.terrain, city); yield; }
@@ -6695,7 +6757,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   // world: shadow mapping was on, the sun tracked the camera, and nothing at
   // street level threw a shadow ("stíny vůbec nefungují").
   if (sg) {
-    const sinkMesh = new THREE.Mesh(drape(sg, mats.terrain, sink.fixed), mats.flat);
+    const sinkMesh = new THREE.Mesh(drape(sg, ground, sink.fixed), mats.flat);
     sinkMesh.castShadow = true;
     sinkMesh.receiveShadow = true;
     group.add(sinkMesh);
@@ -6797,7 +6859,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       // (js/treeshapes.js). A wood's slots and the measured-but-unmapped ones
       // arrive with their height; a mapped point asks the raster here.
       const spec = specOf(t);
-      const gy = mats.terrain ? mats.terrain.heightAt(t.x, t.z) : 0;
+      const gy = ground ? ground.heightAt(t.x, t.z) : 0;
       // the crown's matrix is the unit crown sphere: the shader stands the
       // species' trunk under it down to the ground
       treeMatrices(spec, t.x, gy, t.z, _m4, null);

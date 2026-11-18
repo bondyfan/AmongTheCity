@@ -8,6 +8,7 @@
 
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
+import { inBand, LEVEL_GAP } from './levelsep.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
   roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull,
   clustersIn, clusterHull, clusterDeckY, streetOf } from './geo.js';
@@ -2250,10 +2251,16 @@ export class CityWorld {
     // geometry. Hulls come from main.js (see world.carHulls) — every vehicle
     // in the world, whoever owns it.
     const hulls = this.carHulls?.();
+    // the asker's own level, where it gave one (a car's wheels, a walker's
+    // feet, the helicopter's skids): a hull or a mast on another level, the
+    // deck overhead or the street under this bridge, is not in its way
+    // (js/levelsep.js). Asked without a level, everything is, as it always was.
+    const lv = opts?.y ?? opts?.yLo ?? opts?.aboveY;
     if (hulls) {
       for (const c of hulls) {
         const dx = pos.x - c.x, dz = pos.z - c.z;
         if (dx * dx + dz * dz > 64) continue;                 // 8 m gate
+        if (lv !== undefined && !inBand(lv, c.y, c.tallY ?? LEVEL_GAP)) continue;
         // the hull as two discs down its axis, like driveStep's own model
         const fx = -Math.sin(c.heading), fz = -Math.cos(c.heading);
         const rr = c.wid * 0.55 + radius;
@@ -2272,7 +2279,7 @@ export class CityWorld {
     }
     // A LAMP MAST IS SOLID. It is instanced geometry, so it never went near
     // the footprint tests below — you drove through seven metres of steel.
-    pushed = this.poles?.collide(pos, radius) || pushed;
+    pushed = this.poles?.collide(pos, radius, lv) || pushed;
     // the D11's median barrier and guard rails (js/mwsolid.js, the mesher's own plan)
     pushed = barrierCollide(this, pos, radius, opts) || pushed;
     // …and so are the D11 gantry legs and sign posts (js/mwsolids.js), never fellable

@@ -169,6 +169,11 @@ import { SITE, SiteIndex, RoadIndex, stopSpot, stopBay, STOP_SPREAD, isFoodVenue
 import { SEAT_H } from './furniture.js';
 import { doorsOf } from './transitbody.js';
 import { landmarkWalks } from './landmarks-walks.js';
+import { sameLevel } from './levelsep.js';
+
+// The height a walker stands at, from the feet they last asked for (_feet):
+// NaN until they have, which separates nothing (js/levelsep.js).
+const levelOf = (p) => (p.gy === null || p.gy === undefined ? NaN : p.gy + (p.y || 0));
 
 // ---- the shared population ------------------------------------------------
 // Same dice as traffic.js on purpose: one grid, one mental model, and a cell
@@ -1642,7 +1647,7 @@ export class Pedestrians {
       // off afterwards. Bounded by HOLD_MAX, so two drivers waving each other
       // through cannot hold anybody for ever.
       if (Math.abs(p.rArc - nomArc) < HOLD_MAX
-        && (this._kerbUnsafe(s.cross, p.rArc, sign, s.speed) || this._carInWay(p, s.cross, sign))) {
+        && (this._kerbUnsafe(s.cross, p.rArc, sign, s.speed, levelOf(p)) || this._carInWay(p, s.cross, sign))) {
         holding = true;
         p.rush = p.rArc - nomArc;
       } else if (p.rush !== 0) {
@@ -1669,7 +1674,7 @@ export class Pedestrians {
     this._walkPose(s.steps, arc, dirS, s.lat * this._latK(s.tight, arc, dirS), s.span, _P, s.bay);
     let x = _P.x, z = _P.z, dx = _P.dx, dz = _P.dz;
     let moving = !still, sit = 0;
-    this._noteCrossing(s.cross, arc, dirS, still, x, z);
+    this._noteCrossing(s.cross, arc, dirS, still, x, z, levelOf(p));
 
     // ---- doing something there (js/dwell.js) ----
     if (still && nomV === 0 && kind !== DW.WALK && p.rush === 0 && !holding) {
@@ -1727,13 +1732,13 @@ export class Pedestrians {
   // Is a walker at `arc`, heading `sign`, standing at a kerb they should not
   // step off yet? At the kerb means within KERB_NEAR short of a GROUP of
   // crossings; unsafe means any road of that group has something coming.
-  _kerbUnsafe(cross, arc, sign, speed) {
+  _kerbUnsafe(cross, arc, sign, speed, y) {
     if (!cross) return false;
     for (let i = 0; i < cross.length; i++) {
       const c = cross[i];
       const de = sign > 0 ? c.g0 - arc : arc - c.g1;
       if (de < -0.05 || de > KERB_NEAR) continue;
-      if (this._gapUnsafe(c, speed)) return true;
+      if (this._gapUnsafe(c, speed, y)) return true;
     }
     return false;
   }
@@ -1749,16 +1754,17 @@ export class Pedestrians {
     if (!on) return false;
     // one stride ahead, the way they are facing
     const qx = p.x - Math.sin(p.heading) * 0.9, qz = p.z - Math.cos(p.heading) * 0.9;
-    const pc = this.playerCar;
-    if (pc && this._overCar(pc, qx, qz)) return true;
+    const pc = this.playerCar, y = levelOf(p);
+    if (pc && this._overCar(pc, qx, qz, y)) return true;
     const cars = this.cars;
-    if (cars) for (const car of cars) if (car !== pc && this._overCar(car, qx, qz)) return true;
+    if (cars) for (const car of cars) if (car !== pc && this._overCar(car, qx, qz, y)) return true;
     return false;
   }
 
-  _overCar(car, x, z) {
+  _overCar(car, x, z, y) {
     const dx = x - car.x, dz = z - car.z;
     if (Math.abs(dx) > car.len || Math.abs(dz) > car.len) return false;
+    if (!sameLevel(car.y, y)) return false;             // a car on another level is not in the way
     const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
     return Math.abs(dx * fx + dz * fz) < car.len / 2 + 0.5 && Math.abs(dx * fz - dz * fx) < car.wid / 2 + 0.5;
   }
@@ -1767,22 +1773,23 @@ export class Pedestrians {
   // stepping out. On a zebra (or under lights) drivers are expected to stop,
   // so only a car that physically cannot is a reason to wait; anywhere else
   // the walker needs a gap long enough to get across.
-  _gapUnsafe(c, speed) {
+  _gapUnsafe(c, speed, y) {
     // time to be clear of THIS road, counted from the group's kerb
     const need = Math.min(8, (c.g1 - c.g0) / speed + 1.2);
     const pc = this.playerCar;
-    if (pc && this._bearsDown(pc, c, need)) return true;
+    if (pc && this._bearsDown(pc, c, need, y)) return true;
     // The traffic knows each car's ROUTE, which a look at its bonnet does not:
     // a car about to turn into this street is a threat a heading cannot see.
-    if (this.roadBusy) return this.roadBusy(c.cx, c.cz, c.hw, need, c.zebra || c.sig);
+    if (this.roadBusy) return this.roadBusy(c.cx, c.cz, c.hw, need, c.zebra || c.sig, y);
     const cars = this.cars;
-    if (cars) for (const car of cars) if (car !== pc && this._bearsDown(car, c, need)) return true;
+    if (cars) for (const car of cars) if (car !== pc && this._bearsDown(car, c, need, y)) return true;
     return false;
   }
 
-  _bearsDown(car, c, need) {
+  _bearsDown(car, c, need, y) {
     const v = car.vGround ?? Math.abs(car.speed);
     if (!(v > 1.6)) return false;
+    if (!sameLevel(car.y, y)) return false;             // on the deck over this path, or the street under it
     const rx = c.cx - car.x, rz = c.cz - car.z;
     if (rx * rx + rz * rz > GAP_LOOK * GAP_LOOK) return false;
     const sg = car.speed < 0 ? -1 : 1;
@@ -1799,7 +1806,7 @@ export class Pedestrians {
   // Otherwise the walker is WAITING at the kerb of a zebra, which a driver who
   // can stop comfortably does stop for; waiting anywhere else is the walker's
   // own business and is not reported at all.
-  _noteCrossing(cross, arc, sign, still, x, z) {
+  _noteCrossing(cross, arc, sign, still, x, z, y = NaN) {
     if (!cross) return;
     for (let i = 0; i < cross.length; i++) {
       const c = cross[i];
@@ -1816,9 +1823,11 @@ export class Pedestrians {
         else must = true;
       }
       const n = this.crossers.length;
-      const o = this._crossPool[n] ??= { cx: 0, cz: 0, rdx: 0, rdz: 0, hw: 0, must: false, x: 0, z: 0, body: false, stale: false };
+      const o = this._crossPool[n] ??= { cx: 0, cz: 0, rdx: 0, rdz: 0, hw: 0, must: false, x: 0, z: 0, y: NaN, body: false, stale: false };
       o.cx = c.cx; o.cz = c.cz; o.rdx = c.rdx; o.rdz = c.rdz; o.hw = c.hw;
-      o.must = must; o.x = x; o.z = z; o.body = false; o.stale = false;
+      // (y: the height they stand at, so the traffic of another level does
+      // not stop for them: js/levelsep.js)
+      o.must = must; o.x = x; o.z = z; o.y = y; o.body = false; o.stale = false;
       this.crossers.push(o);
     }
   }
@@ -1828,8 +1837,9 @@ export class Pedestrians {
     // in the list until nobody is looking (the sweep's rule), and while it was
     // reported every car on that road stood for an empty patch of asphalt.
     if (p.state === 'dead' && p.deadT < CORPSE_FADE) return;
-    const o = this._crossPool[this.crossers.length] ??= { cx: 0, cz: 0, rdx: 0, rdz: 0, hw: 0, must: false, x: 0, z: 0, body: false, stale: false };
+    const o = this._crossPool[this.crossers.length] ??= { cx: 0, cz: 0, rdx: 0, rdz: 0, hw: 0, must: false, x: 0, z: 0, y: NaN, body: false, stale: false };
     o.cx = o.x = p.x; o.cz = o.z = p.z; o.rdx = 0; o.rdz = 0; o.hw = 1; o.must = true; o.body = true;
+    o.y = levelOf(p);
     // …and one that has lain there a while is driven round at a crawl, not
     // stood at: a minute of every driver in turn waiting out their patience at
     // the same body was a jam across the whole junction (js/traffic.js).
@@ -2082,7 +2092,7 @@ export class Pedestrians {
     if (!(p.calm > 0)) {
       p.rArc = p.fArc;
       if (p.fHold < FREE_HOLD
-        && (this._kerbUnsafe(p.cross, p.fArc, p.fDir, p.speed > 0.5 ? p.speed : 1.2) || this._carInWay(p, p.cross, p.fDir))) {
+        && (this._kerbUnsafe(p.cross, p.fArc, p.fDir, p.speed > 0.5 ? p.speed : 1.2, levelOf(p)) || this._carInWay(p, p.cross, p.fDir))) {
         hold = true;
         p.fHold += dt;
       } else if (p.fHold > 0) p.fHold = Math.max(0, p.fHold - dt * 0.5);
@@ -2100,7 +2110,7 @@ export class Pedestrians {
     p.x = _P.x;
     p.z = _P.z;
     const dx = _P.dx, dz = _P.dz;
-    this._noteCrossing(p.cross, p.fArc, p.fDir, false, p.x, p.z);
+    this._noteCrossing(p.cross, p.fArc, p.fDir, false, p.x, p.z, levelOf(p));
     if (p.blend > 0) {
       p.blend = Math.max(0, p.blend - dt * p.blendK);
       p.x += (p.bx - p.x) * p.blend;

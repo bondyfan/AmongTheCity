@@ -23,6 +23,9 @@
 import { projectOnPath } from './realines.js';
 import { BRAKE, pathAtExt } from './tramlines.js';
 import { spacingHold } from './tramspacing.js';
+import { sameLevel } from './levelsep.js';
+import { deckLevel } from './roadpose.js';
+import { LAYER_Y } from './config.js';
 
 const HULL_STEP = 5.5, HULL_HALF = 3.0;
 const HULL_R = 420;            // m: no traffic car is further from the player than this
@@ -93,6 +96,14 @@ export class TramYield {
           const sin = Math.abs(((bx - ax) * ez - (bz - az) * ex) / (L * el));
           if (sin < 0.35) continue;          // running along the street, not across it (the hulls see to that)
           const a = P.cum[i] + t * L, x = ax + (bx - ax) * t, z = az + (bz - az) * t;
+          // A road that crosses the track on a bridge, or under the tram's
+          // own, is not a level crossing: nobody waits there for a tram on
+          // another level (js/levelsep.js).
+          const yT = this._yAt ? this._yAt(line, a) : NaN;
+          if (yT === yT && e.cum) {
+            const yR = deckLevel(e.road, (e.off0 ?? 0) + (e.offSign ?? 1) * (e.cum[j] + Math.hypot(x - pts[j][0], z - pts[j][1])), tr.world?.terrain);
+            if (yR !== null && !sameLevel(yT, yR + LAYER_Y.road)) continue;
+          }
           // one record per road crossing: the two directed edges of a road meet here twice
           if (c.list.some((q) => Math.abs(q.a - a) < 4 && q.road === e.road)) continue;
           c.list.push({ a, x, z, rdx: ex / el, rdz: ez / el, hw: e.road.w / 2, clr: Math.min(6, TRACK_CLEAR / sin), road: e.road });
@@ -113,6 +124,7 @@ export class TramYield {
   }
 
   update(trams, dt, pos) {
+    this._yAt = trams.yAt;                     // the trams' own level along a line (crossings ask it)
     // the records of the last frame back in the pool
     for (const r of this.cross) this._pool.push(r);
     this.cross.length = 0;
@@ -127,10 +139,12 @@ export class TramYield {
       // ---- the hold: a car standing on the rail ahead of this tram (local only)
       tr.hold = Infinity;
       const look = tr.v * tr.v / (2 * BRAKE) + HOLD_LOOK;
+      const trY = trams.yAt ? trams.yAt(line, tr.sr) : NaN;
       if (actors) for (const o of actors) {
         if (!Number.isFinite(o?.x)) continue;
         const dx = o.x - tr.x, dz = o.z - tr.z;
         if (dx * dx + dz * dz > (look + 20) ** 2) continue;
+        if (!sameLevel(trY, o.y, 30)) continue;       // under the tram's bridge, or on one over the track
         projectOnPath(line.P, o.x, o.z, tr.sr - 1, tr.sr + look, _q);
         if (_q.d > HOLD_LAT) continue;
         const h = _q.a - (o.half ?? 2.3) - 0.8;
@@ -150,6 +164,7 @@ export class TramYield {
       if (cars && !tr.far) for (const o of cars) {
         const dx = o.x - tr.x, dz = o.z - tr.z;
         if (dx * dx + dz * dz > (look + 12) ** 2) continue;
+        if (!sameLevel(trY, o.y, 30)) continue;
         projectOnPath(line.P, o.x, o.z, tr.sr - 1, tr.sr + look, _q);
         if (_q.d > HOLD_LAT_CAR) continue;
         const h = _q.a - (o.len ?? 4.6) / 2 - 1.2;
@@ -193,9 +208,10 @@ export class TramYield {
           const r = HULL_HALF + (pc.len ?? 4.6) / 2 + PIN_CLEAR;
           if ((p.x - pc.x) ** 2 + (p.z - pc.z) ** 2 < r * r) continue;
         }
-        const b = pool[n] ?? (pool[n] = { x: 0, z: 0, half: HULL_HALF, tram: true });
+        const b = pool[n] ?? (pool[n] = { x: 0, z: 0, half: HULL_HALF, tram: true, y: NaN });
         n++;
         b.x = p.x; b.z = p.z;
+        b.y = trams.yAt ? trams.yAt(tr.line, tr.sr - Math.min(d, tr.len)) : NaN;   // (its level: js/levelsep.js)
         list.push(b);
       }
     }
