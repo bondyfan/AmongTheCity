@@ -81,13 +81,19 @@ const CITY_GLSL = /* glsl */`
     float gap = smoothstep(0.0, 0.04 + soft, f) * smoothstep(1.0, 0.96 - soft, f);
     return (1.0 - smoothstep(h - soft, h + soft, d.y)) * gap * uCity;
   }
-  // lit windows on that skyline, for the night: a sparse hashed grid
+  // lit windows on that skyline, for the night: a sparse hashed grid. Seen in
+  // a curved pane or a faceted flank the reflected ray sweeps several cells a
+  // pixel, and a hard 60-a-radian grid turned every rear window into
+  // glitter (seen in game, 18 Nov 2026). So the grid is coarser and fades
+  // out by its own screen-space footprint: where a pixel covers more than
+  // about half a cell, it shows the cells' average glow instead of dots.
   float carWindows(vec3 d) {
-    float az = (atan(d.z, d.x) + 3.14159265) * 60.0;
-    vec2 cell = vec2(floor(az), floor(d.y * 70.0));
-    vec2 f = fract(vec2(az, d.y * 70.0));
+    vec2 g = vec2((atan(d.z, d.x) + 3.14159265) * 34.0, d.y * 40.0);
+    vec2 fw = fwidth(g);
+    vec2 cell = floor(g), f = fract(g);
     float on = step(0.62, carHash(cell.x * 7.13 + cell.y * 91.7));
-    return on * step(0.3, f.x) * step(f.x, 0.75) * step(0.25, f.y) * step(f.y, 0.7);
+    float dots = on * step(0.3, f.x) * step(f.x, 0.75) * step(0.25, f.y) * step(f.y, 0.7);
+    return mix(dots, 0.07, smoothstep(0.2, 0.55, max(fw.x, fw.y)));
   }`;
 
 function build(opt) {
