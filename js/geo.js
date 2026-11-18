@@ -2705,7 +2705,9 @@ function* indexPayloadSteps(city, data, touched, slot = 0, heavyOnly = false, ke
   mergeStage(city.chunkIndex, stage);
   yield;
   if (landJ) yield* landJ();
-  if (!kept) yield* indexTileCrossings(city, roads, rails, stage.keys());
+  // Neighbours may have arrived while a retained tile was absent from the
+  // spatial index. Reconcile both arrival orders; existing pairs are deduplicated.
+  yield* indexTileCrossings(city, roads, rails, stage.keys());
   appendAll(city.buildings, buildings);
   appendAll(city.trees, trees);
   yield;
