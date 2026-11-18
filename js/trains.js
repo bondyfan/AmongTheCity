@@ -1171,7 +1171,8 @@ export class Trains {
     if (t !== this.riding && t._passT <= 0 && t.speed > PASS_V
       && Math.hypot(t.x - this._fx, t.z - this._fz) < PASS_R) {
       t._passT = 6;
-      sfx('train_pass', 0.6);
+      if (this.storyPass) this.storyPass();
+      else sfx('train_pass', 0.6);
     }
   }
 

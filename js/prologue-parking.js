@@ -1,3 +1,5 @@
+import { parkingLines } from './prologue-dialogue.js';
+import { storyRecording } from './audio.js';
 import { makeCitizen } from './citizen.js';
 import { seatAnchor } from './vehicles.js';
 import { SIT_DROP, seatX } from './seating.js';
@@ -16,16 +18,11 @@ export function meetVasek(car, scene, world, map, complete) {
   friend.group.rotation.y = car.heading + Math.PI / 2;
   scene.add(friend.group);
   map.setWaypoint(car.x, car.z);
-  const lines = [
-    ['Vašek', 'Hoď batoh dozadu. Klíčky máš na sedačce.'],
-    ['Ty', 'Víš, na co ty prachy potřebuju?'],
-    ['Vašek', 'Vím. Jak jí je?'],
-    ['Ty', 'Dneska jsem ji neslyšel.'],
-    ['Vašek', 'Tak jedem.']
-  ];
+  let voice;
   function speak() {
     if (!near || ready) return false;
-    if (++line === lines.length) {
+    voice?.stop();
+    if (++line === parkingLines.length) {
       ready = true;
       hud.say();
       hud.action();
@@ -36,7 +33,15 @@ export function meetVasek(car, scene, world, map, complete) {
       car.mesh.add(friend.group);
       friend.group.position.set(seatX(p.x), p.y - SIT_DROP, p.z);
       friend.group.rotation.y = 0;
-    } else hud.say(...lines[line]);
+    } else {
+      const [id, who, text] = parkingLines[line];
+      hud.say(who, text);
+      voice = storyRecording(id, {
+        end: () => {
+          if (near && !seated) speak();
+        },
+      });
+    }
     return true;
   }
   hud.button.onclick = speak;
@@ -61,7 +66,7 @@ export function meetVasek(car, scene, world, map, complete) {
       hud.guide(
         'Pardubice • parkoviště',
         ready ? 'Sedni si za volant Vaškova kombíku' : 'Najdi Vaška u kombíku',
-        ready ? 'Přistup k autu a stiskni E' : dist + ' m'
+        ready ? 'Přistup k autu a stiskni E' : dist + ' m',
       );
       hud.action(near && !ready ? (line < 0 ? 'Promluvit s Vaškem' : 'Pokračovat') : '');
     },
@@ -72,6 +77,6 @@ export function meetVasek(car, scene, world, map, complete) {
       if (map.waypoint?.x === car.x && map.waypoint?.z === car.z) map.setWaypoint(null);
       complete('done');
       return true;
-    }
+    },
   };
 }

@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR, START_PLACES, FLEET_STRIDE, HOSPITALS } from './config.js';
 import { arriveText, nearestHospital, tilesReady } from './startplace.js';
 import { loadCity, chunkKey, venueAt, forEachChunkInRadius } from './geo.js';
+import { StationPassages } from './station-passages.js';
 import { CityWorld } from './city.js';
 import { planRings, planCarRings } from './streamplan.js';
 import { input } from './input.js';
@@ -382,6 +383,12 @@ function applyLens(dt, fov, near) {
 let _lastLookT = -9; // when the mouse last steered — pauses auto-follow
 function updateCamera(dt) {
   const drag = input.takeDrag();
+  if (journey?.frameCamera(camera, dt, drag)) {
+    fpHideSelf(journey.seated);
+    camNear = camera.near;
+    camInit = false;
+    return;
+  }
   // pointer-locked mouse look uses a finer touch than right-drag
   const sens = input.locked ? 0.0026 : 0.004;
   if (drag.x || drag.y) _lastLookT = performance.now() * 0.001;
@@ -550,8 +557,9 @@ function updateCamera(dt) {
   // bug. The helicopter was already excluded; the jet was not, and the jet is
   // the one that crosses a block every fifth of a second.
   const flying = !!(game.heli || game.jet);
-  const indoors = !flying && !game.car && !!world.interiors?.modelAt(tx, tz);
-  if (indoors) dist = Math.min(dist, 3.4);
+  const enclosed = !flying && !game.car && (journey?.aboard || world.stationPassages?.inside(tx, tz, player.y));
+  const indoors = enclosed || (!flying && !game.car && !!world.interiors?.modelAt(tx, tz));
+  if (indoors) dist = Math.min(dist, enclosed ? 0.85 : 3.4);
   const flat = Math.cos(pitch) * dist;
   let px = tx + Math.sin(camYaw) * flat;
   let pz = tz + Math.cos(camYaw) * flat;
@@ -1041,6 +1049,7 @@ function applyParkVisibility() {
 
 // N on a moving train: skip to the next station (js/express.js). One game
 // hour is one real minute, so the ride to Prague is 50 real minutes without it.
+input.onKey('KeyT', () => { if (game.mode === 'play' && !document.body.dataset.panelOpen) journey?.skip(); });
 input.onKey('KeyN', () => {
   if (game.mode !== 'play' || !trains?.riding || trains.riding.halted) return;
   express?.skip(screenFade);
@@ -1049,7 +1058,10 @@ input.onKey('KeyN', () => {
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
   if (player.ragdoll) return;      // flying through the air is not a door
-  if (meeting && document.body.dataset.panelOpen) return;
+  if ((journey || meeting) && document.body.dataset.panelOpen) return;
+  // Beside a vehicle E keeps its normal meaning, even with the phone ringing.
+  // The call can still be answered with the on-screen phone button.
+  if (journey && !(career.activeStory() === 'bridge' && nearestEnterableCar()) && journey.use()) return;
   if (meeting?.use(player)) return;
   let jetNear = null;              // set by the fighter branch's own test
   if (trains?.riding) {
@@ -1754,8 +1766,6 @@ function updateActors() {
 function updateBlockers() {
   _blockers.length = 0;
   const px = player.pos.x, pz = player.pos.z;
-  if (meeting?.ready && Math.hypot(meeting.car.x - px, meeting.car.z - pz) < bd)
-    return meeting.car;
   for (const c of parked) {
     const dx = c.x - px, dz = c.z - pz;
     if (dx * dx + dz * dz > 400 * 400) continue;
@@ -2577,7 +2587,8 @@ renderer.domElement.addEventListener('click', () => {
     input.takeLeftPressed();
   }
 });
-window.addEventListener('keydown', () => initAudio(), { once: true });
+window.addEventListener('pointerdown', initAudio, {capture: true, once: true});
+window.addEventListener('keydown', initAudio, {capture: true, once: true});
 
 // ---------- settings → engine application ----------
 let orthoMgr = null;
@@ -2674,7 +2685,7 @@ function applySettings(s, key) {
 }
 
 // ---------- boot ----------
-async function boot(arrived = null) {
+async function boot() {
   // Region manifest first (tiled world); the single-city file is the
   // fallback — ALSO when the manifest exists but its download hasn't reached
   // the spawn yet (the region fetcher writes tiles spawn-first, but a fresh
@@ -2695,6 +2706,8 @@ async function boot(arrived = null) {
   }
   // the legacy single file is Pardubice: whatever was picked, it starts there
   let legacy = false;
+  if (!city && career.activeStory() && career.activeStory() !== 'done')
+    throw new Error('Mapu příběhu se nepodařilo načíst. Obnov stránku pro další pokus.');
   if (!city) {
     city = await loadCity(CITY_DATA_URL); legacy = true;
     if (sp.place !== START_PLACES[0]) {
@@ -2704,6 +2717,7 @@ async function boot(arrived = null) {
     }
   }
   world = new CityWorld(scene, city);
+  world.stationPassages = new StationPassages(scene,world);
   grass = new Grass(scene, world, city);
   // A region tile landing changes what the ground under us is MADE of — a car
   // park arriving where the mask said field has to stop the grass growing
@@ -3049,7 +3063,12 @@ async function boot(arrived = null) {
     }, 4000);
   });
 
-  if (arrived) await arrived; // The station exit hands control to this world.
+  const chapter = career.activeStory();
+  if (chapter && chapter !== 'done' && chapter !== 'forecourt') {
+    const { createPrologue } = await import('./prologue.js');
+    journey = createPrologue({ chapter, scene, world, player, map: worldMap, trip: career.storyTrip(), trains, save: career.checkpointStory });
+
+  }
   career.attach(careerHost());
   game.mode = 'play';
   // builds pace themselves from here on — during boot the queue must drain
@@ -3106,7 +3125,6 @@ function tick(src) {
   }
   try {
     let remaining = Math.min(clock.getDelta(), fromInterval ? 1.0 : 0.05);
-    if (journey) { if (!fromInterval) journey.frame(remaining, renderer); return; }
     while (remaining > 0) {
       const dt = Math.min(remaining, 0.05);
       remaining -= dt;
@@ -3246,6 +3264,10 @@ function stepGame(dt) {
   // world streams around whoever leads the view. `onFoot` is what gates the
   // interior streamer: rooms only matter to somebody who can walk into them,
   // and building them for a car doing 130 km/h would be a hitch for nothing.
+  world.stationPassages.update(player.pos.x,player.pos.z);
+  world.stationPassages.advanceEscalator(dt,player);
+  journey?.update(dt, !!(game.car || game.heli || game.jet || trains?.riding), vasekCar);
+  if (journey?.finished) { journey.dispose(); journey = null; }
   const focus = game.car ?? player.pos;
   // STREAM WHERE YOU WILL BE, NOT WHERE YOU ARE. Everything downstream of this
   // point — chunk meshes, region tiles, the aerial photo — is keyed to one
@@ -3356,7 +3378,7 @@ function stepGame(dt) {
     // scrub; audio.js turns it into a squeal on tarmac or a spray on dirt.
     skidSet(game.car.slip01 ?? 0, game.car.offroad ?? 0);
     if (shouldEject(game.car)) ejectDriver(game.car);
-  } else {
+  } else if (!journey?.posePlayer(dt)) {
     player.update(dt, { input, camYaw, world });
   }
   if (_ejCar) {
@@ -3835,24 +3857,7 @@ async function start() {
     setSoloTime(openingHour);
     ui.setStatus({ online: null });
   }
-  if (opening && chapter !== 'forecourt') {
-    const { createPrologue } = await import('./prologue.js');
-    const cover = $id('enter-overlay');
-    // Warm the real forecourt while the player is aboard. Its input and city
-    // simulation only take over after they cross the hall's front doors.
-    let depart, arrive;
-    const trainReady = new Promise(resolve => { depart = resolve; });
-    const outside = new Promise(resolve => { arrive = resolve; });
-    journey = createPrologue({ checkpoint: chapter, save: career.checkpointStory,
-      input, sound: sfx, prepareCity: depart,
-      exit() { journey = null; cover.style.visibility = ''; arrive(); } });
-    cover.style.visibility = 'hidden';
-    if (chapter === 'arrival') depart();
-    await trainReady;
-    await boot(outside);
-  } else {
-    await boot();
-  }
+  await boot();
   if (!net) setSoloTime(openingHour);
 }
 // Leaving the tab is the ordinary way a session ends here, so say goodbye
@@ -3969,6 +3974,7 @@ function careerHost() {
     get parkingLots() { return parkingLots; }, get trains() { return trains; },
     get sky() { return sky; },
     hint: ui_hint,
+    storyTrain: () => journey?.aboard,
     camReset() { camInit = false; camYaw = player.heading; },
   };
 }

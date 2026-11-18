@@ -1,41 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { floorAt, storyStart, trainZ, doorX } from '../js/prologue-route.js';
+import { bridge, stationExit, storyStart } from '../js/prologue-route.js';
 import { blank, parse, serialize } from '../js/savegame.js';
 
-function follow(points, arrival, y) {
-  const [first, ...rest] = points;
-  let [x, z] = first;
-  for (const [endX, endZ] of rest) {
-    const dx = endX - x,
-      dz = endZ - z,
-      count = Math.ceil(Math.hypot(dx, dz) / 0.06);
-    for (let i = 0; i < count; i++) {
-      x += dx / count;
-      z += dz / count;
-      const next = floorAt(x, z, y, arrival);
-      assert.notEqual(next, null, 'disconnected floor at ' + [x, z, y]);
-      y = next;
-    }
+import { readFileSync, statSync } from 'node:fs';
+import { register } from 'node:module';
+import { railPose, lineLength } from '../js/story-rail.js';
+register(new URL('./three-alias.mjs', import.meta.url));
+const { Navigation } = await import('../js/navigation.js');
+
+test('Kolín bridge, the whole railway and the forecourt share a drivable world', () => {
+  const root = new URL('../public/',import.meta.url);
+  const manifest = JSON.parse(readFileSync(new URL('data/manifest.json', root)));
+  const tiles = manifest.tiles.filter(t => t.tx>=-9 && t.tx<=0 && t.tz>=-1 && t.tz<=0);
+  const byId = new Set(tiles.map(t => t.tx+'_'+t.tz));
+  for(let s=0; s<=lineLength; s+=100) {
+    const p=railPose(s), id=Math.floor(p.x/4800)+'_'+Math.floor(p.z/4800);
+    assert.ok(byId.has(id),'missing world tile '+id);
   }
-  return y;
-}
-test('the bridge, lower concourse, platform stairs, threshold and carriage aisle connect in both directions', () => {
-  const station = [
-    [1, 27],
-    [1, 2],
-    [1, -18],
-    [13.7, -18],
-    [doorX, -20.9],
-    [doorX, trainZ],
-    [4.8, trainZ]
-  ];
-  assert.equal(follow([[0, 68], [1.5, 40], ...station], false, 2.4), 0.18);
-  assert.equal(follow([...station].reverse().concat([[1, 28.05]]), true, 0.18), 0);
-  assert.equal(floorAt(1, -18, -3.6, true), -3.6);
-  assert.equal(floorAt(4, -18, 0, true), null);
-  assert.equal(floorAt(5, -21.6, 0, false), null, 'no boarding through a window');
-  assert.equal(floorAt(3, 70, 2.4, false), null, 'bridge railing');
+  assert.ok(lineLength>41000 && lineLength<43000);
+  const roads=[];
+  for (const t of tiles) {
+    assert.equal(statSync(new URL('data/terrain/'+t.tx+'_'+t.tz+'.bin',root)).size,241*241*2);
+    roads.push(...JSON.parse(readFileSync(new URL(t.f,root))).roads);
+  }
+  const nav=new Navigation({roads});
+  nav.setDestination(stationExit.x,stationExit.z);
+  nav.reroute(bridge.x,bridge.z);
+  assert.ok(nav.route?.length>50);
+  assert.equal(nav.partial,false);
+  assert.ok(nav.remainingM>39000);
 });
 test('chapter checkpoints round-trip, fresh single player starts in Kolín and legacy saves continue', () => {
   for (const stage of ['bridge', 'station', 'coach', 'arrival', 'forecourt', 'done']) {
@@ -65,4 +59,20 @@ test('an evening car park keeps the two door approaches free for the handover', 
   const duringHandover = parkedAtNight(reserved);
   assert.ok(duringHandover.length > 0);
   assert.ok(duringHandover.every(car => Math.hypot(car.x - reserved.x, car.z - reserved.z) >= 5));
+});
+
+test('every replay selects another connected platform and the countdown survives a save', async()=>{
+  const {newTrip,platforms}=await import('../js/prologue-route.js');
+  const {routeFor}=await import('../js/story-rail.js');
+  const starts=[];
+  for(const platform of platforms){
+    for(const random of [0,.99])assert.notEqual(newTrip(platform,()=>random).platform,platform);
+    const route=routeFor(platform);
+    starts.push(route.railPose(0));
+    assert.ok(Math.abs(route.lineLength-lineLength)<600);
+    assert.deepEqual(route.railPose(route.lineLength),railPose(lineLength));
+    const trip={platform,remaining:82.5};
+    assert.deepEqual(parse(serialize({...blank(),storyTrip:trip})).state.storyTrip,trip);
+  }
+  for(let i=1;i<starts.length;i++) assert.ok(Math.hypot(starts[i].x-starts[i-1].x,starts[i].z-starts[i-1].z)>8);
 });

@@ -102,7 +102,9 @@ const ZLIN = { latS: 49.100, latN: 49.320, lonW: 17.400, lonE: 17.900 };
 const boxToRect = (b) => ({
   x0: xOf(b.lonW), x1: xOf(b.lonE), z0: zOf(b.latN), z1: zOf(b.latS),
 });
-const RECTS = [PRAHA, HOME, ZLIN].map(boxToRect);
+// Kolín and the line 010 / road II/322 corridor through Týnec to Přelouč.
+const KOLIN_PCE = { latS: 49.992, latN: 50.065, lonW: 15.173, lonE: 15.556 };
+const RECTS = [PRAHA, HOME, ZLIN, KOLIN_PCE].map(boxToRect);
 const toLocal = (pts) => pts.map(([la, lo]) => [xOf(lo), zOf(la)]);
 // Each entry is one polyline plus the half-width it claims, so routes of very
 // different lengths can be given very different bands without the tile test

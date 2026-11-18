@@ -177,7 +177,7 @@ export class Player {
     this.uid = uid;                        // 'base:tab' — what goes on the wire
     this.baseUid = baseUid(uid);           // the person: look and name come from here
     this.look = lookForUid(this.baseUid, jacketIdx);
-    const c = makeCitizen(this.look);
+    const c = makeCitizen(this.look, { faceDetail: true });
     this._cit = c;
     this.mesh = c.group;
     this._animate = c.walk;

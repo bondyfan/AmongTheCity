@@ -47,11 +47,9 @@ const SAVE_EVERY = 20;         // s between autosaves
 // Where main.js stands you up after the death card is the hospital nearest
 // to where you fell (config.js HOSPITALS, js/startplace.js nearestHospital,
 // the same call main.js makes). Only the save written as you go down needs it.
-import { storyStart } from './prologue-route.js';
+import { storyStart, newTrip, bridge, roof, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
 
 const store = browserStore();
-// Outside the front doors of the surveyed station hall.
-const STATION_EXIT = { x: 21.73, z: -96.52, h: 0 };
 
 let h = null;                  // main.js's host (see careerHost there)
 let state = blank();           // the loaded save, until attach() has applied it
@@ -88,12 +86,20 @@ export function choose(choice) {
   const story = storyStart(solo, startPick, state.prologue, res.reason === 'empty');
   if (story && story !== 'done') {
     state.onb.done = true;
+    if (!state.storyTrip) {
+      let previous = null;
+      try { previous = Number(localStorage.getItem('atc-last-platform')); } catch {}
+      state.storyTrip = state.prologue ? {platform: 2, remaining: 210} : newTrip(previous);
+      try { localStorage.setItem('atc-last-platform', state.storyTrip.platform); } catch {}
+    }
+    if (story === 'bridge' && state.pos && Math.hypot(state.pos.x - bridge.x, state.pos.z - bridge.z) < 40) state.pos = null;
     if (!state.prologue || (story === 'forecourt' && !state.pos)) checkpointStory(story);
   }
   loadNote = res.reason === 'corrupt' || res.reason === 'newer' ? res.reason : null;
 }
 
-/** Story coordinates live in the chapter, city saves stay in world metres. */
+/** A chapter selects the objective. The position is always in the streamed world. */
+export const storyTrip = () => state.storyTrip;
 export function activeStory() {
   return solo && startPick !== 'praha' ? state.prologue : null;
 }
@@ -101,7 +107,7 @@ export function checkpointStory(stage) {
   state.prologue = stage;
   if (applied) { save(); return; }
   if (stage === 'forecourt') {
-    state.pos = { ...STATION_EXIT };
+    state.pos = { ...stationExit };
     state.tod = 20.6 / 24;
   }
   store.save(state);
@@ -113,8 +119,11 @@ export function checkpointStory(stage) {
  *  saved position, so spawn() below does not walk the player back to it. */
 export function startPoint() {
   const chapter = activeStory();
-  if (chapter && chapter !== 'done' && chapter !== 'forecourt') {
-    return { ...pickStart('pardubice', null), x: STATION_EXIT.x, z: STATION_EXIT.z, heading: STATION_EXIT.h };
+  if (chapter && chapter !== 'done') {
+    const fallback = { bridge: roof, station: stationEntry, coach: kolinPlatform, arrival: pardubicePlatform, forecourt: stationExit }[chapter];
+    const p = state.pos ?? fallback;
+    const place = p.x < -38000 ? { name: 'Kolín', to: 'do Kolína' } : pickStart(null, p).place;
+    return { x: p.x, z: p.z, heading: p.h, place, saved: !!state.pos };
   }
   const sp = pickStart(startPick, state.pos);
   if (!sp.saved && state.pos) state = { ...state, pos: null };
@@ -124,8 +133,6 @@ export function startPoint() {
 /** Stand the player where the save left them. The tile under that spot is
  *  fetched first, so the boot warm-up builds the right neighbourhood. */
 export async function spawn(player, city) {
-  const chapter = activeStory();
-  if (chapter && chapter !== 'done' && chapter !== 'forecourt') return;
   const p = state.pos;
   if (!p) return;
   try {
@@ -352,6 +359,7 @@ function snapshot() {
   return {
     money: wallet.money(),
     prologue: state.prologue,
+    storyTrip: state.storyTrip,
     pos: lastSafe,
     tod: solo ? tod() : null,
     played: Math.round(played),
@@ -456,7 +464,7 @@ export function update(dt) {
   if (lastX !== null) {
     moved = Math.hypot(x - lastX, z - lastZ);
     if (car) progress.addDrive(moved);
-    else if (onFoot) progress.addWalk(moved);
+    else if (onFoot && !h.storyTrain?.()) progress.addWalk(moved);
   }
   lastX = x; lastZ = z;
   // Where a reload should put you: the last place you were on the ground, on

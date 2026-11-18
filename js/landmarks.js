@@ -26,6 +26,7 @@ import { buildBrana, buildPredbrani, branaSolids } from './landmarks-brana.js';
 import { buildZamek, zamekSolids } from './landmarks-zamek.js';
 import { buildZamekBrana, zamekBranaSolids } from './landmarks-zamekbrana.js';
 import { buildValy, isValyBarrier } from './landmarks-valy.js';
+import { buildKolin, kolinSolids } from './landmarks-kolin.js';
 import { buildNadrazi, nadraziSolids } from './landmarks-nadrazi.js';
 import { buildRadnice, radniceSolids } from './landmarks-radnice.js';
 import { buildBartolomej, buildZvestovani, buildJan, buildZvonice } from './landmarks-kostely.js';
@@ -57,6 +58,7 @@ import { LANDMARKS_WIDE, CLEAR_WIDE, PROP_WIDE, EXTRAS_WIDE, isWideBarrier } fro
  *   solids, 3.5 for the model. Checked by tests/landmarks.test.mjs.
  */
 export const LANDMARKS = [
+  { id:'kolin-nadrazi', region:'kolin', at:[-38845.33,746.7], area:1545, kind:'train_station', top:4.3, build:buildKolin, solids:kolinSolids },
   { id: 'zelena-brana', name: 'Zelená brána', at: [1565.4, -700.4], area: 70, top: 38, build: buildBrana, solids: branaSolids },
   { id: 'predbrani', at: [1555.1, -695.4], area: 86, r: 5, top: 10, build: buildPredbrani, solids: branaSolids },
   { id: 'zamek', name: 'zámek Pardubice', at: [1462.2, -1021.4], area: 3512, r: 15, top: 13.6, build: buildZamek, solids: zamekSolids, grounds: buildValy },

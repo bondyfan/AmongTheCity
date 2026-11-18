@@ -43,6 +43,7 @@ export function blank() {
     v: SAVE_VERSION,
     savedAt: 0,
     prologue: null,
+    storyTrip: null,
     money: 2500,
     pos: null,                 // { x, z, h, y? } or null = the station forecourt
     tod: null,                 // 0..1 time of day (single player only), or null
@@ -109,6 +110,12 @@ export function sanitize(raw) {
   return {
     v: SAVE_VERSION,
     savedAt: pos(s.savedAt),
+    storyTrip: [2,4,5].includes(s.storyTrip?.platform) ? {
+      platform: s.storyTrip.platform,
+      remaining: clamp(fin(s.storyTrip.remaining, 210), 0, 210),
+      ...(Number.isFinite(s.storyTrip.metres) ? {metres: clamp(s.storyTrip.metres, 0, 43000)} : {}),
+      ...(Number.isFinite(s.storyTrip.seatU) && Math.abs(s.storyTrip.seatU) < 40 ? {seatU: s.storyTrip.seatU} : {}),
+    } : null,
     prologue: storyStops.includes(s.prologue) ? s.prologue : null,
     money: Math.round(clamp(fin(s.money, b.money), -MONEY_MAX, MONEY_MAX)),
     pos: sanePos(s.pos),

@@ -1277,6 +1277,7 @@ export class CityWorld {
       if (inf.stale) this._requeueCells([key]);
       return;
     }
+    this.stationPassages?.cut(group,cx,cz,CHUNK);
     const prev = this.built.get(key);            // rebuilt / upgraded in place
     if (prev) { this.scene.remove(prev); shed(prev); }
     // a finished chunk never moves: its matrices are composed once (js/scenegraph.js)
@@ -2133,9 +2134,14 @@ export class CityWorld {
   // staircase is, the walk controller merely keeps finding a surface 175 mm
   // higher than the last one.
   supportY(x, z, maxY) {
+    const coach = this.storyCoach?.support(x, z, maxY);
+    if (Number.isFinite(coach) && this.storyCoach.carrying(x, z)) return coach;
+    const passage = this.stationPassages?.floor(x, z, maxY);
+    if (Number.isFinite(passage)) return passage;
     let best = this.heightAt(x, z, maxY);
     const roof = this.roofY(x, z, maxY);
     if (roof > best) best = roof;
+    if (coach > best) best = coach;
     const inside = this.interiors.supportY(x, z, maxY);
     return inside > best ? inside : best;
   }
@@ -2235,7 +2241,9 @@ export class CityWorld {
   // and (once shot at) holes. Cars and the helicopter never pass it, so for
   // them a building stays the impenetrable footprint it always was.
   collide(pos, radius, opts) {
-    let pushed = false;
+    if (opts?.interior && this.stationPassages?.contain(pos, opts.aboveY - 0.3, radius)) return true;
+    let pushed = this.storyCoach?.collide(pos, radius, opts) ?? false;
+    if (opts?.interior && this.storyCoach?.carrying(pos.x, pos.z)) return pushed;
     // A CAR IS A SOLID OBJECT, even for someone on foot. Walking through a
     // parked Octavia was the same lie as an NPC driving through it, and it
     // stayed in for exactly as long as nobody thought of the pavement as

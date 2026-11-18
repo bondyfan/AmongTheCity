@@ -10,7 +10,7 @@
 // longest wall (fitFrame byEdge) and every volume is a box in that frame:
 // u runs WEST along the forecourt front, v north toward the city.
 
-import { K, prism } from './landmarkskit.js';
+import { K } from './landmarkskit.js';
 import { fitFrame } from './landmarksframe.js';
 import { clockFace, storeys, rect } from './landmarks-parts.js';
 
@@ -70,7 +70,18 @@ export function buildNadrazi(kit, f) {
   const curtain = { cols: 17, rows: [{ y: 0.15, h: 3.25, w: 3.7, hex: GLASS, dark: true, glow: 0.92, rev: 0.25 },
     { y: 4.25, h: 5.5, w: 3.7, hex: GLASS, dark: true, glow: 0.92, rev: 0.25 }], seed: 1 };
   kit.set(CONCRETE, K.plaster);
-  F.box(hu0, hu1, hv0, hv1, 0, HH, { f: curtain, b: { ...curtain, seed: 2 } });
+  // Open door bays on the forecourt and platform faces, under the upper glazing.
+  for (const v of [hv0, hv1]) {
+    F.box(hu0, -18, v-.1, v+.1, 0, HH, { f: { ...curtain, cols: 8 }, b: { ...curtain, cols: 8 } });
+    F.box(-10, hu1, v-.1, v+.1, 0, HH, { f: { ...curtain, cols: 8 }, b: { ...curtain, cols: 8 } });
+    F.box(-18,-10,v-.1,v+.1,3.4,HH);
+  }
+  F.box(hu0, hu1, hv0, hv1, HH-.26, HH, null, true, true);
+  for (const u of [hu0, hu1]) F.box(u-.1,u+.1,hv0,hv1,0,HH);
+  for (const u of [-41,-30,0,12]) {
+    F.box(u,u+.15,hv0+2,hv1-2,HH-.45,HH-.26);
+    for (const v of [hv0+4,hv1-5]) F.box(u-1.8,u+1.8,v,v+.62,.35,.52);
+  }
   // the canopy over the doors, the whole length of the glass
   F.box(hu0 + 2, hu1 - 1.5, hv1, hv1 + 4.6, 3.55, 3.9, null, true, true);
   // the raised lantern that lights the hall from above
@@ -127,5 +138,12 @@ export function buildNadrazi(kit, f) {
 export function nadraziSolids(f, l) {
   const { F } = fitFrame(null, f.o, 0, -1, true);
   const over = ([u0, u1, v0, v1, top]) => ({ ring: F.ring(u0, u1, v0, v1), holes: null, top, bot: 0 });
-  return [prism(f, l.top), over(HALL), over(HOTEL), over(ANNEX)];
+  const [a,b,c,d,top]=HALL;
+  const walls = [over(HOTEL),over(ANNEX), { ...over(HALL),bot:top-.26 }];
+  for (const v of [c,d]) {
+    walls.push(over([a,-18,v-.1,v+.1,top]),over([-10,b,v-.1,v+.1,top]),{ ...over([-18,-10,v-.1,v+.1,top]),bot:3.4 });
+  }
+  for (const u of [a,b]) walls.push(over([u-.1,u+.1,c,d,top]));
+  for (const r of [[-152.8,-70.2,-24.8,-11.8,7.3],[55,100.3,-.6,12.4,7.6],[100.3,110.3,-.6,26.8,7.6],[110.3,152.8,-.7,12.4,6.4],[22,47.4,12.5,23.5,4.7]]) walls.push(over(r));
+  return walls;
 }

@@ -48,7 +48,7 @@ const STYLES = {
 };
 
 /** Build the head on M. Returns the height of the top of the hair or hat. */
-export function buildHead(M, D, o) {
+export function buildHead(M, D, o, eye) {
   const hk = D.headK * 1.05, k = D.k, h = D.crownY - D.chinY, z0 = -0.012 * k;
   const fem = o.fem, jaw = fem ? 0.92 : o.arch === 'm60' ? 1.07 : 1;
   const B = BONE.head;
@@ -85,6 +85,14 @@ export function buildHead(M, D, o) {
 
   // ---- face ----
   const ue = 0.545, xe = 0.031 * hk, ye = yOf(ue);
+  if (eye) {
+    const headY = D.shoulderTopY + .012 * k, headZ = .008 * k;
+    Object.assign(eye, {
+      x: xe, y: ye - headY, z: fz(xe, ue, .005 * hk) - headZ,
+      lipY: yOf(.235) - headY,
+      surface: (x, y) => fz(x, (y + headY - D.chinY) / h) - headZ,
+    });
+  }
   const lid = mix(o.skin, 0x1a1210, 0.72);
   const browC = o.arch === 'm90' ? 0xa9a59c : (o.arch === 'm60' || o.arch === 'f60') ? mix(o.hair, 0x3a3530, 0.5) : shade(o.hair, 0.8);
   const flat = { normal: [0, 0, -1] };

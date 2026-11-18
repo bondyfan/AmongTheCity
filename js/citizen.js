@@ -189,7 +189,7 @@ const TOPSY = { puffer: 0.07, coat: 0.04, jacket: 0.03, hoodie: 0.03 };
  * order: js/pedestrians.js lends this call a seeded Math.random, which is what
  * makes the same citizen wear the same coat on every co-op screen.
  */
-export function makeCitizen(look = {}) {
+export function makeCitizen(look = {}, { faceDetail = false } = {}) {
   const a = archetype(look.archetype);
   const D = bodyDims(a.key, a.h);
   const id = look.uid ?? null;
@@ -210,7 +210,8 @@ export function makeCitizen(look = {}) {
   // ---- the surface ----
   const M = new BodyMesh();
   buildBody(M, D, o);
-  const headTop = buildHead(M, D, o);
+  const eye = faceDetail ? {} : null;
+  const headTop = buildHead(M, D, o, eye);
   const geo = M.build();
 
   // ---- the skeleton ----
@@ -332,7 +333,7 @@ export function makeCitizen(look = {}) {
     arch: a,
     // feet to the top of the hair or hat, before the owner's scale: name tags
     // and speech bubbles read this rather than assume 1.75
-    headTop,
+    headTop, eye,
     // 'near' | 'far' | null (automatic): the dev showroom and tests force it
     setLod(v) { mesh.userData.force = v === 'far' ? true : v === 'near' ? false : null; },
     tris: geo.userData.tris,

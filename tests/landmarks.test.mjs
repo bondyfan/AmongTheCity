@@ -37,7 +37,7 @@ function tileAt(x, z) {
 const tileOf = (l) => tileAt(l.at[0], l.at[1]);
 const tile = tileAt(1500, -700);                     // Pardubice, 0_-1
 // The founding height each model is built on: one per region, near its real ground
-const GROUND_OF = { pardubice: 221, praha: 192 };
+const GROUND_OF = { pardubice: 221, praha: 192, kolin: 204 };
 const groundOf = (l) => GROUND_OF[l.region ?? 'pardubice'];
 const GROUND = 221;
 const copy = (f) => JSON.parse(JSON.stringify(f));
@@ -103,9 +103,9 @@ function build(l, f) {
 
 // Per region, all its models together. Prague holds two packages' landmarks
 // (the old town and the wide set), so its cap is the larger.
-const REGION_CAP = { pardubice: 60000, praha: 160000 };
+const REGION_CAP = { pardubice: 60000, praha: 160000, kolin: 10000 };
 // and per model: Prague's castle is one footprint 400 m long (js/landmarks-hrad.js)
-const MODEL_CAP = { pardubice: 12000, praha: 20000 };
+const MODEL_CAP = { pardubice: 12000, praha: 20000, kolin: 3500 };
 test('each model stands on its own footprint, on the ground, and is sound geometry', () => {
   const total = {};
   for (const l of MODELS) {
@@ -144,7 +144,7 @@ test('each model stands on its own footprint, on the ground, and is sound geomet
     // at the Dancing House reach into their slope, js/landmarks-hrad.js.)
     else if (l.id.startsWith('zamek') || WIDE_IDS.has(l.id)) assert.ok(y0 - GROUND > -1.85 && y0 - GROUND < 0.01, `${l.id} starts ${(y0 - GROUND).toFixed(2)} m off its ground`);
     else assert.ok(Math.abs(y0 - GROUND) < 0.01, `${l.id} starts ${(y0 - GROUND).toFixed(2)} m off its ground`);
-    assert.ok(y1 - GROUND > 8, `${l.id} is only ${(y1 - GROUND).toFixed(1)} m tall`);
+    assert.ok(y1 - GROUND > (l.id === 'kolin-nadrazi' ? 4 : 8), `${l.id} is only ${(y1 - GROUND).toFixed(1)} m tall`);
     if (l.id === 'zelena-brana') assert.ok(Math.abs(y1 - GROUND - 59) < 1, `Zelená brána is 59 m, the model ${(y1 - GROUND).toFixed(1)}`);
   }
   for (const [reg, n] of Object.entries(total)) assert.ok(n < REGION_CAP[reg], `the landmarks of ${reg} are ${n} triangles in all`);
@@ -251,7 +251,7 @@ test('a landmark is solid as high as its model stands, not as high as the tile g
   const { F } = fitFrame(null, st.o, 0, -1, true);
   const [hx, hz] = F.xz(38, -6), [ax, az] = F.xz(-14, -6), [wx, wz] = F.xz(-110, -18);
   assert.ok(at('nadrazi', hx, hz, 22) && !at('nadrazi', hx, hz, 24), 'the hotel is not 23.4 m of solid');
-  assert.ok(at('nadrazi', ax, az, 10) && !at('nadrazi', ax, az, 12), 'the hall is not 10.6 m of solid');
+  assert.ok(!at('nadrazi', ax, az, 1.6) && at('nadrazi', ax, az, 10.5) && !at('nadrazi', ax, az, 12), 'the hall is not 10.6 m of solid');
   assert.ok(at('nadrazi', wx, wz, 6) && !at('nadrazi', wx, wz, 9), 'a wing is not 7.3 m of solid');
   // the chateau: its courtyards are open, its wings are not
   const za = found.get('zamek');

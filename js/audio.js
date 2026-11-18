@@ -90,6 +90,7 @@ function playSample(name, buf, vol, rate) {
 // The prefix stays in the key, so a voice line and a sound effect can share a
 // name without colliding.
 function assetUrl(name) {
+  if (name.startsWith('story/')) return 'assets/last-train/' + name.slice(6) + '.mp3';
   return name.charCodeAt(0) === 118 /* v */ && name.charCodeAt(1) === 47 /* / */
     ? 'assets/voices/' + name.slice(2) + '.mp3'
     : 'assets/sounds/' + name + '.mp3';
@@ -2605,4 +2606,49 @@ export function windSet(speed) {
   wind.gain.gain.setTargetAtTime(WIND.vol * windLvl * windLvl * load, t, 0.12);
   wind.lp.frequency.setTargetAtTime(
     (WIND.cutLo + (WIND.cutHi - WIND.cutLo) * windLvl) * (1 + 0.8 * windG), t, 0.12);
+}
+
+// Story dialogue and Foley use the same master volume as the rest of the city.
+export function storyRecording(id, {level = 1, phone = false, loop = false, meter = false, end} = {}) {
+  let source, gain, analyser, samples, stopped = false;
+  if (ctx?.state === 'running') loadBuffer('story/' + id).then(buffer => {
+    if (!buffer || stopped) return;
+    source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = loop;
+    let output = source;
+    if (phone) {
+      for (const [type, frequency] of [['highpass', 360], ['lowpass', 3050]]) {
+        const filter = ctx.createBiquadFilter();
+        filter.type = type;
+        filter.frequency.value = frequency;
+        output.connect(filter);
+        output = filter;
+      }
+    }
+    if(meter){
+      analyser=ctx.createAnalyser();analyser.fftSize=256;samples=new Uint8Array(analyser.fftSize);
+      output.connect(analyser);output=analyser;
+    }
+    gain = ctx.createGain();
+    gain.gain.value = level;
+    output.connect(gain);
+    gain.connect(master);
+    source.onended = () => { gain.disconnect(); if (!stopped) end?.(); };
+    source.start();
+  });
+  return { intensity() {
+    if(stopped || !analyser) return 0;
+    analyser.getByteTimeDomainData(samples);
+    let energy=0;
+    for(const v of samples) energy+=((v-128)/128)**2;
+    return Math.min(1,Math.sqrt(energy/samples.length)*4.6);
+  }, stop(fade = 0.035) {
+    if (stopped) return;
+    stopped = true;
+    if (source) {
+      gain.gain.setTargetAtTime(0, ctx.currentTime, Math.max(.004,fade/4));
+      source.stop(ctx.currentTime + fade);
+    }
+  }};
 }

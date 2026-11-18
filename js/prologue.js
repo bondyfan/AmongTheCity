@@ -1,382 +1,521 @@
-import * as THREE from 'three';
-import { floorAt, openingCalls, trainZ, doorX } from './prologue-route.js';
-import { scenery } from './prologue-kit.js';
-import { station } from './prologue-station.js';
-import { coach } from './prologue-coach.js';
-import { makeCitizen } from './citizen.js';
+import { chunkKey, distPointToSegment } from './geo.js';
+import { railHeadOn, railHeadAt } from './trains.js';
+import { storyRecording } from './audio.js';
+import { trainBody, doorX, carriageAt } from './prologue-coach.js';
+import { trainDeck, inside } from './prologue-deck.js';
 import { storyHud } from './prologue-hud.js';
+import { calls } from './prologue-dialogue.js';
+import { stationEntry, stationExit, trackNumber, roof } from './prologue-route.js';
+import { routeFor, localAt, worldAt } from './story-rail.js';
+import { rooftop } from './prologue-roof.js';
+import { departureBoard } from './prologue-board.js';
 
-const place = ['Kolín', 'Pardubice hlavní nádraží'];
-const walkHelp = 'WASD chůze · Shift běh · ← → nebo tažení pravou myší rozhlížení';
-const bagX = 1.7,
-  bagZ = 40;
-export function createPrologue({ checkpoint, save, input, sound, prepareCity, exit }) {
-  const scene = new THREE.Scene(),
-    camera = new THREE.PerspectiveCamera(67, 1, 0.035, 340);
-  const hemi = new THREE.HemisphereLight(0xffe6dc, 0x9392a5, 1.72);
-  const sun = new THREE.DirectionalLight(0xffcf9c, 1.55);
-  sun.position.set(-20, 18, 36);
-  scene.add(hemi, sun);
-  const sky = new THREE.Mesh(
-    new THREE.SphereGeometry(260, 40, 16),
-    new THREE.ShaderMaterial({
-      side: THREE.BackSide,
-      depthWrite: false,
-      uniforms: { night: { value: 0 } },
-      vertexShader:
-        'varying vec3 dir; void main(){dir=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
-      fragmentShader: `varying vec3 dir; uniform float night;
-      void main(){vec3 d=normalize(dir); float t=smoothstep(-.09,.58,d.y);
-      vec3 c=mix(vec3(.85,.43,.29),vec3(.11,.16,.34),t);
-      c=mix(c,mix(vec3(.31,.29,.36),vec3(.045,.067,.15),t),night);
-      c+=vec3(.8,.42,.17)*pow(max(dot(d,normalize(vec3(-.72,.095,-.68))),0.),35.)*(1.-night);
-      gl_FragColor=vec4(c,1.);
-      #include <colorspace_fragment>
-      }`
-    })
-  );
-  scene.add(sky);
-  const kits = [];
-  const assemble = (build) => {
-    const group = new THREE.Group();
-    scene.add(group);
-    const kit = scenery(group);
-    build(kit);
-    kit.finish();
-    kits.push(kit);
-    return group;
-  };
-  const origin = assemble((k) => station(k, false)),
-    destination = assemble((k) => station(k, true));
-  const carriage = assemble(coach);
-  const people = [];
-  function person(parent, uid, x, y, z, heading, sitting = false) {
-    const body = makeCitizen({ uid, archetype: 'man' });
-    parent.add(body.group);
-    body.group.position.set(x, y, z);
-    body.group.rotation.y = heading;
-    if (sitting) body.sitPose(1, 0);
-    people.push(body);
+const clock = (seconds) => Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+export function createPrologue({ chapter, scene, world, player, map, trip, trains, save }) {
+  const hud = storyHud(),
+    train = trainBody(scene),
+    board = departureBoard(scene, world, trip);
+  const { lineLength, railPose, nearestMetres } = routeFor(trip.platform);
+  const roofSet = rooftop(scene, world, player);
+  let phase = chapter,
+    speed = 0,
+    closed = chapter === 'coach' ? 1 : 0,
+    line = -1;
+  let metres =
+    chapter === 'arrival'
+      ? lineLength
+      : chapter === 'coach'
+        ? Math.min(lineLength, trip.metres ?? nearestMetres(player.pos.x, player.pos.z))
+        : 0;
+  let pose = railPose(metres),
+    base = 0,
+    aboard = false,
+    driving = false,
+    seat = null;
+  let skipped = null,
+    missed = false,
+    readBoard = false,
+    guideTarget = null,
+    hudWait = 0;
+  let voice = null,
+    music = null,
+    ring = null,
+    friendRinging = false,
+    silence = 0,
+    speechTime = 0,
+    nextJunction = 240,
+    lookYaw = 0.98,
+    lookPitch = 0;
+  let live = true,
+    step = 0,
+    exitStep = 0;
+  const frame = world.stationPassages.stations;
+  const kolin = frame[0],
+    pardubice = frame[1],
+    vPlatform = { 2: 0, 4: -41, 5: -57 }[trip.platform];
+  const outbound = [
+    [24, 35],
+    [17, 35],
+    [0, 35],
+    [0, vPlatform],
+    [17, vPlatform],
+  ];
+  const inbound = [
+    [18, 0],
+    [0, 0],
+    [0, -39],
+    [18, -39],
+    [18, -46],
+    [7, -46],
+  ];
+  function nextTurn(station, points, index) {
+    while (index < points.length && distance(worldAt(station, ...points[index])) < 2.1) index++;
+    return index;
   }
-  person(origin, 'pruvodci', 15.8, 0, -19.9, 0.65);
-  person(destination, 'cestujici', -5, 0, -19.8, 2.4);
-  person(carriage, 'cestujici-u-okna', -6.35, -0.27, trainZ - 1.08, Math.PI / 2, true);
-  person(carriage, 'cestujici-s-taskou', 9.3, -0.27, trainZ + 1.08, -Math.PI / 2, true);
-  const door = assemble((k) => {
-    k.box(doorX, 1.44, trainZ + 1.49, 1.49, 2.55, 0.13, 0xb64539);
-    k.box(doorX, 1.65, trainZ + 1.566, 0.83, 0.88, 0.025, 0x5f7686);
-  });
-  const bag = assemble((k) => {
-    k.box(bagX, 0.34, bagZ, 0.48, 0.65, 0.3, 0x74503b);
-    k.box(bagX, 0.31, bagZ + 0.16, 0.38, 0.35, 0.1, 0x9d7755);
-    k.box(bagX, 0.03, bagZ + 0.45, 0.61, 0.06, 0.67, 0x7e857b);
-  });
-  const lineSide = assemble((k) => {
-    k.box(0, -0.98, trainZ, 380, 0.31, 220, 0x4d594a);
-    for (const dz of [-3.7, 3.7]) k.box(0, -0.73, trainZ + dz, 370, 0.14, 2.3, 0x77716c);
-    for (let i = 0; i < 75; i++) {
-      const x = i * 3 - 100,
-        z = trainZ + (i % 2 ? 1 : -1) * (10 + (i % 7));
-      if (i % 5 === 0) {
-        k.box(x, 2, z, 4, 4, 3, 0x575369);
-        k.box(x, 2, z + (z < trainZ ? 1.51 : -1.51), 0.84, 1, 0.04, 0xffcb87, 0, true);
-      } else {
-        k.box(x, 1.4, z, 0.19, 3, 0.19, 0x4f4440);
-        k.box(x, 3.6, z, 2.2, 2.7, 2.1, 0x525e5d);
+  const point = () => localAt(pose, player.pos.x, player.pos.z);
+  const distance = (p) => Math.hypot(p.x - player.pos.x, p.z - player.pos.z);
+  function guideTo(target) {
+    if (guideTarget?.x === target.x && guideTarget?.z === target.z) return;
+    guideTarget = target;
+    map.setWaypoint(target.x, target.z);
+  }
+  let lastSegment = null;
+  function railHeight(x, z) {
+    const rails = world.city.chunkIndex.get(chunkKey(x, z))?.rails;
+    // Keep the rail bed under the wheels even when a road passes overhead.
+    // A curve can cross several mapped ways without leaving the same cell.
+    const near = {};
+    if (lastSegment && rails === lastSegment.rails) {
+      const { a, b, way, start } = lastSegment;
+      if (distPointToSegment(x, z, ...a, ...b, near) < 0.04)
+        return railHeadOn(way, start + Math.hypot(near.x - a[0], near.z - a[1]), x, z);
+    }
+    for (const way of rails ?? []) {
+      if (way.t !== 'rail') continue;
+      let start = 0;
+      for (let i = 1; i < way.p.length; i++) {
+        const a = way.p[i - 1],
+          b = way.p[i];
+        if (distPointToSegment(x, z, ...a, ...b, near) < 0.04) {
+          lastSegment = { rails, way, a, b, start };
+          return railHeadOn(way, start + Math.hypot(near.x - a[0], near.z - a[1]), x, z);
+        }
+        start += Math.hypot(b[0] - a[0], b[1] - a[1]);
       }
     }
-  });
-  const treads = assemble((k) => {
-    for (let i = 0; i < 28; i++) {
-      const z = 2 + (i * 8) / 28,
-        y = ((z - 10) * 3.6) / 8;
-      k.box(1.12, y + 0.014, z, 2.03, 0.035, 0.2, 0x454c53);
-      k.box(1.12, y + 0.036, z + 0.08, 2.01, 0.014, 0.024, 0xe9c476);
+    return railHeadAt(x, z);
+  }
+  function place() {
+    pose = railPose(metres);
+    base = railHeight(pose.x, pose.z) + 0.6;
+    train.group.position.set(pose.x, base, pose.z);
+    train.group.rotation.y = -Math.atan2(pose.s, pose.c);
+    train.doors(closed);
+    if (phase === 'coach') trip.metres = metres;
+  }
+  function change(next) {
+    phase = next;
+    hud.say();
+    hud.action();
+    hud.phone();
+    hudWait = 0;
+    if (next === 'station') guideTo(stationEntry);
+    if (next === 'arrival') guideTo(stationExit);
+    save(next);
+  }
+  function nextLine() {
+    voice?.stop();
+    ring?.stop();
+    silence = 0;
+    speechTime = 0;
+    if (line === 4 && !friendRinging) {
+      friendRinging = true;
+      hud.say();
+      hud.phone('Vašek');
+      hud.action('Přijmout hovor');
+      ring = storyRecording('phone-ring', { level: 0.49 });
+      silence = 2.4;
+      return;
     }
-  });
-  let treadPhase = 0;
-  const hud = storyHud();
-  document.body.classList.add('on-last-train');
-  let arrival = checkpoint === 'arrival';
-  let phase = { bridge: 'ring', station: 'walk', coach: 'coach', arrival: 'alight' }[checkpoint] ?? 'ring';
-  let x = 0,
-    z = 68,
-    y = 2.4,
-    yaw = 0,
-    pitch = 0,
-    ride = 0,
-    line = 0,
-    seconds = 120,
-    stride = 0;
-  let missedTime = 0,
-    conductorTime = 0,
-    seatX = 4.8,
-    seatSide = -1,
-    closed = false;
-  if (phase === 'walk') {
-    z = 39;
-    y = 0;
+    if (++line >= calls.length) {
+      roofSet.release();
+      hud.cinema(false);
+      music?.stop(2.3);
+      change('station');
+      return;
+    }
+    const [id, who, words, role] = calls[line];
+    hud.say(who, words);
+    hud.phone(
+      line < 4 ? 'Nemocnice' : line === 4 ? 'Máma' : 'Vašek',
+      line === 4 ? 'Nová zpráva' : 'Probíhá hovor',
+    );
+    hud.action('Další replika');
+    if (id === 'message') {
+      silence = 4.4;
+      return;
+    }
+    const expected = line;
+    voice = storyRecording(id, {
+      phone: role !== 'father',
+      meter: role === 'father',
+      level: role === 'father' ? 0.95 : 1.08,
+      end: () => {
+        if (live && phase === 'bridge' && line === expected) silence = 0.52;
+      },
+    });
+    speechTime = Math.max(14, words.length * 0.16);
+  }
+  place();
+  if (phase === 'bridge') {
+    if (distance(roof) < 9) roofSet.putOnRoof();
+    hud.cinema(true);
+    music = storyRecording('roof-music', { level: 0.23, loop: true });
+    ring = storyRecording('phone-ring', { level: 0.49, loop: true });
+    hud.phone('Nemocnice');
+    hud.action('Přijmout hovor');
+  }
+  if (phase !== 'bridge' && Number.isFinite(trip.seatU)) {
+    const savedSeat = { u: trip.seatU, v: 0.61 };
+    if (distance(worldAt(pose, savedSeat.u, savedSeat.v)) < 2) seat = savedSeat;
   }
   if (phase === 'coach') {
-    x = doorX;
-    z = trainZ;
-    y = 0.18;
-    yaw = Math.PI / 2;
-  }
-  if (arrival) {
-    x = seatX;
-    z = trainZ;
-    y = 0.18;
-    yaw = -Math.PI / 2;
-  }
-  const moving = () => ['bag', 'walk', 'coach', 'alight'].includes(phase);
-  input.rpgMode = true;
-  function nearBag() {
-    return Math.hypot(x - bagX, z - bagZ) < 2.3;
-  }
-  function atSeat() {
-    return x < 10.9 && x > -8.65 && Math.abs(z - trainZ) < 0.5;
-  }
-  function outdoors() {
-    return z > 27.8 && Math.abs(x) < 2.5;
-  }
-  function interact() {
-    if (closed || document.body.dataset.panelOpen) return;
-    if (phase === 'ring') {
-      phase = 'call';
-      line = 0;
-    } else if (phase === 'call') {
-      if (++line === openingCalls.length) phase = 'bag';
-    } else if (phase === 'bag' && nearBag()) {
-      phase = 'walk';
-      save('station');
-    } else if (phase === 'late') {
-      phase = 'walk';
-      missedTime = 0;
-      x = 0;
-      z = 38;
-      y = 0;
-      yaw = 0;
-      pitch = 0;
-      seconds = 120;
-    } else if (phase === 'coach' && atSeat()) {
-      seatX = Math.max(-8.2, Math.min(10.14, -8.2 + Math.round((x + 8.2) / 2.62) * 2.62));
-      seatSide = Math.cos(yaw) > 0 ? -1 : 1;
-      prepareCity();
-      phase = 'ride';
-      ride = 0;
-      yaw = seatSide < 0 ? 0 : Math.PI;
-      pitch = -0.04;
-      sound('train_doors', 0.55);
-    } else if (phase === 'seated') {
-      phase = 'alight';
-      x = seatX;
-      z = trainZ;
-      y = 0.18;
-      yaw = -Math.PI / 2;
-      pitch = 0;
+    const { u, v } = point();
+    if (!inside(u, v)) {
+      metres = 0;
+      closed = 0;
+      place();
+      change('station');
+    } else {
+      aboard = true;
+      player.y = base + 0.165;
     }
   }
-  hud.button.onclick = interact;
-  const key = (e) => {
-    if (e.code === 'KeyE' && !e.repeat && !e.metaKey && !e.ctrlKey) {
-      e.preventDefault();
-      interact();
-    }
-  };
-  window.addEventListener('keydown', key);
-  function close() {
-    closed = true;
-    window.removeEventListener('keydown', key);
-    document.body.classList.remove('on-last-train');
-    people.forEach((body) => body.dispose());
-    hud.close();
-    kits.forEach((k) => k.dispose());
-    sky.geometry.dispose();
-    sky.material.dispose();
-    scene.clear();
-    input.takeDrag();
-    input.cancelCombat();
-    input.keys.clear();
+  const deck = trainDeck({
+    get pose() {
+      return pose;
+    },
+    get base() {
+      return base;
+    },
+    get closed() {
+      return closed;
+    },
+    get aboard() {
+      return aboard;
+    },
+    get travelling() {
+      return phase === 'coach';
+    },
+  });
+  world.storyCoach = deck;
+  const passSound = () =>
+    storyRecording(aboard ? 'coach-pass' : 'platform-pass', { level: aboard ? 0.38 : 0.65 });
+  if (trains) trains.storyPass = passSound;
+  function beginRun() {
+    trip.remaining = 0;
+    missed = !aboard;
+    if (!missed) change('coach');
+    if (distance(pose) < 90) storyRecording('door', { level: aboard ? 0.54 : 0.72 });
   }
-  function move(dt) {
-    const drag = input.takeDrag();
-    yaw -= drag.x * 0.003;
-    pitch = THREE.MathUtils.clamp(pitch - drag.y * 0.003, -1.1, 1.1);
-    yaw += dt * 1.85 * (Number(input.keys.has('ArrowLeft')) - Number(input.keys.has('ArrowRight')));
-    if (!moving()) return;
-    const side = Number(input.keys.has('KeyD')) - Number(input.keys.has('KeyA'));
-    const ahead = -input.moveZ;
-    const speed = ((input.selecting ? 5.8 : 3.3) * dt) / Math.max(1, Math.hypot(side, ahead));
-    const dx = (Math.cos(yaw) * side - Math.sin(yaw) * ahead) * speed;
-    const dz = (-Math.sin(yaw) * side - Math.cos(yaw) * ahead) * speed;
-    // Substep even a long frame so thin partitions and stair landings hold.
-    const parts = Math.max(1, Math.ceil(speed / 0.085));
-    for (let i = 0; i < parts; i++) {
-      for (const [nx, nz] of [
-        [x + dx / parts, z],
-        [null, z + dz / parts]
-      ]) {
-        const px = nx ?? x;
-        if (phase === 'bag' && nz < 36) continue;
-        if (phase === 'coach' && nz > trainZ + 1.32) continue;
-        if (arrival && px < 0.16 && px > -0.16 && nz > 2 && nz < 10) continue;
-        const floor = floorAt(px, nz, y, arrival);
-        if (floor !== null) {
-          x = px;
-          z = nz;
-          y = floor;
-        }
+  function nearSeat() {
+    if (!aboard) return null;
+    const { u } = point(),
+      offset = carriageAt(u),
+      x = u - offset;
+    if (x < -9.7 || x > 11.7) return null;
+    const bay = Math.max(0, Math.min(7, Math.round((x + 8.2) / 2.62)));
+    return { u: offset - 8.2 + bay * 2.62 + 0.84, v: 0.61 };
+  }
+  function use() {
+    if (driving) return false;
+    if (skipped) return true;
+    if (phase === 'bridge') {
+      nextLine();
+      return true;
+    }
+    if (phase === 'station' && roofSet.startClimb()) return true;
+    if (roofSet.climbing) return true;
+    if (seat) {
+      Object.assign(player.pos, worldAt(pose, seat.u, 0));
+      player.y = base + 0.165;
+      seat = null;
+      delete trip.seatU;
+      player._stand();
+      hud.seated(false);
+      hudWait = 0;
+      return true;
+    }
+    if (phase === 'station' && missed) {
+      if (distance(stationEntry) > 7) return false;
+      missed = false;
+      metres = 0;
+      speed = 0;
+      closed = 0;
+      trip.remaining = 120;
+      place();
+      change('station');
+      return true;
+    }
+    if (phase === 'station' && !aboard && distance(stationEntry) < 7) {
+      readBoard = true;
+      hudWait = 0;
+      return true;
+    }
+    if (phase === 'station' || phase === 'coach') {
+      seat = nearSeat();
+      if (seat) {
+        trip.seatU = seat.u;
+        lookYaw = 0.98;
+        lookPitch = 0;
+        hudWait = 0;
+        hud.seated(true);
+        return true;
       }
     }
-    if (side || ahead) stride += speed * 1.75;
-    if (arrival && x > 0.16 && x < 2 && z > 2 && z < 10) {
-      z = Math.min(10, z + dt * 0.82);
-      y = ((z - 10) * 3.6) / 8;
-    }
-    if (phase === 'walk' && Math.abs(z - trainZ) < 0.9) {
-      phase = 'coach';
-      conductorTime = 3.4;
-      save('coach');
-      sound('station_bell', 0.35);
-    }
-    if (phase === 'alight' && outdoors()) {
-      save('forecourt');
-      close();
-      exit();
-    }
+    return aboard && phase === 'coach';
   }
-  function routeHint() {
-    if (arrival) {
-      if (z < -20.97 && Math.abs(z - trainZ) < 2)
-        return x < 12.8 ? 'Uličkou k nástupním dveřím →' : 'Vystup na nástupiště';
-      if (y > -1 && z < 0) return 'Sejdi po schodech do podchodu';
-      if (z < 2) return 'Podchodem k označení Východ • Hala';
-      if (z < 10) return 'Vyjdi do odbavovací haly';
-      return 'Vyjdi před nádraží za Vaškem';
-    }
-    if (z > 28) return 'Stihni poslední vlak do Pardubic';
-    if (z > 2) return 'Projdi halou do podchodu';
-    if (y < -2.9 && x < 3) return 'Nástupiště 2 • odboč vpravo ke schodům';
-    if (x < 10.9 && y < -0.25) return 'Vyjdi po schodech na nástupiště';
-    return 'Nastup otevřenými dveřmi do modrého vozu';
+  function skip() {
+    if (!seat || skipped || (phase !== 'station' && phase !== 'coach')) return;
+    if (phase === 'station') beginRun();
+    const destination = railPose(lineLength);
+    world.city.ensureTiles(destination.x, destination.z).catch(() => {});
+    world.terrain.ensure(destination.x, destination.z);
+    skipped = { elapsed: 0, moved: false, from: metres };
+    hud.travel(true);
+    hud.seated(false);
+    hud.countdown();
+    hud.action();
+    storyRecording('skip-rail', { level: 0.76 });
   }
-  function drawHud() {
-    let title = '',
-      help = walkHelp,
-      action = '',
-      speaker = '',
-      text = '';
-    switch (phase) {
-      case 'ring':
-        title = 'Nemocnice volá';
-        action = 'Přijmout hovor';
-        break;
-      case 'call':
-        [speaker, text] = openingCalls[line];
-        title = line < 4 ? 'Hovor z nemocnice' : line === 4 ? 'Zpráva od mámy' : 'Vašek';
-        action = line === 4 ? 'Zvednout Vaškovi telefon' : 'Pokračovat';
-        break;
-      case 'bag':
-        title = 'Vezmi si batoh na konci mostu';
-        if (nearBag()) action = 'Vzít batoh';
-        break;
-      case 'walk':
-        title = routeHint();
-        help =
-          'Odjezd za ' +
-          Math.floor(Math.ceil(seconds) / 60) +
-          ':' +
-          String(Math.ceil(seconds) % 60).padStart(2, '0') +
-          ' · ' +
-          walkHelp;
-        break;
-      case 'late':
-        title = 'Poslední vlak odjel';
-        action = 'Zkusit cestu od mostu znovu';
-        break;
-      case 'coach':
-        if (conductorTime > 0) {
-          speaker = 'Průvodčí';
-          text = 'Dobrý, vidím vás. Pojďte.';
-        }
-        title = 'Projdi vozem a vyber si místo u okna';
-        if (atSeat()) action = 'Sednout si';
-        break;
-      case 'ride':
-        title = 'Poslední vlak do Pardubic';
-        help = '← → nebo myš • výhled z okna';
-        if (ride > 4 && ride < 10) {
-          speaker = 'Vašek · zpráva';
-          text = 'Čekám na parkovišti před hlavákem. Až vystoupíš, projdi halou ven.';
-        }
-        break;
-      case 'seated':
-        title = 'Pardubice hlavní nádraží';
-        action = 'Vstát ze sedadla';
-        break;
-      case 'alight':
-        title = routeHint();
-        break;
+  hud.button.onclick = use;
+  hud.skip.onclick = skip;
+  function arrive() {
+    speed = 0;
+    missed = false;
+    change('arrival');
+    storyRecording('open', { level: 0.55 });
+  }
+  function moveSeat() {
+    Object.assign(player.pos, worldAt(pose, seat.u, seat.v));
+    player.y = base + 0.165;
+    player.vy = 0;
+    player.speed = 0;
+    player.grounded = true;
+    player.heading = train.group.rotation.y + Math.PI / 2;
+    player.mesh.position.set(player.pos.x, base - 0.26, player.pos.z);
+    player.mesh.rotation.y = player.heading;
+    player._sit(1, 0);
+  }
+  function refreshHud() {
+    const remaining = Math.ceil(trip.remaining),
+      n = trip.platform;
+    const platform = 'Nástupiště ' + n + ' · kolej ' + trackNumber[n];
+    const boardStatus =
+      missed || phase === 'coach' || phase === 'arrival' ? 'Vlak odjel' : 'Odjezd za ' + clock(remaining);
+    if (distance(stationEntry) < 220) board.update(boardStatus);
+    hud.countdown(phase === 'station' && !missed && !skipped ? clock(remaining) : '', remaining < 45);
+    hud.seated(!!seat && !skipped && phase !== 'arrival');
+    if (phase === 'bridge') return;
+    if (phase === 'station') {
+      if (missed) {
+        guideTo(stationEntry);
+        hud.guide(
+          'Kolín',
+          'Poslední vlak odjel',
+          'Odjezd můžeš zopakovat u tabule nebo dojet k Vaškovi autem.',
+        );
+        hud.action(distance(stationEntry) <= 7 ? 'Zkusit odjezd znovu' : '');
+        return;
+      }
+      if (roofSet.near() || roofSet.climbing) {
+        hud.guide('Kolín', 'Slez po žebříku na ulici', 'Nádraží je za rohem');
+        hud.action(roofSet.climbing ? '' : 'Slézt po žebříku');
+        return;
+      }
+      if (!aboard) {
+        if (distance(stationEntry) < 5) readBoard = true;
+        const door = worldAt(pose, doorX, -2.5);
+        const toTrain = readBoard || distance(door) < 30;
+        if (toTrain) {
+          step = nextTurn(kolin, outbound, step);
+          guideTo(step < outbound.length && distance(door) > 17 ? worldAt(kolin, ...outbound[step]) : door);
+        } else guideTo(stationEntry);
+        hud.guide(
+          'Kolín • poslední vlak',
+          toTrain ? platform : 'Najdi odjezdovou tabuli',
+          toTrain
+            ? step < outbound.length && distance(door) > 17
+              ? 'Projdi halou a podchodem k nástupišti'
+              : 'Pardubice hl. n. · nastup otevřenými dveřmi'
+            : 'Nádraží Kolín · ' + Math.round(distance(stationEntry)) + ' m',
+        );
+        hud.action(!readBoard && distance(stationEntry) < 7 ? 'Přečíst odjezdy' : '');
+        return;
+      }
     }
-    if (phase === 'ring' || phase === 'call') help = 'Most přes Labe · soumrak';
-    hud.guide(phase === 'ride' ? 'Kolín → Pardubice' : place[Number(arrival)], title, help);
-    hud.say(speaker, text);
-    hud.action(action);
-    hud.phone(
-      phase === 'ring' ? 'Nemocnice' : phase === 'call' ? (line === 4 ? 'Máma' : line < 4 ? 'Nemocnice' : 'Vašek') : '',
-      phase === 'ring' || (phase === 'call' && line === 4) ? '' : 'Probíhá hovor'
-    );
+    if (phase === 'station' || phase === 'coach') {
+      if (aboard && guideTarget) {
+        guideTarget = null;
+        map.setWaypoint(null);
+      }
+      hud.guide(
+        'Poslední vlak',
+        seat ? 'Pardubice hlavní nádraží' : aboard ? 'Najdi si místo v oddílu' : platform,
+        phase === 'coach'
+          ? ((lineLength - metres) / 1000).toFixed(1).replace('.', ',') + ' km'
+          : seat
+            ? 'Rozhlédni se myší'
+            : 'Pardubice hlavní nádraží',
+      );
+      hud.action(seat ? 'Vstát' : nearSeat() ? 'Sednout si' : '');
+      return;
+    }
+    if (phase === 'arrival') {
+      if (!aboard) {
+        exitStep = nextTurn(pardubice, inbound, exitStep);
+        guideTo(exitStep < inbound.length ? worldAt(pardubice, ...inbound[exitStep]) : stationExit);
+      }
+      hud.guide(
+        'Pardubice hlavní nádraží',
+        seat
+          ? 'Vstaň a vystup z vlaku'
+          : aboard
+            ? 'Vystup na nástupiště'
+            : 'Projdi halou na parkoviště za Vaškem',
+      );
+      hud.action(seat ? 'Vstát' : '');
+    }
   }
   return {
-    dispose: close,
-    frame(dt, renderer) {
-      if (closed) return;
-      if (document.hidden || document.body.dataset.panelOpen) dt = 0;
-      conductorTime = Math.max(0, conductorTime - dt);
-      move(dt);
-      if (closed) return;
-      if (phase === 'walk' && (seconds = Math.max(0, seconds - dt)) === 0) phase = 'late';
-      if (phase === 'ride') {
-        ride += dt;
-        if (ride >= 16) {
-          arrival = true;
-          phase = 'seated';
-          save('arrival');
-          sound('station_bell', 0.5);
+    get aboard() {
+      return aboard;
+    },
+    get finished() {
+      return phase === 'forecourt';
+    },
+    use,
+    skip,
+    get seated() {
+      return !!seat;
+    },
+    frameCamera(camera, dt, drag) {
+      if (seat && !driving) {
+        lookYaw = Math.max(-1.7, Math.min(1.7, lookYaw - drag.x * 0.003));
+        lookPitch = Math.max(-0.73, Math.min(0.71, lookPitch - drag.y * 0.003));
+        const heading = player.heading + lookYaw,
+          c = Math.cos(lookPitch);
+        const eye = player._cit.eye,
+          head = player._cit.parts.head;
+        head.updateWorldMatrix(true, false);
+        camera.position.set(0, eye.y, eye.z - 0.035).applyMatrix4(head.matrixWorld);
+        const { x, y, z } = camera.position;
+        camera.lookAt(x - Math.sin(heading) * c, y + Math.sin(lookPitch), z - Math.cos(heading) * c);
+        camera.near = 0.055;
+        camera.fov = 68;
+        camera.updateProjectionMatrix();
+        return true;
+      }
+      if (phase !== 'bridge' || driving) return false;
+      roofSet.camera(camera, dt, line);
+      return true;
+    },
+    posePlayer(dt) {
+      if (driving) return false;
+      if (seat) {
+        moveSeat();
+        return true;
+      }
+      return roofSet.pose(dt, phase === 'bridge', line, phase === 'bridge' ? (voice?.intensity() ?? 0) : 0);
+    },
+    update(dt, otherRide, car) {
+      driving = otherRide || !!(player.inCar || player.boarding || player.exiting || player.ragdoll);
+      const { u, v } = point(),
+        oldBase = base;
+      aboard =
+        !driving &&
+        (seat !== null ||
+          (inside(u, v) && ((phase === 'coach' && aboard) || Math.abs(player.y - base) < 1.54)));
+      if (phase === 'bridge' && !driving && line >= 0) {
+        if (silence > 0) {
+          silence -= dt;
+          if (silence <= 0) nextLine();
+        } else if (speechTime > 0) {
+          speechTime -= dt;
+          if (speechTime <= 0) nextLine();
         }
       }
-      const t = Math.min(1, ride / 16);
-      origin.visible = !arrival && t < 0.48;
-      origin.position.x = -110 * t * t * 11;
-      destination.visible = arrival || t > 0.58;
-      destination.position.x = arrival ? 0 : 140 * (1 - t) * (1 - t) * 5;
-      lineSide.visible = phase === 'ride' && t > 0.14 && t < 0.86;
-      lineSide.position.x = 75 - 150 * t;
-      if (phase === 'late') missedTime += dt;
-      carriage.position.x = Math.min(155, missedTime * missedTime * 1.4);
-      door.position.x = carriage.position.x;
-      door.visible = phase === 'late' || (phase === 'ride' && t < 0.97);
-      bag.visible = phase === 'bag' || phase === 'call' || phase === 'ring';
-      treads.visible = arrival;
-      if (arrival) {
-        treadPhase = (treadPhase + dt * 0.82) % (8 / 28);
-        treads.position.set(0, (treadPhase * 3.6) / 8, treadPhase);
+      if (phase === 'station' && !missed) {
+        trip.remaining = Math.max(0, trip.remaining - dt);
+        if (trip.remaining === 0) beginRun();
       }
-      const night = arrival ? 1 : t;
-      sky.material.uniforms.night.value = night;
-      if (phase === 'ride' || phase === 'seated') {
-        camera.position.set(seatX - 0.38, 1.37, trainZ + seatSide * 1.01);
-      } else camera.position.set(x, y + 1.64 + Math.sin(stride) * 0.024, z);
-      camera.rotation.order = 'YXZ';
-      camera.rotation.set(pitch, yaw, 0);
-      const aspect = renderer.domElement.clientWidth / Math.max(1, renderer.domElement.clientHeight);
-      if (camera.aspect !== aspect) {
-        camera.aspect = aspect;
-        camera.updateProjectionMatrix();
+      if (skipped) {
+        skipped.elapsed += dt;
+        if (skipped.elapsed > 0.55 && !skipped.moved) {
+          metres = lineLength;
+          closed = 1;
+          place();
+          moveSeat();
+          skipped.moved = true;
+        }
+        if (
+          skipped.moved &&
+          skipped.elapsed >= 4.35 &&
+          world.terrain.ready(pose.x, pose.z) &&
+          world.built.has(chunkKey(pose.x, pose.z))
+        ) {
+          skipped = null;
+          hud.travel(false);
+          arrive();
+        } else if (skipped.elapsed > 25) {
+          metres = skipped.from;
+          skipped = null;
+          place();
+          moveSeat();
+          hud.travel(false);
+          hud.say('Poslední vlak', 'Nádraží se zatím nepodařilo načíst. Vlak pokračuje po trati.');
+        }
+        return;
       }
-      drawHud();
-      renderer.render(scene, camera);
-    }
+      if (phase === 'coach' || missed) {
+        closed = Math.min(1, closed + dt * 0.65);
+        if (closed === 1) {
+          speed = Math.min(speed + dt * 0.95, 44.4, Math.sqrt(Math.max(0, 2 * 0.85 * (lineLength - metres))));
+          metres = Math.min(lineLength, metres + dt * speed);
+        }
+      } else closed = Math.max(0, closed - dt * 0.69);
+      place();
+      if (aboard) {
+        Object.assign(player.pos, worldAt(pose, u, v));
+        player.y += base - oldBase;
+        if (phase === 'coach' && speed > 4 && metres > nextJunction) {
+          storyRecording('junction', { level: 0.21 + Math.random() * 0.13 });
+          nextJunction = metres + 650 + Math.random() * 1250;
+        }
+      }
+      if ((aboard || distance(pose) < 85) && train.aisle(dt, aboard ? u : null))
+        storyRecording('passenger', { level: 0.24 });
+      if (phase === 'coach' && metres >= lineLength) arrive();
+      if (!aboard && car && (distance(car) < 11 || distance(stationExit) < 7)) {
+        change('forecourt');
+        return;
+      }
+      if ((hudWait -= dt) <= 0) {
+        hudWait = 0.18;
+        refreshHud();
+      }
+    },
+    dispose() {
+      live = false;
+      voice?.stop();
+      music?.stop(0.4);
+      ring?.stop();
+      if (trains?.storyPass === passSound) trains.storyPass = null;
+      if (world.storyCoach === deck) world.storyCoach = null;
+      roofSet.dispose();
+      board.dispose();
+      train.close();
+      hud.close();
+    },
   };
 }

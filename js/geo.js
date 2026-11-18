@@ -2620,6 +2620,13 @@ function* indexPayloadSteps(city, data, touched, slot = 0, heavyOnly = false, ke
   const stage = new Map();
   let landJ = null;            // indexJunctions' landing half, run when the roads land
   const buildings = stamp(data.buildings);
+  // Open canopies at the two station entrances are mapped as roof outlines
+  // without min_height. Keep their cover overhead and the doors beneath clear.
+  for (const b of buildings) {
+    if (b.t !== 'roof' || b.y || !b.o?.length) continue;
+    const [x,z] = b.o[0];
+    if (Math.hypot(x+38850,z-739)<125 || Math.hypot(x-16,z+70)<130) b.y = Math.max(2.8,b.h-0.4);
+  }
   yield;
   // f._pw: shared walls, this tile only, a few thousand edges a step (partywalls.js)
   yield* stampPartyWallsSteps(buildings);
