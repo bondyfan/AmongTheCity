@@ -41,7 +41,13 @@ import * as THREE from 'three';
 
 const PW = 2048, PH = 1024, SW = 512, SH = 128, COLS = PW / SW, SLOTS = COLS * (PH / SH);
 const PAD = 8;            // texels of background round the label inside its slot
-const MAX_PAGES = 8;      // 256 labels; past that a label gets its own canvas again
+// 1024 labels; past that a label gets its own canvas again. A label is any
+// shop's own name, not just a chain's: the old town alone held 487 of them
+// (Václavské náměstí, November 2026), and the first cap of 8 pages left half
+// of them on canvases of their own, a draw call each. More pages never cost
+// more than the fallback would: a page is 8 MB of canvas and some 11 MB on
+// the GPU for 32 labels, which as canvases of their own would be 32 and 45.
+const MAX_PAGES = 32;
 
 let renderer = null;
 /** main.js hands the renderer over so a new label uploads only its own slot. */
