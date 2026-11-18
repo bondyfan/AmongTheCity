@@ -1911,3 +1911,51 @@ the traffic was a large slice of a CPU-bound frame. Now:
 * **A/B**: `atcCars.instancing(false|true)` at runtime, `atcCars.city(k)`,
   `atcCars.stats()`; `?carmerge=0` builds the old eleven-part cars,
   `?carinst=0` starts with the pools off.
+
+## The campaign "Poslední vlak", part one (js/prologue*.js, Nov 2026)
+
+The story from the street in Kolín to Vašek's kitchen table in Pardubice. It
+is a set of small modules round two owners that main.js holds: `journey`
+(js/prologue.js: the opening film, the roof, the station, the train) and
+`meeting` (js/prologue-parking.js: Vašek at his car, the drive, the house,
+the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
+`posePlayer()`; main.js asks the story first and plays the game otherwise.
+
+* **Script**: `prologue-dialogue.js` is the one place the words live
+  (`hospitalCall`, `friendCall`, `parkingLines`, `tableTalk`, the two text
+  messages). `scripts/gen-prologue-audio.mjs` renders one recording per id
+  into `public/assets/last-train/`. A line without a recording is timed by its
+  length (`storyRecording({ missing })`), so the film plays before it is voiced.
+  Speech is never skipped: lines follow one another by themselves.
+* **The film** (`prologue-opening.js`) is a list of beats: ring1, call1 (with
+  the four-second cut to the hospital room, `prologue-ward.js`), a black card,
+  the roof (`prologue-roof.js` logic, `prologue-roofset.js` dressing), the
+  bank's message, ring2, call2. `prologue-actor.js` owns what is attached to
+  the father (phone, face, the gestures of a call); `prologue-street.js` and
+  the roof hold the shots as (right, up, forward) offsets from his eyes.
+* **Two lamps** (`prologue-lights.js`): the story has exactly two point lights
+  for its whole length, moved and tinted by whichever scene is on, so the
+  count of lights (and every compiled material) never changes mid-play.
+* **After the call** the roof is walkable but has an edge (`prologue-ladder.js`
+  is a deck for `world.storyCoach`, composed with the train's in prologue.js)
+  and the way down is the cat ladder: E takes it, S climbs down.
+* **The run**: 180 seconds (`DEPARTS_IN`). The pin and the column of light
+  (`prologue-marker.js`) lead to the departure board and no further: the
+  platform is read there. `prologue-tracks.js` takes back any step onto the
+  rails, in Kolín and in Pardubice, so the underpass is the only way across.
+  `prologue-platform.js` and `prologue-waiting.js` furnish the platform the
+  train leaves from; `prologue-birds.js` and `prologue-life.js` are the pigeons
+  and the cat. Sitting down is `prologue-seat.js`, with the game's own camera.
+* **No second chances**: nothing is saved before the campaign's end
+  (js/career.js `storyRunning`), an unfinished chapter in a save starts again
+  (`storyStart`), and a missed train or a death restarts the campaign in place
+  (main.js `failStory`).
+* **Its own clock** (`prologue-clock.js`, `worldclock.overrideTod`): 20:00 on
+  the street, 20:10 as the train leaves, 20:30 in Pardubice, 22:00 at the
+  house. Only the sky, the light and the HUD follow it; `worldT()` does not.
+* **Pardubice**: `prologue-house.js` is Dražkovická 119 (the doorstep outside,
+  the kitchen as a closed set far below the house) and `prologue-table.js` the
+  scene at the table that ends part one and writes the first save.
+* **Three paces** (js/player.js `_pace`, config `WALK`): a walk, the run on
+  Shift, and a sprint on a double tap of Shift that spends `stamina`
+  (js/stamina.js draws the bar).

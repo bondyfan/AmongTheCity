@@ -1,6 +1,6 @@
 // ELEVENLABS_API_KEY=… node scripts/gen-prologue-audio.mjs
 import { mkdir, writeFile, rename, stat } from 'node:fs/promises';
-import { calls, parkingLines } from '../js/prologue-dialogue.js';
+import { calls, parkingLines, tableTalk } from '../js/prologue-dialogue.js';
 const out = new URL('../public/assets/last-train/', import.meta.url);
 const key = process.env.ELEVENLABS_API_KEY;
 if (!key) throw Error('Set ELEVENLABS_API_KEY to render recordings.');
@@ -9,7 +9,7 @@ const voices = {
   father: 'iP95p4xoKVk53GoZ742B',
   friend: 'CwhRBWXzGAHq8TQ4Fs17',
 };
-const tracks = [...calls, ...parkingLines]
+const tracks = [...calls, ...parkingLines, ...tableTalk]
   .filter((l) => l[3])
   .map(([id, , text, role, direction]) => [
     id,

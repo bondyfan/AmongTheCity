@@ -2609,9 +2609,13 @@ export function windSet(speed) {
 }
 
 // Story dialogue and Foley use the same master volume as the rest of the city.
-export function storyRecording(id, {level = 1, phone = false, loop = false, meter = false, end} = {}) {
+export function storyRecording(id, {level = 1, phone = false, loop = false, meter = false, end, missing} = {}) {
   let source, gain, analyser, samples, stopped = false;
-  if (ctx?.state === 'running') loadBuffer('story/' + id).then(buffer => {
+  // `missing` is told when there is nothing to play (no recording on disk, or
+  // no sound yet), so a caption can be timed by its length instead.
+  if (ctx?.state !== 'running') queueMicrotask(() => { if (!stopped) missing?.(); });
+  else loadBuffer('story/' + id).then(buffer => {
+    if (!buffer && !stopped) missing?.();
     if (!buffer || stopped) return;
     source = ctx.createBufferSource();
     source.buffer = buffer;
@@ -2651,4 +2655,37 @@ export function storyRecording(id, {level = 1, phone = false, loop = false, mete
       source.stop(ctx.currentTime + fade);
     }
   }};
+}
+
+// A hospital monitor's beep and other one-note story sounds: a short sine with
+// soft edges, through the same master volume.
+export function storyTone(frequency = 880, seconds = 0.09, level = 0.1) {
+  if (ctx?.state !== 'running') return;
+  const osc = ctx.createOscillator(), gain = ctx.createGain(), t = ctx.currentTime;
+  osc.frequency.value = frequency;
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(level, t + 0.006);
+  gain.gain.setValueAtTime(level, t + seconds);
+  gain.gain.linearRampToValueAtTime(0, t + seconds + 0.03);
+  osc.connect(gain); gain.connect(master);
+  osc.start(t); osc.stop(t + seconds + 0.06);
+}
+
+// Pigeons leaving the pavement: a handful of soft wing claps of filtered noise.
+export function storyFlutter(level = 0.2, claps = 9) {
+  if (ctx?.state !== 'running') return;
+  const length = Math.floor(ctx.sampleRate * 1.5), buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let c = 0; c < claps; c++) {
+    const at = Math.floor((0.02 + c * 0.11 + Math.random() * 0.06) * ctx.sampleRate);
+    const size = Math.floor((0.03 + Math.random() * 0.025) * ctx.sampleRate), loud = 1 - c / (claps * 1.4);
+    for (let i = 0; i < size && at + i < length; i++)
+      data[at + i] += (Math.random() * 2 - 1) * Math.sin((Math.PI * i) / size) ** 2 * loud;
+  }
+  const source = ctx.createBufferSource(), filter = ctx.createBiquadFilter(), gain = ctx.createGain();
+  source.buffer = buffer;
+  filter.type = 'bandpass'; filter.frequency.value = 1500; filter.Q.value = 0.7;
+  gain.gain.value = level;
+  source.connect(filter); filter.connect(gain); gain.connect(master);
+  source.start();
 }

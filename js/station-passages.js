@@ -234,6 +234,14 @@ export class StationPassages {
     const buildings = this.world.city.chunkIndex.get(chunkKey(x,z))?.buildings;
     return buildings?.some(b => b.t === 'train_station' && pointInPolygon(x,z,b.o)) ?? false;
   }
+  // Under a station canopy (the bus shelter's mapped roof, or a platform
+  // canopy that registered itself as extraCover) the camera stays below it.
+  covered(x, z) {
+    if (!this.nearby(x, z, 140)) return false;
+    if (this.extraCover?.(x, z)) return true;
+    const buildings = this.world.city.chunkIndex.get(chunkKey(x, z))?.buildings;
+    return buildings?.some?.((b) => b.t === 'roof' && pointInPolygon(x, z, b.o)) ?? false;
+  }
   // Keep a walker below the surface in the union of corridor and flights.
   // The upper landing is deliberately open onto the ordinary station floor.
   contain(pos, y, r) {

@@ -202,8 +202,15 @@ export const PLAYER_SCALE = 0.9;
 // one, which is a comic-book run and is meant to be — it is the difference
 // between crossing Pardubice and giving up. `runFrom` is where the animation
 // starts turning from a walk into a run.
+//
+// THREE PACES (Frank, 18 Nov 2026). Without Shift he WALKS (`walk`). Shift is
+// the run, at what used to be the pace without it (`jog`). A double tap of
+// Shift, held, is the sprint (`sprint`): `sprintFor` seconds of breath, shown
+// as a bar that runs down; spent, he is `tiredFor` seconds at `tired` even
+// with Shift down, and the breath comes back over `recover` seconds.
 export const WALK = {
-  jog: 5.6, sprint: 14.0, runFrom: 6.5,
+  walk: 2.3, jog: 5.6, sprint: 12.0, tired: 4.2, runFrom: 6.5,
+  sprintFor: 6, tiredFor: 6, recover: 11, tap: 0.34,
   accel: 14, turn: 12, radius: 0.38,
 };
 

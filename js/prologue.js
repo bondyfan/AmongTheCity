@@ -1,26 +1,39 @@
-import { chunkKey, distPointToSegment } from './geo.js';
-import { railHeadOn, railHeadAt } from './trains.js';
+import { chunkKey } from './geo.js';
 import { storyRecording } from './audio.js';
 import { trainBody, doorX, carriageAt } from './prologue-coach.js';
 import { trainDeck, inside } from './prologue-deck.js';
 import { storyHud } from './prologue-hud.js';
-import { calls } from './prologue-dialogue.js';
-import { stationEntry, stationExit, trackNumber, roof } from './prologue-route.js';
+import { stationEntry, stationExit, DEPARTS_IN } from './prologue-route.js';
 import { routeFor, localAt, worldAt } from './story-rail.js';
-import { rooftop } from './prologue-roof.js';
 import { departureBoard } from './prologue-board.js';
+import { railbed } from './prologue-railbed.js';
+import { storyLights } from './prologue-lights.js';
+import { opening } from './prologue-opening.js';
+import { waymark } from './prologue-marker.js';
+import { seating } from './prologue-seat.js';
+import { dressPlatform } from './prologue-platform.js';
+import { streetLife } from './prologue-life.js';
+import { roofWalk } from './prologue-ladder.js';
+import { trackGuard } from './prologue-tracks.js';
+import { storyClock } from './prologue-clock.js';
 
 const clock = (seconds) => Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
-export function createPrologue({ chapter, scene, world, player, map, trip, trains, save }) {
+// `night()` is the sky's 0..1 darkness; `fail(why)` ends the campaign ('train').
+export function createPrologue({ chapter, scene, world, player, map, trip, trains, save, input, night = () => 0, fail = () => {} }) {
   const hud = storyHud(),
     train = trainBody(scene),
-    board = departureBoard(scene, world, trip);
+    board = departureBoard(scene, world, trip),
+    lights = storyLights(scene),
+    mark = waymark(scene, hud),
+    seat = seating(player),
+    life = streetLife(scene, world),
+    roofCtl = roofWalk(world, player, input),
+    guard = trackGuard(world),
+    railHeight = railbed(world);
   const { lineLength, railPose, nearestMetres } = routeFor(trip.platform);
-  const roofSet = rooftop(scene, world, player);
   let phase = chapter,
     speed = 0,
-    closed = chapter === 'coach' ? 1 : 0,
-    line = -1;
+    closed = chapter === 'coach' ? 1 : 0;
   let metres =
     chapter === 'arrival'
       ? lineLength
@@ -30,36 +43,18 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
   let pose = railPose(metres),
     base = 0,
     aboard = false,
-    driving = false,
-    seat = null;
+    driving = false;
   let skipped = null,
-    missed = false,
+    missed = 0, // seconds since the train left without him
     readBoard = false,
     guideTarget = null,
-    hudWait = 0;
-  let voice = null,
-    music = null,
-    ring = null,
-    friendRinging = false,
-    silence = 0,
-    speechTime = 0,
+    hudWait = 0,
+    platformSet = null,
     nextJunction = 240,
-    lookYaw = 0.98,
-    lookPitch = 0;
-  let live = true,
-    step = 0,
     exitStep = 0;
   const frame = world.stationPassages.stations;
   const kolin = frame[0],
-    pardubice = frame[1],
-    vPlatform = { 2: 0, 4: -41, 5: -57 }[trip.platform];
-  const outbound = [
-    [24, 35],
-    [17, 35],
-    [0, 35],
-    [0, vPlatform],
-    [17, vPlatform],
-  ];
+    pardubice = frame[1];
   const inbound = [
     [18, 0],
     [0, 0],
@@ -74,36 +69,12 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
   }
   const point = () => localAt(pose, player.pos.x, player.pos.z);
   const distance = (p) => Math.hypot(p.x - player.pos.x, p.z - player.pos.z);
-  function guideTo(target) {
-    if (guideTarget?.x === target.x && guideTarget?.z === target.z) return;
+  // The map's waypoint, the column of light and the pin all follow one target.
+  function guideTo(target, label = '') {
+    if (guideTarget?.x === target?.x && guideTarget?.z === target?.z) return;
     guideTarget = target;
-    map.setWaypoint(target.x, target.z);
-  }
-  let lastSegment = null;
-  function railHeight(x, z) {
-    const rails = world.city.chunkIndex.get(chunkKey(x, z))?.rails;
-    // Keep the rail bed under the wheels even when a road passes overhead.
-    // A curve can cross several mapped ways without leaving the same cell.
-    const near = {};
-    if (lastSegment && rails === lastSegment.rails) {
-      const { a, b, way, start } = lastSegment;
-      if (distPointToSegment(x, z, ...a, ...b, near) < 0.04)
-        return railHeadOn(way, start + Math.hypot(near.x - a[0], near.z - a[1]), x, z);
-    }
-    for (const way of rails ?? []) {
-      if (way.t !== 'rail') continue;
-      let start = 0;
-      for (let i = 1; i < way.p.length; i++) {
-        const a = way.p[i - 1],
-          b = way.p[i];
-        if (distPointToSegment(x, z, ...a, ...b, near) < 0.04) {
-          lastSegment = { rails, way, a, b, start };
-          return railHeadOn(way, start + Math.hypot(near.x - a[0], near.z - a[1]), x, z);
-        }
-        start += Math.hypot(b[0] - a[0], b[1] - a[1]);
-      }
-    }
-    return railHeadAt(x, z);
+    map.setWaypoint(target ? target.x : null, target?.z);
+    mark.set(target && label ? { x: target.x, y: target.y ?? world.heightAt(target.x, target.z), z: target.z } : null, label);
   }
   function place() {
     pose = railPose(metres);
@@ -119,66 +90,31 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     hud.action();
     hud.phone();
     hudWait = 0;
-    if (next === 'station') guideTo(stationEntry);
+    if (next === 'station') {
+      trip.remaining = DEPARTS_IN;
+    }
     if (next === 'arrival') guideTo(stationExit);
     save(next);
   }
-  function nextLine() {
-    voice?.stop();
-    ring?.stop();
-    silence = 0;
-    speechTime = 0;
-    if (line === 4 && !friendRinging) {
-      friendRinging = true;
-      hud.say();
-      hud.phone('Vašek');
-      hud.action('Přijmout hovor');
-      ring = storyRecording('phone-ring', { level: 0.49 });
-      silence = 2.4;
-      return;
-    }
-    if (++line >= calls.length) {
-      roofSet.release();
-      hud.cinema(false);
-      music?.stop(2.3);
-      change('station');
-      return;
-    }
-    const [id, who, words, role] = calls[line];
-    hud.say(who, words);
-    hud.phone(
-      line < 4 ? 'Nemocnice' : line === 4 ? 'Máma' : 'Vašek',
-      line === 4 ? 'Nová zpráva' : 'Probíhá hovor',
-    );
-    hud.action('Další replika');
-    if (id === 'message') {
-      silence = 4.4;
-      return;
-    }
-    const expected = line;
-    voice = storyRecording(id, {
-      phone: role !== 'father',
-      meter: role === 'father',
-      level: role === 'father' ? 0.95 : 1.08,
-      end: () => {
-        if (live && phase === 'bridge' && line === expected) silence = 0.52;
-      },
-    });
-    speechTime = Math.max(14, words.length * 0.16);
-  }
   place();
-  if (phase === 'bridge') {
-    if (distance(roof) < 9) roofSet.putOnRoof();
-    hud.cinema(true);
-    music = storyRecording('roof-music', { level: 0.23, loop: true });
-    ring = storyRecording('phone-ring', { level: 0.49, loop: true });
-    hud.phone('Nemocnice');
-    hud.action('Přijmout hovor');
-  }
-  if (phase !== 'bridge' && Number.isFinite(trip.seatU)) {
-    const savedSeat = { u: trip.seatU, v: 0.61 };
-    if (distance(worldAt(pose, savedSeat.u, savedSeat.v)) < 2) seat = savedSeat;
-  }
+  // The film runs first; when Vašek has hung up the clock starts.
+  const film =
+    phase === 'bridge'
+      ? opening({
+          scene,
+          world,
+          player,
+          hud,
+          lights,
+          birds: life,
+          // Vašek has hung up: the roof is the player's, and the clock runs
+          done: () => {
+            roofCtl.begin();
+            change('station');
+          },
+        })
+      : null;
+  life.populate(film?.street);
   if (phase === 'coach') {
     const { u, v } = point();
     if (!inside(u, v)) {
@@ -191,7 +127,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       player.y = base + 0.165;
     }
   }
-  const deck = trainDeck({
+  const coachDeck = trainDeck({
     get pose() {
       return pose;
     },
@@ -208,18 +144,37 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       return phase === 'coach';
     },
   });
+  // One deck for the world's support and collision: the roof while he is on
+  // it, the train otherwise.
+  const deck = {
+    carrying: (x, z) => roofCtl.carrying(x, z) || coachDeck.carrying(x, z),
+    support: (x, z, limit) => (roofCtl.carrying(x, z) ? roofCtl.support() : coachDeck.support(x, z, limit)),
+    collide: (pos, r, opts) => roofCtl.collide(pos, r) || coachDeck.collide(pos, r, opts),
+  };
   world.storyCoach = deck;
+  // where a walker in the yard may be off the platforms: in the train, at its door
+  const atTrain = (x, z) => {
+    const l = localAt(pose, x, z),
+      dx = l.u - carriageAt(l.u);
+    return inside(l.u, l.v) || (Math.abs(dx - doorX) < 0.95 && l.v < 0.3 && l.v > -3.4);
+  };
   const passSound = () =>
     storyRecording(aboard ? 'coach-pass' : 'platform-pass', { level: aboard ? 0.38 : 0.65 });
   if (trains) trains.storyPass = passSound;
   function beginRun() {
     trip.remaining = 0;
-    missed = !aboard;
-    if (!missed) change('coach');
+    if (aboard) change('coach');
+    else {
+      // The doors close in front of him. He watches it go, and it is over.
+      missed = 0.001;
+      guideTo(null);
+      hud.guide('Kolín', 'Poslední vlak odjel', 'Bez Vaška zálohu nezaplatíš.');
+      hud.action();
+    }
     if (distance(pose) < 90) storyRecording('door', { level: aboard ? 0.54 : 0.72 });
   }
   function nearSeat() {
-    if (!aboard) return null;
+    if (!aboard || seat.taken) return null;
     const { u } = point(),
       offset = carriageAt(u),
       x = u - offset;
@@ -227,34 +182,20 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     const bay = Math.max(0, Math.min(7, Math.round((x + 8.2) / 2.62)));
     return { u: offset - 8.2 + bay * 2.62 + 0.84, v: 0.61 };
   }
+  const coachFrame = () => ({
+    worldAt: (u, v) => worldAt(pose, u, v),
+    floor: base + 0.165,
+    facing: train.group.rotation.y + Math.PI / 2,
+  });
   function use() {
     if (driving) return false;
-    if (skipped) return true;
-    if (phase === 'bridge') {
-      nextLine();
-      return true;
-    }
-    if (phase === 'station' && roofSet.startClimb()) return true;
-    if (roofSet.climbing) return true;
-    if (seat) {
-      Object.assign(player.pos, worldAt(pose, seat.u, 0));
-      player.y = base + 0.165;
-      seat = null;
-      delete trip.seatU;
-      player._stand();
-      hud.seated(false);
+    if (skipped || missed) return true;
+    if (film?.running) return film.use();
+    if (roofCtl.state === 'ladder') return true;
+    if (roofCtl.state === 'roof') return roofCtl.mount();
+    if (seat.taken) {
+      if (seat.settled) seat.rise();
       hudWait = 0;
-      return true;
-    }
-    if (phase === 'station' && missed) {
-      if (distance(stationEntry) > 7) return false;
-      missed = false;
-      metres = 0;
-      speed = 0;
-      closed = 0;
-      trip.remaining = 120;
-      place();
-      change('station');
       return true;
     }
     if (phase === 'station' && !aboard && distance(stationEntry) < 7) {
@@ -263,20 +204,18 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       return true;
     }
     if (phase === 'station' || phase === 'coach') {
-      seat = nearSeat();
-      if (seat) {
-        trip.seatU = seat.u;
-        lookYaw = 0.98;
-        lookPitch = 0;
+      const target = nearSeat();
+      if (target) {
+        const { u, v } = point();
+        seat.sit(target, u, v, player.heading);
         hudWait = 0;
-        hud.seated(true);
         return true;
       }
     }
     return aboard && phase === 'coach';
   }
   function skip() {
-    if (!seat || skipped || (phase !== 'station' && phase !== 'coach')) return;
+    if (!seat.settled || skipped || (phase !== 'station' && phase !== 'coach')) return;
     if (phase === 'station') beginRun();
     const destination = railPose(lineLength);
     world.city.ensureTiles(destination.x, destination.z).catch(() => {});
@@ -292,83 +231,79 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
   hud.skip.onclick = skip;
   function arrive() {
     speed = 0;
-    missed = false;
     change('arrival');
+    storyClock.to(20.5);
     storyRecording('open', { level: 0.55 });
   }
-  function moveSeat() {
-    Object.assign(player.pos, worldAt(pose, seat.u, seat.v));
-    player.y = base + 0.165;
-    player.vy = 0;
-    player.speed = 0;
-    player.grounded = true;
-    player.heading = train.group.rotation.y + Math.PI / 2;
-    player.mesh.position.set(player.pos.x, base - 0.26, player.pos.z);
-    player.mesh.rotation.y = player.heading;
-    player._sit(1, 0);
+  // The two lamps after the film: one under the canopy beside him, one in the coach.
+  function lamps() {
+    const dark = night(),
+      { a, b } = lights;
+    const close = distance(pose) < 150 && phase !== 'arrival';
+    if (platformSet && close && phase === 'station') {
+      const p = platformSet.lampAt(player.pos.x, player.pos.z);
+      b.color.setHex(0xffe2b8);
+      b.distance = 15;
+      b.decay = 1.5;
+      b.intensity = 4 + 14 * dark;
+      b.position.set(p.x, p.y, p.z);
+    } else b.intensity = 0;
+    if (aboard || distance(pose) < 60) {
+      const u = aboard ? point().u : carriageAt(point().u) + doorX - 2,
+        p = worldAt(pose, u, 0);
+      a.color.setHex(0xfff0d4);
+      a.distance = 9;
+      a.decay = 1.5;
+      a.intensity = 2 + 3.2 * dark;
+      a.position.set(p.x, base + 2.4, p.z);
+    } else a.intensity = 0;
   }
   function refreshHud() {
-    const remaining = Math.ceil(trip.remaining),
-      n = trip.platform;
-    const platform = 'Nástupiště ' + n + ' · kolej ' + trackNumber[n];
-    const boardStatus =
-      missed || phase === 'coach' || phase === 'arrival' ? 'Vlak odjel' : 'Odjezd za ' + clock(remaining);
-    if (distance(stationEntry) < 220) board.update(boardStatus);
+    const remaining = Math.ceil(trip.remaining);
+    const status = missed || phase === 'coach' || phase === 'arrival' ? 'Vlak odjel' : 'Odjezd za ' + clock(remaining);
+    if (distance(stationEntry) < 220) board.update(status);
+    platformSet?.update(0, night(), status, player.pos.x, player.pos.z);
     hud.countdown(phase === 'station' && !missed && !skipped ? clock(remaining) : '', remaining < 45);
-    hud.seated(!!seat && !skipped && phase !== 'arrival');
-    if (phase === 'bridge') return;
-    if (phase === 'station') {
-      if (missed) {
-        guideTo(stationEntry);
-        hud.guide(
-          'Kolín',
-          'Poslední vlak odjel',
-          'Odjezd můžeš zopakovat u tabule nebo dojet k Vaškovi autem.',
-        );
-        hud.action(distance(stationEntry) <= 7 ? 'Zkusit odjezd znovu' : '');
-        return;
-      }
-      if (roofSet.near() || roofSet.climbing) {
-        hud.guide('Kolín', 'Slez po žebříku na ulici', 'Nádraží je za rohem');
-        hud.action(roofSet.climbing ? '' : 'Slézt po žebříku');
-        return;
-      }
-      if (!aboard) {
-        if (distance(stationEntry) < 5) readBoard = true;
-        const door = worldAt(pose, doorX, -2.5);
-        const toTrain = readBoard || distance(door) < 30;
-        if (toTrain) {
-          step = nextTurn(kolin, outbound, step);
-          guideTo(step < outbound.length && distance(door) > 17 ? worldAt(kolin, ...outbound[step]) : door);
-        } else guideTo(stationEntry);
+    hud.seated(seat.settled && !skipped && phase !== 'arrival');
+    if (phase === 'bridge' || missed) return;
+    if (phase === 'station' && !aboard) {
+      if (roofCtl.state !== 'off') {
+        const rungs = roofCtl.state === 'ladder';
+        guideTo(rungs ? null : roofCtl.ladderTop(), 'Žebřík');
         hud.guide(
           'Kolín • poslední vlak',
-          toTrain ? platform : 'Najdi odjezdovou tabuli',
-          toTrain
-            ? step < outbound.length && distance(door) > 17
-              ? 'Projdi halou a podchodem k nástupišti'
-              : 'Pardubice hl. n. · nastup otevřenými dveřmi'
-            : 'Nádraží Kolín · ' + Math.round(distance(stationEntry)) + ' m',
+          rungs ? 'Slez po žebříku' : 'Dolů vede jen žebřík',
+          rungs ? 'Drž S, dokud nejsi na zemi (W zpátky nahoru)' : 'Je na rohu střechy',
         );
-        hud.action(!readBoard && distance(stationEntry) < 7 ? 'Přečíst odjezdy' : '');
+        hud.action(!rungs && roofCtl.near() ? 'Slézt po žebříku' : '');
         return;
       }
+      // The pin leads to the departure board and no further (Frank, 18 Nov
+      // 2026): which platform, and how to get to it, he reads there himself.
+      if (distance(stationEntry) < 5) readBoard = true;
+      if (!readBoard) {
+        guideTo(stationEntry, 'Nádraží');
+        hud.guide('Kolín • poslední vlak', 'Utíkej na nádraží', 'Shift: běh. Dvakrát Shift a držet: sprint, dokud stačí dech.');
+        hud.action(distance(stationEntry) < 7 ? 'Přečíst odjezdy' : '');
+      } else {
+        guideTo(null);
+        hud.guide('Kolín • poslední vlak', 'Najdi svůj vlak', 'Nástupiště a kolej jsou na odjezdové tabuli.');
+        hud.action();
+      }
+      return;
     }
     if (phase === 'station' || phase === 'coach') {
-      if (aboard && guideTarget) {
-        guideTarget = null;
-        map.setWaypoint(null);
-      }
+      if (guideTarget) guideTo(null);
       hud.guide(
         'Poslední vlak',
-        seat ? 'Pardubice hlavní nádraží' : aboard ? 'Najdi si místo v oddílu' : platform,
+        seat.taken ? 'Pardubice hlavní nádraží' : 'Najdi si místo v oddílu',
         phase === 'coach'
           ? ((lineLength - metres) / 1000).toFixed(1).replace('.', ',') + ' km'
-          : seat
-            ? 'Rozhlédni se myší'
+          : seat.taken
+            ? 'Vlak odjede za ' + clock(remaining)
             : 'Pardubice hlavní nádraží',
       );
-      hud.action(seat ? 'Vstát' : nearSeat() ? 'Sednout si' : '');
+      hud.action(seat.settled ? 'Vstát' : nearSeat() ? 'Sednout si' : '');
       return;
     }
     if (phase === 'arrival') {
@@ -378,13 +313,9 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       }
       hud.guide(
         'Pardubice hlavní nádraží',
-        seat
-          ? 'Vstaň a vystup z vlaku'
-          : aboard
-            ? 'Vystup na nástupiště'
-            : 'Projdi halou na parkoviště za Vaškem',
+        seat.taken ? 'Vstaň a vystup z vlaku' : aboard ? 'Vystup na nástupiště' : 'Projdi halou na parkoviště za Vaškem',
       );
-      hud.action(seat ? 'Vstát' : '');
+      hud.action(seat.settled ? 'Vstát' : '');
     }
   }
   return {
@@ -397,36 +328,29 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     use,
     skip,
     get seated() {
-      return !!seat;
+      return false;
     },
-    frameCamera(camera, dt, drag) {
-      if (seat && !driving) {
-        lookYaw = Math.max(-1.7, Math.min(1.7, lookYaw - drag.x * 0.003));
-        lookPitch = Math.max(-0.73, Math.min(0.71, lookPitch - drag.y * 0.003));
-        const heading = player.heading + lookYaw,
-          c = Math.cos(lookPitch);
-        const eye = player._cit.eye,
-          head = player._cit.parts.head;
-        head.updateWorldMatrix(true, false);
-        camera.position.set(0, eye.y, eye.z - 0.035).applyMatrix4(head.matrixWorld);
-        const { x, y, z } = camera.position;
-        camera.lookAt(x - Math.sin(heading) * c, y + Math.sin(lookPitch), z - Math.cos(heading) * c);
-        camera.near = 0.055;
-        camera.fov = 68;
-        camera.updateProjectionMatrix();
+    // for the test harness: the opening film, while it runs
+    get film() {
+      return film;
+    },
+    // The film owns the camera; afterwards it is the game's own again, seated or not.
+    frameCamera(camera, dt) {
+      if (film?.running && !driving) return film.camera(camera, dt);
+      // one frame handed to main.js as "filmed" swings its boom behind him,
+      // out over the street, as he turns to the wall and takes the ladder
+      if (roofCtl.turned) {
+        roofCtl.turned = false;
         return true;
       }
-      if (phase !== 'bridge' || driving) return false;
-      roofSet.camera(camera, dt, line);
-      return true;
+      mark.frame(camera, dt, player.pos.x, player.pos.z);
+      return false;
     },
     posePlayer(dt) {
       if (driving) return false;
-      if (seat) {
-        moveSeat();
-        return true;
-      }
-      return roofSet.pose(dt, phase === 'bridge', line, phase === 'bridge' ? (voice?.intensity() ?? 0) : 0);
+      if (film?.running) return film.pose(dt);
+      if (roofCtl.pose(dt)) return true;
+      return seat.pose(dt, coachFrame());
     },
     update(dt, otherRide, car) {
       driving = otherRide || !!(player.inCar || player.boarding || player.exiting || player.ragdoll);
@@ -434,20 +358,30 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
         oldBase = base;
       aboard =
         !driving &&
-        (seat !== null ||
-          (inside(u, v) && ((phase === 'coach' && aboard) || Math.abs(player.y - base) < 1.54)));
-      if (phase === 'bridge' && !driving && line >= 0) {
-        if (silence > 0) {
-          silence -= dt;
-          if (silence <= 0) nextLine();
-        } else if (speechTime > 0) {
-          speechTime -= dt;
-          if (speechTime <= 0) nextLine();
-        }
+        (seat.taken || (inside(u, v) && ((phase === 'coach' && aboard) || Math.abs(player.y - base) < 1.54)));
+      life.update(dt, player.pos.x, player.pos.z, player.y);
+      // (the film object stays after its last frame: the roof it dressed is
+      // still under his feet, and goes with the rest in dispose)
+      if (film?.running) film.update(dt);
+      if (!film?.running) {
+        lamps();
+        // the story's clock: five past eight on the roof, ten past as the train
+        // leaves, half past as it draws into Pardubice
+        if (phase === 'station') storyClock.to(20 + (5 + 5 * (1 - trip.remaining / DEPARTS_IN)) / 60);
+        else if (phase === 'coach') storyClock.to(20 + (10 + 20 * (metres / lineLength)) / 60);
+        else storyClock.flow(dt, 20.7);
+        if (!driving && roofCtl.state === 'off' && !seat.taken) guard(player, atTrain);
       }
+      if (!platformSet && kolin.group && distance(kolin) < 420) platformSet = dressPlatform(scene, world, kolin, trip.platform);
+      platformSet?.update(dt, night(), undefined, player.pos.x, player.pos.z);
       if (phase === 'station' && !missed) {
         trip.remaining = Math.max(0, trip.remaining - dt);
         if (trip.remaining === 0) beginRun();
+      }
+      // a moment to watch the tail lights, then the campaign starts again
+      if (missed && (missed += dt) > 4.2 && missed < 90) {
+        missed = 99;
+        fail('train');
       }
       if (skipped) {
         skipped.elapsed += dt;
@@ -455,7 +389,6 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
           metres = lineLength;
           closed = 1;
           place();
-          moveSeat();
           skipped.moved = true;
         }
         if (
@@ -471,7 +404,6 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
           metres = skipped.from;
           skipped = null;
           place();
-          moveSeat();
           hud.travel(false);
           hud.say('Poslední vlak', 'Nádraží se zatím nepodařilo načíst. Vlak pokračuje po trati.');
         }
@@ -506,15 +438,16 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       }
     },
     dispose() {
-      live = false;
-      voice?.stop();
-      music?.stop(0.4);
-      ring?.stop();
+      film?.dispose();
       if (trains?.storyPass === passSound) trains.storyPass = null;
       if (world.storyCoach === deck) world.storyCoach = null;
-      roofSet.dispose();
+      map.setWaypoint(null);
+      mark.dispose();
+      life.dispose();
+      platformSet?.dispose();
       board.dispose();
       train.close();
+      lights.dispose();
       hud.close();
     },
   };

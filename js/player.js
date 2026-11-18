@@ -191,6 +191,11 @@ export class Player {
     this.heading = heading;
     this.speed = 0;          // m/s along _dir
     this.walkT = 0;          // stride phase, advanced by distance
+    // breath for the sprint (see _pace): 1 full … 0 spent, and what the HUD reads
+    this.stamina = 1;
+    this.tired = 0;          // seconds of heavy legs left
+    this.sprinting = false;
+    this._shiftWas = false; this._shiftAt = -9; this._paceT = 0; this._sprintHeld = false;
     // ---- the two hooks js/combat.js owns; see the header ----
     // Both are plain public fields on purpose: combat.js writes them and this
     // file only ever reads them, so there is no setter to keep in sync and no
@@ -253,9 +258,10 @@ export class Player {
     // result being clamped afterwards, so there is still exactly ONE target
     // speed feeding the accel ramp below and entering or leaving aim is a
     // deceleration through the normal path, never a discontinuity.
-    const sprint = !this.aimLock
+    const shift = !this.aimLock
       && (input.keys.has('ShiftLeft') || input.keys.has('ShiftRight'));
-    const top = this.aimLock ? AIM_SPEED : sprint ? WALK.sprint : WALK.jog;
+    const pace = this._pace(dt, shift, moving);
+    const top = this.aimLock ? AIM_SPEED : pace;
     const target = moving ? top : 0;
     const dv = WALK.accel * dt;
     this.speed = this.speed < target
@@ -329,6 +335,16 @@ export class Player {
     // the RUN blend takes over above WALK.runFrom, so the figure walks at a
     // walk, runs flat out at a sprint, and visibly changes gait between.
     this._animate(this.walkT, Math.min(1.25, this.speed / WALK.jog), runBlend(this.speed), this.speed);
+    // Flat out: the trunk goes forward over the feet and the arms pump high.
+    // Written over the run cycle rather than blended into it, like the combat
+    // poses below: absolute numbers, so several steps a frame land the same.
+    if (this.sprinting && this._cit && this.speed > WALK.jog + 1) {
+      const j = this._cit.parts, s = Math.sin(this.walkT);
+      j.torso.rotation.x -= 0.3;
+      j.head.rotation.x += 0.2;
+      j.elbowL.rotation.x = 1.7; j.elbowR.rotation.x = 1.7;
+      j.armL.rotation.x = 0.15 + 1.1 * s; j.armR.rotation.x = 0.15 - 1.1 * s;
+    }
     // LAST, and after _animate deliberately: the combat poses are ADDITIVE and
     // arms-only, so walk() has to have written the whole skeleton before one of
     // them overwrites its own joints. The other way round the pose is erased
@@ -336,6 +352,26 @@ export class Player {
     // line — boarding, riding and exiting all returned at the top of update(),
     // where the limbs belong to _sit() and a punch would be nonsense anyway.
     this.combatPose?.(dt);
+  }
+
+  // ---- the three paces ----------------------------------------------------
+  // Returns the speed the legs are asked for this step, and keeps the breath:
+  // a second press of Shift within WALK.tap of the first, held, is the sprint.
+  _pace(dt, shift, moving) {
+    this._paceT += dt;
+    if (shift && !this._shiftWas) {
+      if (this._paceT - this._shiftAt < WALK.tap) this._sprintHeld = true;
+      this._shiftAt = this._paceT;
+    }
+    if (!shift) this._sprintHeld = false;
+    this._shiftWas = shift;
+    this.sprinting = this._sprintHeld && moving && this.tired <= 0 && this.stamina > 0;
+    if (this.sprinting) {
+      this.stamina = Math.max(0, this.stamina - dt / WALK.sprintFor);
+      if (this.stamina === 0) { this.tired = WALK.tiredFor; this._sprintHeld = false; this.sprinting = false; }
+    } else if (this.tired > 0) this.tired = Math.max(0, this.tired - dt);
+    else this.stamina = Math.min(1, this.stamina + dt / WALK.recover);
+    return this.sprinting ? WALK.sprint : shift ? (this.tired > 0 ? WALK.tired : WALK.jog) : WALK.walk;
   }
 
   // ---- boarding ----------------------------------------------------------

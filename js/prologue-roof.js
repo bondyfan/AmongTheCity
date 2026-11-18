@@ -1,192 +1,147 @@
 import * as THREE from 'three';
 import { scenery } from './prologue-kit.js';
-import { expression } from './prologue-face.js';
-import { roof } from './prologue-route.js';
+import { roofFrame, stationEntry } from './prologue-route.js';
+import { groundFor } from './terrain.js';
+import { chunkKey, pointInPolygon } from './geo.js';
+import { dressRoof, dressDoor, dressLadder } from './prologue-roofset.js';
 
-const ladder = { x: -38869.22, z: 868.15 };
+// The roof scene. He stands on the coping of the end wall, four storeys over
+// the pavement, and the film cuts round him: his back against the town, the
+// drop under his shoes, his face in the light of the phone. When Vašek names
+// the money he steps back down, and he leaves by the stair head.
 const lerp = THREE.MathUtils.lerp;
+const sin = Math.sin(roofFrame.h),
+  cos = Math.cos(roofFrame.h);
+// roof frame → world (x across the wall, z back along the roof)
+export const world2 = (x, z) => ({ x: roofFrame.x + x * cos + z * sin, z: roofFrame.z - x * sin + z * cos });
+// The height of the roof deck: the building's own top (its walls stand on
+// groundFor), or the mapped storeys over the ground while its tile is on the way.
+export function deckY(world) {
+  const x = roofFrame.x + sin * 3,
+    z = roofFrame.z + cos * 3;
+  const home = world.city.chunkIndex.get(chunkKey(x, z))?.buildings?.find?.((b) => pointInPolygon(x, z, b.o));
+  return home ? groundFor(home, world.terrain) + home.h : world.terrain.heightAt(roofFrame.x, roofFrame.z) + roofFrame.floors;
+}
 
-export function rooftop(scene, world, player) {
-  const group = new THREE.Group();
-  group.name = 'Kolín • střecha u nádraží';
-  group.position.set(ladder.x, 0, ladder.z);
-  group.rotation.y = -0.518;
-  scene.add(group);
-  const kit = scenery(group);
-  const ground = world.terrain.heightAt(ladder.x, ladder.z);
-  const top = () => world.roofY(roof.x, roof.z, Infinity) || ground + 26;
-  const height = top() - ground;
-  group.position.y = ground;
-  for (const x of [-0.33, 0.33]) {
-    kit.box(x, height / 2 + 0.59, 0, 0.065, height + 1.18, 0.08, 0x87949a);
-    for (let y = 1; y < height; y += 2.4) kit.box(x, y, 0.31, 0.09, 0.09, 0.69, 0x626563);
-  }
-  for (let y = 0.26; y < height + 0.6; y += 0.29) kit.box(0, y, 0, 0.7, 0.047, 0.055, 0xa3a8a4);
-  for (const x of [-2.1, 2.1]) {
-    kit.box(x, height + 0.14, 0.63, 3.1, 0.28, 0.22, 0x817e76);
-    kit.box(x, height + 0.3, 0.63, 3.1, 0.055, 0.27, 0xb6b6ae);
-  }
-  kit.box(-2.1, height + 0.29, 4.5, 1.05, 0.58, 0.74, 0x6d7778);
-  for (let x = -2.52; x < -1.6; x += 0.09) kit.box(x, height + 0.59, 4.5, 0.035, 0.04, 0.67, 0xa5afae);
-  kit.box(2.2, height + 0.55, 4.8, 0.24, 1.1, 0.24, 0x867b6a);
-  kit.box(2.2, height + 1.11, 4.8, 0.39, 0.06, 0.39, 0x545b60);
-  // Service hatch, flashing and a riveted extraction duct on the station roof.
-  kit.box(-1.72, height + 0.09, 6.04, 1.28, 0.17, 1.08, 0x596461);
-  kit.box(-1.72, height + 0.2, 6.04, 1.18, 0.08, 0.98, 0x8d9590);
-  kit.box(-1.72, height + 0.27, 5.72, 0.22, 0.055, 0.05, 0x424d4b);
-  kit.box(-2.1, height + 0.2, 3.31, 0.56, 0.4, 1.69, 0x989e98);
-  for (const z of [2.62, 3.24, 3.87]) kit.box(-2.1, height + 0.2, z, 0.59, 0.43, 0.044, 0x707c78);
-  for (const x of [-2.66, 2.13])
-    for (const z of [1.4, 3.6, 5.8]) kit.box(x, height + 0.015, z, 0.043, 0.022, 2.12, 0x535650);
-  kit.box(0.55, height + 0.63, 0.71, 0.19, 0.27, 0.16, 0x475150);
-  kit.box(0.55, height + 0.67, 0.61, 0.13, 0.13, 0.04, 0xffbe77, 0, true);
+const LEDGE = { x: 0.55, z: 0.14, up: 0.6 },
+  DECK = { x: 0.55, z: 1.5, up: 0.035 };
+// Offsets are (right, up, forward) from his eyes, as on the street.
+const shots = {
+  est: { cam: [3.6, 3.3, -11.5], to: [2.5, 2.1, -7.2], look: [-0.3, -1.3, 6], fov: 40, rate: 0.22 },
+  drop: { cam: [0.34, 0.75, 0.1], to: [0.3, 0.95, 0.16], look: [0.02, -9, 1.5], fov: 52, rate: 0.3 },
+  sms: { cam: [-0.5, -0.22, 1.5], to: [-0.4, -0.18, 1.2], look: [0.03, -0.05, 0], fov: 33 },
+  ring: { cam: [5.6, 0.5, 1.6], to: [4.6, 0.35, 1.2], look: [0, -0.35, 0], fov: 34 },
+  f0: { cam: [0.78, 0.3, -1.4], to: [0.64, 0.26, -1.12], look: [-0.5, -1.3, 14], fov: 40 },
+  f1: { cam: [0.3, 0.02, 1.1], to: [0.22, 0.03, 0.84], look: [0.02, -0.03, 0], fov: 33 },
+  f2: { cam: [-1.9, 0.08, 0.5], to: [-1.5, 0.06, 0.62], look: [0, -0.05, 0.1], fov: 34 },
+  f3: { cam: [-0.3, -0.02, 1.0], to: [-0.24, 0, 0.8], look: [0.02, -0.03, 0], fov: 33 },
+  f4: { cam: [3.6, 1.2, -5.4], to: [2.6, 0.8, -3.8], look: [-0.3, -0.5, 6], fov: 38, rate: 0.2 },
+  f5: { cam: [-0.42, 0.04, 0.9], to: [-0.36, 0.04, 0.72], look: [0.02, -0.02, 0], fov: 32 },
+  f6: { cam: [-0.13, 0.03, 0.52], to: [-0.1, 0.03, 0.4], look: [0, 0, 0], fov: 30 },
+  f7: { cam: [-1.0, -0.7, 3.0], to: [-0.85, -0.6, 2.5], look: [0, -0.3, 0], fov: 36 },
+  f8: { cam: [-0.75, 0.32, -1.7], to: [-0.62, 0.28, -1.3], look: [0.4, -2.4, 30], fov: 28, own: true },
+  f9: { cam: [0.5, -0.1, 1.9], to: [0.42, -0.06, 1.5], look: [0, -0.12, 0], fov: 34, own: true },
+};
+
+export function rooftop(scene, world, player, act, lights) {
+  const deck = () => deckY(world);
+  const group = new THREE.Group(),
+    kit = scenery(group);
+  group.name = 'Kolín • střecha bytového domu';
+  group.rotation.y = roofFrame.h;
+  group.position.set(roofFrame.x, deck(), roofFrame.z);
+  dressRoof(kit);
+  dressLadder(kit, group.position.y - world.terrain.heightAt(world2(-3.6, -1).x, world2(-3.6, -1).z));
   kit.finish();
-  const cit = player._cit,
-    { head, handR } = cit.parts;
-  const prop = new THREE.Group();
-  const phoneKit = scenery(prop);
-  phoneKit.box(0, 0.046, 0, 0.071, 0.148, 0.011, 0x282a29);
-  phoneKit.box(0, 0.047, -0.006, 0.059, 0.122, 0.002, 0x8fb8c3, 0, true);
-  phoneKit.finish();
-  handR.add(prop);
-  prop.visible = false;
-  const eye = cit.eye;
-  const face = expression(cit);
-  face.hide();
-  const light = new THREE.PointLight(0xd7e8ff, 2.6, 3.1, 2);
-  scene.add(light);
-  light.visible = false;
-  const eyeWorld = new THREE.Vector3(),
-    offset = new THREE.Vector3(),
-    target = new THREE.Vector3();
-  let emotionalTime = 0,
-    climb = null,
-    age = 0,
-    shot = -99,
-    shotAge = 0;
-  function sync() {
-    player.vy = 0;
-    player.speed = 0;
-    player.mesh.position.set(player.pos.x, player.y, player.pos.z);
-    player.mesh.rotation.y = player.heading;
-  }
-  function near() {
-    return Math.hypot(player.pos.x - ladder.x, player.pos.z - ladder.z) < 5.3 && player.y > top() - 2;
+  scene.add(group);
+  const porch = new THREE.Group(),
+    doorKit = scenery(porch);
+  porch.name = 'Kolín • domovní dveře';
+  porch.rotation.y = roofFrame.h;
+  const wallFoot = world2(-1.1, -0.6);
+  porch.position.set(roofFrame.x, world.terrain.heightAt(wallFoot.x, wallFoot.z), roofFrame.z);
+  dressDoor(doorKit);
+  doorKit.finish();
+  scene.add(porch);
+  // The lamp over the stair-head door: warm on his back, dark between scenes.
+  const lamp = lights.b;
+  const eyes = new THREE.Vector3(),
+    target = new THREE.Vector3(),
+    anchor = new THREE.Vector3();
+  // towards the station: where he turns once there is a train to catch
+  const toStation = Math.atan2(-(stationEntry.x - roofFrame.x), -(stationEntry.z - roofFrame.z));
+  let shot = '',
+    shotAge = 0,
+    step = 0, // 0 on the ledge, 1 down on the roof
+    turn = 0;
+  function offset(out, [r, u, f], base, h) {
+    return out.set(base.x + Math.cos(h) * r - Math.sin(h) * f, base.y + u, base.z - Math.sin(h) * r - Math.cos(h) * f);
   }
   return {
-    near,
-    get climbing() {
-      return climb !== null;
+    begin() {
+      shot = '';
+      shotAge = step = turn = 0;
+      group.position.y = deck();
+      lamp.position.set(world2(1.85, 7.3).x, group.position.y + 2.2, world2(1.85, 7.3).z);
+      this.pose(0, { gesture: null });
     },
-    putOnRoof() {
-      Object.assign(player.pos, { x: roof.x, z: roof.z });
-      player.y = top();
-      player.heading = roof.h;
-      player.grounded = true;
-      sync();
-    },
-    startClimb() {
-      if (climb) return true;
-      if (!near()) return false;
-      climb = { t: 0, x: player.pos.x, z: player.pos.z, y: player.y };
-      player.grounded = false;
+    // gesture, emotion, speech as the actor takes them; `down` steps him off
+    // the coping and `face` turns him to the station.
+    pose(dt, { gesture = null, emotion = false, speech = 0, down = false, face = false } = {}) {
+      step += ((down ? 1 : 0) - step) * Math.min(1, dt * 2.4);
+      turn += ((face ? 1 : 0) - turn) * Math.min(1, dt * 1.8);
+      const top = group.position.y;
+      // down off the ledge, then (leaving) across the felt to the lit door
+      const x = lerp(LEDGE.x, DECK.x, step),
+        z = lerp(LEDGE.z, DECK.z, step),
+        heading = roofFrame.h + (toStation - roofFrame.h) * turn;
+      const hop = Math.sin(Math.min(1, step) * Math.PI) * 0.12;
+      const y = top + lerp(LEDGE.up, DECK.up, step * step) + hop;
+      const p = world2(x, z);
+      act.place(p.x, y, p.z, heading);
       player._stand();
-      return true;
+      // a man on a ledge leans a little into the air and back
+      if (step < 0.5) act.cit.parts.torso.rotation.x += 0.035 * Math.sin(act.age * 0.7) - 0.03;
+      act.perform(dt, { gesture, emotion, speech, light: 1, bow: gesture ? 0 : 0.3 * (1 - step) });
+      lamp.color.setHex(0xffb873);
+      lamp.distance = 9;
+      lamp.decay = 1.7;
+      lamp.intensity = 9;
     },
-    pose(dt, cinematic, line, speech) {
-      age += dt;
-      prop.visible = cinematic && line >= 0 && line !== 4;
-      light.visible = cinematic;
-      if (!cinematic) face.hide();
-      if (climb) {
-        climb.t += dt;
-        const onto = Math.min(1, climb.t / 0.85);
-        const progress = Math.min(1, Math.max(0, (climb.t - 0.85) / 9));
-        const exit = Math.max(0, (progress - 0.95) / 0.05);
-        player.pos.x = lerp(climb.x, ladder.x + 0.21 + 0.55 * exit, onto);
-        player.pos.z = lerp(climb.z, ladder.z - 0.38 - 0.94 * exit, onto);
-        player.y = lerp(climb.y, world.heightAt(player.pos.x, player.pos.z), progress);
-        player.heading = 2.62;
-        const swing = Math.sin(climb.t * 6.4);
-        const j = cit.parts;
-        j.armL.rotation.x = 2.45 + 0.35 * swing;
-        j.armR.rotation.x = 2.45 - 0.35 * swing;
-        j.elbowL.rotation.x = 0.48;
-        j.elbowR.rotation.x = 0.48;
-        j.legL.rotation.x = 0.38 - 0.35 * swing;
-        j.legR.rotation.x = 0.38 + 0.35 * swing;
-        j.kneeL.rotation.x = -0.5 + 0.35 * swing;
-        j.kneeR.rotation.x = -0.5 - 0.35 * swing;
-        sync();
-        if (progress === 1) {
-          climb = null;
-          player._stand();
-          player.grounded = true;
-        }
-        return true;
-      }
-      if (!cinematic) return false;
-      sync();
-      player._stand();
-      cit.setLod('near');
-      const j = cit.parts;
-      head.rotation.x = 0.12 + 0.027 * Math.sin(age * 1.1);
-      head.rotation.z = 0.044 * Math.sin(age * 0.43);
-      if (prop.visible) {
-        j.armR.rotation.set(1.23, 0.14, -0.31);
-        j.elbowR.rotation.x = 2.4;
-        prop.rotation.set(-0.33, Math.PI / 2, 0.11);
-      }
-      if (line >= 2) emotionalTime += dt;
-      face.update(line >= 2 ? emotionalTime : age, line >= 2, speech);
-      light.position.set(player.pos.x - 0.48, player.y + 1.97, player.pos.z - 0.72);
-      return true;
-    },
-    camera(camera, dt, line) {
-      if (line !== shot) {
-        shot = line;
+    camera(camera, dt, key) {
+      const def = shots[key] ?? shots.est;
+      act.eyes(eyes);
+      if (key !== shot) {
+        shot = key;
         shotAge = 0;
+        anchor.copy(eyes);
       }
       shotAge += dt;
-      const t = 1 - Math.exp(-shotAge * 0.38),
-        breathe = Math.sin(age * 0.71) * 0.007;
-      head.updateWorldMatrix(true, false);
-      eyeWorld.set(0, eye.y, eye.z).applyMatrix4(head.matrixWorld);
-      target.copy(eyeWorld);
-      if (line < 0) {
-        offset.set(lerp(8.8, 4.3, t), lerp(3.1, 1.75, t), lerp(10, 5.9, t));
-        target.y -= 0.38;
-      } else if (line === 3 || line === 4) {
-        offset.set(lerp(0.095, 0.052, t), 0.016 + breathe, -lerp(0.3, 0.231, t));
-        target.x += 0.014;
-      } else if (line === 0 || line === 5 || line === 9) {
-        offset.set(lerp(-1.15, -0.91, t), 0.18, lerp(0.85, 0.67, t));
-        target.y -= 0.17;
-      } else {
-        offset.set(lerp(0.33, 0.21, t), 0.038 + breathe, -lerp(1.08, 0.75, t));
-        target.y -= 0.07;
-      }
-      offset.applyAxisAngle(THREE.Object3D.DEFAULT_UP, player.heading);
-      camera.position.copy(eyeWorld).add(offset);
+      const t = 1 - Math.exp(-shotAge * (def.rate ?? 0.38)),
+        breathe = Math.sin(act.age * 0.71) * 0.006;
+      const mix = def.cam.map((v, i) => lerp(v, def.to[i], t));
+      mix[1] += breathe;
+      // shots keep the roof's own axes; `own` ones turn with him to the station
+      const h = def.own ? player.heading : roofFrame.h;
+      offset(camera.position, mix, def.fixed ? anchor : eyes, h);
+      offset(target, def.look, eyes, h);
       camera.lookAt(target);
-      camera.near = 0.025;
-      camera.fov = line < 0 ? 48 : 35;
+      camera.near = 0.03;
+      camera.fov = def.fov;
       camera.updateProjectionMatrix();
     },
+    // The film is over: he stands on the felt, turned to the ladder's corner.
+    handOver() {
+      const p = world2(DECK.x, DECK.z),
+        to = world2(-3.6, 0.9);
+      act.place(p.x, group.position.y + DECK.up, p.z, Math.atan2(-(to.x - p.x), -(to.z - p.z)));
+    },
     release() {
-      prop.visible = false;
-      face.hide();
-      light.visible = false;
-      cit.setLod(null);
-      if (!player.inCar && !player.ragdoll) player._stand();
+      lamp.intensity = 0;
     },
     dispose() {
-      this.release();
       kit.dispose();
-      phoneKit.dispose();
-      face.dispose();
-      light.removeFromParent();
-      light.dispose();
+      doorKit.dispose();
     },
   };
 }

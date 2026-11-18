@@ -185,6 +185,15 @@ export function worldT() {
   return (nowMs() - WORLD_EPOCH_MS) / 1000;
 }
 
+// THE STORY'S OWN HOUR. While the campaign runs it decides what time the sky,
+// the light and the HUD clock show (js/prologue-clock.js); worldT() is not
+// touched, so signals and timetables keep their shared phase underneath.
+// A number 0..1 holds that hour; null gives the day back to the world clock.
+let _todOverride = null;
+export function overrideTod(tod01) {
+  _todOverride = Number.isFinite(tod01) ? tod01 - Math.floor(tod01) : null;
+}
+
 // Time of day, 0..1 with 0 = midnight — what sky.js, the HUD clock and the
 // traffic-density curve consume. START_TOD is the phase at WORLD_EPOCH_MS,
 // so the world reads 10:30 at every real UTC midnight rather than at the
@@ -192,6 +201,7 @@ export function worldT() {
 // share an hour; the cost is that a solo player no longer always spawns
 // mid-morning, which is the trade the shared world requires.
 export function tod() {
+  if (_todOverride !== null) return _todOverride;
   const d = START_TOD + worldT() / DAY_LENGTH;
   return d - Math.floor(d);   // frac(), correct for negative d (pre-epoch)
 }

@@ -29,7 +29,15 @@ export function storyHud() {
   travel.innerHTML =
     '<div><small>POSLEDNÍ VLAK</small><section><strong>Kolín</strong><strong>Pardubice</strong></section><div class="journey-track"><i aria-hidden="true"><b></b><b></b><b></b></i></div></div>';
   timer.hidden = skip.hidden = travel.hidden = true;
-  root.append(timer, skip, travel);
+  // A black card for cuts between scenes, and the pin that marks the station.
+  const veil = document.createElement('div'),
+    pin = document.createElement('div');
+  veil.className = 'journey-veil';
+  veil.innerHTML = '<div><strong></strong><span></span></div>';
+  pin.className = 'journey-pin';
+  pin.innerHTML = '<i></i><b></b><small></small>';
+  pin.hidden = true;
+  root.append(timer, skip, travel, pin, veil);
   return {
     root,
     button,
@@ -60,6 +68,26 @@ export function storyHud() {
     cinema(on) {
       document.body.classList.toggle('story-cinema', on);
     },
+    // Fade to black (and back). A title and a line may stand on the black.
+    veil(on, title = '', line = '') {
+      veil.classList.toggle('on', on);
+      if (on || title) {
+        put(veil.querySelector('strong'), title);
+        put(veil.querySelector('span'), line);
+      }
+    },
+    // The station pin: x and y are 0..1 of the window, `off` is the bearing in
+    // radians when the place is outside the picture (the pin then rides the rim).
+    pin(x, y, label = '', metres = '', off = null) {
+      pin.hidden = x === undefined;
+      if (pin.hidden) return;
+      pin.style.left = (x * 100).toFixed(2) + '%';
+      pin.style.top = (y * 100).toFixed(2) + '%';
+      pin.classList.toggle('off', off !== null);
+      pin.firstChild.style.transform = off === null ? '' : 'rotate(' + off.toFixed(3) + 'rad)';
+      put(pin.querySelector('b'), label);
+      put(pin.querySelector('small'), metres);
+    },
     guide(place, task, help = '') {
       put(location, place);
       put(title, task);
@@ -74,12 +102,15 @@ export function storyHud() {
       button.hidden = !label;
       put(button, label ? 'E　' + label : '');
     },
-    phone(contact, status) {
+    // `text` turns the screen into a message: the sender above, the words below.
+    phone(contact, status, text = '') {
       phone.hidden = !contact;
+      phone.classList.toggle('message', !!text);
+      phone.classList.toggle('ringing', !!contact && !status && !text);
       if (contact) {
         put(phone.querySelector('small'), document.getElementById('tod-clock')?.textContent ?? '');
         put(phone.querySelector('strong'), contact);
-        put(phone.querySelector('span'), status || (contact === 'Máma' ? 'Nová zpráva' : 'Příchozí hovor'));
+        put(phone.querySelector('span'), text || status || 'Příchozí hovor');
       }
     },
     close() {

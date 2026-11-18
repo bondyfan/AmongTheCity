@@ -47,7 +47,7 @@ const SAVE_EVERY = 20;         // s between autosaves
 // Where main.js stands you up after the death card is the hospital nearest
 // to where you fell (config.js HOSPITALS, js/startplace.js nearestHospital,
 // the same call main.js makes). Only the save written as you go down needs it.
-import { storyStart, newTrip, bridge, roof, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
+import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
 
 const store = browserStore();
 
@@ -86,14 +86,7 @@ export function choose(choice) {
   const story = storyStart(solo, startPick, state.prologue, res.reason === 'empty');
   if (story && story !== 'done') {
     state.onb.done = true;
-    if (!state.storyTrip) {
-      let previous = null;
-      try { previous = Number(localStorage.getItem('atc-last-platform')); } catch {}
-      state.storyTrip = state.prologue ? {platform: 2, remaining: 210} : newTrip(previous);
-      try { localStorage.setItem('atc-last-platform', state.storyTrip.platform); } catch {}
-    }
-    if (story === 'bridge' && state.pos && Math.hypot(state.pos.x - bridge.x, state.pos.z - bridge.z) < 40) state.pos = null;
-    if (!state.prologue || (story === 'forecourt' && !state.pos)) checkpointStory(story);
+    beginStory();
   }
   loadNote = res.reason === 'corrupt' || res.reason === 'newer' ? res.reason : null;
 }
@@ -103,15 +96,27 @@ export const storyTrip = () => state.storyTrip;
 export function activeStory() {
   return solo && startPick !== 'praha' ? state.prologue : null;
 }
+// THE CAMPAIGN IS NOT SAVED BEFORE ITS END (Frank, 18 Nov 2026): a missed train
+// or a death starts it again from the street in Kolín, and so does closing the
+// tab. The chapter lives in memory only; the first write is the one for 'done'.
+function beginStory() {
+  let previous = null;
+  try { previous = Number(localStorage.getItem('atc-last-platform')); } catch {}
+  state.prologue = 'bridge';
+  state.pos = null;
+  state.storyTrip = newTrip(previous);
+  try { localStorage.setItem('atc-last-platform', state.storyTrip.platform); } catch {}
+}
 export function checkpointStory(stage) {
   state.prologue = stage;
-  if (applied) { save(); return; }
-  if (stage === 'forecourt') {
-    state.pos = { ...stationExit };
-    state.tod = 20.6 / 24;
-  }
-  store.save(state);
+  if (stage === 'done' && applied) save();
 }
+/** The campaign from its first frame again: a new platform, a full countdown. */
+export function restartStory() {
+  beginStory();
+  return state.storyTrip;
+}
+const storyRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && startPick !== 'praha';
 
 /** Where boot begins, before the world exists: the save's spot when it is in
  *  the city the menu shows, else that city's square (js/startplace.js).
@@ -120,7 +125,7 @@ export function checkpointStory(stage) {
 export function startPoint() {
   const chapter = activeStory();
   if (chapter && chapter !== 'done') {
-    const fallback = { bridge: roof, station: stationEntry, coach: kolinPlatform, arrival: pardubicePlatform, forecourt: stationExit }[chapter];
+    const fallback = { bridge: street, station: stationEntry, coach: kolinPlatform, arrival: pardubicePlatform, forecourt: stationExit }[chapter];
     const p = state.pos ?? fallback;
     const place = p.x < -38000 ? { name: 'Kolín', to: 'do Kolína' } : pickStart(null, p).place;
     return { x: p.x, z: p.z, heading: p.h, place, saved: !!state.pos };
@@ -257,7 +262,7 @@ export function attach(host) {
   // wake (at the hospital, on your feet, the job you fell on failed) with the
   // bill still open, and loading it is what pays (apply, settleOwed).
   vitals.onDown(() => {
-    if (!applied || !h) return;
+    if (!applied || !h || storyRunning()) return;
     const snap = snapshot();
     const px = h.player?.pos?.x ?? lastSafe?.x, pz = h.player?.pos?.z ?? lastSafe?.z;
     const hosp = nearestHospital(px, pz);
@@ -331,7 +336,7 @@ function apply() {
     // raises is what sends the police out again)
     if (s.wanted.heat > 0) wanted.add(s.wanted.heat, s.wanted.crime);
     if (s.owed) settleOwed(s.owed.stars);
-    else if (activeStory() !== 'forecourt') toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ tam, kde jsi skončil', ms: 7000 });
+    else if (activeStory() !== 'forecourt' && !storyRunning()) toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ tam, kde jsi skončil', ms: 7000 });
   }
   if (loadNote === 'corrupt')
     toast('Uložená hra se nedala načíst', { icon: '⚠️', kind: 'warn', sub: 'Začínáš novou. Původní data jsou odložená.', ms: 9000 });
@@ -376,7 +381,7 @@ function snapshot() {
 /** Write the save now. Never while down (the body is mid-teleport) and never
  *  before the loaded save has been applied (that would overwrite it blank). */
 export function save() {
-  if (!applied || !h || vitals.down()) return false;
+  if (!applied || !h || vitals.down() || storyRunning()) return false;
   return store.save(snapshot());
 }
 
@@ -525,7 +530,7 @@ export function update(dt) {
   saveT -= dt;
   // A save that was due and did not land (the storage is blocked or full) is
   // said out loud. Down and the newer-version refusal are not failures.
-  if (saveT <= 0) { saveT = SAVE_EVERY; if (!save() && !vitals.down() && loadNote !== 'newer') tellUnsaved(); }
+  if (saveT <= 0) { saveT = SAVE_EVERY; if (!save() && !vitals.down() && !storyRunning() && loadNote !== 'newer') tellUnsaved(); }
 }
 
 // Everything that does not need to run every frame.

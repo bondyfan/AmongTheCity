@@ -31,10 +31,10 @@ test('Kolín bridge, the whole railway and the forecourt share a drivable world'
   assert.equal(nav.partial,false);
   assert.ok(nav.remainingM>39000);
 });
-test('chapter checkpoints round-trip, fresh single player starts in Kolín and legacy saves continue', () => {
+test('the campaign is played in one sitting: an unfinished chapter starts again, a finished one stays finished', () => {
   for (const stage of ['bridge', 'station', 'coach', 'arrival', 'forecourt', 'done']) {
     assert.equal(parse(serialize({ ...blank(), prologue: stage })).state.prologue, stage);
-    assert.equal(storyStart(true, 'pardubice', stage, false), stage);
+    assert.equal(storyStart(true, 'pardubice', stage, false), stage === 'done' ? 'done' : 'bridge');
   }
   assert.equal(storyStart(true, 'pardubice', null, true), 'bridge');
   assert.equal(storyStart(true, 'pardubice', null, false), null);
@@ -42,6 +42,30 @@ test('chapter checkpoints round-trip, fresh single player starts in Kolín and l
   assert.equal(storyStart(true, null, null, true), null);
   assert.equal(storyStart(false, 'pardubice', 'arrival', false), null);
   assert.equal(parse('{"v":2,"pos":{"x":20,"z":-121}}').state.prologue, null);
+});
+
+test('the script: every spoken line has its own recording id and nobody uses a long dash', async () => {
+  const { hospitalCall, friendCall, parkingLines, tableTalk, bankMessage, hospitalMessage } = await import('../js/prologue-dialogue.js');
+  const lines = [...hospitalCall, ...friendCall, ...parkingLines, ...tableTalk];
+  assert.equal(new Set(lines.map((l) => l[0])).size, lines.length);
+  for (const [id, who, words, role, direction] of lines) {
+    assert.ok(id && who && words && direction, id);
+    assert.ok(['care', 'father', 'friend'].includes(role), id);
+    assert.ok(!words.includes('\u2014'), id);
+  }
+  // the price and the deadline are said out loud, and the offer is the same sum
+  assert.match(hospitalCall.map((l) => l[2]).join(' '), /zálohu\. Do zítřejší půlnoci\. Dvě stě padesát tisíc/);
+  assert.match(friendCall.map((l) => l[2]).join(' '), /Dvě stě padesát tisíc/);
+  assert.match(friendCall.at(-2)[2], /Poslední vlak ti jede, koukám, za tři minuty\. Stihneš to\./);
+  assert.equal(friendCall.at(-1)[2], 'No nevím. Pokusím se.');
+  assert.match(hospitalMessage[1] + bankMessage[1], /250 000 Kč/);
+});
+
+test('the three paces: a walk, the run on Shift, and a sprint that runs out of breath', async () => {
+  const { WALK } = await import('../js/config.js');
+  assert.ok(WALK.walk < WALK.tired && WALK.tired < WALK.jog && WALK.jog < WALK.sprint);
+  assert.equal(WALK.jog, 5.6);
+  assert.equal(WALK.sprintFor, 6);
 });
 
 test('an evening car park keeps the two door approaches free for the handover', async () => {
@@ -71,6 +95,7 @@ test('every replay selects another connected platform and the countdown survives
     starts.push(route.railPose(0));
     assert.ok(Math.abs(route.lineLength-lineLength)<600);
     assert.deepEqual(route.railPose(route.lineLength),railPose(lineLength));
+    assert.equal(newTrip(platform,()=>0).remaining,180);
     const trip={platform,remaining:82.5};
     assert.deepEqual(parse(serialize({...blank(),storyTrip:trip})).state.storyTrip,trip);
   }

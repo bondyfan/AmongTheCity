@@ -208,7 +208,7 @@ export function showMenu() {
       const journey = start === 'pardubice' && sum?.prologue && sum.prologue !== 'done';
       const move = sum && here && here !== start ? ' · nový start ' + placeById(start).at : '';
       single.appendChild(el('small', '', undefined)).textContent = sum
-        ? journey ? 'Poslední vlak • pokračovat v příběhu' : kc(sum.money) + ' · odehráno ' + fmtPlayed(sum.played)
+        ? journey ? 'Poslední vlak • příběh začíná znovu' : kc(sum.money) + ' · odehráno ' + fmtPlayed(sum.played)
           + (sum.jobs ? ' · zakázek ' + sum.jobs : '') + move
         : start === 'pardubice' ? 'Příběh • poslední vlak z Kolína' : 'sám ve městě';
       fresh.style.display = sum ? '' : 'none';

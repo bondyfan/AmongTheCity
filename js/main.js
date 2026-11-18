@@ -91,6 +91,8 @@ import { makeNetUI } from './netui.js';
 // module (js/career.js lists the hooks main.js calls, and why there are so few)
 import * as career from './career.js';
 import { meetVasek } from './prologue-parking.js';
+import { hours as storyHours } from './prologue-route.js';
+import { staminaHud } from './stamina.js';
 import { exitHudText, setExitLine } from './mwhud.js';
 import { MwRetro } from './mwretro.js';
 import { setMotorwayAtlasScale } from './mwatlas.js';
@@ -146,6 +148,53 @@ const game = {
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let journey = null, meeting = null, vasekCar = null;
+let startJourney = null, storyOver = null;
+// THE CAMPAIGN HAS NO SECOND CHANCES (Frank, 18 Nov 2026): miss the last train
+// or die, and it starts again on the street in Kolín. Nothing was saved (see
+// career.js), so this is the same start a reload would give, without the menu.
+// The screen goes black with one line, the world streams in round the first
+// scene, and the film begins again with a new platform and a full clock.
+function failStory(why) {
+  if (storyOver || !startJourney) return;
+  const veil = document.createElement('div');
+  veil.className = 'story-over';
+  veil.innerHTML = '<div><strong></strong><span>Kampaň začíná znovu</span></div>';
+  veil.querySelector('strong').textContent = why === 'train' ? 'Poslední vlak odjel' : 'Zemřel jsi';
+  document.body.append(veil);
+  requestAnimationFrame(() => veil.classList.add('on'));
+  storyOver = { veil, t: 0, moved: false };
+}
+function pumpStoryOver(dt) {
+  const o = storyOver;
+  if (!o) return;
+  o.t += dt;
+  if (!o.moved && o.t > 1.4) {
+    o.moved = true;
+    journey?.dispose(); journey = null;
+    meeting?.close?.(); meeting = null;
+    if (player.ragdoll) player.endRagdoll();
+    if (player.inCar) player.setInCar(null);
+    player.boarding = player.exiting = null;
+    vitals.revive();
+    statusbar.hideBanner();
+    wanted.clear?.();
+    career.restartStory();
+    const at = career.startPoint();
+    player.pos.x = at.x; player.pos.z = at.z;
+    player.y = world.terrain.heightAt(at.x, at.z);
+    world.city.ensureTiles?.(at.x, at.z)?.catch?.(() => {});
+    world.terrain.ensure?.(at.x, at.z);
+    camInit = false;
+  }
+  // wait for the street to exist again (he may have died in Pardubice)
+  const ready = o.moved && world.terrain.ready(player.pos.x, player.pos.z) && world.built.has(chunkKey(player.pos.x, player.pos.z));
+  if (o.moved && !journey && (ready && o.t > 3.4 || o.t > 30)) {
+    journey = startJourney('bridge');
+    o.veil.classList.remove('on');
+    setTimeout(() => o.veil.remove(), 900);
+    storyOver = null;
+  }
+}
 let roadWorks = null;
 let parkingLots = null;
 let cityLife = null;     // crowd, traffic and buses tied together (js/citylife.js)
@@ -381,14 +430,20 @@ function applyLens(dt, fov, near) {
 }
 
 let _lastLookT = -9; // when the mouse last steered — pauses auto-follow
+let _filmed = false;  // the story's film had the camera last frame
 function updateCamera(dt) {
   const drag = input.takeDrag();
-  if (journey?.frameCamera(camera, dt, drag)) {
-    fpHideSelf(journey.seated);
+  // the story's films: the opening and the train (journey), then Vašek's table (meeting)
+  if ((journey ?? meeting)?.frameCamera?.(camera, dt, drag)) {
+    fpHideSelf(false);
     camNear = camera.near;
     camInit = false;
+    _filmed = true;
     return;
   }
+  // The film has just handed the camera back: the boom starts behind him,
+  // looking the way he is turned (towards the station), not where it was left.
+  if (_filmed) { _filmed = false; camYaw = player.heading; camInit = false; }
   // pointer-locked mouse look uses a finer touch than right-drag
   const sens = input.locked ? 0.0026 : 0.004;
   if (drag.x || drag.y) _lastLookT = performance.now() * 0.001;
@@ -558,7 +613,7 @@ function updateCamera(dt) {
   // the one that crosses a block every fifth of a second.
   const flying = !!(game.heli || game.jet);
   const enclosed = !flying && !game.car && (journey?.aboard || world.stationPassages?.inside(tx, tz, player.y));
-  const indoors = enclosed || (!flying && !game.car && !!world.interiors?.modelAt(tx, tz));
+  const indoors = enclosed || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
   if (indoors) dist = Math.min(dist, enclosed ? 0.85 : 3.4);
   const flat = Math.cos(pitch) * dist;
   let px = tx + Math.sin(camYaw) * flat;
@@ -1059,9 +1114,8 @@ input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
   if (player.ragdoll) return;      // flying through the air is not a door
   if ((journey || meeting) && document.body.dataset.panelOpen) return;
-  // Beside a vehicle E keeps its normal meaning, even with the phone ringing.
-  // The call can still be answered with the on-screen phone button.
-  if (journey && !(career.activeStory() === 'bridge' && nearestEnterableCar()) && journey.use()) return;
+  // The story answers first: its opening is a film and E is the phone.
+  if (journey?.use()) return;
   if (meeting?.use(player)) return;
   let jetNear = null;              // set by the fighter branch's own test
   if (trains?.riding) {
@@ -1229,7 +1283,7 @@ input.onKey('KeyE', () => {
         camDist = CAM_DIST_MIN;
         if (s !== 0) return;             // passenger seat: no engine, no speedo
         game.car = car;
-        if (meeting?.driving(car)) { meeting = null; fpView = true; }
+        if (meeting?.driving(car)) fpView = true;
         // Claimed from onSeated for the same reason the helicopter is: the
         // walk-up is cancellable, and taking a car off everybody else's street
         // because somebody started strolling towards it is worse than the race
@@ -3045,6 +3099,11 @@ async function boot() {
     fpView = false;
     $id('speedo').classList.add('hidden');
     hideCarName();
+    // In the campaign there is no hospital to wake up in: it starts again.
+    if (startJourney && career.activeStory() && career.activeStory() !== 'done') {
+      setTimeout(() => { if (game.mode === 'play') failStory('death'); }, 2200);
+      return;
+    }
     setTimeout(() => {
       if (game.mode !== 'play') return;
       player.endRagdoll();
@@ -3066,8 +3125,9 @@ async function boot() {
   const chapter = career.activeStory();
   if (chapter && chapter !== 'done' && chapter !== 'forecourt') {
     const { createPrologue } = await import('./prologue.js');
-    journey = createPrologue({ chapter, scene, world, player, map: worldMap, trip: career.storyTrip(), trains, save: career.checkpointStory });
-
+    startJourney = (stage) => createPrologue({ chapter: stage, scene, world, player, map: worldMap, trip: career.storyTrip(),
+      trains, save: career.checkpointStory, input, night: () => sky?.nightK ?? 0, fail: failStory });
+    journey = startJourney(chapter);
   }
   career.attach(careerHost());
   game.mode = 'play';
@@ -3268,6 +3328,8 @@ function stepGame(dt) {
   world.stationPassages.advanceEscalator(dt,player);
   journey?.update(dt, !!(game.car || game.heli || game.jet || trains?.riding), vasekCar);
   if (journey?.finished) { journey.dispose(); journey = null; }
+  pumpStoryOver(dt);
+  if (meeting?.finished) { meeting.close(); meeting = null; }
   const focus = game.car ?? player.pos;
   // STREAM WHERE YOU WILL BE, NOT WHERE YOU ARE. Everything downstream of this
   // point — chunk meshes, region tiles, the aerial photo — is keyed to one
@@ -3378,9 +3440,10 @@ function stepGame(dt) {
     // scrub; audio.js turns it into a squeal on tarmac or a spray on dirt.
     skidSet(game.car.slip01 ?? 0, game.car.offroad ?? 0);
     if (shouldEject(game.car)) ejectDriver(game.car);
-  } else if (!journey?.posePlayer(dt)) {
+  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt)) {
     player.update(dt, { input, camYaw, world });
   }
+  staminaHud(player, !game.car && !player.inCar);
   if (_ejCar) {
     if (_ejCar !== game.car && (_ejT -= dt) > 0) driveStep(_ejCar, _ejIdle, dt, world, _crashList());
     else _ejCar = null;
@@ -3577,8 +3640,8 @@ function stepGame(dt) {
   pumpStep(dt);
   career.update(dt);
   if (career.activeStory() === 'forecourt' && vasekCar) {
-    meeting ??= meetVasek(vasekCar, scene, world, worldMap, career.checkpointStory);
-    meeting.update(player);
+    meeting ??= meetVasek(vasekCar, scene, world, worldMap, career.checkpointStory, player);
+    meeting.update(player, dt);
   }
   statusbar.update(dt, _vitCtx);
 
@@ -3852,7 +3915,7 @@ async function start() {
   career.choose({ ...choice, mode: net ? 'server' : 'single' });
   const chapter = career.activeStory();
   const opening = chapter && chapter !== 'done';
-  const openingHour = opening ? 20.6 / 24 : 6 / 24;
+  const openingHour = opening ? storyHours.street / 24 : 6 / 24;
   if (!net) {
     setSoloTime(openingHour);
     ui.setStatus({ online: null });
@@ -3906,6 +3969,7 @@ tick();
 // drive the game: window.__atc.player.pos, __atc.input.keys, __atc.game.car…
 window.__atc = {
   build: 'v16-coop-shared-world',   // bump on risky changes — which code a tab runs
+  get journey() { return journey; },
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   // `cabin` is the graft's live truth, not a copy of fpView: a harness can
