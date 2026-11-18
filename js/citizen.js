@@ -120,26 +120,45 @@ function pickLod(renderer, scene, camera) {
 // it or beside it kept whatever castShadow they last had: true from birth for
 // most of a crowd, and the shadow box (js/sky.js, 230 m across on medium and
 // leading the view) takes in a good deal of what is behind the camera. Each
-// of them was a whole skinned draw call in the shadow pass, for a shadow a
-// few texels long on a 2048 map. Every live body is listed here and, once a
-// frame (main.js, before the render), casts only within `r` of the camera,
-// with 3 m of give either way so a person standing at the line does not
-// flicker. The contact blob under the feet (js/groundblob.js) is drawn at any
-// distance, so a far figure is still grounded; past 45 m the sun's own shadow
-// of a walker is a smudge of some ten pixels. `__batch.shadows = false`
-// (js/batchflags.js) puts back cast-at-any-distance.
+// of them was a whole skinned draw call in the shadow pass. Every live body is
+// listed here and, once per shadow-map update (main.js, before the render),
+// a person casts only
+//   - within `r` of the camera, in any direction (a shadow from just behind
+//     the camera can fall forward into the view), or
+//   - when a sphere of SH_REACH round them touches the view frustum, which is
+//     where their shadow could be seen at all; there pickLod's own far line
+//     (FAR_OUT) keeps deciding, exactly as before.
+// So nothing on screen changes: a figure in view casts as it always did, and
+// only people whose shadow cannot reach the picture stop drawing one. The
+// first version cut everyone past 45 m, in view too, which put a second line
+// in the picture (walkers 45 to 62 m away losing their shadow) next to the
+// far LOD's own at 62. Both tests have some give, so nobody flickers on one.
+// `__batch.shadows = false` (js/batchflags.js) puts back cast-always.
 const _bodies = new Set();
 const SH_GIVE = 3;
+// metres round a body that its shadow may reach: a 1.8 m figure under a sun
+// 10 degrees up throws some 10 m; the larger value holds a caster until it is
+// well clear, the smaller one lets a new one in
+const SH_REACH_KEEP = 14, SH_REACH_JOIN = 11;
+const _frustum = new THREE.Frustum(), _pv = new THREE.Matrix4(), _sph = new THREE.Sphere();
 
-/** Once a frame: people farther than `r` metres from the camera stop casting. */
+/** Once per shadow update: people whose shadow cannot reach the view stop casting. */
 export function cullPeopleShadows(camera, r = 45) {
   if (!BATCH.shadows || !camera) return;
+  camera.updateWorldMatrix(true, false);
+  _pv.multiplyMatrices(camera.projectionMatrix, _pv.copy(camera.matrixWorld).invert());
+  _frustum.setFromProjectionMatrix(_pv);
   const c = camera.matrixWorld.elements, cx = c[12], cy = c[13], cz = c[14];
-  const rIn = (r - SH_GIVE) ** 2, rOut = (r + SH_GIVE) ** 2;
+  const rIn = (r - SH_GIVE) ** 2, rOut = (r + SH_GIVE) ** 2, far2 = (FAR_OUT + SH_GIVE) ** 2;
   for (const m of _bodies) {
     const u = m.userData, e = m.matrixWorld.elements;
     const dx = e[12] - cx, dy = e[13] - cy, dz = e[14] - cz, d2 = dx * dx + dy * dy + dz * dz;
-    const near = u.shNear ? d2 < rOut : d2 < rIn;
+    let near = u.shNear ? d2 < rOut : d2 < rIn;
+    if (!near && d2 < far2) {
+      _sph.center.set(e[12], e[13], e[14]);
+      _sph.radius = u.shNear ? SH_REACH_KEEP : SH_REACH_JOIN;
+      near = _frustum.intersectsSphere(_sph);
+    }
     u.shNear = near;
     m.castShadow = near && !u.far;
   }

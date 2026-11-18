@@ -3113,8 +3113,8 @@ function tick(src) {
     setCoverage(renderer, wantPost && postfx ? 4 : null);   // alpha to coverage needs MSAA: js/coverage.js
     renderer.shadowMap.autoUpdate = false;                  // moon shadows at half rate: js/shadowpace.js
     renderer.shadowMap.needsUpdate = shadowDue(gs, sky?.nightK ?? 0);
-    // a person farther than this from the camera casts no sun shadow (js/citizen.js);
-    // the finer 4096 map of the high preset shows a walker's shadow farther out
+    // people whose shadow cannot reach the view cast none (js/citizen.js); this is
+    // the radius round the camera inside which everyone still casts
     if (renderer.shadowMap.needsUpdate) cullPeopleShadows(camera, gs.shadowRes >= 4096 ? 60 : 45);
     if (wantPost && postfx) {
       postfx.setSize(renderer.domElement.width, renderer.domElement.height);

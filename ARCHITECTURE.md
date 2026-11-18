@@ -300,7 +300,9 @@ strays >1500 m from the last render center.
   ONE InstancedMesh (js/signalbatch.js: the parts merged, a per-vertex lens
   index, a per-instance state float picks off or lit colour and glow in the
   shader), so the lights of the whole city in range are one draw call; a
-  felled mast gives up its slot. `__batch.signals = false` (js/batchflags.js)
+  felled mast gives up its slot. The mesh stands at an anchor near the masts
+  and the instances are offsets from it (float32 world coordinates at 95 km
+  broke the lens out of its housing). `__batch.signals = false` (js/batchflags.js)
   draws the old per-mast Groups for an A/B. AI: a red/amber light on the car's edge ahead → smooth
   stop 5 m short (reuse the follow-brake math); pull away on green.
 - Cars with `_rammedT > 0`: AI control suspended (car keeps momentum, decays
@@ -872,7 +874,9 @@ chunk's per-chain quads into one mesh per page with their uvs remapped, after
 the decode (js/meshpool.js finish) and at the end of a synchronous
 buildBuildingsMesh alike. The worker still sends one stream per chain. The
 merged mesh lists its labels in `userData.marks`, which CityWorld._sweepMarks
-counts, so a label in view never gives its slot away.
+counts, so a label in view never gives its slot away. A label is any shop's
+own name (487 of them in the old town), so the pages go up to 32 (1024
+labels) before a label falls back on a canvas of its own.
 
 Two invariants worth knowing before touching js/city.js:
 - **A key in `_inflight` is being built and is in neither `built` nor the
