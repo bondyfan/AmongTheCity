@@ -26,6 +26,7 @@ const { impostorFrame } = await import('../js/treeimpostor.js');
 const { IMP_COLS, IMP_ROWS } = await import('../js/treeshader.js');
 const { pavingUnder, treePitsInto } = await import('../js/treepits.js');
 const { treeQuality } = await import('../js/trees.js');
+const { TREE_TAXA } = await import('../js/tiledata.js');
 
 const street = (i, x, z) => ({ x, z, seed: 5000 + i, forest: false });
 
@@ -114,12 +115,15 @@ test('the far template is what the codec can carry', () => {
   assert.ok(S.FAR_BOUND_PAD > 0);
   // the pad a batch takes covers its tallest tree: a 36 m pine reaches past
   // the 14 m floor, a street lime does not
-  const reach = (sp, h, rx, ry) => S.farBoundPad({ sp, h, rx, ry });
-  assert.ok(reach(S.SP.LINDEN, 14, 4, 4) <= S.FAR_BOUND_PAD);
-  assert.ok(reach(S.SP.PINE, 36, 4, 5.5) > S.FAR_BOUND_PAD);
+  const surveyed = (genus, height) => S.treeSpec({ ...street(1, 0, 0),
+    th: height, tc: 8, tx: TREE_TAXA.findIndex(t => t?.id === genus) }, 0, {});
+  const lime = surveyed('tilia', 14), pine = surveyed('pinus', 36);
+  assert.equal(pine.h, 36);
+  assert.ok(S.farBoundPad(lime) <= S.FAR_BOUND_PAD);
+  assert.ok(S.farBoundPad(pine) > S.FAR_BOUND_PAD);
   for (let sp = 0; sp < S.SPECIES.length; sp++) {
     const ry = 5, rx = 4, m = Math.max(rx, ry), lowest = S.groundOf(sp) * ry + S.TRUNK_SINK;
-    assert.ok(Math.SQRT2 * m + reach(sp, 20, rx, ry) >= lowest - 1e-9, `${S.SPECIES[sp].name}: the pad misses the trunk's foot`);
+    assert.ok(Math.SQRT2 * m + S.farBoundPad({ sp, rx, ry }) >= lowest - 1e-9, `${S.SPECIES[sp].name}: the pad misses the trunk's foot`);
   }
 });
 

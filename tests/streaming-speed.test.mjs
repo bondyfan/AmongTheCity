@@ -23,8 +23,9 @@
 //
 // and the main thread is charged the 3.85 ms a dense worker chunk costs it
 // (meshpool.js). The clock is virtual so the frame budget bites deterministically
-// — but it also folds node's own elapsed time in, so the ring scan and the
-// far-ribbon sweep are charged what they really cost. The pool never declines,
+// — but it also charges the main thread's actual CPU time for the ring scan
+// and far-ribbon sweep. Other test processes cannot advance the aircraft by
+// pre-empting this one. The pool never declines,
 // because the shipping machine has one; the synchronous fallback is
 // sliced-build.test.mjs's subject, not this one.
 
@@ -38,7 +39,11 @@ import { fileURLToPath } from 'node:url';
 register(new URL('./three-alias.mjs', import.meta.url));
 
 const PUBLIC = path.resolve(fileURLToPath(new URL('../public', import.meta.url)));
-const REAL_NOW = performance.now.bind(performance);
+const cpuUsage = process.threadCpuUsage ?? process.cpuUsage;
+function cpuMs() {
+  const { user, system } = cpuUsage();
+  return (user + system) / 1000;
+}
 
 // ---- the browser things node has not ---------------------------------------
 globalThis.fetch = async (url) => {
@@ -104,9 +109,9 @@ const meshMs = (lod, w) => lod === 'ground' ? 0.8 : lod === 'shell' ? 2.45 + 0.0
 const mainMs = (lod, w) => lod === 'ground' ? 0.5 : 0.5 + 0.012 * w;
 
 function makeClock() {
-  let vbase = 0, rbase = REAL_NOW();
-  const c = { now: () => vbase + (REAL_NOW() - rbase),
-    set(t) { vbase = t; rbase = REAL_NOW(); },
+  let vbase = 0, rbase = cpuMs();
+  const c = { now: () => vbase + (cpuMs() - rbase),
+    set(t) { vbase = t; rbase = cpuMs(); },
     charge(ms) { c.set(c.now() + ms); } };
   return c;
 }
@@ -174,14 +179,18 @@ async function fly(v, { dur = 10, agl = 400, plan = planRings, coverageFirst = t
   const world = new CityWorld(scene, city);
   world.terrain.ensure(x0 + v * dur * 0.5, z0, v * dur * 0.5 + 5000);
   // …and so does the height map under it
-  await waitUntil(() => [0, 0.5, 1].every((f) =>
+  const terrainReady = await waitUntil(() => [0, 0.5, 1].every((f) =>
     world.terrain.ready(x0 + v * dur * f, z0)));
+  assert.ok(terrainReady, 'the height map along the flight path never finished loading');
 
   world.pool = fakePool(city, clock, 4, fullMs);
   world.coverageFirst = coverageFirst;
   world.buildCooldownMs = 0;
   world.buildBudgetMs = v > 140 ? 11 : 9;
   world.chunksPerFrame = v > 140 ? 48 : 16;
+  // main.js slices terrain work during play. The constructor's unbounded
+  // budget bakes whole terrain tiles in a single update during boot.
+  world.conformBudgetMs = 3;
 
   const realPerf = globalThis.performance;
   globalThis.performance = { now: () => clock.now() };
@@ -225,8 +234,9 @@ const oldPlan = (v, agl, base) => {
 // more than a couple of frames is a cell the player flies through.
 const GRACE = 2;
 
-test('at 555 m/s the ground under the jet, and ahead of it, is never missing', async () => {
+test('at 555 m/s the ground under the jet, and ahead of it, is never missing', async (t) => {
   const r = await fly(555);
+  t.diagnostic(`${r.holes} of ${r.counted} measured frames had a hole, longest run ${r.worstRun}`);
   assert.ok(r.counted > 200, `only ${r.counted} frames were measured`);
   assert.ok(r.worstRun <= GRACE,
     `the cell under the jet (or one of the next ${AHEAD}) had no geometry for ` +
