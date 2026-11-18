@@ -13,14 +13,17 @@ import { StationPassages } from './station-passages.js';
 import { CityWorld } from './city.js';
 import { planRings, planCarRings } from './streamplan.js';
 import { input } from './input.js';
-import { Player, worldSeatAnchor } from './player.js';
+import { Player, worldSeatAnchor, localSeatAnchor } from './player.js';
+import { Carjack, witnessed } from './carjack.js';
+import { setDriver } from './cardoor.js';
+import { isLocked, unlock } from './carlocks.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
   attachCabin, detachCabin, setVehicleEventSink } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { RoadWorks } from './mwworksmesh.js';
 import { makeSky, updateSky, todClock, EXPOSURE_DAY } from './sky.js';
 import { Minimap } from './minimap.js';
-import { initAudio, sfx, sfxAt, setListener, engineVoices, engineVoicesStop,
+import { initAudio, sfx, sfxOr, sfxAt, setListener, engineVoices, engineVoicesStop,
   engineStart, engineStop, engineSet, tireSet, setVolume, skidSet, carAudioStop,
   heliStart, heliStop, heliSet, jetStart, jetStop, jetSet,
   windStart, windStop, windSet, windLoad, roadWindSet, roadWindStop,
@@ -149,6 +152,8 @@ const game = {
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let journey = null, meeting = null, vasekCar = null;
+let carjack = null;      // the drivers pulled out of their cars (js/carjack.js)
+let arrest = null;       // { veil, t, moved } while the ZATČEN card is up
 let startJourney = null, storyOver = null;
 // THE CAMPAIGN HAS NO SECOND CHANCES (Frank, 18 Nov 2026): miss the last train
 // or die, and it starts again on the street in Kolín. Nothing was saved (see
@@ -160,7 +165,7 @@ function failStory(why) {
   const veil = document.createElement('div');
   veil.className = 'story-over';
   veil.innerHTML = '<div><strong></strong><span>Kampaň začíná znovu</span></div>';
-  veil.querySelector('strong').textContent = why === 'train' ? 'Poslední vlak odjel' : 'Zemřel jsi';
+  veil.querySelector('strong').textContent = why === 'train' ? 'Poslední vlak odjel' : why === 'busted' ? 'Zatkli tě' : 'Zemřel jsi';
   document.body.append(veil);
   requestAnimationFrame(() => veil.classList.add('on'));
   storyOver = { veil, t: 0, moved: false };
@@ -481,7 +486,8 @@ function updateCamera(dt) {
   if (game.car || game.heli || game.jet || trains?.riding) camDist = Math.max(CAM_DIST_MIN, Math.min(CAM_DIST_MAX, camDist + input.takeWheel() * 1.4));
   else footDist = Math.max(FOOT_DIST_MIN, Math.min(FOOT_DIST_MAX, footDist + input.takeWheel() * 0.45));
   fpHideSelf(!!fpCar);
-  fpCabin(fpCar);
+  // the cabin is in for the driver's eyes, and for as long as a door stands open
+  fpCabin(fpCar ?? player?.doorCar ?? null);
 
   if (fpCar) {
     const c = fpCar;
@@ -1122,6 +1128,7 @@ input.onKey('KeyN', () => {
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
   if (player.ragdoll) return;      // flying through the air is not a door
+  if (arrest) return;              // in handcuffs
   if ((journey || meeting) && document.body.dataset.panelOpen) return;
   // The story answers first: its opening is a film and E is the phone.
   if (journey?.use()) return;
@@ -1153,20 +1160,7 @@ input.onKey('KeyE', () => {
   } else if (player.exiting) {
     // mid step-out: let the animation land, it's a third of a second
   } else if (game.car) {
-    // step out: control returns NOW, the body follows over EXIT_T
-    const c = game.car;
-    c.ctl = null;
-    game.car = null;
-    fpView = false;          // step out and you are looking at yourself again
-    parked.includes(c) || parked.push(c);
-    // Hand it back to the room where it now stands, not where it was born.
-    claimParked(c, false);
-    $id('speedo').classList.add('hidden');
-    hideCarName();
-    engineStop();
-    carAudioStop();          // roll, wind and any skid still running, in one call
-    sfx('door_open', 0.7);
-    player.beginExit({ onOut: () => sfx('door_close', 0.8) });
+    leaveCar();
   } else if (game.jet) {
     // …and nobody climbs out of a Gripen in the air either. Wheels down and
     // slow enough to stop: taxi speed, not a 200 km/h rollout.
@@ -1200,8 +1194,7 @@ input.onKey('KeyE', () => {
     // started either. fpView drops itself once the seat is gone, but say so.
     fpView = false;
     hideCarName();
-    sfx('door_open', 0.7);
-    player.beginExit({ onOut: () => sfx('door_close', 0.8) });
+    stepOutOfCar();
   } else if (heli && !heli.airborne
       && Math.hypot(heli.x - player.pos.x, heli.z - player.pos.z) < 5.5) {
     // F22: somebody in the room is already flying this one. `seats` cannot know
@@ -1265,6 +1258,11 @@ input.onKey('KeyE', () => {
       return;
     }
     const inTraffic = traffic.cars instanceof Set ? traffic.cars.has(car) : traffic.cars.includes?.(car);
+    // Somebody is driving it (read BEFORE steal(), which takes the driver's
+    // hands off the wheel): then the door is opened on a person, and they
+    // come out of it first. They stay in the seat, lamps on, for as long as
+    // the walk-up takes or is given up; `_driverIn` remembers them.
+    if (inTraffic && car.ai && !car.police && !car.rescue) { car._driverIn = true; car._litT = Infinity; unlock(car); }
     if (inTraffic) {
       // The slot key has to be read BEFORE steal(), which nulls car.ai and
       // takes the key with it. Sending it lets every other client call
@@ -1277,10 +1275,33 @@ input.onKey('KeyE', () => {
     }
     const pi = parked.indexOf(car);
     if (pi >= 0) parked.splice(pi, 1);
+    // A parked car is somebody's and is locked, all but one in a hundred
+    // (js/carlocks.js). You only find out at the handle: the walk-up is the
+    // same, the hand goes out, and it does not give. A car with a peer at the
+    // wheel is open: they are sitting in it.
+    const locked = !inTraffic && !holder && isLocked(car);
     player.boardVehicle(car, seat, {
-      onDoor: () => sfx('door_open', 0.8),
+      locked,
+      jack: !!car._driverIn && seat === 0,
+      onJack: () => jackDriver(car),
+      onLocked: () => {
+        carSfx('locked', 0.9);
+        car._lockTried = true;
+        ui_hint('Zamčeno');
+      },
+      onDoor: () => {
+        carSfx('open', 0.8);
+        // a bus or a lorry has no door to haul anybody through: its driver is
+        // simply out the moment it is reached
+        if (car._driverIn && !player.boarding?.door) jackDriver(car);
+        // …and through a door, the driver has to BE there when it opens
+        else if (car._driverIn) carjack?.seat(car, localSeatAnchor(car, 0));
+      },
+      onShut: () => carSfx('slam', 0.75),
       onSeated: (s) => {
-        sfx('door_close', 0.6);
+        // (the slam is onShut's: the door comes shut a moment after the seat)
+        if (!player.doorAnim) sfx('door_close', 0.6);
+        unlock(car);                     // a car you have sat in is yours to open
         // the name card goes up for BOTH seats — a passenger knows perfectly
         // well what he just climbed into — and only from here, never from
         // onDoor: the walk-up is cancellable (a second E, the car driving off,
@@ -1312,6 +1333,143 @@ input.onKey('KeyE', () => {
     });
   }
 });
+
+// The driver's exit, shared by E and by an arrest: control goes now, the body
+// follows through the door.
+function leaveCar() {
+  const c = game.car;
+  if (!c) return;
+  c.ctl = null;
+  game.car = null;
+  fpView = false;          // step out and you are looking at yourself again
+  parked.includes(c) || parked.push(c);
+  // Hand it back to the room where it now stands, not where it was born.
+  claimParked(c, false);
+  $id('speedo').classList.add('hidden');
+  hideCarName();
+  engineStop();
+  carAudioStop();          // roll, wind and any skid still running, in one call
+  stepOutOfCar();
+}
+
+// ---------- taking a car with somebody in it ----------
+// The door is open and both hands are in (js/carentry.js 'jack'): the driver
+// leaves the seat for the road (js/carjack.js) and the law asks who saw it.
+// Frank's rule: a person within a hundred metres, or a building with a light
+// on, and it is two stars at once (they come to arrest, not to shoot).
+function jackDriver(car) {
+  car._driverIn = false;
+  car._litT = 2;
+  setDriver(car, null);                  // nobody at the wheel, lamps or no lamps
+  const a = localSeatAnchor(car, 0);
+  const thrown = carjack?.throwOut(car, -1, a);
+  // they have something to say about it on the way out
+  sfxOr(String(thrown?.body?.arch?.key ?? 'm').startsWith('f') ? 'voice_carjack_f' : 'voice_carjack_m', null, 0.9);
+  setTimeout(() => sfxOr('body_fall', null, 0.8), 420);
+  try { peds?.panic?.(car.x, car.z, 16); } catch { /* the crowd is not the point */ }
+  const others = [];
+  if (traffic) for (const c of traffic.cars) if (c !== car) others.push(c);
+  const saw = witnessed(car.x, car.z, { peds, cars: others, city: world?.city, night: sky?.nightK ?? 0 });
+  if (saw) wanted.add('prepadeni');
+}
+
+// A runner with a policeman on him goes down (js/policecops.js onTackle).
+function tackled() {
+  if (arrest || player.ragdoll || player.inCar || player.boarding || vitals.down()) return;
+  const v = Math.min(5, player.speed) * 0.6;
+  if (player.tumble(player._dirX * v, player._dirZ * v, 1.3,
+    { onHit: (u) => vitals.damage(Math.min(5, impactDamage(u)), 'zadržení') })) sfxOr('body_fall', null, 0.7);
+}
+
+// ---------- ZATČEN ----------
+// Hands were laid on a player who had stopped (js/policecops.js onArrest).
+// Out of the car if he sits in one, down on the knees, the card, and then the
+// game goes back to what was last saved (Frank: "Pokud je bástit, tak se
+// pokračuje od posledního autosaveu aktuálně"; the cell comes later). In the
+// campaign, where nothing is saved, it is the campaign's own restart.
+function busted() {
+  if (arrest || storyOver || game.mode !== 'play' || vitals.down() || game.heli || game.jet) return;
+  if (game.car) { game.car.speed = 0; leaveCar(); }
+  else if (player.inCar) { fpView = false; hideCarName(); stepOutOfCar(); }
+  if (player.boarding) player.cancelBoarding();
+  if (player.ragdoll) player.ragdoll.stay = true;      // face down stays face down
+  player.held = 0;
+  sfxOr('voice_police_hands', null, 0.9);
+  setTimeout(() => sfxOr('handcuffs', null, 0.9), 700);
+  const veil = document.createElement('div');
+  veil.className = 'busted-card';
+  veil.innerHTML = '<div><strong>ZATČEN</strong><span></span></div>';
+  document.body.append(veil);
+  arrest = { veil, t: 0, moved: false, shown: false };
+}
+function pumpArrest(dt) {
+  const o = arrest;
+  if (!o) return;
+  o.t += dt;
+  if (!o.moved) player.held = Math.min(1, o.t / 0.9);
+  if (!o.shown && o.t > 1.0) { o.shown = true; o.veil.classList.add('on'); }
+  if (!o.moved && o.t > 3.4) {
+    o.moved = true;
+    const story = career.activeStory();
+    if (story && story !== 'done') {
+      // the campaign has no save to go back to: it starts again
+      o.veil.remove(); arrest = null;
+      if (player.ragdoll) player.endRagdoll();
+      player.held = null;
+      failStory('busted');
+      return;
+    }
+    o.veil.classList.add('out');
+    o.veil.querySelector('span').textContent = 'Pokračuješ od posledního uložení';
+  }
+  if (o.moved && !o.back && o.t > 4.3) {
+    o.back = true;
+    if (player.ragdoll) player.endRagdoll();
+    player.held = null;
+    const at = career.reloadLast();
+    wanted.clear();
+    if (at) {
+      world.city.ensureTiles?.(at.x, at.z)?.catch?.(() => {});
+      world.terrain.ensure?.(at.x, at.z);
+      camInit = false;
+    }
+  }
+  if (!o.back) return;
+  const ready = world.terrain.ready(player.pos.x, player.pos.z) && world.built.has(chunkKey(player.pos.x, player.pos.z));
+  if ((ready && o.t > 5.2) || o.t > 30) {
+    o.veil.classList.remove('on', 'out');
+    setTimeout(() => o.veil.remove(), 900);
+    arrest = null;
+  }
+}
+
+// The sounds of a car door. Each has a recording of its own (scripts/
+// gen-move-audio.mjs) and falls back to the two door sounds the game always
+// had, so a checkout without the new files is not silent.
+const CAR_SFX = { open: ['car_door_open', 'door_open'], slam: ['car_door_slam', 'door_close'],
+  locked: ['car_door_locked', 'door_open'] };
+function carSfx(what, vol) {
+  const s = CAR_SFX[what];
+  sfxOr(s[0], s[1], vol);
+}
+// a jump's landing and a hand coming down on a bonnet (silent until recorded)
+function leapSfx(what) {
+  if (what === 'land') sfxOr('jump_land', null, 0.5);
+  else if (what === 'vault') sfxOr('vault', null, 0.6);
+  else if (what === 'rise') sfxOr('getup', null, 0.5);
+}
+// Out through the door: it opens now and is heard coming shut behind you. A
+// machine without a door of its own (a bus, a lorry) keeps the old pair.
+function stepOutOfCar() {
+  carSfx('open', 0.7);
+  const own = player.inCar?.owned;
+  player.beginExit({ onShut: () => {
+    carSfx('slam', 0.8);
+    // your own car locks itself behind you: the clunk of the central locking
+    if (own) setTimeout(() => sfxOr('car_lock', null, 0.6), 450);
+  } });
+  if (player.exiting && !player.exiting.door) player.exiting.onOut = () => sfx('door_close', 0.8);
+}
 
 // ---------- C: chase cam ⇄ driver's eyes ----------
 // C is the camera key everywhere in this genre, and it is free here (E, M and
@@ -1490,7 +1648,7 @@ function updateStationCars(x, z) {
 
 // ---------- the fist ----------
 // Melee is a PRESS, not a hold: input.js exposes attackHeld (left mouse OR
-// Space OR the touch button) and takeLeftPressed() for the edge. combat.js
+// the touch button; Space is the jump now, js/leap.js) and takeLeftPressed() for the edge. combat.js
 // rate-limits a held button itself, so this can pass both through and let it
 // decide — which is what makes tapping and holding feel the same.
 //
@@ -1502,7 +1660,7 @@ function combatInput(dt) {
   const onFoot = !game.car && !game.heli && !game.jet && !player.inCar && !trains?.riding;
   const pressed = input.takeLeftPressed();
   if (!onFoot) return;
-  if (pressed || input.keys.has('Space')) combat.strike();
+  if (pressed) combat.strike();
 }
 
 // ---------- the stars ----------
@@ -1687,7 +1845,7 @@ function placeParkedCars(city, spawn = SPAWN, base = 0) {
     const car = vehicles.add(kind, pos.x, pos.z, h, color);
     // The claim key. Stamped at spawn and never renumbered, because `parked`
     // is spliced all session while parkedFleet is not — see the declaration.
-    if (spots[i] === meetSpot) vasekCar = car;
+    if (spots[i] === meetSpot) { vasekCar = car; unlock(car); }   // the story's car is never locked
     car.parkIdx = k;
     parkedFleet[k] = car;
     parked.push(car);
@@ -2078,6 +2236,7 @@ async function initDev() {
         world.collide(pos, 2.4);
         const color = CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0];
         const car = vehicles.add(kind, pos.x, pos.z, h + Math.PI, color);
+        unlock(car);                     // a dev spawn is for driving
         parked.push(car);
         ui_hint?.('🚗 ' + kind);
       },
@@ -2469,6 +2628,9 @@ function updateHud(dt) {
         else hint.classList.add('hidden');
       }
       career.footHint(hint, inside ? null : car);   // E at a food counter, B at a car
+      // a handle you have already tried says so instead of offering it again
+      if (car && !inside && car._lockTried && isLocked(car) && parked.includes(car))
+        hint.innerHTML = hint.innerHTML.replace('<kbd>E</kbd> nastoupit', '🔒 zamčeno');
     }
   }
   // rocket readout: rounds left, or the reload bar
@@ -2801,6 +2963,7 @@ async function boot() {
   // other client hashes to dress our avatar. One function, one uid, one look —
   // "the blue one is me" used to be true on four screens at once.
   player = new Player(scene, sp.x, sp.z, sp.heading, localUid());
+  player.onLeap = leapSfx;
   // "Pokračovat": stand where the save left you (a no-op for a fresh start,
   // and skipped when the region data was missing and Pardubice stood in)
   if (!legacy || sp.saved) await career.spawn(player, city);
@@ -2879,6 +3042,7 @@ async function boot() {
   city.evictHolds?.push((out) => { if (net) for (const r of net.remotes.values()) if (r.state) out.push(r.x, r.z); });
 
   peds = new Pedestrians(scene, city, world.footing ?? world.terrain);   // feet on the pavement, not under it
+  carjack = new Carjack({ scene, world });
   cityLife = wireCityLife({ city, traffic, peds, vehicles, world, parked });
   cityLife.trams?.draw?.glow.attach(lightPools);   // tram lamps seen from afar at night (js/tramglow.js)
   // riders on the cycleways: they read the crowd's indexes and the traffic's lights
@@ -3062,7 +3226,11 @@ async function boot() {
     peds.panic(x, z, 18);
   });
   police = new Police({ traffic, vehicles, wanted, city, scene,
-    say: (t) => policeToast(t, { icon: '🚓', kind: 'warn', ms: 3500 }) });
+    say: (t) => {
+      policeToast(t, { icon: '🚓', kind: 'warn', ms: 3500 });
+      if (t.includes('Vystupte')) sfxOr('voice_police_out', null, 0.9);   // the one order that is recorded
+    },
+    onArrest: () => busted(), onTackle: () => tackled() });
   ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL, hospitals: HOSPITALS });
 
   // ---- the body, the wallet and the tank ----
@@ -3342,6 +3510,8 @@ function stepGame(dt) {
   journey?.update(dt, !!(game.car || game.heli || game.jet || trains?.riding), vasekCar);
   if (journey?.finished) { journey.dispose(); journey = null; }
   pumpStoryOver(dt);
+  pumpArrest(dt);
+  carjack?.update(dt, player.pos.x, player.pos.z);
   if (meeting?.finished) { meeting.close(); meeting = null; }
   const focus = game.car ?? player.pos;
   // STREAM WHERE YOU WILL BE, NOT WHERE YOU ARE. Everything downstream of this
@@ -3639,6 +3809,7 @@ function stepGame(dt) {
   wanted.update(dt, _wntCtx);
   _polCtx.x = _eyes.x; _polCtx.z = _eyes.z; _polCtx.car = game.car;
   _polCtx.onFoot = _vitCtx.onFoot; _polCtx.y = game.car ? NaN : player.y;
+  _polCtx.lying = !!player.ragdoll;
   police?.update(dt, _polCtx);
   ambulance?.update(dt, _polCtx);
   combatInput(dt);

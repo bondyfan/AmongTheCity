@@ -138,7 +138,8 @@ class Input {
   // is edge-tracked separately so holding and releasing can charge a strike.
   get quickAttack() { return !this.rpgMode && this.mouse.right; }
   // Hold the attack button (left mouse OR spacebar OR the on-screen button).
-  get attackHeld() { return this.mouse.left || this.keys.has('Space') || this.touchAttack; }
+  // (Space was the keyboard's attack button until it became the jump: js/leap.js)
+  get attackHeld() { return this.mouse.left || this.touchAttack; }
   get block() {
     return this.touchBlock || this.keys.has('ControlLeft') || this.keys.has('ControlRight') || this.keys.has('KeyV');
   }

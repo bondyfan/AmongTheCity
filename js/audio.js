@@ -67,6 +67,19 @@ export function sfx(name, vol = 1, rate = 1) {
   loadBuffer(name).then(b => { if (b) playSample(name, b, vol, rate); else fallback(name, vol); });
 }
 
+/**
+ * `name` if its file exists, `alt` if it does not. For a cue with a newer,
+ * better recording that a bare checkout (or a day before the recordings are
+ * made) will not have: the older sound stands in instead of silence.
+ */
+export function sfxOr(name, alt, vol = 1, rate = 1) {
+  if (!ctx || ctx.state !== 'running') return;
+  const buf = buffers.get(name);
+  if (buf) { playSample(name, buf, vol, rate); return; }
+  if (buf === null) { if (alt) sfx(alt, vol, rate); return; }
+  loadBuffer(name).then(b => { if (b) playSample(name, b, vol, rate); else if (alt) sfx(alt, vol, rate); });
+}
+
 // One indirection over playBuffer so a cue other code must SYNC TO is noted at
 // the moment it actually starts: heliSet() crossfades the procedural rotor in
 // under the tail of the heli_start sample, so it needs to know when that

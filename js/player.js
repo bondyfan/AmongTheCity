@@ -97,6 +97,10 @@ import { seatAnchor as heliSeatAnchor } from './helicopter.js';
 import { seatAnchor as jetSeatAnchor } from './aircraft.js';
 import { SIT_DROP, seatX } from './seating.js';
 import { launchBody, stepBody, feetFor } from './ejection.js';
+import { entryDoor, entryStep, entryCancel, exitStep, doorStep } from './carentry.js';
+import { setDoor, setDriver } from './cardoor.js';
+import { leap, vaultStep, airStep } from './leap.js';
+import { getUpPose, snapshot, surrenderPose } from './bodymoves.js';
 
 const TWO_PI = Math.PI * 2;
 // v5: the player now has a y. Buildings have floors, so "the ground" stopped
@@ -207,6 +211,17 @@ export class Player {
     this.boarding = null;    // { veh, seat, phase:'walk'|'slide', t, … } or null
     this.exiting = null;     // { veh, t, from…, to… } or null
     this.ragdoll = null;     // thrown through a windscreen: js/ejection.js state, or null
+    // ---- a car's door, a jump, a vault (js/carentry.js, js/leap.js) ----
+    this.doorAnim = null;    // a door swinging shut behind us: { veh, seat, t, T, … }
+    this.vault = null;       // going over something: js/leap.js record, or null
+    this.airT = 0;           // seconds the feet have been off the ground
+    this.jumped = false;     // this flight began with Space
+    this.jumpRun = 0;
+    this.landT = -1;         // seconds since touchdown, -1 once the knees have recovered
+    this.landHard = 0;
+    this.onLeap = null;      // fn('jump' | 'vault' | 'land'): main.js's sounds
+    this.held = null;        // 0..1 while being arrested: down on the knees, hands on the head
+    this._spaceWas = false;
     this._dirX = 0; this._dirZ = -1;  // last move direction — decel glides along it
     this._world = null;      // remembered from update() so beginExit() can collide
     this.mesh.scale.setScalar(PLAYER_SCALE);
@@ -217,8 +232,23 @@ export class Player {
 
   update(dt, { input, camYaw, world }) {
     this._world = world;
+    // a door pulled shut behind us runs on its own clock, whatever comes next
+    if (this.doorAnim) doorStep(this, dt);
     if (this.ragdoll) { this._ragStep(dt, world); return; }
+    if (this.vault) { vaultStep(this, dt); return; }
     if (this.exiting) { this._exitStep(dt); return; }
+    // Arrested (main.js): nothing the stick says counts any more. The body
+    // stays where it stands and goes down on its knees as `held` runs to 1.
+    if (this.held != null && !this.boarding && !this.inCar) {
+      this.speed = 0; this.aimLock = false;
+      const sup = world.supportY(this.pos.x, this.pos.z, this.y + INTERIOR.stepUp);
+      if (this.y - sup < INTERIOR.stepUp) { this.y = sup; this.vy = 0; this.grounded = true; }
+      this.mesh.position.set(this.pos.x, this.y, this.pos.z);
+      this.mesh.rotation.y = this.heading;
+      this._stand();
+      surrenderPose(this._cit.parts, this.held);
+      return;
+    }
     if (this.boarding) { this._boardStep(dt, world); return; }
     if (this.inCar) {
       // seated: the MESH rides the vehicle (parented), but pos/heading mirror
@@ -240,6 +270,16 @@ export class Player {
       this.vy = 0;
       return;
     }
+
+    // --- Space: a jump, or a vault over what stands in the way (js/leap.js) ---
+    const space = input.keys.has('Space');
+    if (space && !this._spaceWas && this.grounded && this.landT < 0) {
+      this._spaceWas = true;
+      if (leap(this, world) === 'vault') return;
+    }
+    this._spaceWas = space;
+    const wasGrounded = this.grounded;
+    let fell = 0;
 
     // --- stick → world direction, relative to the camera yaw ---
     // camera forward f = dir(camYaw); screen-right r = dir(camYaw − π/2) =
@@ -317,14 +357,17 @@ export class Player {
     // the three cases fall out of one query: it is above me but within a step
     // (climb), it is right under me (stand), or it is further down (fall).
     const support = world.supportY(this.pos.x, this.pos.z, this.y + INTERIOR.stepUp);
-    if (support > this.y + 0.002 && support <= this.y + INTERIOR.stepUp) {
+    // (a body on its way UP is doing neither of the first two: it left the
+    // ground on purpose, and the ground may not take it back until it falls)
+    if (this.vy <= 0 && support > this.y + 0.002 && support <= this.y + INTERIOR.stepUp) {
+      fell = -this.vy;
       this.y = support; this.vy = 0; this.grounded = true;
-    } else if (this.y <= support + 0.04) {
+    } else if (this.vy <= 0 && this.y <= support + 0.04) {
       this.y = support; this.vy = 0; this.grounded = true;
     } else {
       this.vy = Math.max(-TERMINAL, this.vy - GRAVITY * dt);
       this.y += this.vy * dt;
-      if (this.y <= support) { this.y = support; this.vy = 0; this.grounded = true; }
+      if (this.vy <= 0 && this.y <= support) { fell = -this.vy; this.y = support; this.vy = 0; this.grounded = true; }
       else this.grounded = false;
     }
 
@@ -345,6 +388,9 @@ export class Player {
       j.elbowL.rotation.x = 1.7; j.elbowR.rotation.x = 1.7;
       j.armL.rotation.x = 0.15 + 1.1 * s; j.armR.rotation.x = 0.15 - 1.1 * s;
     }
+    // The air and the landing go over the stride (js/leap.js): a knee driven
+    // up and the arms thrown, then the knees taking the ground.
+    if (!this.grounded || !wasGrounded || this.landT >= 0) airStep(this, dt, wasGrounded, fell);
     // LAST, and after _animate deliberately: the combat poses are ADDITIVE and
     // arms-only, so walk() has to have written the whole skeleton before one of
     // them overwrites its own joints. The other way round the pose is erased
@@ -392,7 +438,11 @@ export class Player {
     // strafed sideways to its own car at 3.1 m/s facing the camera would be
     // the most obviously broken thing in the game.
     this.aimLock = false;
-    this.boarding = { veh, seat, phase: 'walk', t: 0,
+    // door: the car's own door for this seat (js/cardoor.js), or null for the
+    // machines that have none, which keep the slide. cbs may add `locked`
+    // (the handle will not give: onLocked() and the walk-up is over) and
+    // onShut() (the door has come shut behind the seated body).
+    this.boarding = { veh, seat, phase: 'walk', t: 0, door: entryDoor(veh, seat), locked: false,
       sx: 0, sy: 0, sz: 0, fromH: this.heading, ...(cbs ?? {}) };
     return true;
   }
@@ -405,6 +455,7 @@ export class Player {
     if (b.veh.seats?.[b.seat] === this) b.veh.seats[b.seat] = null;
     this.boarding = null;
     this.speed = 0;
+    entryCancel(this, b);                // a door already moving falls shut
     this._stand();
     b.onCancel?.();
   }
@@ -416,6 +467,8 @@ export class Player {
     if (!veh.mesh?.parent || veh.seats?.[b.seat] !== this
         || (veh.airborne && b.phase === 'walk')) { this.cancelBoarding(); return; }
     const a = bodySeat(veh, b.seat);
+    // a car with a door: everything after the walk is js/carentry.js
+    if (b.door && b.phase !== 'walk') { entryStep(this, b, dt, a); return; }
     const vy = veh.y ?? veh.mesh.position.y ?? 0;
     const h = veh.heading, ch = Math.cos(h), sh = Math.sin(h);
     // local → world, ARCHITECTURE.md rotation: +x → (cos h, −sin h), −z → dir(h)
@@ -427,8 +480,11 @@ export class Player {
       // the door point is the seat anchor pushed out past its own flank,
       // recomputed EVERY frame so a car still creeping to a stop (or shoved
       // by traffic) keeps its door honest under our feet
-      const side = Math.sign(a.x || -1) * ((veh.wid ?? 1.62) / 2 + DOOR_OUT);
-      const dx = wX(side, a.z) - this.pos.x, dz = wZ(side, a.z) - this.pos.z;
+      // …or, for a car's door, where you stand to open it: beside the handle
+      // and clear of the leaf's swing
+      const side = b.door ? b.door.stand.x : Math.sign(a.x || -1) * ((veh.wid ?? 1.62) / 2 + DOOR_OUT);
+      const doorZ = b.door ? b.door.stand.z : a.z;
+      const dx = wX(side, doorZ) - this.pos.x, dz = wZ(side, doorZ) - this.pos.z;
       const dist = Math.hypot(dx, dz);
       // give up when it drove off, we ran out of patience (wedged on a wall),
       // or the door floats a storey away (bridge deck, remote takeoff)
@@ -464,13 +520,15 @@ export class Player {
       }
       // at the door: remember where we stand IN THE VEHICLE'S FRAME so the
       // slide stays glued to the car even while it keeps creeping under us
-      b.phase = 'slide'; b.t = 0;
+      b.phase = b.door ? 'reach' : 'slide'; b.t = 0;
       const rx = this.pos.x - veh.x, rz = this.pos.z - veh.z;
       b.sx = rx * ch - rz * sh;          // inverse of the wX/wZ rotation
       b.sz = rx * sh + rz * ch;
       b.sy = this.y - vy;
       b.fromH = this.heading;
       this.speed = 0;
+      // with a door the handle comes first, and it may not give
+      if (b.door) { entryStep(this, b, 0, a); return; }
       b.onDoor?.();                      // sfx('door_open') lives out there
     }
 
@@ -510,6 +568,8 @@ export class Player {
     this.pos.x = veh.x; this.pos.z = veh.z;
     this.heading = veh.heading;
     this.speed = 0; this.vy = 0;
+    // the glass shows who is at the wheel (js/carglass.js): us, in our jacket
+    if (b.seat === 0 && b.door) setDriver(veh, { jacket: this._cit.look.jacket });
     b.onSeated?.(b.seat);                // ONLY now may game.car/heli be set
   }
 
@@ -529,7 +589,10 @@ export class Player {
     const a = bodySeat(veh, this.seat);
     const h = veh.heading, ch = Math.cos(h), sh = Math.sin(h);
     const vy = veh.y ?? veh.mesh?.position.y ?? 0;
-    const ox = Math.sign(a.x || -1) * ((veh.wid ?? 1.62) / 2 + 0.9);
+    const door = entryDoor(veh, this.seat);
+    if (this.doorAnim?.veh === veh) this.doorAnim = null;   // stepping out again before it shut
+    if (this.seat === 0 && door) setDriver(veh, null);      // the seat is empty from here on
+    const ox = Math.sign(a.x || -1) * ((veh.wid ?? 1.62) / 2 + (door ? 0.78 : 0.9));
     const t = { x: veh.x + ox * ch + a.z * sh, z: veh.z - ox * sh + a.z * ch };
     const world = this._world;
     let ty = vy;
@@ -540,7 +603,9 @@ export class Player {
       ty = world.supportY(t.x, t.z, vy + INTERIOR.stepUp);
     }
     this._scene.add(this.mesh);          // back into world space, still folded
-    this.exiting = { veh, t: 0,
+    // door: out through the car's own door (js/carentry.js exitStep), which
+    // opens first; cbs.onShut() hears it come shut behind us
+    this.exiting = { veh, t: 0, door, seat: this.seat, phase: 'open', ax: a.x, toH: h,
       fx: veh.x + a.x * ch + a.z * sh, fy: vy + a.y - SIT_DROP,
       fz: veh.z - a.x * sh + a.z * ch,
       tx: t.x, ty, tz: t.z, ...(cbs ?? {}) };
@@ -555,6 +620,19 @@ export class Player {
 
   _exitStep(dt) {
     const x = this.exiting;
+    if (x.door) {
+      if (!x.veh.mesh?.parent) x.door = null;            // the car went: just stand up
+      else {
+        if (!exitStep(this, x, dt)) return;
+        this.exiting = null;
+        this.y = x.ty; this.vy = 0; this.grounded = true;
+        this.mesh.position.y = x.ty;
+        this._dirX = -Math.sin(this.heading); this._dirZ = -Math.cos(this.heading);
+        this._stand();
+        x.onOut?.();
+        return;
+      }
+    }
     x.t += dt;
     const k = smooth(Math.min(1, x.t / EXIT_T));
     const px = x.fx + (x.tx - x.fx) * k;
@@ -587,6 +665,8 @@ export class Player {
     if (veh.seats?.[seat] === this) veh.seats[seat] = null;
     this.inCar = null; this.boarding = null; this.exiting = null;
     this.aimLock = false;
+    this._dropDoor();
+    if (seat === 0 && typeof veh.kind === 'string') setDriver(veh, null);
     this._scene.add(this.mesh);          // world space again
     const st = launchBody(veh, a, 0.92 * PLAYER_SCALE);
     st.onHit = cbs?.onHit ?? null;
@@ -602,8 +682,55 @@ export class Player {
     const st = this.ragdoll;
     const going = stepBody(st, dt, world, st.onHit);
     this._ragPlace();
-    if (st.phase === 'rise' && !st._stood) { st._stood = true; this._stand(); }
+    // Getting up is a move with hands and knees in it (js/bodymoves.js), out
+    // of the shape the body lay in: remembered once, on the first step of it.
+    if (st.phase === 'rise') {
+      if (!st.lay) { st.lay = snapshot(this._cit.parts); this.onLeap?.('rise'); }
+      this._stand();
+      getUpPose(this._cit.parts, st.rise ?? 0, st.faceUp, st.lay);
+    }
     if (!going) this.endRagdoll();
+  }
+
+  /**
+   * Thrown to the ground from where the body stands or sits, without a car
+   * crash behind it: pulled out of a seat, knocked over. v is the push (m/s,
+   * world), up the lift. The same ragdoll as eject(), so it lies and gets up
+   * the same way.
+   */
+  tumble(vx, vz, up = 2.2, cbs = null) {
+    if (this.ragdoll) return false;
+    const veh = this.inCar;
+    if (veh?.seats?.[this.seat] === this) veh.seats[this.seat] = null;
+    this.inCar = null; this.boarding = null; this.exiting = null; this.vault = null;
+    this.aimLock = false;
+    this._dropDoor();
+    this._scene.add(this.mesh);
+    const hip = 0.92 * PLAYER_SCALE;
+    const st = launchBody({ x: this.pos.x, z: this.pos.z, y: this.y, heading: this.heading,
+      impactVx: vx / 0.8, impactVz: vz / 0.8 }, { x: 0, y: hip - 0.35, z: 0 }, hip);
+    st.car = null; st.vy = up; st.ap *= 0.6;
+    if (!(vx * vx + vz * vz > 0.01)) st.yaw = this.heading;
+    st.onHit = cbs?.onHit ?? null;
+    this.ragdoll = st;
+    this.mesh.rotation.order = 'YXZ';
+    this._cit.ragdollPose();
+    this._ragPlace();
+    return true;
+  }
+
+  // whatever door we had open is let go of (thrown out, torn down)
+  _dropDoor() {
+    const d = this.doorAnim;
+    this.doorAnim = null;
+    if (d) setDoor(d.veh, d.seat, 0);
+  }
+
+  /** The car whose door we have open or are opening, if any (main.js keeps
+   *  its cabin in for exactly that long). */
+  get doorCar() {
+    return this.doorAnim?.veh ?? (this.boarding?.door ? this.boarding.veh : null)
+      ?? (this.exiting?.door ? this.exiting.veh : null);
   }
 
   // pos/y/heading/speed mirror the flying body, so the chase camera, the
@@ -647,6 +774,7 @@ export class Player {
       if (!car.seats[0]) car.seats[0] = this;
       this.inCar = car;
       this.seat = 0;
+      if (typeof car.kind === 'string') setDriver(car, { jacket: this._cit.look.jacket });
       const a = bodySeat(car, 0);
       const carrier = car.mesh?.userData?.body ?? car._body ?? car.mesh;
       if (carrier) {
@@ -661,6 +789,8 @@ export class Player {
     this.inCar = null;
     if (c) {
       if (c.seats?.[this.seat] === this) c.seats[this.seat] = null;
+      if (this.seat === 0 && typeof c.kind === 'string') setDriver(c, null);
+      this._dropDoor();
       this._scene.add(this.mesh);        // world space again
       // step out 1.4 m to the vehicle's RIGHT — right of dir(h) is
       // dir(h − π/2) = (cos h, −sin h) — then let the world push us clear
@@ -694,6 +824,7 @@ export class Player {
     const seat = this.inCar ? this.seat : this.boarding?.seat;
     if (veh?.seats && seat != null && veh.seats[seat] === this) veh.seats[seat] = null;
     this.inCar = null; this.boarding = null; this.exiting = null; this.ragdoll = null;
+    this._dropDoor();
     this._cit.dispose();
   }
 }

@@ -13,6 +13,13 @@
 // and five raise the ceiling speed and shorten every reaction: the rubber band
 // is wider, rams come sooner, the shooting is quicker and a little better.
 //
+// NOBODY SHOOTS BELOW THREE STARS (`lethal`). At one and two stars the police
+// want you alive: the cars close in and box you (from two stars the second car
+// goes ahead to block the road), the officers get out with their hands free,
+// run at you and lay hands on you. Stand still beside one, or sit in a stopped
+// car with one at the door, and you are arrested (js/policecops.js). The
+// pistols come out at three.
+//
 // THE BAND'S NEAR END (`near`, metres) is where the rubber band stops
 // helping. At one star it is police.js's original 40 m: a single patrol sits
 // back and follows, and only reaches you when you stop. From two stars it is
@@ -46,15 +53,15 @@
  *  builds its own table rather than editing the game's. */
 export const TIERS = Object.freeze([
   null,
-  Object.freeze({ stars: 1, units: 1, near: 40, band: 2.2, vmax: 42, ram: false, pit: false, box: false,
+  Object.freeze({ stars: 1, units: 1, near: 40, band: 2.2, vmax: 42, ram: false, pit: false, box: false, lethal: false,
     cops: 1, rate: 0.55, acc: 0.85, react: 1.25, ramCd: 0, ramClose: 0, dmg: 0.85 }),
-  Object.freeze({ stars: 2, units: 2, near: 14, band: 2.2, vmax: 42, ram: true, pit: false, box: false,
+  Object.freeze({ stars: 2, units: 2, near: 14, band: 2.2, vmax: 42, ram: true, pit: false, box: true, lethal: false,
     cops: 2, rate: 0.7, acc: 1.0, react: 1.0, ramCd: 6.5, ramClose: 5.5, dmg: 1.0 }),
-  Object.freeze({ stars: 3, units: 3, near: 12, band: 2.35, vmax: 44, ram: true, pit: true, box: true,
+  Object.freeze({ stars: 3, units: 3, near: 12, band: 2.35, vmax: 44, ram: true, pit: true, box: true, lethal: true,
     cops: 2, rate: 0.8, acc: 1.05, react: 0.9, ramCd: 5.0, ramClose: 6.5, dmg: 1.0 }),
-  Object.freeze({ stars: 4, units: 4, near: 10, band: 2.6, vmax: 48, ram: true, pit: true, box: true,
+  Object.freeze({ stars: 4, units: 4, near: 10, band: 2.6, vmax: 48, ram: true, pit: true, box: true, lethal: true,
     cops: 2, rate: 1.0, acc: 1.2, react: 0.75, ramCd: 3.8, ramClose: 8, dmg: 1.1 }),
-  Object.freeze({ stars: 5, units: 5, near: 10, band: 2.8, vmax: 52, ram: true, pit: true, box: true,
+  Object.freeze({ stars: 5, units: 5, near: 10, band: 2.8, vmax: 52, ram: true, pit: true, box: true, lethal: true,
     cops: 2, rate: 1.15, acc: 1.3, react: 0.65, ramCd: 3.0, ramClose: 9, dmg: 1.2 }),
 ]);
 

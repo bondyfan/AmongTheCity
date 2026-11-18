@@ -146,9 +146,14 @@ export function setCarState(group, lit, brake) {
   const s = group?.userData?.carState;
   if (!s) return;
   lit = !!lit; brake = !!brake && lit;
-  if (s.lit === lit && s.brake === brake) return;
-  const mat = bodyMatFor(s.key, s.hex, s.decal, lit, brake);
+  // s.door: the region an open door has cut out of this car (js/cardoor.js)
+  // s.tint: who the glass shows at the wheel (js/cardoor.js setDriver)
+  const door = s.door ?? null, tint = s.tint ?? null;
+  if (s.lit === lit && s.brake === brake && s.doorShown === door && s.tintShown === tint) return;
+  const mat = bodyMatFor(s.key, s.hex, s.decal, lit, brake, door, tint);
   s.body.material = mat;
+  s.doorShown = door; s.tintShown = tint;
+  if (s.leaf) s.leaf.material = bodyMatFor(s.key, s.hex, s.decal, lit, false, s.leafDoor);
   if (s.lit !== lit) {
     // the distance dress has no brake element; only the lamps reach it
     s.far.material = bodyMatFor(s.key, s.hex, s.decal, lit, false);
