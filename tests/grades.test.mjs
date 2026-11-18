@@ -167,3 +167,29 @@ test('a road bridge leaves its approach on the approach’s own grade: no step, 
   assert.ok(worstStep < 0.06, `a ${(worstStep * 100).toFixed(1)} cm step in half a metre`);
   assert.ok(worstBend < 0.06, `the grade changes ${(worstBend * 100).toFixed(1)} % per metre`);
 });
+
+test('a surveyed crossing waits for its railway corridor to finish streaming', async () => {
+  const city = await cityFrom({
+    roads: [{ t: 'secondary', w: 8, d: 1, p: [[4500, 1000], [4500, 1100]] }],
+    rails: [{ t: 'rail', p: [[4300, 1050], [4600, 1050]] }],
+  });
+  const neighbour = { tx: 1, tz: 0, state: 1 };
+  city.tile = 4800;
+  city.manifestTiles = [neighbour];
+  geo.setStreetCity(city);
+  const terrain = terrainFlat();
+  const road = city.roads[0], count = geo.INDEX_STATS.tiles;
+  try {
+    const first = geo.roadProfile(road, terrain);
+    assert.ok(first.crossingStations.length);
+    assert.equal(first.ready, false);
+    neighbour.state = 2;
+    geo.INDEX_STATS.tiles++;
+    const final = geo.roadProfile(road, terrain);
+    assert.notStrictEqual(final, first);
+    assert.equal(final.ready, true);
+  } finally {
+    geo.INDEX_STATS.tiles = count;
+    geo.setStreetCity(null);
+  }
+});

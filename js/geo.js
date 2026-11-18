@@ -499,7 +499,7 @@ export function roadProfile(way, terrain) {
     prof.loads = terrain._loads ?? 0;
     // The underlying corridor can be final while a pin is still provisional.
     // Its old stamp would make every wheel and mesh vertex re-fit this road.
-    if (prof.cor && _streets) prof.fl = featStamp();
+    if ((prof.cor || prof.crossingStations) && _streets) prof.fl = featStamp();
     way._prof = prof;
     if (!prof.ready) terrain.missed = true;
   }
@@ -528,7 +528,11 @@ function levelWay(way, terrain, pinList, noDip = false) {
     // pass through the level of the track the road physically intersects.
     const panels = crossings.map(({ s, node }) => ({ s, y: junctionY(node, terrain) }));
     fitCrossingPanels(y, base.ds, panels);
-    return { ...base, y, crossingStations: panels.map(p => p.s), ready: base.ready && ok };
+    // A local road can be completely surveyed while a neighbouring railway
+    // tile is still streaming. Keep its panel provisional until the rail
+    // level used here is final, even when no new terrain raster arrives.
+    const ready = base.ready && ok && crossings.every(({ node }) => node._nyOk);
+    return { ...base, y, crossingStations: panels.map(p => p.s), ready };
   }
   return { ...base, y, ready: base.ready && ok };
 }
