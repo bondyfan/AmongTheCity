@@ -3500,7 +3500,7 @@ function stepGame(dt) {
   // and the default y≈0 anchor put the whole shadow frustum underground
   updateSky(sky, tod(), camera, scene,
     world?.terrain?.heightAt?.(camera.position.x, camera.position.z) ?? (camera.position.y - 6));
-  lightPools?.update(dt, camera, world, sky, renderer.domElement.height, traffic?.cars, game.car);
+  lightPools?.update(dt, camera, world, sky, renderer.domElement.height, traffic?.cars, game.car, getSettings().flare !== false);
   updateHud(dt);
 
   // ---- the body, the wallet, the tank ----

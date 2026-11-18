@@ -36,6 +36,19 @@ const mast = (x, z) => ({ x, y: 220, z, i: 0, kind: 'street', posts: { userData:
 const world = (poles) => ({ poles: { grid: new Map([['k', poles]]) }, terrain: { heightAt: () => 220 } });
 const car = { x: 0, z: 0, heading: 0, mesh: { position: { y: 220.2 } } };
 
+test('switching the street-lamp flare keeps the lamps and their road lighting on', () => {
+  const lp = new LightPools(new THREE.Scene());
+  const view = { ...camera, fov: 55 }, w = world([mast(10, -12)]);
+  assert.equal(lp.glowMat.defines.STREET_LENS, 1);
+  assert.equal(lp.far.mat.defines.STREET_LENS, undefined);
+  for (const flare of [true, false, true]) {
+    lp.update(0.016, view, w, sky(1), 900, [], null, flare);
+    assert.equal(lp.glowMat.uniforms.uFlare.value, Number(flare));
+    assert.ok(lp.glows.visible && lp.pools.visible);
+    assert.ok(lp.glowMat.uniforms.uOn.value > 0 && lp.poolMat.uniforms.uOn.value > 0);
+  }
+});
+
 test('a bubble is as it was by day and comes down with the scene at night, on both paths', () => {
   assert.equal(bubbleDim(0.86, true), 1);
   assert.equal(bubbleDim(0.86, false), 1);

@@ -9,7 +9,7 @@
 //     under tree crowns and nowhere else (both in js/postao.js)
 //   * god rays  — march each pixel toward the sun's screen position and count
 //     how much open SKY it crosses, giving shafts through gaps in the canopy
-//   * bloom     — threshold at 1.0 ("brighter than white") + separable blur
+//   * bloom     — filtered HDR highlights and a compact two-dimensional blur
 //
 // The composite works entirely in LINEAR light, then applies the tone curve and
 // encodes to sRGB, both exactly once, at the very end. Both steps are easy to
@@ -39,8 +39,7 @@
 //     4 x 4 interleave, and the canopy shade, which used to be worked out per
 //     FULL-size pixel in the composite. No blur pass: the composite averages
 //     the interleave with four depth-weighted bilinear taps;
-//   * bloom's threshold rides its first blur (BLOOM_H_FRAG), two passes not
-//     three;
+//   * bloom filters highlights while downsampling, then blurs in both axes;
 //   * god rays only for a LOW sun: with the sun above the golden hour the
 //     shafts were pinned to the top edge at a third of their strength, a pass
 //     a frame for a haze nobody could point at. The sun's screen position (the
@@ -59,23 +58,20 @@ const QUAD_VERT = /* glsl */`
   varying vec2 vUv;
   void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 
-// Bloom's first pass: the threshold applied to each tap of the horizontal blur,
-// straight from the full-size scene. One pass where a threshold pass and a
-// blur pass used to be; the taps land where the old blur's did.
-const BLOOM_H_FRAG = /* glsl */`
-  uniform sampler2D tDiffuse; uniform float threshold; uniform vec2 dir; varying vec2 vUv;
-  vec3 bright(vec2 uv) {
-    vec3 c = texture2D(tDiffuse, uv).rgb;
-    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    return c * smoothstep(threshold, threshold + 0.25, l);
-  }
+// Average the entire 4x4 neighbourhood as the HDR image is reduced. Each
+// bilinear tap covers four source pixels. A pin light between sample columns
+// must not seed an entire vertical streak in the next pass.
+const BLOOM_PREFILTER = /* glsl */`
+  uniform sampler2D tDiffuse;
+  uniform vec2 texel;
+  varying vec2 vUv;
   void main() {
-    vec3 sum = bright(vUv) * 0.227;
-    sum += bright(vUv + dir * 1.384) * 0.316;
-    sum += bright(vUv - dir * 1.384) * 0.316;
-    sum += bright(vUv + dir * 3.230) * 0.070;
-    sum += bright(vUv - dir * 3.230) * 0.070;
-    gl_FragColor = vec4(sum, 1.0);
+    vec3 c = 0.25 * (texture2D(tDiffuse, vUv - texel).rgb
+                   + texture2D(tDiffuse, vUv + vec2(texel.x, -texel.y)).rgb
+                   + texture2D(tDiffuse, vUv + vec2(-texel.x, texel.y)).rgb
+                   + texture2D(tDiffuse, vUv + texel).rgb);
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    gl_FragColor = vec4(c * smoothstep(0.85, 1.35, luma), 1.0);
   }`;
 
 // ---- God rays (crepuscular shafts): march each pixel toward the sun's
@@ -112,15 +108,20 @@ const GODRAY_FRAG = /* glsl */`
     gl_FragColor = vec4(vec3(sum / float(RAY_SAMPLES) * fall), 1.0);
   }`;
 
-const BLUR_FRAG = /* glsl */`
-  uniform sampler2D tDiffuse; uniform vec2 dir; varying vec2 vUv;
+// Symmetric tent in both axes at the same resolution. Bilinear filtering
+// shares each diagonal tap across four texels.
+const BLOOM_BLUR = /* glsl */`
+  uniform sampler2D tDiffuse;
+  uniform vec2 texel;
+  varying vec2 vUv;
   void main() {
-    vec3 sum = texture2D(tDiffuse, vUv).rgb * 0.227;
-    sum += texture2D(tDiffuse, vUv + dir * 1.384).rgb * 0.316;
-    sum += texture2D(tDiffuse, vUv - dir * 1.384).rgb * 0.316;
-    sum += texture2D(tDiffuse, vUv + dir * 3.230).rgb * 0.070;
-    sum += texture2D(tDiffuse, vUv - dir * 3.230).rgb * 0.070;
-    gl_FragColor = vec4(sum, 1.0);
+    vec2 d = 1.25 * texel;
+    vec3 c = texture2D(tDiffuse, vUv).rgb * 0.25;
+    c += 0.1875 * (texture2D(tDiffuse, vUv - d).rgb
+                 + texture2D(tDiffuse, vUv + vec2(d.x, -d.y)).rgb
+                 + texture2D(tDiffuse, vUv + vec2(-d.x, d.y)).rgb
+                 + texture2D(tDiffuse, vUv + d).rgb);
+    gl_FragColor = vec4(c, 1.0);
   }`;
 
 const COMPOSITE_FRAG = /* glsl */`
@@ -398,10 +399,10 @@ export class PostFX {
     // threshold sits at 1.0 = "brighter than white": on the HDR target only
     // genuinely over-bright light (sun disc, water glints, flames) blooms, so
     // ordinary lit surfaces come through the post path untouched
-    this.bloomHMat = mat('bloomH', BLOOM_H_FRAG, {
-      tDiffuse: { value: null }, threshold: { value: 1.0 }, dir: { value: new THREE.Vector2() },
+    this.bloomPrefilter = mat('bloomPrefilter', BLOOM_PREFILTER, {
+      tDiffuse: { value: null }, texel: { value: new THREE.Vector2() },
     });
-    this.blurMat = mat('bloomV', BLUR_FRAG, { tDiffuse: { value: null }, dir: { value: new THREE.Vector2() } });
+    this.blurMat = mat('bloomBlur', BLOOM_BLUR, { tDiffuse: { value: null }, texel: { value: new THREE.Vector2() } });
     this.rayMat = mat('rays', GODRAY_FRAG, {
       tDepth: { value: null }, uSunUv: { value: new THREE.Vector2(0.5, 0.5) },
       uDensity: { value: 0.7 }, uDecay: { value: 0.96 }, uAspect: { value: 1.78 },
@@ -560,11 +561,11 @@ export class PostFX {
     }
 
     if (opts.bloom) {
-      this.bloomHMat.uniforms.tDiffuse.value = this.rtScene.texture;
-      this.bloomHMat.uniforms.dir.value.set(1 / this.rtA.width, 0);
-      this._pass(this.bloomHMat, this.rtB);
+      this.bloomPrefilter.uniforms.tDiffuse.value = this.rtScene.texture;
+      this.bloomPrefilter.uniforms.texel.value.set(1 / this.rtScene.width, 1 / this.rtScene.height);
+      this._pass(this.bloomPrefilter, this.rtB);
       this.blurMat.uniforms.tDiffuse.value = this.rtB.texture;
-      this.blurMat.uniforms.dir.value.set(0, 1 / this.rtB.height);
+      this.blurMat.uniforms.texel.value.set(1 / this.rtB.width, 1 / this.rtB.height);
       this._pass(this.blurMat, this.rtA);
     }
 
@@ -672,12 +673,8 @@ export class PostFX {
 //     on stay warm by contrast. Without it dusk was noon dimmed.
 //   * night: a blue lift in the shadows so the dark has a hue instead of being
 //     a hole, highlights (lamps, windows) left warm, colour drained a touch.
-// `bloom` is the bloom strength. A lamp head is a few pixels across, and the
-// quarter-size blur spreads what little of it clears the threshold so thin
-// that at 0.55 a street lamp at midnight had no glow at all (seen in the game:
-// the brightest bloom texel 0.14). Night only: the sun, glints and flames by
-// day keep the old 0.55, and only what was already over the threshold (lamp
-// heads, headlamps) gains a halo. A uniform, so it costs nothing.
+// Lamp heads already have a local glint. A modest rise in bloom at night
+// keeps bright sources distinct where several lamps overlap on the horizon.
 const _grade = { lift: new THREE.Color(), gain: new THREE.Color(), sat: 1, vignette: 0.1, bloom: 0.55 };
 export function gradeFor(warm, nightK) {
   if (!LOOK_AB.grade) return oldGrade(warm, nightK);
@@ -695,7 +692,7 @@ export function gradeFor(warm, nightK) {
     1 + 0.012 * w - 0.004 * b,
     1 - 0.070 * w + 0.040 * b);
   _grade.sat = 1 + 0.06 * w - 0.08 * n;
-  _grade.bloom = 0.55 + 1.45 * n;
+  _grade.bloom = 0.55 + 0.15 * n;
   return _grade;
 }
 

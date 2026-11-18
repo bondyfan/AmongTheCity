@@ -30,6 +30,7 @@ export class TramGlow {
     if (this.mesh || !lightPools?.glowMat) return;
     this.src = lightPools.glowMat;
     const mat = this.src.clone();
+    delete mat.defines.STREET_LENS;
     mat.uniforms.uRange.value = RANGE;
     mat.uniforms.uSize.value = SIZE;
     mat.uniforms.uNear.value = NEAR;

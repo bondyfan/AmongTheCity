@@ -64,8 +64,9 @@ export class FarLights {
    *  glows give out, in metres. */
   constructor(scene, glowMat, near) {
     this.mat = glowMat.clone();
+    delete this.mat.defines.STREET_LENS;
     this.mat.uniforms.uRange.value = RANGE;
-    this.mat.uniforms.uSize.value = 0.9;
+    this.mat.uniforms.uSize.value = 0.55;
     this.mat.uniforms.uNear.value = near;
     const g = new THREE.PlaneGeometry(2, 2);
     this.mesh = new THREE.InstancedMesh(g, this.mat, MAX);

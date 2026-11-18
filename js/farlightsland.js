@@ -45,15 +45,19 @@ const VERT = /* glsl */`
     vec2 q = abs( position.xz - uEdge.xy );
     float inside = 1.0 - smoothstep( uEdge.z, uEdge.w, max( q.x, q.y ) );
     vA = uNight * ( 1.0 - inside ) * ( 1.0 - smoothstep( uWall.x, uWall.y, d ) );
-    vCol = color;
-    gl_PointSize = 2.0;
+    // At ground level many kilometres of town project onto the same row.
+    // A distant point contributes less light even before the outer fog wall.
+    vCol = color / (1.0 + d * d * 0.00000032);
+    gl_PointSize = 3.0;
   }`;
 const FRAG = /* glsl */`
   varying vec3 vCol;
   varying float vA;
   void main() {
     if ( vA < 0.01 ) discard;
-    gl_FragColor = vec4( vCol * vA * 2.2, 1.0 );
+    vec2 q = 2.0 * gl_PointCoord - 1.0;
+    float coverage = 1.0 - smoothstep(0.0, 1.0, dot(q, q));
+    gl_FragColor = vec4(vCol * (0.8 * vA * coverage), 1.0);
   }`;
 
 export class FarLandLights {

@@ -125,7 +125,7 @@ const DECK_TRIM = 0.35 + DECK_STEP;
 //   glow    brightness of the sprite at a lamp head
 //   far     brightness of the far field's points (farlights.js)
 export const TUNE = { level: 0.85, beam: 0.62, knee: 0.6, lit: 1.3, top: 8.5, sun: 0.45,
-  wall: 0.55, soft: 1.0, direct: 0.11, glow: 0.42, far: 1.3,
+  wall: 0.55, soft: 1.0, direct: 0.11, glow: 0.42, far: 0.78,
   beamKnee: 0.5, leaf: 1.0, mapDirect: 512 };
 // Two kinds of lighting, by district rather than by lamp (a street does not
 // alternate): high-pressure sodium, the orange of every Czech housing estate,
@@ -199,6 +199,9 @@ const GLOW_VERT = /* glsl */`
   uniform float uNear;      // farlights.js only: nothing nearer than this (0 = off)
   uniform float uFloorPx;   // the quad's least radius, px (1.1: every lamp glow)
   uniform float uGive;      // 1: what the floor adds in area it gives back in brightness
+  #ifdef STREET_LENS
+    varying float vResolved;
+  #endif
   varying vec2 vP;
   varying vec3 vCol;
   varying float vK;
@@ -214,6 +217,11 @@ const GLOW_VERT = /* glsl */`
     // wider floor and no give-back: a delineator in the beams is a point that
     // keeps its brightness to the beam's end, see there.)
     float size = max(uSize, depth * uPx * uFloorPx);
+    #ifdef STREET_LENS
+      float pixel = max(depth * uPx, 0.000001);
+      size = min(size, 14.0 * pixel);
+      vResolved = smoothstep(2.0, 7.0, size / pixel);
+    #endif
     float fade = 1.0 - smoothstep(uRange * 0.80, uRange, depth);
     if (uNear > 0.0) fade *= smoothstep(uNear * 0.80, uNear, depth);
     vK = fade * mix(1.0, min(1.0, (uSize * uSize) / (size * size) * 3.0), uGive);
@@ -225,13 +233,28 @@ const GLOW_FRAG = /* glsl */`
   uniform float uOn;
   uniform float uLevel;
   uniform float uDirect;
+  #ifdef STREET_LENS
+    uniform float uFlare;
+  #endif
+  #ifdef STREET_LENS
+    varying float vResolved;
+  #endif
   varying vec2 vP;
   varying vec3 vCol;
   varying float vK;
   #include <fog_pars_fragment>
   void main() {
     float r = length(vP);
-    float g = exp(-r * r * 5.5) * (1.0 - smoothstep(0.7, 1.0, r));
+    float edge = 1.0 - smoothstep(0.62, 1.0, r);
+    #ifdef STREET_LENS
+      // Keep an unresolved lamp visible. As the head resolves, its lens
+      // glint has a tight core and a faint horizontal diffraction tail.
+      float core = exp2(-mix(9.0, 50.0, vResolved) * dot(vP, vP));
+      float ray = exp2(-6.0 * abs(vP.x) - 40.0 * abs(vP.y));
+      float g = (core + vResolved * uFlare * (0.36 * ray + 0.055 * exp2(-6.0*r*r))) * edge;
+    #else
+      float g = exp(-r * r * 5.5) * edge;
+    #endif
     float clear = 1.0;
     #ifdef USE_FOG
       clear = clamp(1.0 - atcFogAmount(), 0.0, 1.0);
@@ -288,10 +311,10 @@ export class LightPools {
     // ---- glows: camera-facing quads at the lamp heads
     const gg = new THREE.PlaneGeometry(2, 2);
     this.glowMat = new THREE.ShaderMaterial({
-      vertexShader: GLOW_VERT, fragmentShader: GLOW_FRAG,
+      vertexShader: GLOW_VERT, fragmentShader: GLOW_FRAG, defines: { STREET_LENS: 1 },
       uniforms: { ...fogU(), uOn: { value: 0 }, uDirect: { value: 0 }, uLevel: { value: 1 }, uNear: { value: 0 },
-        uFloorPx: { value: 1.1 }, uGive: { value: 1 },
-        uRange: { value: RANGE }, uPx: { value: 0.001 }, uSize: { value: 1.15 } },
+        uFloorPx: { value: 1.1 }, uGive: { value: 1 }, uFlare: { value: 1 },
+        uRange: { value: RANGE }, uPx: { value: 0.001 }, uSize: { value: 0.55 } },
       fog: true, transparent: true, depthWrite: false, depthTest: true,
       blending: THREE.AdditiveBlending,
     });
@@ -351,7 +374,7 @@ export class LightPools {
    *          mesh }): the traffic set. `own` is the car being driven, which
    *          has usually left that set.
    */
-  update(dt, camera, world, sky, viewH, cars = null, own = null) {
+  update(dt, camera, world, sky, viewH, cars = null, own = null, flare = true) {
     const nightK = sky?.nightK ?? 0;
     // the lamps come up through dusk: nothing at 20 % of the way to night,
     // everything by 60 %
@@ -407,6 +430,7 @@ export class LightPools {
     this.poolMat.uniforms.uLevel.value = TUNE.level * TUNE.direct;
     this.glowMat.uniforms.uOn.value = on;
     this.glowMat.uniforms.uLevel.value = TUNE.glow;
+    this.glowMat.uniforms.uFlare.value = flare ? 1 : 0;
     this.glowMat.uniforms.uPx.value =
       2 * Math.tan((camera.fov * Math.PI) / 360) / Math.max(1, viewH);
     const show = this.count > 0;
