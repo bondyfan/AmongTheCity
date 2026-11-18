@@ -129,9 +129,14 @@ const MOON_I = 0.085;
 // was. A clear sky gives shade about a fifth of the sun's light, and that is
 // roughly where the pair stands now; the sunlit pavement itself is within five
 // percent of where it was, so the exposure did not have to move.)
+// (Then, seen in the game: 0.82 and 2.4. At 0.70 shaded pavement on Legerova
+// came out at 44/255 against 62 before, nearly black under the S-curve, and the
+// sunlit side lost a little. 0.82 with the sun at 2.4 keeps the shade about a
+// fifth of the sunlit ground in light, shaded paving at about 51/255 with its
+// texture, and the sunlit side a touch brighter than it was.)
 // One object, not constants, so the pair can be retuned on a live page by eye
 // (__atc.sky.light) the way heightfog.js HAZE is; `bounce` is BOUNCE below.
-export const LIGHT = { hemiDay: 0.70, sunI: 2.25, bounce: 0.5 };
+export const LIGHT = { hemiDay: 0.82, sunI: 2.4, bounce: 0.5 };
 const HEMI_NIGHT = 0.12;
 // The fill's SKY colour follows the sky: clear blue by day, the lavender of
 // the sunset sky through the golden hour, moonlit blue at night. Its GROUND

@@ -513,7 +513,7 @@ export class PostFX {
   // opts: { ssao, bloom, aoRadius, aoStrength, aoFloor, canopy, rays, grade, lamps }
   // lamps:  the LightPools (lightpools.js). Its bake() draws this frame's lamp
   //         map and returns where it lies, or null by day
-  // grade:  { lift: Color, gain: Color, sat, vignette } from gradeFor() below,
+  // grade:  { lift: Color, gain: Color, sat, vignette, bloom } from gradeFor() below,
   //         or nothing for a neutral frame
   // canopy: { densTex, metaTex, cx, cz, size, strength } — the world-space
   //         crown-shade map maintained by trees.js
@@ -589,6 +589,7 @@ export class PostFX {
     else { c.uGradeLift.value.setRGB(0, 0, 0); c.uGradeGain.value.setRGB(1, 1, 1); }
     c.uGradeSat.value = g ? (g.sat ?? 1) : 1;
     c.uVignette.value = g ? (g.vignette ?? 0) : 0;
+    c.bloomStrength.value = g?.bloom ?? 0.55;
     c.uLookK.value = LOOK_AB.curve ? LOOK.contrast : 0;
     c.aoStrength.value = opts.aoStrength ?? 0.25;
     c.aoFloor.value = opts.aoFloor ?? 0.30;
@@ -671,7 +672,13 @@ export class PostFX {
 //     on stay warm by contrast. Without it dusk was noon dimmed.
 //   * night: a blue lift in the shadows so the dark has a hue instead of being
 //     a hole, highlights (lamps, windows) left warm, colour drained a touch.
-const _grade = { lift: new THREE.Color(), gain: new THREE.Color(), sat: 1, vignette: 0.1 };
+// `bloom` is the bloom strength. A lamp head is a few pixels across, and the
+// quarter-size blur spreads what little of it clears the threshold so thin
+// that at 0.55 a street lamp at midnight had no glow at all (seen in the game:
+// the brightest bloom texel 0.14). Night only: the sun, glints and flames by
+// day keep the old 0.55, and only what was already over the threshold (lamp
+// heads, headlamps) gains a halo. A uniform, so it costs nothing.
+const _grade = { lift: new THREE.Color(), gain: new THREE.Color(), sat: 1, vignette: 0.1, bloom: 0.55 };
 export function gradeFor(warm, nightK) {
   if (!LOOK_AB.grade) return oldGrade(warm, nightK);
   _grade.vignette = 0.1;
@@ -688,6 +695,7 @@ export function gradeFor(warm, nightK) {
     1 + 0.012 * w - 0.004 * b,
     1 - 0.070 * w + 0.040 * b);
   _grade.sat = 1 + 0.06 * w - 0.08 * n;
+  _grade.bloom = 0.55 + 1.45 * n;
   return _grade;
 }
 
@@ -699,5 +707,6 @@ function oldGrade(warm, nightK) {
   _grade.gain.setRGB(1 + 0.045 * w, 1 + 0.010 * w, 1 - 0.050 * w);
   _grade.sat = 1;
   _grade.vignette = 0.08;
+  _grade.bloom = 0.55;
   return _grade;
 }
