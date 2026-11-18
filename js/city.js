@@ -926,6 +926,11 @@ export class CityWorld {
       const m = o.material;
       if (!m) return;
       if (Array.isArray(m)) { for (const e of m) if (e.map) used.add(e); } else if (m.map) used.add(m);
+      // a chunk's merged wordmarks wear the shared page: the labels it shows
+      // are listed on the mesh (js/wordmarkatlas.js mergeMarks), and a label
+      // freed under it would hand its slot to another chain's name
+      const mk = o.userData.marks;
+      if (mk) for (let i = 0; i < mk.length; i++) used.add(mk[i]);
     };
     for (const [key, g] of this.built) if (g && this._detail.get(key) !== 'ground') g.traverse(note);
     for (const m of this.interiors?.models?.values() ?? []) m.group?.traverse(note);

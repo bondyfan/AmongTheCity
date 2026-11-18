@@ -47,6 +47,7 @@ import { makeGait } from './gait.js';
 import { addBlob, removeBlob, blobsIn, disposeBlobs } from './groundblob.js';
 import { makePoses } from './poses.js';
 import { lampDirectPatch } from './lampmap.js';
+import { BATCH, onBatchFlag } from './batchflags.js';
 
 // Where the distance variant takes over, metres from the rendering camera,
 // with a gap so a person standing at the line does not flicker between two.
@@ -111,8 +112,61 @@ function pickLod(renderer, scene, camera) {
   if (far === u.far) return;
   u.far = far;
   this.geometry.setDrawRange(far ? g.farStart : 0, far ? g.farCount : g.nearCount);
-  this.castShadow = !far;
+  this.castShadow = !far && u.shNear !== false;
 }
+
+// ---- who casts into the sun's shadow map ------------------------------------
+// pickLod above only runs for a person the CAMERA drew, so everybody behind
+// it or beside it kept whatever castShadow they last had: true from birth for
+// most of a crowd, and the shadow box (js/sky.js, 230 m across on medium and
+// leading the view) takes in a good deal of what is behind the camera. Each
+// of them was a whole skinned draw call in the shadow pass. Every live body is
+// listed here and, once per shadow-map update (main.js, before the render),
+// a person casts only
+//   - within `r` of the camera, in any direction (a shadow from just behind
+//     the camera can fall forward into the view), or
+//   - when a sphere of SH_REACH round them touches the view frustum, which is
+//     where their shadow could be seen at all; there pickLod's own far line
+//     (FAR_OUT) keeps deciding, exactly as before.
+// So nothing on screen changes: a figure in view casts as it always did, and
+// only people whose shadow cannot reach the picture stop drawing one. The
+// first version cut everyone past 45 m, in view too, which put a second line
+// in the picture (walkers 45 to 62 m away losing their shadow) next to the
+// far LOD's own at 62. Both tests have some give, so nobody flickers on one.
+// `__batch.shadows = false` (js/batchflags.js) puts back cast-always.
+const _bodies = new Set();
+const SH_GIVE = 3;
+// metres round a body that its shadow may reach: a 1.8 m figure under a sun
+// 10 degrees up throws some 10 m; the larger value holds a caster until it is
+// well clear, the smaller one lets a new one in
+const SH_REACH_KEEP = 14, SH_REACH_JOIN = 11;
+const _frustum = new THREE.Frustum(), _pv = new THREE.Matrix4(), _sph = new THREE.Sphere();
+
+/** Once per shadow update: people whose shadow cannot reach the view stop casting. */
+export function cullPeopleShadows(camera, r = 45) {
+  if (!BATCH.shadows || !camera) return;
+  camera.updateWorldMatrix(true, false);
+  _pv.multiplyMatrices(camera.projectionMatrix, _pv.copy(camera.matrixWorld).invert());
+  _frustum.setFromProjectionMatrix(_pv);
+  const c = camera.matrixWorld.elements, cx = c[12], cy = c[13], cz = c[14];
+  const rIn = (r - SH_GIVE) ** 2, rOut = (r + SH_GIVE) ** 2, far2 = (FAR_OUT + SH_GIVE) ** 2;
+  for (const m of _bodies) {
+    const u = m.userData, e = m.matrixWorld.elements;
+    const dx = e[12] - cx, dy = e[13] - cy, dz = e[14] - cz, d2 = dx * dx + dy * dy + dz * dz;
+    let near = u.shNear ? d2 < rOut : d2 < rIn;
+    if (!near && d2 < far2) {
+      _sph.center.set(e[12], e[13], e[14]);
+      _sph.radius = u.shNear ? SH_REACH_KEEP : SH_REACH_JOIN;
+      near = _frustum.intersectsSphere(_sph);
+    }
+    u.shNear = near;
+    m.castShadow = near && !u.far;
+  }
+}
+onBatchFlag('shadows', (on) => {
+  if (on) return;                         // the next cull sets them
+  for (const m of _bodies) { m.userData.shNear = true; m.castShadow = !m.userData.far; }
+});
 
 // how far a bulky top holds the arms off the ribs, radians
 const TOPSY = { puffer: 0.07, coat: 0.04, jacket: 0.03, hoodie: 0.03 };
@@ -212,7 +266,9 @@ export function makeCitizen(look = {}) {
   mesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, D.hipY, 0), 1.35 * k);
   mesh.userData.far = false;
   mesh.userData.force = null;
+  mesh.userData.shNear = true;            // until the first cullPeopleShadows
   mesh.onBeforeRender = pickLod;
+  _bodies.add(mesh);
   const shade = addBlob(group, mesh);
   // …and only now the resting angles, so the bind pose stays the modelled one
   const rest = (0.05 + D.s.belly * 0.7 + (D.s.hip - 1) * 0.15) + ((TOPSY[o.top] ?? 0));
@@ -258,6 +314,7 @@ export function makeCitizen(look = {}) {
   // minutes, so an owner that does `scene.remove(group)` and stops leaks both.
   const dispose = () => {
     group.parent?.remove(group);
+    _bodies.delete(mesh);
     removeBlob(shade);
     geo.dispose();
     skeleton.dispose();

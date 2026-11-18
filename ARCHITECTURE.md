@@ -294,11 +294,16 @@ strays >1500 m from the last render center.
 - `this.maxCars` honored (settings sends 0/30/60/120); spawnR 400→460.
 - TRAFFIC LIGHTS: cluster signals within 30 m → one junction controller,
   2-phase (N-S-ish vs E-W-ish by approach bearing), green 11 s / amber 1.5 s
-  alternating, phase offset hashed per junction. Simple pole meshes (dark
-  cylinder 3.6 m + 3-lamp box, emissive lamp of the active color) at each
-  signal node, oriented to its road, added to vehicles.scene, ONE shared
-  geometry+materials, state flips by material emissive swap on ≤4 Meshes per
-  junction (cheap). AI: a red/amber light on the car's edge ahead → smooth
+  alternating, phase offset hashed per junction. A mast (js/signalmodel.js:
+  shaft, three-lens head with hoods, pedestrian head) at each signal node,
+  oriented to its road. Every standing mast within SIG_VIS2 is one instance of
+  ONE InstancedMesh (js/signalbatch.js: the parts merged, a per-vertex lens
+  index, a per-instance state float picks off or lit colour and glow in the
+  shader), so the lights of the whole city in range are one draw call; a
+  felled mast gives up its slot. The mesh stands at an anchor near the masts
+  and the instances are offsets from it (float32 world coordinates at 95 km
+  broke the lens out of its housing). `__batch.signals = false` (js/batchflags.js)
+  draws the old per-mast Groups for an A/B. AI: a red/amber light on the car's edge ahead → smooth
   stop 5 m short (reuse the follow-brake math); pull away on green.
 - Cars with `_rammedT > 0`: AI control suspended (car keeps momentum, decays
   by friction), timer down, then re-snap onto the nearest own-edge point and
@@ -863,6 +868,15 @@ the facade window atlas, the brand wordmarks and the aerial photo material. All
 three are handled by NAMING rather than by switching off — the geometry comes
 back with its atlas uvs and a material key, and the main thread resolves the key
 to its own singleton (`facadeMaterial`, `brandMarkMat`, the ortho plan's `mat`).
+The wordmarks then go one step further on the main thread: a label is a slot
+of a shared 2048 x 1024 page (js/wordmarkatlas.js), and `mergeMarks` folds a
+chunk's per-chain quads into one mesh per page with their uvs remapped, after
+the decode (js/meshpool.js finish) and at the end of a synchronous
+buildBuildingsMesh alike. The worker still sends one stream per chain. The
+merged mesh lists its labels in `userData.marks`, which CityWorld._sweepMarks
+counts, so a label in view never gives its slot away. A label is any shop's
+own name (487 of them in the old town), so the pages go up to 32 (1024
+labels) before a label falls back on a canvas of its own.
 
 Two invariants worth knowing before touching js/city.js:
 - **A key in `_inflight` is being built and is in neither `built` nor the

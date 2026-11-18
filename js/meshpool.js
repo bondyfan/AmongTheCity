@@ -23,6 +23,8 @@
 import { chunkSpec } from './chunkspec.js';
 import { decode } from './geomcodec.js';
 import { facadeMaterial, brandMarkMat } from './meshes.js';
+import { mergeMarks } from './wordmarkatlas.js';
+import { BATCH } from './batchflags.js';
 
 /** Hard ceiling on workers. Past four the queue is never the bottleneck. */
 const MAX_WORKERS = 4;
@@ -204,8 +206,12 @@ export function makeMeshPool(opts = {}) {
     const r = f.reply;
     if (r.empty) return { group: null, canopyMissed: false, groundMissed: false };
     resolveMaterials(r, f.ortho, mats);
-    return { group: decode(r.payload, mats),
-      canopyMissed: !!r.canopyMissed, groundMissed: !!r.groundMissed };
+    const group = decode(r.payload, mats);
+    // the worker sent one quad stream per chain; here, where the labels are
+    // slots of one page, they become one mesh (js/wordmarkatlas.js), exactly
+    // as js/meshes.js buildBuildingsMesh does after a synchronous build
+    if (BATCH.marks && Object.keys(r.brands ?? {}).length) mergeMarks(group);
+    return { group, canopyMissed: !!r.canopyMissed, groundMissed: !!r.groundMissed };
   }
 
   /** Fail anything the workers have stopped answering for. Called once a frame. */

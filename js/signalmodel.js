@@ -5,9 +5,10 @@
 // and lower down, turned ninety degrees to face the people waiting on the far
 // kerb, the two-lens pedestrian head.
 //
-// One geometry and material set for EVERY mast in the region. A light changes
-// by swapping the material on a lens mesh, nothing else (js/traffic.js owns the
-// schedule and the swapping; this file only says what the parts look like).
+// One geometry and material set for EVERY mast in the region. js/signalbatch.js
+// merges these parts into the one instanced mast the city draws, and a light
+// changes by one per-pole float there (js/traffic.js owns the schedule; this
+// file only says what the parts look like, and js/poles.js drops a felled one).
 //
 // Frame: base on the origin, y up, the vehicle lenses on the head's -z face
 // (a mast is yawed so that -z looks at the drivers rolling up). Local +x is
@@ -90,4 +91,7 @@ export function signalNight(exposure) {
   // at a power of 1.5 it was still mint.)
   const k = LIT * Math.pow(LIT_DAY_EXPOSURE / Math.max(0.3, exposure || LIT_DAY_EXPOSURE), 2);
   _S.redOn.emissiveIntensity = _S.ambOn.emissiveIntensity = _S.grnOn.emissiveIntensity = k;
+  // the masts in range are js/signalbatch.js's one mesh, whose lit lenses glow
+  // through this material (its emissive is white times this, times the lens colour)
+  if (_S.batchMat) _S.batchMat.emissiveIntensity = k;
 }

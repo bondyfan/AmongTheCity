@@ -49,6 +49,8 @@ import { MwDecoSink, motorwaySignsInto } from './mwsignmesh.js';
 import { motorwayDecoMaterial, motorwayNight } from './mwatlas.js';
 import { terracesInto, terraceOpen } from './terraces.js';
 import { signalNight } from './signalmodel.js';
+import { atlasMark, releaseMark, paintMark, mergeMarks } from './wordmarkatlas.js';
+import { BATCH } from './batchflags.js';
 import { tod } from './worldclock.js';
 import { sealedRects } from './sealed.js';
 import { entranceOf, brandOf, signBrandOf, classify, storeyPlan } from './interiors.js';
@@ -3821,11 +3823,20 @@ export function facadeCells(f) {
 // resolves the name against this cache (geomcodec's `mats.codecMats`).
 export const brandMatKey = (brand) => 'brand:' + (brand.label ?? 'Obchod');
 
+// Since the batch package the label is a slot of a shared page instead
+// (js/wordmarkatlas.js), and a chunk's quads draw as one mesh. The canvas of
+// its own below is the fallback: the pages are full, there is no 2D context,
+// or the A/B flag says so (`__batch.marks = false`, js/batchflags.js).
 const _brandMats = new Map();
 export function brandMarkMat(brand) {
   const label = brand.label ?? 'Obchod';
   let m = _brandMats.get(label);
-  if (m) return m;
+  // a build is about to wear it, and may not land before the next sweep (a
+  // paused synchronous build): an atlas slot freed under it would come back
+  // with another chain's name, where a freed canvas only uploaded again
+  if (m) { m.userData.idle = 0; return m; }
+  m = BATCH.marks ? atlasMark(brand, label) : null;
+  if (m) { _brandMats.set(label, m); return m; }
   const cv = document.createElement('canvas');
   cv.width = 1024; cv.height = 256;
   const g = cv.getContext('2d');
@@ -3836,26 +3847,9 @@ export function brandMarkMat(brand) {
     _brandMats.set(label, m);
     return m;
   }
-  const css = (hex) => '#' + hex.toString(16).padStart(6, '0');
-  g.fillStyle = css(brand.sign);
-  g.fillRect(0, 0, 1024, 256);
-  // Ink: the chain's trim colour when it defines one (McDonald's writes red on
-  // its yellow, KFC near-white on its red), else white — except on a LIGHT
-  // fascia, where white would vanish: Billa is dark type on yellow, exactly
-  // like the real shopfront. Perceived luminance off the sRGB bytes is enough
-  // to make that call deterministically.
-  const lum = 0.299 * (brand.sign >> 16 & 255) + 0.587 * (brand.sign >> 8 & 255)
-    + 0.114 * (brand.sign & 255);
-  g.fillStyle = css(brand.trim ?? (lum > 150 ? 0x23201a : 0xffffff));
-  g.textAlign = 'center'; g.textBaseline = 'middle';
-  let size = 168;
-  g.font = `bold ${size}px Arial, sans-serif`;
-  const w = g.measureText(label).width;
-  if (w > 920) {                       // "Penny Market" must fit the same panel
-    size = Math.floor(size * 920 / w);
-    g.font = `bold ${size}px Arial, sans-serif`;
-  }
-  g.fillText(label, 512, 132);
+  // the panel itself (fascia colour, ink rule, the type fitted to 920 px)
+  // is js/wordmarkatlas.js paintMark, the one the atlas slots are painted by
+  paintMark(g, brand, label);
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 8;                  // fascias are read at grazing angles
@@ -3875,8 +3869,9 @@ export function sweepBrandMats(inUse) {
   for (const [label, m] of _brandMats) {
     if (inUse.has(m)) { m.userData.idle = 0; continue; }
     if ((m.userData.idle = (m.userData.idle ?? 0) + 1) < 2) continue;
-    m.map?.dispose();
-    m.dispose();
+    // an atlas label gives its slot back to the page (and frees only its
+    // windowed clone of the page texture); a canvas of its own goes whole
+    if (!releaseMark(m)) { m.map?.dispose(); m.dispose(); }
     _brandMats.delete(label);
     (gone ??= []).push(m);
   }
@@ -4407,6 +4402,10 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
     g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(mk.uv), 2));
     group.add(new THREE.Mesh(g, brandMat(mk.brand)));
   }
+  // on the main thread (no mats.brandMat seam) the chains' quads become one
+  // mesh on the shared wordmark page; a worker's go out per chain as before
+  // and js/meshpool.js merges them the same way after the decode
+  if (!mats.brandMat && BATCH.marks) mergeMarks(group);
   return group;
 }
 
