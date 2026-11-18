@@ -314,6 +314,11 @@ const CAM_DIST_0 = 14;      // ⌘0 comes back here
 // 14 m read as watching your own car from across the street.
 const CAM_DIST_MIN = 5, CAM_DIST_MAX = 26;
 let camDist = CAM_DIST_0;
+// ON FOOT the boom is its own, and short (Frank, 18 Nov 2026: fourteen metres
+// behind a walking man is watching him from across the street). Five metres
+// over the shoulder is the default, and the wheel cannot take it past 7.5.
+const FOOT_DIST_0 = 5, FOOT_DIST_MIN = 3.2, FOOT_DIST_MAX = 7.5, FOOT_HEIGHT = 0.8;
+let footDist = FOOT_DIST_0;
 const camSmooth = new THREE.Vector3();
 let _camSpeedK = 0;   // eased |speed|/vmax for boom+FOV — see updateCamera
 let _camPullT = 1;    // eased occlusion boom factor (1 = full length)
@@ -469,8 +474,10 @@ function updateCamera(dt) {
   // consumed in BOTH modes even though first person has no boom: these are
   // one-shot getters, and a notch left sitting in the accumulator would fire
   // the chase cam across the street the moment C switched back.
-  if (input.takeZoomHome()) camDist = CAM_DIST_0;
-  camDist = Math.max(CAM_DIST_MIN, Math.min(CAM_DIST_MAX, camDist + input.takeWheel() * 1.4));
+  if (input.takeZoomHome()) { camDist = CAM_DIST_0; footDist = FOOT_DIST_0; }
+  // the wheel zooms the boom that is in use: the walker's, or the vehicle's
+  if (game.car || game.heli || game.jet || trains?.riding) camDist = Math.max(CAM_DIST_MIN, Math.min(CAM_DIST_MAX, camDist + input.takeWheel() * 1.4));
+  else footDist = Math.max(FOOT_DIST_MIN, Math.min(FOOT_DIST_MAX, footDist + input.takeWheel() * 0.45));
   fpHideSelf(!!fpCar);
   fpCabin(fpCar);
 
@@ -570,8 +577,8 @@ function updateCamera(dt) {
     fov = BASE_FOV + speedK * 10;
   } else {
     wantYaw = player.heading;
-    dist = camDist + (player.ragdoll ? 3 : 0);   // thrown: pull back and watch it fly
-    height = 2.1;
+    dist = footDist + (player.ragdoll ? 3 : 0);   // thrown: pull back and watch it fly
+    height = FOOT_HEIGHT;
     // player.y, NOT mesh.position.y: once boarding parents the mesh to a
     // vehicle its position is SEAT-LOCAL, and a passenger riding over a bridge
     // deck would drag the camera down to the riverbed. player.y is world space

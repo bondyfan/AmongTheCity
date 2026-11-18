@@ -5,8 +5,9 @@ import { groundFor } from './terrain.js';
 import { chunkKey, pointInPolygon } from './geo.js';
 import { dressRoof, dressDoor, dressLadder } from './prologue-roofset.js';
 
-// The roof scene. He stands on the coping of the end wall, four storeys over
-// the pavement, and the film cuts round him: his back against the town, the
+// The roof scene. He stands a step back from the edge of the end wall, four
+// storeys over the pavement; when the bank says no he climbs onto the coping.
+// The film cuts round him: his back against the town, the
 // drop under his shoes, his face in the light of the phone. When Vašek names
 // the money he steps back down, and he leaves by the stair head.
 const lerp = THREE.MathUtils.lerp;
@@ -24,12 +25,13 @@ export function deckY(world) {
 }
 
 const LEDGE = { x: 0.55, z: 0.14, up: 0.6 },
-  DECK = { x: 0.55, z: 1.5, up: 0.035 };
+  DECK = { x: 0.55, z: 1.2, up: 0.035 }; // a step back from the coping
 // Offsets are (right, up, forward) from his eyes, as on the street.
 const shots = {
   est: { cam: [3.6, 3.3, -11.5], to: [2.5, 2.1, -7.2], look: [-0.3, -1.3, 6], fov: 40, rate: 0.22 },
   drop: { cam: [0.34, 0.75, 0.1], to: [0.3, 0.95, 0.16], look: [0.02, -9, 1.5], fov: 52, rate: 0.3 },
   sms: { cam: [-0.5, -0.22, 1.5], to: [-0.4, -0.18, 1.2], look: [0.03, -0.05, 0], fov: 33 },
+  step: { cam: [4.6, -0.3, 2.6], to: [4.0, -0.2, 2.2], look: [0, -0.5, 0.3], fov: 36 },
   ring: { cam: [5.6, 0.5, 1.6], to: [4.6, 0.35, 1.2], look: [0, -0.35, 0], fov: 34 },
   f0: { cam: [0.78, 0.3, -1.4], to: [0.64, 0.26, -1.12], look: [-0.5, -1.3, 14], fov: 40 },
   f1: { cam: [0.3, 0.02, 1.1], to: [0.22, 0.03, 0.84], look: [0.02, -0.03, 0], fov: 33 },
@@ -72,7 +74,7 @@ export function rooftop(scene, world, player, act, lights) {
   const toStation = Math.atan2(-(stationEntry.x - roofFrame.x), -(stationEntry.z - roofFrame.z));
   let shot = '',
     shotAge = 0,
-    step = 0, // 0 on the ledge, 1 down on the roof
+    step = 1, // 0 on the ledge, 1 down on the roof
     turn = 0;
   function offset(out, [r, u, f], base, h) {
     return out.set(base.x + Math.cos(h) * r - Math.sin(h) * f, base.y + u, base.z - Math.sin(h) * r - Math.cos(h) * f);
@@ -80,7 +82,8 @@ export function rooftop(scene, world, player, act, lights) {
   return {
     begin() {
       shot = '';
-      shotAge = step = turn = 0;
+      shotAge = turn = 0;
+      step = 1; // he begins a step back from the edge, thinking
       group.position.y = deck();
       lamp.position.set(world2(1.85, 7.3).x, group.position.y + 2.2, world2(1.85, 7.3).z);
       this.pose(0, { gesture: null });

@@ -9,9 +9,9 @@ import { rooftop } from './prologue-roof.js';
 
 // The film before the game: the call on the street, four seconds at his
 // daughter's bed, a black card, the roof, Vašek. One beat at a time:
-//   ring1 → call1 → out1 → card → est → drop → sms → ring2 → call2 → done
+//   ring1 → call1 → out1 → card → est → sms → step → drop → ring2 → call2 → done
 // E answers a ringing phone. Speech and shots are never skipped.
-const SILENT = { est: 5.2, drop: 3.4, sms: 6.2, out1: 3.1, card: 3.3 };
+const SILENT = { est: 5.2, sms: 6.2, step: 2.6, drop: 3.6, out1: 3.1, card: 3.3 };
 const CUT_AT = 3.2, // seconds into the nurse's long sentence
   CUT_FOR = 4.2;
 
@@ -91,7 +91,7 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
     }
   }
   function advance() {
-    const order = ['ring1', 'call1', 'out1', 'card', 'est', 'drop', 'sms', 'ring2', 'call2', 'done'];
+    const order = ['ring1', 'call1', 'out1', 'card', 'est', 'sms', 'step', 'drop', 'ring2', 'call2', 'done'];
     const next = order[order.indexOf(beat) + 1];
     if (next === 'done') {
       // he hangs up, and the roof and the three minutes are the player's
@@ -158,9 +158,11 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
         const calling = beat === 'call2';
         roofSet.pose(dt, {
           gesture: calling ? 'ear' : beat === 'sms' || (beat === 'ring2' && age > 0.9) ? 'read' : null,
-          emotion: beat !== 'est' && beat !== 'drop',
+          emotion: beat !== 'est',
           speech,
-          down: calling && line >= 7,
+          // back from the edge until the bank's message, and again once
+          // Vašek has named the money
+          down: beat === 'est' || beat === 'sms' || (calling && line >= 7),
           face: calling && line >= 8,
         });
       }
@@ -175,7 +177,7 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
     },
     // Test harness: cut straight to a beat (and a line of its call).
     seek(name, index = 0) {
-      if (name === 'est' || name === 'drop' || name === 'sms' || name === 'ring2' || name === 'call2') {
+      if (name === 'est' || name === 'sms' || name === 'step' || name === 'drop' || name === 'ring2' || name === 'call2') {
         roofSet.begin();
         hud.veil(false);
       }
