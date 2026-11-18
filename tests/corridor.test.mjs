@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { CHUNK } from '../js/config.js';
 import { inScope, outranks, endIndex, seriesNext, parallel, buildAxis, membersOf } from '../js/corridorgeom.js';
 import { gradeLimit, fitProfile, applyPins, gaussBlur, applyFloors, smax, smin, crestFall } from '../js/corridorfit.js';
-import { corridorLevel, sameCorridor } from '../js/corridorlevel.js';
+import { corridorLevel, invalidateBridgeFit, sameCorridor } from '../js/corridorlevel.js';
 import { indexLevelCrossings, indexTileCrossings } from '../js/levelxing.js';
 
 let ID = 1000;
@@ -170,4 +170,53 @@ test('the shared asphalt of a motorway slip follows the main road through the wh
   assert.equal(profile.y[20], 202);
   assert.equal(profile.y.at(-1), 200);
   assert.equal(base.y[20], 200);
+});
+
+test('a viaduct longer than its fit window uses both real abutments', () => {
+  const bridge = road(line(400, 0, 640, 0), { br: 1, t: 'motorway' });
+  const left = road([[-1600, 0], [-1500, 0]]), right = road([[2000, 0], [2100, 0]]);
+  bridge._apN0 = [{ road: left, at: 100, d: 1900 }, { road: right, at: 0, d: 1600 }];
+  bridge._apN1 = [{ road: left, at: 100, d: 2140 }, { road: right, at: 0, d: 1360 }];
+  const terrain = { heightAt: x => x <= -1500 ? 220 : x >= 2000 ? 240 : 180 };
+  const city = cityOf([bridge]);
+  const p = corridorLevel(bridge, terrain, city, 0);
+  assert.ok(p);
+  assert.ok(p.y[0] > 230 && p.y.at(-1) < 233);
+  assert.ok(p.y.at(-1) - p.y[0] > 0.75);
+  bridge._apN0 = [{ road: left, at: 100, d: 40 }];
+  invalidateBridgeFit(bridge);
+  const fresh = corridorLevel(bridge, terrain, city, 1);
+  assert.ok(fresh.y[0] < p.y[0] - 4);
+});
+
+test('a high motorway merge extends back across a split elevated slip', async () => {
+  const { fitSlip } = await import('../js/slipgrade.js');
+  const main = road([[200, 0], [300, 0]], { t: 'motorway', br: 1, l: 2 });
+  const nose = road([[100, 25], [200, 0]], { t: 'motorway_link', br: 1, l: 2 });
+  const upstream = road([[0, 50], [100, 25]], { t: 'motorway_link', br: 1, l: 1 });
+  const city = cityOf([main, nose, upstream]);
+  const L = Math.hypot(100, 25);
+  const base = { n: 51, total: L, ds: L / 50, ready: true, y: new Float32Array(51).fill(200) };
+  const highway = () => ({ n: 2, ds: 100, y: [222, 222], ready: true });
+  const a = fitSlip(upstream, base, {}, city, highway), b = fitSlip(nose, base, {}, city, highway);
+  assert.ok(a.y[0] > 208 && Math.abs(a.y.at(-1) - b.y[0]) < 0.001);
+  assert.equal(b.y.at(-1), 222);
+});
+
+test('crossing panels hold the rail elevation over their full width and across adjacent tracks', async () => {
+  const { fitCrossingPanels } = await import('../js/levelxing.js');
+  const y = Float32Array.from({ length: 41 }, (_, i) => 202 + 0.5 * Math.cos(i * 2));
+  const before = y[0];
+  fitCrossingPanels(y, 2, [{ s: 33.6, y: 201.2 }, { s: 29.5, y: 201.1 }]);
+  assert.equal(y[0], before);
+  for (let i = 14; i <= 18; i++) assert.ok(y[i] >= 201.099 && y[i] <= 201.201);
+});
+
+test('ramp smoothing preserves the sides of a real junction and its endpoints', async () => {
+  const { fairLink } = await import('../js/corridorfit.js');
+  const y = Float32Array.from({ length: 81 }, (_, i) => 201 + 0.6 * Math.cos(i / 2));
+  const way = { t: 'primary_link', _pins: [{ s: 61, node: {} }] };
+  const smooth = fairLink({ y, n: y.length, ds: 2 }, way).y;
+  for (const i of [0, 30, 31, 80]) assert.equal(smooth[i], y[i]);
+  assert.ok(Math.abs(smooth[50] - smooth[56]) < Math.abs(y[50] - y[56]) / 2);
 });

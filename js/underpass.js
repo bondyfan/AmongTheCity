@@ -33,6 +33,7 @@
 
 import { CHUNK } from './config.js';
 import { polylineLength, roadGradeY } from './geo.js';
+import { invalidateBridgeFit } from './corridorlevel.js';
 import { indexPortalApproach } from './railportal.js';
 import { rebuildChains } from './dipchain.js';
 
@@ -122,7 +123,12 @@ export function deckNodeLevel(w, end, terrain) {
   }
   return near !== null ? near : sw > 0 ? sy / sw : null;
 }
+function sameLinks(a, b) {
+  return a?.length === b?.length && (!a || a.every((v, i) =>
+    v.road === b[i].road && v.at === b[i].at && v.d === b[i].d));
+}
 function deckNodes(city, w) {
+  const previous0 = w._apN0, previous1 = w._apN1;
   // (from scratch every time: a structure that grew since is measured whole;
   // a lone deck's own chain, made when its profile was first asked for, is
   // made again from what is known now)
@@ -168,6 +174,7 @@ function deckNodes(city, w) {
   }
   w._bridgeProfile = null;
   if (w._chain) w._chain.profile = null;
+  if (!sameLinks(previous0, w._apN0) || !sameLinks(previous1, w._apN1)) invalidateBridgeFit(w);
 }
 
 // The road approaches of every bridge member reachable from node (x, z) by

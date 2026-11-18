@@ -308,7 +308,7 @@ export function vergeFacesInto(sink, f, q, per, ys, hw, terrain, entries, shaped
 }
 
 // ---- a track's shoulders, and the bed between two tracks ----------------------------
-const INFILL_MIN = 2.8, INFILL_MAX = 6.5;     // m between track centres: one bed
+const INFILL_MIN = 2.8, INFILL_MAX = 8;     // m between track centres: one bed
 /**
  * The other heavy-rail track beside (x, z) on the side (nx, nz) whose bed
  * this one shares: parallel within ~18 deg, its centre INFILL_MIN to INFILL_MAX

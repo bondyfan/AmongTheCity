@@ -207,21 +207,21 @@ test('a verge face runs down at 1:1.5 to the ground, and not at all onto a sibli
   assert.equal(onTwinSide, 0, `${onTwinSide} face quads stand on the twin deck`);
 });
 
-test('two tracks of one bed share their ballast: no inner shoulders between them', () => {
+for (const spacing of [4.5, 7.4]) test(`two tracks ${spacing} m apart share a continuous ballast bed`, () => {
   const t = terrainOf(() => 220);
   const a = { t: 'rail', p: [[200, 600], [400, 600]] };
-  const b = { t: 'rail', p: [[200, 604.5], [400, 604.5]] };
+  const b = { t: 'rail', p: [[200, 600 + spacing], [400, 600 + spacing]] };
   const city = cityWith([], [a, b]);
   const { q, per } = stations(a.p);
   const g = q.map((_, i) => railGradeY(a, i * 4, t));
   const sk = sinkStub();
   B.railShouldersInto(sk, a, q, per, g, t, B.edgeNear(city, a), null, [0.4, 0.4, 0.4]);
-  // toward b (z > 600) the bed runs flat to the midline at 602.25
+  // On the inside the bed runs flat to the midline, even at a widening turnout.
   let worst = 0, reach = 0;
   for (const qd of sk.quads) for (const [, y, z] of qd) {
     if (z > 601.3) { worst = Math.max(worst, Math.abs(y - (g[0] + LAYER_Y.rail - 0.025))); reach = Math.max(reach, z); }
   }
-  assert.ok(Math.abs(reach - 602.25) < 0.01, `the infill reaches ${reach.toFixed(2)}, not the midline`);
+  assert.ok(Math.abs(reach - (600 + spacing / 2)) < 0.01, `the infill reaches ${reach.toFixed(2)}, not the midline`);
   assert.ok(worst < 0.01, `the infill between level tracks is ${worst.toFixed(2)} m off their bed`);
   // and the feet on it
   const w = worldOf(t, city);

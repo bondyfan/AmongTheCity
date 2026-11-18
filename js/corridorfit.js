@@ -214,3 +214,32 @@ export function applyPins(y, ds, pins, reachOf, merge = 4) {
   }
   return y;
 }
+
+// Between two real attachment points a slip follows a continuous vertical
+// alignment. Fair the surveyed profile over a 50 m neighbourhood while
+// keeping the junction samples and no more than 1.2 m of additional cut/fill.
+export function fairLink(profile, way) {
+  if (!profile || way.br || way._dipChain || !way.t.endsWith('_link')) return profile;
+  const n = profile.n, ds = profile.ds, last = n - 1, raw = profile.y;
+  const anchors = new Set([0, last]);
+  for (const { s, node } of way._pins ?? []) {
+    if (node._ovl) continue;
+    const i = Math.max(0, Math.min(last, Math.floor(s / ds)));
+    anchors.add(i); anchors.add(Math.min(last, i + 1));
+  }
+  const sorted = [...anchors].sort((a, b) => a - b);
+  const y = Float32Array.from(raw), sums = new Float64Array(n + 1);
+  const radius = Math.max(1, Math.round(25 / ds));
+  for (let pass = 0; pass < 3; pass++) {
+    for (let i = 0; i < n; i++) sums[i + 1] = sums[i] + y[i];
+    for (let j = 1; j < sorted.length; j++) {
+      const a = sorted[j - 1], b = sorted[j];
+      for (let i = a + 1; i < b; i++) {
+        const r = Math.min(radius, i - a, b - i);
+        const mean = (sums[i + r + 1] - sums[i - r]) / (2 * r + 1);
+        y[i] = Math.max(raw[i] - 1.2, Math.min(raw[i] + 1.2, mean));
+      }
+    }
+  }
+  return { ...profile, y };
+}

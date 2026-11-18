@@ -23,9 +23,9 @@ import { applyDip, underCap } from './dipchain.js';
 import { corridorLevel, sameCorridor, inScope as corridorScope, outranks, surveyOf } from './corridorlevel.js';
 import { fitSlip } from './slipgrade.js';
 import { portalLevel } from './railportal.js';
-import { applyPins } from './corridorfit.js';
+import { fairLink, applyPins } from './corridorfit.js';
 import { parallel as corridorParallel } from './corridorgeom.js';
-import { indexTileCrossings } from './levelxing.js';
+import { fitCrossingPanels, indexTileCrossings } from './levelxing.js';
 
 // how far ahead of the focus a tile starts loading. View streams ±600 m, so
 // 2600 m of headroom means even 130 km/h driving gives a fetch ~55 s before
@@ -526,10 +526,9 @@ function levelWay(way, terrain, pinList, noDip = false) {
     // A track crossing at grade can lie on an approach to a separate rail
     // bridge. The dip shapes that approach, but its outer taper must still
     // pass through the level of the track the road physically intersects.
-    const profile = { ds: base.ds, n: y.length, y };
-    applyPins(y, base.ds, crossings.map(({ s, node }) => ({
-      s, d: junctionY(node, terrain) - sampleProfile(profile, s),
-    })), (d) => Math.max(PIN_TAPER, Math.abs(d) / BRIDGE_GRADE));
+    const panels = crossings.map(({ s, node }) => ({ s, y: junctionY(node, terrain) }));
+    fitCrossingPanels(y, base.ds, panels);
+    return { ...base, y, crossingStations: panels.map(p => p.s), ready: base.ready && ok };
   }
   return { ...base, y, ready: base.ready && ok };
 }
@@ -560,13 +559,22 @@ function pinCorridor(way, cor, pinList, terrain) {
   applyPins(y, cor.ds, pins, (d) => Math.max(PIN_TAPER, Math.abs(d) / 0.03));
   return { ...cor, y: Float32Array.from(y), ready };
 }
+const _fairLinks = new WeakMap();
 function levelWayBase(way, terrain, pinList) {
   // A way of a CORRIDOR (heavy rail, the main road classes) reads its
   // corridor's one line, and only a higher corridor meeting it may bend it
   // (js/corridorlevel.js). The pins are the residual against what that
   // higher way finally lies at; everything else it meets adapts to it.
   const cor = _streets && corridorScope(way) ? corridorLevel(way, terrain, _streets, featStamp()) : null;
-  if (cor) return pinList ? pinCorridor(way, cor, pinList, terrain) : cor;
+  if (cor) {
+    const profile = pinList ? pinCorridor(way, cor, pinList, terrain) : cor;
+    if (!way.t.endsWith('_link') || way.br || way._dipChain) return profile;
+    const cached = _fairLinks.get(profile);
+    if (cached && cached.pins === way._pins && cached.n === way._pins?.length) return cached.value;
+    const value = fairLink(profile, way);
+    _fairLinks.set(profile, { pins: way._pins, n: way._pins?.length, value });
+    return value;
+  }
   const rc = way._raw;
   if (!pinList && rc && rc.terrain === terrain
     && (rc.ready || rc.loads === (terrain._loads ?? 0))) return rc;
@@ -2201,7 +2209,7 @@ export function junctionDeckY(node, x, z, terrain) {
       }
     }
   }
-  let best = Infinity, gy = null;
+  let best = Infinity, gy = null, onCrossing = false;
   for (const g of segs) {
     const dx = g.bx - g.ax, dz = g.bz - g.az;
     const L2 = dx * dx + dz * dz || 1e-9;
@@ -2213,8 +2221,13 @@ export function junctionDeckY(node, x, z, terrain) {
       best = d2;
       const s2 = Math.max(0, g.s0 + Math.hypot(px - g.ax, pz - g.az));
       gy = g.r.br ? bridgeDeckHeight(g.r, s2, terrain) : roadGradeY(g.r, s2, terrain);
+      onCrossing = g.r._prof?.crossingStations?.some(s => Math.abs(s - s2) < 3.5);
     }
   }
+  // The rail sets the elevation of a crossing panel even when an adjacent
+  // surveyed embankment is higher. The visible pad and its wheel surface
+  // both call this function, including in a mesh worker.
+  if (onCrossing && gy != null) return gy;
   // the terrain guard, sampling a small neighbourhood like the road cut does
   let hi = terrain.heightAt(x, z);
   for (const [ox, oz] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) {

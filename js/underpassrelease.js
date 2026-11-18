@@ -3,6 +3,7 @@
 // writes the links this undoes (stitchStructures, linkEnd) and owns the deck
 // cache and the abutment ledger it reads.
 
+import { invalidateBridgeFit } from './corridorlevel.js';
 import { forgetPortal } from './railportal.js';
 import { polylineLength } from './geo.js';
 import { deckCache, abutLedger, linkEnd, chainAcross, deckNodes } from './underpass.js';
@@ -74,6 +75,7 @@ export function* releaseStructures(city, gone, keys) {
       }
     }
     if ((w._apN0 ?? []).some((l) => gone.has(l.road)) || (w._apN1 ?? []).some((l) => gone.has(l.road))) {
+      invalidateBridgeFit(w);
       delete w._apN0; delete w._apN1; renode.push(w); hit = true;
     }
     if (w._pins?.some((p) => p.node.arms.some((a) => gone.has(a.r)))) {

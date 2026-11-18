@@ -108,3 +108,31 @@ export function* indexTileCrossings(city, roads, rails, keys) {
   yield* indexCrossingsSteps(roads, nearbyRails);
   yield* indexCrossingsSteps(oldRoads, rails);
 }
+
+// The rubber/asphalt panels cover both rails, with one continuous platform
+// across adjacent tracks. A point pin alone can make a bump between two
+// centre lines, even if its height at each individual centre is exact.
+export function fitCrossingPanels(y, ds, pins) {
+  const ordered = [...pins].sort((a, b) => a.s - b.s);
+  const near = 3.5, taper = 12;
+  let first = 0;
+  for (let last = 0; last < ordered.length; last++) {
+    if (last + 1 < ordered.length && ordered[last + 1].s - ordered[last].s <= 16) continue;
+    const a = ordered[first], b = ordered[last];
+    let rail = first;
+    const lo = Math.max(0, Math.ceil((a.s - near - taper) / ds));
+    const hi = Math.min(y.length - 1, Math.floor((b.s + near + taper) / ds));
+    for (let i = lo; i <= hi; i++) {
+      const s = i * ds;
+      while (rail < last && ordered[rail + 1].s < s) rail++;
+      const u = ordered[rail], v = ordered[Math.min(rail + 1, last)];
+      const t = Math.max(0, Math.min(1, (s - u.s) / (v.s - u.s || 1)));
+      const top = u.y + (v.y - u.y) * t;
+      const outside = Math.max(a.s - s, s - b.s) - near;
+      const blend = Math.max(0, Math.min(1, outside / taper));
+      const weight = 1 - blend * blend * (3 - 2 * blend);
+      y[i] += (top - y[i]) * weight;
+    }
+    first = last + 1;
+  }
+}

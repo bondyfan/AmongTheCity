@@ -166,11 +166,39 @@ function cross(ax, az, bx, bz, cx, cz, dx, dz) {
 
 // ---- the corridor of one way: its axis, members and the fitted line -----------
 const _core = new WeakMap();
+const _bridgeFits = new WeakMap();
+
+function forgetFit(info) {
+  for (const m of info.members) {
+    if (m.br) _bridgeFits.get(m)?.delete(info);
+    if (_out.get(m)?.info === info) {
+      _out.delete(m);
+      m._prof = undefined;
+    }
+  }
+  _core.delete(info.ax.self.w);
+}
+
+// A remote abutment can arrive after the local 450 m fitting window settled.
+// Affected connected structures are already re-indexed by underpass.js.
+export function invalidateBridgeFit(way) {
+  for (const info of [...(_bridgeFits.get(way) ?? [])]) forgetFit(info);
+  way._prof = undefined;
+}
+
 function core(w, terrain, city, fl) {
   let c = _core.get(w);
   const loads = terrain._loads ?? 0;
   if (c && c.terrain === terrain && c.p === w.p && (c.ready || (c.loads === loads && c.fl === fl))) return c.info;
+  if (c?.info && !c.info.rail) for (const m of c.info.members)
+    if (m.br) _bridgeFits.get(m)?.delete(c.info);
   const info = computeCore(w, terrain, city);
+  if (info && !info.rail) for (const m of info.members) {
+    if (!m.br) continue;
+    let fits = _bridgeFits.get(m);
+    if (!fits) _bridgeFits.set(m, fits = new Set());
+    fits.add(info);
+  }
   _core.set(w, { terrain, p: w.p, loads, fl, ready: !!info?.ready, info });
   return info;
 }
@@ -192,12 +220,31 @@ function computeCore(w, terrain, city) {
   const inner = Array.from({ length: nb }, () => null);
   const dmin = new Float64Array(nb).fill(Infinity), dmax = new Float64Array(nb).fill(-Infinity);
   const deck = new Float64Array(nb).fill(-Infinity);
+  const joints = new Float64Array(nb), jointCounts = new Uint16Array(nb);
+  // A fixed fitting window may see only one bank of a kilometre-long
+  // viaduct. Follow its indexed deck network to both real abutments.
+  // Read the surveyed approach, without requesting another road profile.
+  const bankAt = (direct, links) => {
+    let weighted = 0, weights = 0;
+    for (const link of direct ? [direct] : links ?? []) {
+      const p = pointOn(link.road, link.at);
+      if (!settled(terrain, p.x, p.z)) ready = false;
+      if (!measured(terrain, p.x, p.z)) continue;
+      const y = sv.heightAt(p.x, p.z), d = link.d ?? 0;
+      if (d < 1) return y;
+      weighted += y / d; weights += 1 / d;
+    }
+    return weights ? weighted / weights : NaN;
+  };
   const cut = new Float64Array(nb).fill(NaN), fill = new Float64Array(nb).fill(NaN), grade = new Float64Array(nb).fill(NaN);
   const top = Array.from({ length: nb }, () => null);
   for (const m of members) {
     const S = samplesOf(m, terrain, sv);
     if (!S.settled) ready = false;
     const P = rail ? RAIL : classOf(m);
+    const network = !rail && m.br && (m._apN0 || m._apN1);
+    const a = network ? bankAt(m._ap0, m._apN0) : NaN;
+    const bEnd = network ? bankAt(m._ap1, m._apN1) : NaN;
     let hint = -1;
     for (let i = 0; i < S.n; i++) {
       if (!Number.isFinite(S.h[3 * i])) continue;
@@ -206,7 +253,15 @@ function computeCore(w, terrain, city) {
       // (a projection is clamped to the axis: what lies past its ends is not on it)
       if (Math.abs(q.d) > K.lat || q.s <= 1e-6 || q.s >= ax.L - 1e-6) continue;
       const b = Math.min(nb - 1, Math.round(q.s / DS));
-      if (m.br) { const f = S.h[3 * i] + K.floorLift; if (f > deck[b]) deck[b] = f; continue; }
+      if (m.br) {
+        const f = S.h[3 * i] + K.floorLift;
+        if (f > deck[b]) deck[b] = f;
+        if (Number.isFinite(a) && Number.isFinite(bEnd)) {
+          joints[b] += a + (bEnd - a) * i / (S.n - 1);
+          jointCounts[b]++;
+        }
+        continue;
+      }
       (inner[b] ??= []).push(S.h[3 * i], S.h[3 * i + 1], S.h[3 * i + 2]);
       if (q.d - S.hw < dmin[b]) dmin[b] = q.d - S.hw;
       if (q.d + S.hw > dmax[b]) dmax[b] = q.d + S.hw;
@@ -234,7 +289,11 @@ function computeCore(w, terrain, city) {
   };
   for (let b = 0; b < nb; b++) {
     const v = inner[b];
-    if (!v) { free[b] = 1; continue; }
+    if (!v) {
+      free[b] = 1;
+      if (jointCounts[b]) T[b] = joints[b] / jointCounts[b];
+      continue;
+    }
     const A = axisPoint(ax, b * DS), nx = A.tz, nz = -A.tx;
     const med = quantile(v, 0.5);
     const side = [];
@@ -255,9 +314,15 @@ function computeCore(w, terrain, city) {
   }
   if (!fillGaps(T)) return null;              // nothing in the window stands on ground
   if (rail) { cut.fill(RAIL.cut); fill.fill(RAIL.fill); grade.fill(RAIL.grade); }
-  else { fillGaps(cut); fillGaps(fill); fillGaps(grade); }
+  else {
+    fillGaps(cut); fillGaps(fill);
+    if (!fillGaps(grade)) grade.fill(classOf(w).grade);
+  }
   gaussBlur(T, 2);                            // 4 m: the bins are sparse
-  const Y = fitProfile(T, free, cut, fill, grade, DS, K);
+  // On a shared railway terrace the wall cuts across the 20 m DEM filter.
+  // Carry the established track alignment farther across that survey edge.
+  const raisedTrackBed = rail && wallSeg.length && members.some(m => m !== w && parallel(w, m));
+  const Y = fitProfile(T, free, cut, fill, grade, DS, raisedTrackBed ? { ...K, final: 64 } : K);
 
   // ---- floors and ceilings ----
   const floors = [], ceilings = [];
