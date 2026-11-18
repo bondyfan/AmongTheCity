@@ -12,7 +12,8 @@
 // test. WORKER SAFE (meshes.js runs in the mesh worker): geometry only.
 
 import * as THREE from 'three';
-import { quaySnap, hardEdgeDist, hardEdgeSide, SNAP } from './quayedge.js';
+import { quaySnap, quayGroundY, hardEdgeDist, hardEdgeSide, SNAP } from './quayedge.js';
+import { FLIGHTS, inStairBox } from './quayflights.js';
 
 const FINE = 2;            // m: longest edge within reach of a hard edge
 const DEPTH = 8;           // splits at most (a 12 m edge needs three)
@@ -121,11 +122,37 @@ export function quayRefine(geo) {
  * plain 4 m grid that was not refined.
  */
 export function quayLiftArray(a, terrain, ox = 0, oz = 0, reach = SNAP) {
+  let nearStairs = false;
   for (let i = 0; i < a.length; i += 3) {
     const x = a[i] + ox, z = a[i + 2] + oz;
+    if (!nearStairs && inStairBox(x, z)) nearStairs = true;
     const q = quaySnap(terrain, x, z, reach);
     if (q) { a[i] = q[0] - ox; a[i + 1] += q[1]; a[i + 2] = q[2] - oz; }
-    else a[i + 1] += terrain.heightAt(x, z);
+    else a[i + 1] += quayGroundY(terrain, x, z);
+  }
+  return nearStairs;
+}
+
+// At a landing corner two different edges meet. Even after snapping, an
+// individual triangle can run from the quay up to a vertex on the street
+// side of the wall. The photograph and paving run up to its foot; only the
+// stone stair mesh should draw the face above them.
+export function quayLiftTriangles(a, terrain) {
+  if (!quayLiftArray(a, terrain)) return;
+  for (let i = 0; i < a.length; i += 9) {
+    const x = (a[i] + a[i + 3] + a[i + 6]) / 3, z = (a[i + 2] + a[i + 5] + a[i + 8]) / 3;
+    if (!inStairBox(x, z)) continue;
+    const low = Math.min(a[i + 1], a[i + 4], a[i + 7]);
+    const high = Math.max(a[i + 1], a[i + 4], a[i + 7]);
+    if (high - low < 0.3) continue;
+    for (const F of FLIGHTS) {
+      if (!F.wall || Math.abs(low - F.y0) > 0.2 || x < F.x0 - FINE || x > F.x1 + FINE ||
+          z < F.z0 - FINE || z > F.z1 + FINE) continue;
+      const dx = x - F.a[0], dz = z - F.a[1], s = dx * F.ux + dz * F.uz, d = dx * F.nx + dz * F.nz;
+      if (s < -F.e0 - FINE || s > F.L + F.e1 + FINE || d < -F.l - FINE || d > F.r + FINE) continue;
+      a[i + 1] = a[i + 4] = a[i + 7] = low;
+      break;
+    }
   }
 }
 
@@ -133,7 +160,8 @@ export function quayLiftArray(a, terrain, ox = 0, oz = 0, reach = SNAP) {
 export function quayDrape(geo, terrain) {
   if (!terrain || !geo) return geo;
   const p = geo.attributes.position;
-  quayLiftArray(p.array, terrain);
+  if (geo.index) quayLiftArray(p.array, terrain);
+  else quayLiftTriangles(p.array, terrain);
   p.needsUpdate = true;
   geo.computeVertexNormals();
   return geo;

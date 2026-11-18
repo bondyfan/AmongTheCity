@@ -150,8 +150,9 @@ export const NAPLAVKA_BEFORE = [
 // The paved apron in front of the Na Františku flight lies at the
 // lower-quay level. The dig stamp only cuts high survey samples; a low
 // sample near the bank otherwise pulls the edge of this square into a pit.
-export const FRANTISKU_LANDING = way('Na Františku lower landing', 'raise', [[-95865.4, -6750.2], [-95885, -6740]],
-    [FLOOR_C, FLOOR_C], 0, 8, { fl: 0.3, fr: 4, e0: 1, e1: 1 });
+export const FRANTISKU_LANDING = way('Na Františku lower landing', 'raise',
+  [[-95842.3, -6760.4], [-95865.4, -6750.2], [-95885, -6740], [-95918.3, -6720.5]],
+  [FLOOR_C, FLOOR_C], 0, 12, { fl: 0.3, fr: 4, e0: 0.1, e1: 0.1 });
 
 // Laid on the floor after the quay is dug.
 export const NAPLAVKA_AFTER = [
@@ -180,8 +181,8 @@ export const NAPLAVKA_AFTER = [
   // the pairs climbing the wall's face from one landing, both ways: either
   // side of Palackého most and by Jiráskův most (a storey and a half: the
   // street there is the bridgehead, terrainstamps.js RASINOVO)
-  stair('Palackého stairs south', [-96177.1, -4671.9], [-96176.6, -4657.6], FLOOR_A - 0.26, 194.8, 'L'),
-  stair('Palackého stairs north', [-96177.1, -4671.9], [-96177.7, -4686.8], FLOOR_A - 0.26, 194.8, 'R'),
+  stair('Palackého stairs south', [-96177.1, -4671.9], [-96176.6, -4657.6], FLOOR_A, 194.8, 'L'),
+  stair('Palackého stairs north', [-96177.1, -4671.9], [-96177.7, -4686.8], FLOOR_A, 194.8, 'R'),
   stair('Jiráskův stairs south', [-96180.3, -4769.7], [-96179.7, -4753], FLOOR_A, 194.6, 'L'),
   stair('Jiráskův stairs north', [-96180.3, -4769.7], [-96180.8, -4787.5], FLOOR_A, 194.3, 'R'),
   stair('Výtoň stairs south', [-96072.6, -3780.4], [-96073.5, -3787.3], FLOOR_A, 191.9, 'L'),

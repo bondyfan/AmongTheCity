@@ -125,6 +125,10 @@ function flightInto(sink, F, terrain) {
   }
   // End the flat landing in dressed stone wherever its stamped level ends
   // above the quay. The side walls alone used to leave the end open.
+  for (const [start, end, y] of [[-F.e0, 0, y0], [F.L, F.L + F.e1, F.y1]]) {
+    quad(sink, P(start, -l, y + 0.01), P(end, -l, y + 0.01),
+      P(end, r, y + 0.01), P(start, r, y + 0.01), 0, 1, 0, TREAD);
+  }
   for (const [s, sg, y] of [[-F.e0, -1, y0], [F.L + F.e1, 1, F.y1]]) {
     const count = Math.ceil((l + r) / 0.6);
     for (let j = 0; j < count; j++) {

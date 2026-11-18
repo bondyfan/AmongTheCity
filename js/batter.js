@@ -122,10 +122,13 @@ export function groundUnder(x, z, g0, entries, terrain, shaped) {
       }
     }
   }
+  const floor2 = Math.min(maxFloor, minCap);
+  // A stamped lower quay is surveyed stone. A road or footway at another
+  // level must neither cut a trench through its paving nor raise a bank.
+  if ((g0 > minCap || g0 < floor2) && shaped?.(x, z)) return g0;
   let a = g0;
   if (a > minCap) a = minCap;
-  const floor2 = Math.min(maxFloor, minCap);
-  if (floor2 > -Infinity && a < floor2 && !shaped?.(x, z) && !(a < g0 - 1)) a = floor2;
+  if (floor2 > -Infinity && a < floor2 && !(a < g0 - 1)) a = floor2;
   return a;
 }
 

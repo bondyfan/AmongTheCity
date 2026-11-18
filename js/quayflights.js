@@ -79,11 +79,22 @@ export function quayStairY(x, z) {
   for (const F of FLIGHTS) {
     if (x < F.x0 || x > F.x1 || z < F.z0 || z > F.z1) continue;
     const { s, d } = local(F, x, z, _l);
-    if (s < 0 || s > F.L || d < -F.l || d > F.r) continue;
-    const y = walkLine(F, s);
+    if (s < -F.e0 || s > F.L + F.e1 || d < -F.l || d > F.r) continue;
+    const y = s < 0 ? F.y0 : walkLine(F, s);
     if (best === null || y > best) best = y;
   }
   return best;
+}
+
+/** Is the drawn stone of a wall-side stair or its landing above this point? */
+export function onWallFlight(x, z) {
+  if (!inStairBox(x, z)) return false;
+  for (const F of FLIGHTS) {
+    if (!F.wall || x < F.x0 || x > F.x1 || z < F.z0 || z > F.z1) continue;
+    const { s, d } = local(F, x, z, _l);
+    if (s >= -F.e0 && s <= F.L + F.e1 && d >= -F.l && d <= F.r) return true;
+  }
+  return false;
 }
 
 // The OSM `steps` way each flight was built along (js/naplavky.js: every

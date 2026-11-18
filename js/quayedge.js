@@ -7,6 +7,7 @@
 // WORKER SAFE: plain arithmetic over the stamps.
 
 import { STAMP_REGIONS, CELL, regionList, applyStamp } from './terrainstamps.js';
+import { onWallFlight } from './quayflights.js';
 
 // ---- the drawn ground at a hard edge ------------------------------------------
 // The ground is drawn as triangles 4 to 6 m across (meshes.js terrainQuad, the
@@ -76,6 +77,17 @@ export function hardEdgeSide(x, z, reach = 8) {
   return nearestHard(x, z, reach) ? _hard.d * _hard.s : NaN;
 }
 const _snap = [0, 0, 0];
+// The stone mesh carries the treads and both landings. On their river side
+// the underlying photograph and paving must follow the lower quay. Lifting
+// one ground vertex onto the stone and its neighbour onto the quay draws a
+// textured triangle through the retaining wall at a landing corner.
+export function quayGroundY(terrain, x, z) {
+  const y = terrain.heightAt(x, z);
+  if (!onWallFlight(x, z)) return y;
+  const near = regionList(STAMP_REGIONS[1], x, z);
+  if (near) for (const st of near) if (st.quayFloor) return applyStamp(st, x, z, y);
+  return y;
+}
 /**
  * Where the ground vertex at (x, z) is drawn: null to leave it, or a shared
  * [x, y, z] (overwritten by the next call) on the nearest snapping hard edge,
@@ -84,8 +96,8 @@ const _snap = [0, 0, 0];
 export function quaySnap(terrain, x, z, reach = SNAP) {
   if (!nearestHard(x, z, reach)) return null;
   const { x: hx, z: hz, nx, nz, s } = _hard;
-  const own = terrain.heightAt(hx + nx * 0.05 * s, hz + nz * 0.05 * s);
-  const other = terrain.heightAt(hx - nx * 0.05 * s, hz - nz * 0.05 * s);
+  const own = quayGroundY(terrain, hx + nx * 0.05 * s, hz + nz * 0.05 * s);
+  const other = quayGroundY(terrain, hx - nx * 0.05 * s, hz - nz * 0.05 * s);
   // (no step worth the name: a raise against a higher street did nothing here)
   if (Math.abs(own - other) < 0.3) return null;
   // Both sides' vertices go to a line BACK_OFF behind the face, on the high

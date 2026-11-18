@@ -72,7 +72,7 @@ import { treePitsInto } from './treepits.js';
 import { riverLevelAt, isPooled, isCulvert } from './riverpools.js';
 import { quayPiece, balustradeInto, embankmentNear, QUAY_MIN } from './quaywall.js';
 import { refineNearWeirs, paintFlow, weirSillsInto } from './weirs.js';
-import { quaySnap, GRID_SNAP, stampShaped } from './quayedge.js';
+import { quaySnap, quayGroundY, GRID_SNAP, stampShaped } from './quayedge.js';
 import { roadSegs } from './roadsegments.js';
 import { roadCorr, railCorr, floorOf, vergeFaced, kerbedAt, vergeFacesInto, railShouldersInto, edgeNear } from './batter.js';
 import { vysehradInto } from './vysehrad.js';
@@ -80,7 +80,7 @@ import { quayStairsInto } from './quaystairs.js';
 import { balustradeAt, rasinovoParapet } from './quaybalustrade.js';
 import { isQuayStairWay } from './quayflights.js';
 import { forecourtFrame, islandsOf } from './forecourt.js';
-import { quayRefine, quayRefineArray, quayLiftArray, quayDrape } from './quayground.js';
+import { quayRefine, quayRefineArray, quayLiftTriangles, quayDrape } from './quayground.js';
 import { mwPainted, motorwayPaint } from './mwpaint.js';
 import { cwOf, osmBarrierReplaced, mwPierStations, BRIDGE_KERB as MW_BRIDGE_KERB, BRIDGE_IN as MW_BRIDGE_IN } from './mwplan.js';
 import { motorwayDressInto } from './mwdress.js';
@@ -692,7 +692,7 @@ function terrainQuad(x0, z0, terrain, hex, y = 0, layer = SURF.grass) {
       // own side's height, instead of as a wedge beside it: quayedge.js)
       const q = terrain ? quaySnap(terrain, x, z, GRID_SNAP) : null;
       if (q) pos.push(q[0], y + q[1], q[2]);
-      else pos.push(x, y + (terrain ? terrain.heightAt(x, z) : 0), z);
+      else pos.push(x, y + (terrain ? quayGroundY(terrain, x, z) : 0), z);
     }
   }
   for (let j = 0; j < SEG; j++) {
@@ -1182,8 +1182,9 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
     // apply: ceiling first, and the embankment floor is itself CEILINGED by
     // every other road's cap — ground rises into a bank only where no lower
     // carriageway needs the space
-    if (a[i + 1] > minCap) a[i + 1] = minCap;
     const floor2 = Math.min(maxFloor, minCap);
+    if ((a[i + 1] > minCap || a[i + 1] < floor2) && stampShaped(terrain, x, z)) continue;
+    if (a[i + 1] > minCap) a[i + 1] = minCap;
     // (…except onto ground a stamp shaped: the quay floor at the foot of a
     // Prague embankment is not a hollow under the street above it, and the
     // street's embankment body stood up out of it as a row of sails along
@@ -1191,7 +1192,7 @@ function* clampUnderRoadsGen(geo, drv, terrain, offX = 0, offZ = 0) {
     // city.heightAt offers no bank there either. And a vertex drawn metres
     // under the ground at its x/z is the foot of a quay wall that
     // js/quayground.js put on the wall's line, a hair behind it.)
-    if (floor2 > -Infinity && a[i + 1] < floor2 && !stampShaped(terrain, x, z)
+    if (floor2 > -Infinity && a[i + 1] < floor2
       && !(a[i + 1] < terrain.heightAt(x, z) - 1)) a[i + 1] = floor2;
   }
   geo.attributes.position.needsUpdate = true;
@@ -4314,7 +4315,7 @@ export function carveOrtho(mesh, x0, z0, x1, z1, holes, terrain = null) {
     ng.setAttribute('position', new THREE.BufferAttribute(p, 3));
     ng.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((p.length / 3) * 2), 2));
     nonIdx.dispose();
-    quayLiftArray(p, terrain);
+    quayLiftTriangles(p, terrain);
   }
   const np = ng.attributes.position, nuv = ng.attributes.uv;
   for (let i = 0; i < np.count; i++) {

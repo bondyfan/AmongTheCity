@@ -81,7 +81,7 @@ export function makeStamp(def) {
     if (prof[i + 1][0] - prof[i][0] < 0.01 && Math.abs(prof[i + 1][2] - prof[i][2]) > 0.5) hard.push((prof[i][0] + prof[i + 1][0]) / 2);
   }
   const st = { mode: def.mode, prof, reach, x0, z0, x1, z1, segN, sx, sz, ex, ez, len, nx, nz, y0, y1,
-    hard: def.snap ? hard : [],
+    hard: def.snap ? hard : [], quayFloor: NAPLAVKY.includes(def),
     closed, open: !closed && def.capped === false,
     holes: (def.holes ?? []).map(prepHole), grid: null, gw: 0, gh: 0 };
   // ---- the bucket grid: per CELL square, the segments within reach of it ----

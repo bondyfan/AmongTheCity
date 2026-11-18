@@ -182,6 +182,36 @@ test('the approach at Na Františku has a flat landing and no stub up the retain
   assert.ok(Math.abs(t.heightAt(x, z) - f.y0) < 0.02);
 });
 
+test('a walker can cross the whole upper landing and turn into the street', () => {
+  const f = FLIGHTS.find(f => f.name === 'Palackého stairs south');
+  for (let s = f.L; s <= f.L + f.e1; s += 0.05) {
+    for (const d of [-f.l + 0.03, 0, f.r - 0.03]) {
+      const [x, z] = at(f, s, d);
+      assert.equal(quayStairY(x, z), f.y1);
+      assert.equal(quayStairsCollide({x, z}, 0.38, {interior: true, yLo: f.y1 + 0.49}), false);
+    }
+  }
+});
+
+test('ground and aerial photo stay below the stone landing at the Dvořákovo quay corner', async () => {
+  const { quayGroundY } = await import('../js/quayedge.js');
+  const { quayLiftTriangles } = await import('../js/quayground.js');
+  const t = flatPrague();
+  const x = -95647.5151, z = -6819.63929; // top vertex of the two photographed spikes
+  assert.equal(quayStairY(x, z), 188.5);
+  assert.equal(quayGroundY(t, x, z), 186);
+  // After snapping, this triangle still had one corner on the elevated street
+  // and two at quay level; the stone end wall already fills the vertical face.
+  const photo = new Float32Array([-95646.64, 2.24, -6819.06, -95645.58, 0, -6819.24,
+    -95647.5, 0, -6819.53]);
+  quayLiftTriangles(photo, { heightAt: () => 186 });
+  assert.deepEqual([photo[1], photo[4], photo[7]], [186, 186, 186]);
+  const low = flatPrague(182);
+  for (const [x, z] of [[-95882.4,-6746.6], [-95895.4,-6742.1], [-95865.5,-6754.8]]) {
+    assert.ok(Math.abs(low.heightAt(x, z) - 186) < 0.01);
+  }
+});
+
 test('the pedestal belongs to the middle of a balustrade joint', async () => {
   const { balustradeInto } = await import('../js/quaywall.js');
   const { rasinovoParapet } = await import('../js/quaybalustrade.js');
