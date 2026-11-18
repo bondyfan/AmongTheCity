@@ -656,6 +656,7 @@ export function updateSky(sky, tod, camera, scene, groundY = camera.position.y -
   _ld.set(sky.lightDir.x, Math.max(0.12, sky.lightDir.y), sky.lightDir.z).normalize();
   if (sky._held.lengthSq() < 0.5 || sky._held.dot(_ld) < SHADOW_STEP_COS) sky._held.copy(_ld);
   const ld = sky._held;
+  scene.userData.shadowSlope = Math.hypot(ld.x, ld.z) / ld.y;
   const half = shadowHalf(sun.shadow.mapSize.x);
   const sc = sun.shadow.camera;
   if (sky._half !== half) {

@@ -132,28 +132,50 @@ export function crestFall(x, g, R) {
  * down (rising away). C1 everywhere (smax / smin over `k`).
  */
 export function applyFloors(y, ds, floors, ceilings, k = 1) {
-  const n = y.length;
-  if (floors.length) {
-    for (let i = 0; i < n; i++) {
-      const s = i * ds;
-      let E = -Infinity;
-      for (const f of floors) {
-        const e = f.y - crestFall(Math.abs(s - f.s), f.g, f.R);
-        if (e > E) E = e;
+  for (const [constraints, sign] of [[floors, 1], [ceilings, -1]]) {
+    if (!constraints.length) continue;
+    // Short lists (a typical crossing) are cheaper to evaluate directly.
+    if (constraints.length <= 8) {
+      for (let i = 0; i < y.length; i++) {
+        let level = -Infinity;
+        for (const c of constraints) level = Math.max(level, sign * c.y - crestFall(Math.abs(i * ds - c.s), c.g, c.R));
+        if (level > sign * y[i] - k) y[i] = sign * smax(sign * y[i], level, k);
       }
-      if (E > y[i] - k) y[i] = smax(y[i], E, k);
+      continue;
     }
-  }
-  if (ceilings.length) {
-    for (let i = 0; i < n; i++) {
-      const s = i * ds;
-      let E = Infinity;
-      for (const c of ceilings) {
-        const e = c.y + crestFall(Math.abs(s - c.s), c.g, c.R);
-        if (e < E) E = e;
+    // Beyond its circular crest each constraint is a straight line. For each
+    // grade/radius pair all left tails and all right tails are parallel, so
+    // only their highest intercept matters. Visit just the nearby crests.
+    const groups = new Map();
+    for (const c of constraints) {
+      const key = c.g + ',' + c.R;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    const envelope = new Float64Array(y.length).fill(-Infinity);
+    for (const group of groups.values()) {
+      group.sort((a, b) => a.s - b.s);
+      const { g, R } = group[0], reach = g * R, offset = reach * g / 2;
+      const suffix = new Float64Array(group.length + 1).fill(-Infinity);
+      for (let j = group.length - 1; j >= 0; j--) suffix[j] = Math.max(suffix[j + 1], sign * group[j].y - g * group[j].s);
+      let lo = 0, hi = 0, left = -Infinity;
+      for (let i = 0; i < y.length; i++) {
+        const s = i * ds;
+        while (lo < group.length && group[lo].s < s - reach) {
+          left = Math.max(left, sign * group[lo].y + g * group[lo].s);
+          lo++;
+        }
+        while (hi < group.length && group[hi].s <= s + reach) hi++;
+        let level = Math.max(left - s * g, suffix[hi] + s * g) + offset;
+        for (let j = lo; j < hi; j++) {
+          const d = s - group[j].s;
+          level = Math.max(level, sign * group[j].y - d * d / (2 * R));
+        }
+        envelope[i] = Math.max(envelope[i], level);
       }
-      if (E < y[i] + k) y[i] = smin(y[i], E, k);
     }
+    for (let i = 0; i < y.length; i++)
+      if (envelope[i] > sign * y[i] - k) y[i] = sign * smax(sign * y[i], envelope[i], k);
   }
   return y;
 }
@@ -174,23 +196,21 @@ export function applyPins(y, ds, pins, reachOf, merge = 4) {
     if (q && p.s - q.s < merge) { q.d = (q.d * q.k + p.d) / (q.k + 1); q.s = (q.s * q.k + p.s) / (q.k + 1); q.k++; }
     else M.push({ s: p.s, d: p.d, k: 1 });
   }
-  const off = new Float64Array(n);
+  let a = -1;
   const ss = (t) => t * t * (3 - 2 * t);
   for (let i = 0; i < n; i++) {
     const s = i * ds;
     // the pins either side of this sample
-    let a = -1;
-    for (let k = 0; k < M.length; k++) if (M[k].s <= s) a = k; else break;
+    while (a + 1 < M.length && M[a + 1].s <= s) a++;
     const A = a >= 0 ? M[a] : null, B = a + 1 < M.length ? M[a + 1] : null;
     if (A && B && B.s - A.s <= reachOf(A.d) + reachOf(B.d)) {
-      off[i] = A.d + (B.d - A.d) * ss((s - A.s) / (B.s - A.s || 1));
+      y[i] += A.d + (B.d - A.d) * ss((s - A.s) / (B.s - A.s || 1));
       continue;
     }
     let v = 0;
     if (A) { const r = reachOf(A.d), x = s - A.s; if (x < r) v += A.d * (0.5 + 0.5 * Math.cos(Math.PI * x / r)); }
     if (B) { const r = reachOf(B.d), x = B.s - s; if (x < r) v += B.d * (0.5 + 0.5 * Math.cos(Math.PI * x / r)); }
-    off[i] = v;
+    y[i] += v;
   }
-  for (let i = 0; i < n; i++) y[i] += off[i];
   return y;
 }

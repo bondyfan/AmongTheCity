@@ -6,6 +6,7 @@
 // Worker safe: no three, no DOM. Plain functions of js/d11.js's constants, the
 // chunk key and the terrain, so every thread and client draws the same thing.
 
+import { roadsideLevel } from './mwroadside.js';
 import { SURF } from './surfaces.js';
 import { ECODUCTS, d11Line } from './d11.js';
 
@@ -351,7 +352,9 @@ function noiseInto(sink, cell, key, terrain) {
   sink.at(SURF.concrete);
   for (let i = 0; i < P.length; i += 6) {
     const ax = P[i], az = P[i + 1], bx = P[i + 2], bz = P[i + 3], nx = P[i + 4], nz = P[i + 5];
-    const ga = terrain.heightAt(ax, az) - 0.3, gb = terrain.heightAt(bx, bz) - 0.3;
+    const len = Math.hypot(bx - ax, bz - az) || 1, alongX = (bx - ax) / len, alongZ = (bz - az) / len;
+    const ga = roadsideLevel(cell.roads, ax, az, alongX, alongZ, terrain) - 0.3;
+    const gb = roadsideLevel(cell.roads, bx, bz, alongX, alongZ, terrain) - 0.3;
     // a concrete plinth, then the absorbent panels, both faces
     for (const f of [1, -1]) {
       const ox = nx * 0.06 * f, oz = nz * 0.06 * f;

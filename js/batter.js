@@ -24,6 +24,7 @@
 //     tracks of one bed a ballast infill instead of two inner shoulders;
 //   · the feet (city.heightAt), which stand on exactly the ground drawn.
 
+import { roadSegs, segmentNear, nearestSeg } from './roadsegments.js';
 import { LAYER_Y, CHUNK } from './config.js';
 import { roadGradeY, railGradeY, streetOf } from './geo.js';
 
@@ -103,25 +104,22 @@ export function groundUnder(x, z, g0, entries, terrain, shaped) {
   for (let k = 0; k < entries.length; k++) {
     const e = entries[k], bb = e.bb, reach = e.hw + (e.flare ?? 0);
     if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
-    const p = e.r.p;
-    let along = 0;
-    for (let i = 0; i < p.length - 1; i++) {
-      const ax = p[i][0], az = p[i][1], dx = p[i + 1][0] - ax, dz = p[i + 1][1] - az;
-      const L2 = dx * dx + dz * dz || 1e-9, L = Math.sqrt(L2);
-      if (Math.min(ax, ax + dx) - reach > x || Math.max(ax, ax + dx) + reach < x
-        || Math.min(az, az + dz) - reach > z || Math.max(az, az + dz) + reach < z) { along += L; continue; }
-      let t = ((x - ax) * dx + (z - az) * dz) / L2;
-      t = t < 0 ? 0 : t > 1 ? 1 : t;
-      const d = Math.hypot(x - ax - dx * t, z - az - dz * t);
-      if (d < reach) {
-        const gy = gradeOf(e.r, along + L * t, terrain);
+    const segs = roadSegs(e.r);
+    for (let i = 0; i < segs.length; i += 10) {
+      if (!segmentNear(segs, i, x, z, reach)) continue;
+      const dx = segs[i + 2], dz = segs[i + 3], L = segs[i + 4];
+      const px = x - segs[i], pz = z - segs[i + 1];
+      const t = Math.max(0, Math.min(1, (px * dx + pz * dz) / (L * L || 1e-9)));
+      const ex = px - dx * t, ez = pz - dz * t, d2 = ex * ex + ez * ez;
+      if (d2 < reach * reach) {
+        const d = Math.sqrt(d2);
+        const gy = gradeOf(e.r, segs[i + 5] + L * t, terrain);
         if (gy !== null && gy !== undefined) {
           const cap = capOf(e, gy, d);
           if (cap < minCap) minCap = cap;
           if (e.flare) { const f = floorOf(e, gy, d); if (f > maxFloor) maxFloor = f; }
         }
       }
-      along += L;
     }
   }
   let a = g0;
@@ -191,19 +189,11 @@ export function edgeNear(city, f, bboxOfLine = bbOf) {
 
 // ---- the drivable deck at a point, of the nearest segment of a way -------------
 // (the same reading city.surfaceY makes: the nearest segment speaks for the way)
+const _deckNear = { d: Infinity, e: 1 };
 function deckOf(r, x, z, terrain, grow) {
-  const p = r.p, half = (r.w ?? 3) / 2 + grow;
-  let along = 0, bd = Infinity, bs = 0;
-  for (let i = 0; i < p.length - 1; i++) {
-    const ax = p[i][0], az = p[i][1], dx = p[i + 1][0] - ax, dz = p[i + 1][1] - az;
-    const L2 = dx * dx + dz * dz || 1e-9, L = Math.sqrt(L2);
-    let t = ((x - ax) * dx + (z - az) * dz) / L2;
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
-    const d = Math.hypot(x - ax - dx * t, z - az - dz * t);
-    if (d < bd) { bd = d; bs = along + L * t; }
-    along += L;
-  }
-  if (bd >= half) return null;
+  const half = (r.w ?? 3) / 2 + grow;
+  const bs = nearestSeg(r, x, z, half, _deckNear);
+  if (_deckNear.d >= half) return null;
   const gy = roadGradeY(r, bs, terrain);
   return gy === null || gy === undefined ? null : gy + LAYER_Y.road;
 }
@@ -235,9 +225,10 @@ export function faceRun(px, pz, nx, nz, Y, entries, terrain, shaped) {
   let pe = 0;
   let ph = Y - (groundUnder(px, pz, terrain.heightAt(px, pz), entries, terrain, shaped) - 0.02);
   if (ph <= 0) { _run.e = 0; _run.y = Y; _run.toe = Y; return _run; }
+  let G;
   for (const e of STEPS) {
     const x = px + nx * e, z = pz + nz * e;
-    const G = groundUnder(x, z, terrain.heightAt(x, z), entries, terrain, shaped);
+    G = groundUnder(x, z, terrain.heightAt(x, z), entries, terrain, shaped);
     const h = (Y - e / BATTER) - (G - 0.02);
     if (h <= 0) {
       const ef = pe + (e - pe) * (ph / (ph - h));
@@ -247,8 +238,7 @@ export function faceRun(px, pz, nx, nz, Y, entries, terrain, shaped) {
     pe = e; ph = h;
   }
   _run.e = FACE_MAX; _run.y = Y - FACE_MAX / BATTER;
-  const x = px + nx * FACE_MAX, z = pz + nz * FACE_MAX;
-  _run.toe = Math.min(_run.y - 0.12, groundUnder(x, z, terrain.heightAt(x, z), entries, terrain, shaped) - 0.05);
+  _run.toe = Math.min(_run.y - 0.12, G - 0.05);
   return _run;
 }
 

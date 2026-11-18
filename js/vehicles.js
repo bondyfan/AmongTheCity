@@ -238,7 +238,7 @@ function drawPlate(kind, hex) {
 
 // ---- the decal atlas: plate and badge on one canvas per kind and colour -----
 // The body is one draw (carmerge.js), so its two decals share one texture: the
-// badge in the top 256 rows, the plate in the bottom 56 (carmerge.js ATLAS has
+// badge in the top 128 rows, the plate in the bottom 56 (carmerge.js ATLAS has
 // the layout). Bounded like the plates always were, by kinds x colour pools.
 const _decals = new Map();
 function decalTexFor(kind, hex) {
@@ -249,7 +249,7 @@ function decalTexFor(kind, hex) {
   cv.width = ATLAS.w; cv.height = ATLAS.h;
   const x = cv.getContext('2d');
   const brand = KIND[kind]?.brand;
-  if (brand) x.drawImage(drawBadge(brand), 0, 0, 256, 256);
+  if (brand) x.drawImage(drawBadge(brand), 0, 0, ATLAS.w, ATLAS.h - 64);
   x.drawImage(drawPlate(kind, hex), 0, ATLAS.h - 56, 256, 56);
   t = new THREE.CanvasTexture(cv);
   t.colorSpace = THREE.SRGBColorSpace;

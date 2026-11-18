@@ -116,7 +116,13 @@ export function isQuayStairWay(r) {
         const { s, d } = local(F, p[0], p[1], _l);
         return s > -0.6 && s < F.L + 0.6 && d > -F.l - g && d < F.r + g;
       };
-      if (r.t === 'steps' ? near(p0, 1) && near(p1, 1) : len < 5 && (near(p0, hw + 0.2) || near(p1, hw + 0.2))) { v = true; break; }
+      // A short stub ending on the retaining wall beside the foot can
+      // lie wholly before the first riser. Draping its width across that
+      // wall produces a vertical triangle of paving (Na Františku).
+      const onLanding = len < 2 && F.wall && [p0, p1].every(p =>
+        Math.hypot(p[0] - F.a[0], p[1] - F.a[1]) < 3.5);
+      if (r.t === 'steps' ? near(p0, 1) && near(p1, 1)
+        : onLanding || (len < 5 && (near(p0, hw + 0.2) || near(p1, hw + 0.2)))) { v = true; break; }
     }
     _stairWay.set(r, v);
   }
@@ -127,12 +133,12 @@ export function isQuayStairWay(r) {
  * A car is not a walker: a flight of steps is a solid block to it. Pushes the
  * point `pos` (radius `radius`) out of every flight's footprint when the
  * caller's level (opts.y, as js/vehicles.js wallPass passes it) is anywhere
- * near the flight's heights. A walker (opts.interior) and a caller with no
- * level are not held (a spawn nudge must not be thrown off a quay). Returns
- * true if it moved.
+ * near the flight's heights. A walker below a flight meets its retaining face.
+ * A caller with no level passes freely (a spawn nudge must not throw someone
+ * off a quay). Returns true if it moved.
  */
 export function quayStairsCollide(pos, radius, opts) {
-  if (opts?.interior) return false;
+  const walker = !!opts?.interior;
   const y = opts?.y ?? opts?.yLo;
   if (y === undefined || y === null) return false;
   if (!inStairBox(pos.x, pos.z)) return false;
@@ -141,6 +147,24 @@ export function quayStairsCollide(pos, radius, opts) {
     if (pos.x < F.x0 - radius || pos.x > F.x1 + radius || pos.z < F.z0 - radius || pos.z > F.z1 + radius) continue;
     if (y < F.y0 - 1.5 || y > F.y1 + 2.5) continue;
     const { s, d } = local(F, pos.x, pos.z, _l);
+    if (walker) {
+      // The actor moves in substeps smaller than its radius. Keep a walker
+      // below the stair out of the solid support, including the top landing.
+      // A walker already standing on a tread can climb through either end.
+      if (y >= walkLine(F, Math.max(0, s)) || s < -F.e0 || s > F.L + F.e1 + radius) continue;
+      const side = d < 0 ? -1 : 1;
+      const width = side < 0 ? F.l : F.r;
+      const pen = width + radius - Math.abs(d);
+      if (pen <= 0) continue;
+      const endPen = F.L + F.e1 + radius - s;
+      if (endPen < pen) {
+        pos.x += F.ux * endPen; pos.z += F.uz * endPen;
+      } else {
+        pos.x += side * F.nx * pen; pos.z += side * F.nz * pen;
+      }
+      pushed = true;
+      continue;
+    }
     // the flight proper, from its first riser to its top step
     const pS0 = s + radius, pS1 = F.L + radius - s, pD0 = d + F.l + radius, pD1 = F.r + radius - d;
     if (pS0 <= 0 || pS1 <= 0 || pD0 <= 0 || pD1 <= 0) continue;

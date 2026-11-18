@@ -107,7 +107,7 @@ const shade = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
 const tone = (i, k) => 0.93 + 0.12 * (((Math.imul(i * 7919 + k, 2654435761) >>> 0) % 1000) / 1000);
 
 /** One flight: treads, risers, and its two sides closed to the ground under it. */
-function flightInto(sink, F) {
+function flightInto(sink, F, terrain) {
   const { a, ux, uz, nx, nz, l, r, n, g, h, y0 } = F;
   const P = (s, d, y) => [a[0] + ux * s + nx * d, y, a[1] + uz * s + nz * d];
   for (let k = 1; k <= n; k++) {
@@ -123,6 +123,23 @@ function flightInto(sink, F) {
       quad(sink, P(sA, d, gA), P(sB, d, gB), P(sB, d, T), P(sA, d, T), nx * sg, 0, nz * sg, shade(RISER, 0.9));
     }
   }
+  // End the flat landing in dressed stone wherever its stamped level ends
+  // above the quay. The side walls alone used to leave the end open.
+  for (const [s, sg, y] of [[-F.e0, -1, y0], [F.L + F.e1, 1, F.y1]]) {
+    const count = Math.ceil((l + r) / 0.6);
+    for (let j = 0; j < count; j++) {
+      const dl = -l + (l + r) * j / count, dr = -l + (l + r) * (j + 1) / count;
+      const foot = d => {
+        const [x, , z] = P(s + sg * 0.09, d, y);
+        return terrain.heightAt(x, z);
+      };
+      const yl = foot(dl), yr = foot(dr);
+      if (y - Math.min(yl, yr) <= 0.08) continue;
+      quad(sink, P(s, dl, y + 0.01), P(s, dr, y + 0.01), P(s, dr, Math.min(y, yr) - 0.1),
+        P(s, dl, Math.min(y, yl) - 0.1), sg * ux, 0, sg * uz, STONE);
+    }
+  }
+
 }
 
 // The ground either side of piece p, just off the edge, into _h; on a flight
@@ -209,6 +226,6 @@ export function quayStairsInto(sink, x0, z0, x1, z1, terrain) {
   if (!terrain) return;
   const b = box();
   if (x1 < b.x0 || x0 > b.x1 || z1 < b.z0 || z0 > b.z1) return;
-  for (const F of FLIGHTS) if (F.mx >= x0 && F.mx < x1 && F.mz >= z0 && F.mz < z1) flightInto(sink, F);
+  for (const F of FLIGHTS) if (F.mx >= x0 && F.mx < x1 && F.mz >= z0 && F.mz < z1) flightInto(sink, F, terrain);
   for (const p of pieces()) if (p.mx >= x0 && p.mx < x1 && p.mz >= z0 && p.mz < z1) pieceInto(sink, p, terrain);
 }

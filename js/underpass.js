@@ -33,6 +33,7 @@
 
 import { CHUNK } from './config.js';
 import { polylineLength, roadGradeY } from './geo.js';
+import { indexPortalApproach } from './railportal.js';
 import { rebuildChains } from './dipchain.js';
 
 const KEY = (x, z) => Math.round(x * 50) + ',' + Math.round(z * 50);
@@ -270,7 +271,7 @@ export function* stitchStructuresSteps(city, roads, rails) {
   // A viaduct split across a tile edge is still ONE structure (geo.js chains
   // the pieces of one tile): its pieces would each grade themselves and meet
   // at a step (0.8 m mid-span on Generála Svobody).
-  for (const b of bridges) if (b.d && !isRail.has(b)) chainAcross(city, b);
+  for (const b of bridges) if (b.d || isRail.has(b)) chainAcross(city, b);
   // Every member of a structure this tile touched is measured again, whole:
   // a complex split over a tile edge has to come out the same whichever of
   // its tiles arrived first (co-op clients load them in any order).
@@ -279,14 +280,6 @@ export function* stitchStructuresSteps(city, roads, rails) {
   yield;
   for (const b of decks) if (!isRail.has(b)) deckNodes(city, b);
   yield;
-  // A railway deck in two pieces has one end on the other piece, where no rail
-  // bed is: it holds the level of the end that has one. (Asking the ground
-  // there read the street the underpass had just dug, and the deck dived.)
-  for (const b of bridges) {
-    if (!isRail.has(b)) continue;
-    if (b._ap0 && !b._ap1) { b._ap1 = b._ap0; b._bridgeProfile = null; }
-    else if (b._ap1 && !b._ap0) { b._ap0 = b._ap1; b._bridgeProfile = null; }
-  }
   // ---- underpasses: every crossing of a bridge over a way, either tile ----
   // (only ways that pass through a cell holding a deck: the city keeps those
   // cells, so the eight thousand ways of a town tile cost a set lookup each)
@@ -324,11 +317,12 @@ export function* stitchStructuresSteps(city, roads, rails) {
 }
 
 function chainAcross(city, b0) {
-  const arms = (x, z, self) => {
+  const rail = b0.t === 'rail' || b0.t === 'tram';
+  const arms = (x, z) => {
     const c = cellAt(city, x, z), k0 = KEY(x, z), out = [];
     if (!c) return out;
-    for (const o of c.roads) {
-      if (!o.br || !o.d || !o.p || o.p.length < 2) continue;
+    for (const o of rail ? c.rails : c.roads) {
+      if (!o.br || !o.p || o.p.length < 2 || (rail ? o.t !== b0.t : !o.d)) continue;
       const n = o.p.length - 1;
       if (KEY(o.p[0][0], o.p[0][1]) === k0) out.push({ b: o, e: 0 });
       else if (KEY(o.p[n][0], o.p[n][1]) === k0) out.push({ b: o, e: n });
@@ -352,13 +346,20 @@ function chainAcross(city, b0) {
     // with the next tile) is dissolved, or the structure would come out
     // differently depending on which tile arrived first.
     for (const w of comp) {
+      if (rail) {
+        const last = w.p.length - 1;
+        w._chain = { total: lenOf(w), members: [w], headWay: w, headEnd: 0, tailWay: w, tailEnd: last,
+          headJoint: arms(...w.p[0]).length > 1, tailJoint: arms(...w.p[last]).length > 1 };
+        w._chainOff = 0; w._chainRev = false;
+        continue;
+      }
       if (!w._chain || w._chain.members.length < 2) continue;
       delete w._chain; delete w._chainOff; delete w._chainRev;
       w._bridgeProfile = null;
     }
     return;
   }
-  if (comp.length < 2) return;
+  if (!rail && comp.length < 2) return;
   const ch0 = comp[0]._chain;
   if (ch0 && ch0.members.length === comp.length && comp.every((w) => w._chain === ch0)) return;
   const deg = (w, e) => arms(w.p[e][0], w.p[e][1]).length;
@@ -391,18 +392,22 @@ function chainAcross(city, b0) {
 // The deck at `end` of bridge `b` lands on the way sharing that vertex.
 function linkEnd(city, b, end, rail) {
   const slot = end === 0 ? '_ap0' : '_ap1';
-  if (b[slot]) return;
+  if (b[slot]) {
+    if (rail) indexPortalApproach(city, b, end, b[slot].road, b[slot].at);
+    return;
+  }
   const [x, z] = b.p[end];
   const c = cellAt(city, x, z);
   if (!c) return;
   const k0 = KEY(x, z);
   for (const w of rail ? c.rails : c.roads) {
     if (w === b || w.br || !w.p || w.p.length < 2) continue;
-    if (!rail && !w.d && b.d) continue;
+    if (rail ? w.t !== b.t : !w.d && b.d) continue;
     for (let i = 0; i < w.p.length; i++) {
       if (KEY(w.p[i][0], w.p[i][1]) !== k0) continue;
       const at = arcTo(w, i);
       b[slot] = { road: w, at };
+      if (rail) indexPortalApproach(city, b, end, w, at);
       if (!rail) {
         (w._abut ??= []).push(at); w._prof = undefined; w._raw = undefined;
         // (who put it there: a released deck takes its abutment back, releaseStructures)

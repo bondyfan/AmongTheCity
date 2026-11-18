@@ -30,8 +30,6 @@
 export const STREET_DETAIL_GLSL = `
   vec3 atcStreetDetail(float layer, vec2 w, vec2 st, float px, float pxMin, float bump) {
     vec3 k = vec3(1.0);
-    // one laid unit is 10 to 60 cm: its shade goes before it shrinks to a pixel
-    float unitK = 1.0 - smoothstep(0.015, 0.05, px);
     // A lattice noise of period P metres is a smooth field while a pixel is
     // well under P and a boil of random pixels once it is not, so each term
     // below is faded on its own scale: a half-metre grain is gone by the time
@@ -39,6 +37,7 @@ export const STREET_DETAIL_GLSL = `
     // by 35 cm. What is left far off is the slow variation, which is the part
     // that stops a tile showing from a car.
     float fine = 1.0 - smoothstep(0.05, 0.12, px);
+    float coarse = 1.0 - smoothstep(0.8, 2.0, px);
     float mid = 1.0 - smoothstep(0.15, 0.35, px);
     if (layer > 5.5 && layer < 6.5) {
       // ---- asphalt ----
@@ -48,7 +47,7 @@ export const STREET_DETAIL_GLSL = `
       // camera a street still read as one flat grey, so the slow term is the
       // strong one now; it is also the one that cannot shimmer)
       float m1 = atcNoise(w * 0.17 + 5.0), m2 = atcNoise(w * 0.73 + 1.3), m3 = atcNoise(w * 2.1 + 7.0);
-      k *= 0.88 + 0.24 * m1 + 0.16 * (m2 - 0.5) * mid + 0.08 * (m3 - 0.5) * fine;
+      k *= 1.0 + 0.24 * (m1 - 0.5) * coarse + 0.16 * (m2 - 0.5) * mid + 0.08 * (m3 - 0.5) * fine;
       // (repairs and sealed cracks are already in the surface shader, under
       // the same switch they are drawn a shade deeper: js/surfaces.js)
       // bitumen browns and greys as it ages; a fresh lay is blue-black. The
@@ -63,7 +62,10 @@ export const STREET_DETAIL_GLSL = `
     } else if (layer > 7.5 && layer < 9.5 || layer > 11.5) {
       // (the shade is a step per stone: judged on the pixel's mean footprint,
       // so a pavement seen along its length keeps it a little further out)
-      unitK = 1.0 - smoothstep(0.02, 0.06, 0.5 * (px + pxMin));
+      float footprint = 0.5 * (px + pxMin);
+      float unitK = layer > 8.5 && layer < 9.5
+        ? 1.0 - smoothstep(0.012, 0.035, footprint)
+        : 1.0 - smoothstep(0.02, 0.06, footprint);
       // ---- slabs (8), setts (9), pavers (12) ----
       // the unit index from the same st the texture is read with
       float u = layer < 8.5 ? atcUnit(st / 2.4, 4.0, 8.0, 0.0)
@@ -77,7 +79,7 @@ export const STREET_DETAIL_GLSL = `
       vec3 hue = mix(vec3(1.03, 1.0, 0.95), vec3(0.97, 1.0, 1.04), atcHash(vec2(u * 97.0, 3.0)));
       k *= mix(vec3(1.0), shade * hue, unitK);
       // walked-on dirt: darker where the feet go, a gum-spotted stain or two
-      float d1 = atcNoise(w * 0.31 + 41.0), d2 = mix(0.5, atcNoise(w * 1.7 + 9.0), mid);
+      float d1 = mix(0.5, atcNoise(w * 0.31 + 41.0), coarse), d2 = mix(0.5, atcNoise(w * 1.7 + 9.0), mid);
       k *= 1.0 - 0.15 * smoothstep(0.45, 0.95, d1 * 0.65 + d2 * 0.35);
       // and the slow weathering of a whole square: a dozen metres darker and
       // warmer where the rain runs and the market stands, paler where the sun
@@ -88,7 +90,7 @@ export const STREET_DETAIL_GLSL = `
       k *= 1.0 - 0.12 * smoothstep(0.86, 0.96, atcNoise(w * 3.1 + 2.0)) * unitK;
     } else if (layer < 1.5) {
       // ---- grass and meadow ----
-      float g1 = atcNoise(w * 0.085 + 3.0), g2 = atcNoise(w * 0.41 + 8.0);
+      float g1 = atcNoise(w * 0.085 + 3.0), g2 = mix(0.5, atcNoise(w * 0.41 + 8.0), coarse);
       float dry = smoothstep(0.48, 0.8, g1 * 0.7 + g2 * 0.3);
       float lush = 1.0 - smoothstep(0.18, 0.45, g1 * 0.5 + g2 * 0.5);
       k *= mix(vec3(1.0), vec3(1.2, 1.1, 0.7), dry * 0.85);
@@ -100,7 +102,7 @@ export const STREET_DETAIL_GLSL = `
       k *= mix(vec3(1.0), vec3(0.84 + 0.32 * gm, 0.86 + 0.26 * gm, 0.84 + 0.3 * gm), mid);
       // clumps, a hand across, and the odd bare patch by a kerb or a path
       k *= 1.0 + 0.4 * (atcNoise(w * 2.4 + 0.5) - 0.5) * fine * (0.6 + 0.4 * atcNoise(w * 0.9 + 4.0));
-      k *= mix(vec3(1.0), vec3(1.18, 1.0, 0.78), smoothstep(0.82, 0.95, atcNoise(w * 0.23 + 61.0)) * 0.6);
+      k *= mix(vec3(1.0), vec3(1.18, 1.0, 0.78), smoothstep(0.82, 0.95, atcNoise(w * 0.23 + 61.0)) * coarse * 0.6);
     } else if (layer > 6.5 && layer < 7.5) {
       // ---- concrete: kerbs, slabs, steps ----
       if (bump < 0.001) k *= 0.8;          // a standing face: the gutter's shadow and dirt

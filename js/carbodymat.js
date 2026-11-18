@@ -78,7 +78,7 @@ const CITY_GLSL = /* glsl */`
     float az = (atan(d.z, d.x) + 3.14159265) * 7.6394;   // 48 cells round
     float c = floor(az), f = fract(az);
     float h = 0.07 + 0.30 * carHash(c) * carHash(c + 31.0) + 0.06 * carHash(c + 7.0);
-    float gap = smoothstep(0.0, 0.04 + soft, f) * smoothstep(1.0, 0.96 - soft, f);
+    float gap = smoothstep(0.0, 0.04 + soft, f) * (1.0 - smoothstep(0.96 - soft, 1.0, f));
     return (1.0 - smoothstep(h - soft, h + soft, d.y)) * gap * uCity;
   }
   // lit windows on that skyline, for the night: a sparse hashed grid. Seen in

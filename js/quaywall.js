@@ -87,7 +87,7 @@ function stoneBox(sink, ax, az, bx, bz, w0, w1, ya0, ya1, yb0, yb1, nx, nz, c, l
   }
 }
 
-function balustradeInto(sink, p0x, p0z, p1x, p1z, c0, c1, nx, nz) {
+export function balustradeInto(sink, p0x, p0z, p1x, p1z, c0, c1, nx, nz) {
   const L = Math.hypot(p1x - p0x, p1z - p0z);
   if (L < 0.05) return;
   const ux = (p1x - p0x) / L, uz = (p1z - p0z) / L;
@@ -104,7 +104,7 @@ function balustradeInto(sink, p0x, p0z, p1x, p1z, c0, c1, nx, nz) {
   const m = Math.max(1, Math.round(L / PED_EVERY)), span = L / m;
   for (let j = 0; j < m; j++) {
     // the pedestal at this bay's start, a touch proud of both faces
-    const t0 = j * span, a = at(Math.max(0, t0 - PED_W / 2)), b = at(Math.min(L, t0 + PED_W / 2));
+    const t0 = j * span, a = at(t0 - PED_W / 2), b = at(Math.min(L, t0 + PED_W / 2));
     stoneBox(sink, a[0], a[1], b[0], b[1], -PED_PROUD, PARAPET_T + PED_PROUD, a[2], a[2] + PARAPET_H + 0.06,
       b[2], b[2] + PARAPET_H + 0.06, nx, nz, STONE, CAP);
     // the balusters of the bay

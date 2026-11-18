@@ -43,10 +43,10 @@ export const PART = {
 };
 
 // Where the two decals live in the per-car atlas (vehicles.js decalTexFor):
-// a 256 x 320 canvas, the badge in the top 256 rows, the plate in the bottom 56,
+// a 256 x 192 canvas, the badge in the top 128 rows, the plate in the bottom 56,
 // 8 rows of transparent gutter between them so a coarse mip cannot bleed one
 // into the other. Canvas textures are flipped, so v counts from the bottom.
-export const ATLAS = { w: 256, h: 320, badge: [64 / 320, 1], plate: [0, 56 / 320] };
+export const ATLAS = { w: 256, h: 192, badge: [64 / 192, 1], plate: [0, 56 / 192] };
 
 /**
  * parts: [{ geo, kind }] with kind one of PART's keys. Null geometries are

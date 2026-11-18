@@ -143,20 +143,21 @@ const SH_REACH_KEEP = 14, SH_REACH_JOIN = 11;
 const _frustum = new THREE.Frustum(), _pv = new THREE.Matrix4(), _sph = new THREE.Sphere();
 
 /** Once per shadow update: people whose shadow cannot reach the view stop casting. */
-export function cullPeopleShadows(camera, r = 45) {
+export function cullPeopleShadows(camera, r = 45, shadowSlope = 0) {
   if (!BATCH.shadows || !camera) return;
   camera.updateWorldMatrix(true, false);
   _pv.multiplyMatrices(camera.projectionMatrix, _pv.copy(camera.matrixWorld).invert());
   _frustum.setFromProjectionMatrix(_pv);
   const c = camera.matrixWorld.elements, cx = c[12], cy = c[13], cz = c[14];
   const rIn = (r - SH_GIVE) ** 2, rOut = (r + SH_GIVE) ** 2, far2 = (FAR_OUT + SH_GIVE) ** 2;
+  const shadowReach = Math.max(SH_REACH_JOIN, 1.8 * shadowSlope);
   for (const m of _bodies) {
     const u = m.userData, e = m.matrixWorld.elements;
     const dx = e[12] - cx, dy = e[13] - cy, dz = e[14] - cz, d2 = dx * dx + dy * dy + dz * dz;
     let near = u.shNear ? d2 < rOut : d2 < rIn;
     if (!near && d2 < far2) {
       _sph.center.set(e[12], e[13], e[14]);
-      _sph.radius = u.shNear ? SH_REACH_KEEP : SH_REACH_JOIN;
+      _sph.radius = shadowReach + (u.shNear ? SH_REACH_KEEP - SH_REACH_JOIN : 0);
       near = _frustum.intersectsSphere(_sph);
     }
     u.shNear = near;
@@ -172,6 +173,7 @@ onBatchFlag('shadows', (on) => {
 const TOPSY = { puffer: 0.07, coat: 0.04, jacket: 0.03, hoodie: 0.03 };
 
 /**
+ * Call dispose() when the citizen leaves the world to unregister the shadow caster.
  * look = { archetype, uid, jacket, pants, skin, hair, role, outfit }.
  *   archetype  a key from js/people.js (default: the thirty-year-old man, on
  *              purpose: the hero and every peer come through the uid path and

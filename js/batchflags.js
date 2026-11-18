@@ -17,14 +17,12 @@
 // may hold different flags and still agree about every light and every shop.
 
 const flags = { signals: true, marks: true, shadows: true };
-try {
-  const q = globalThis.location?.search && new URLSearchParams(globalThis.location.search).get('batch');
-  if (q != null) {
-    const on = new Set(q.split(',').map((s) => s.trim()));
-    const all = q === '1' || q === 'all';
-    for (const k in flags) flags[k] = all || on.has(k);
-  }
-} catch { /* no location (node, a worker): every saving on */ }
+const selection = new URLSearchParams(globalThis.location?.search).get('batch');
+if (selection !== null) {
+  const on = new Set(selection.split(',').map((s) => s.trim()));
+  const all = selection === '1' || selection === 'all';
+  for (const key in flags) flags[key] = all || on.has(key);
+}
 
 const subs = { signals: [], marks: [], shadows: [] };
 

@@ -157,6 +157,11 @@ export function releaseMark(m) {
   m.userData.mark = null;
   m.map?.dispose();                     // the clone only: the page's image stays
   m.dispose();
+  if (k.page.free.length === SLOTS) {
+    pages.splice(pages.indexOf(k.page), 1);
+    k.page.tex.dispose();
+    k.page.mat.dispose();
+  }
   return true;
 }
 

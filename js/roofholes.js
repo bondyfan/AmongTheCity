@@ -18,6 +18,7 @@
 import { polygonArea } from './geo.js';
 import { insetRing, ringSelfIntersects } from './roofs.js';
 import { insetRingVar } from './roofgrammar.js';
+import { courtyardPitch } from './courtyardpitch.js';
 import { ringClearances, depthFactors, depthCap } from './roofclear.js';
 import { PIN_U, PIN_V } from './typologycells.js';
 
@@ -114,14 +115,14 @@ function inside(x, z, ring) {
 // up to the ridge, and goes on `fins` for capEmit to lay in plaster.
 const STEEP = 0.35;      // run over rise, about 70 degrees
 function band(sink, ring, eave, ey, top, ry, d, rise, sgn, away, r, g, b, soffit, topY, k = null,
-  fins = null) {
+  fins = null, heights = null) {
   const n = ring.length;
   let ny = d / Math.hypot(d, rise), nh = rise / Math.hypot(d, rise);
   for (let i = 0; i < n; i++) {
     if (k) {
       const run = d * k[i], hy = Math.hypot(run, rise);
       ny = run / hy; nh = rise / hy;
-      if (fins && run < STEEP * rise) { fins.push([ring, top, i, sgn * away]); continue; }
+      if (fins && run < STEEP * rise) { fins.push([ring, top, i, sgn * away, heights]); continue; }
     }
     const [ax, az] = eave[i], [bx, bz] = eave[(i + 1) % n];
     const [cx, cz] = top[(i + 1) % n], [dx, dz] = top[i];
@@ -130,8 +131,9 @@ function band(sink, ring, eave, ey, top, ry, d, rise, sgn, away, r, g, b, soffit
     if (el < 1e-6) continue;
     const ox = ez / el * sgn * away, oz = -ex / el * sgn * away;
     const nx = ox * ny, nz = oz * ny;
-    sink.triFacing(ax, ey, az, bx, ey, bz, cx, ry, cz, nx, nh, nz, r, g, b);
-    sink.triFacing(ax, ey, az, cx, ry, cz, dx, ry, dz, nx, nh, nz, r, g, b);
+    const ya = heights?.[i] ?? ry, yb = heights?.[(i + 1) % n] ?? ry;
+    sink.triFacing(ax, ey, az, bx, ey, bz, cx, yb, cz, nx, nh, nz, r, g, b);
+    sink.triFacing(ax, ey, az, cx, yb, cz, dx, ya, dz, nx, nh, nz, r, g, b);
     if (soffit && eave !== ring) {
       const [wx, wz] = ring[i], [vx, vz] = ring[(i + 1) % n];
       sink.triFacing(ax, ey, az, bx, ey, bz, vx, topY, vz, -nx, -nh, -nz, r * 0.6, g * 0.6, b * 0.6);
@@ -163,9 +165,44 @@ export function roofCapHoled(sink, outer, holes, topY, r, g, b, ov, soffit, tag,
   // with every simplification, wherever the block stands (one with too many
   // vertices for the gentlest one may well fit under the harder ones).
   if (!P && hasCourtyard({ o: outer, i: holes }))
-    for (const t of [SIMPLIFY, ...SIMPLIFY_RETRY]) { P = capPlan(outer, holes, tag, tri, t, true); if (P) break; }
-  if (!P) return 0;
+    for (const t of [0.03, SIMPLIFY, ...SIMPLIFY_RETRY]) {
+      let plan = capPlan(outer, holes, tag, tri, t, true);
+      if (plan && !bandsFit(plan, outer, holes)) {
+        // One ring may need its kinks smoothed while the yard must keep
+        // a corner the same tolerance would have cut away.
+        plan = capPlan(outer, holes, tag, tri, t, true, 0.08);
+        if (plan && !bandsFit(plan, outer, holes)) plan = null;
+      }
+      if (plan) { P = plan; break; }
+    }
+  if (!P) {
+    if (!hasCourtyard({ o: outer, i: holes })) return 0;
+    const maxRise = tag?.rise || (tag?.attic ? 2.9 * tag.attic : (tag?.low ? 1.5 : 4.2));
+    return courtyardPitch(sink, outer, holes, topY, [r, g, b], pitch, maxRise, tri);
+  }
   return capEmit(sink, P, topY, r, g, b, ov, soffit, tag, pitch, wall);
+}
+
+// Simplifying an irregular ring can close the mouth of a narrow courtyard
+// notch. Test the newly pitched triangles against the surveyed walls before
+// accepting the plan. A few centimetres of masonry tolerance cover rounding.
+function bandsFit(plan, outline, holes) {
+  const fits = (a, b, c) => {
+    const x = (a[0] + b[0] + c[0]) / 3, z = (a[1] + b[1] + c[1]) / 3;
+    const outside = !inside(x, z, outline) ? outline : holes.find(h => inside(x, z, h));
+    return !outside || outside.some((p, i) => {
+      const q = outside[(i + 1) % outside.length], dx = q[0] - p[0], dz = q[1] - p[1];
+      const t = Math.max(0, Math.min(1, ((x - p[0]) * dx + (z - p[1]) * dz) / (dx * dx + dz * dz || 1)));
+      return Math.hypot(x - p[0] - dx * t, z - p[1] - dz * t) <= 0.30;
+    });
+  };
+  const rimFits = (rim, ridge) => rim.every((a, i) => {
+    const j = (i + 1) % rim.length;
+    return fits(a, rim[j], ridge[j]) && fits(a, ridge[j], ridge[i]);
+  });
+  if (!rimFits(plan.outer, plan.inner) || !plan.hs.every((h, i) => rimFits(h, plan.grown[i]))) return false;
+  const points = plan.inner.concat(...plan.grown);
+  return plan.tris.every(([a, b, c]) => fits(points[a], points[b], points[c]));
 }
 
 // The ridge rings at depth d (k* per edge factors, or null for one depth):
@@ -198,9 +235,9 @@ function ridges(outer, hs, sgn, hsg, area, d, kO, kH) {
 // null when the rings fold at every depth; false when no simplification can
 // help (too many vertices, too little solid roof). `vary`: each edge runs only
 // the share of the depth the gap in front of it leaves (roofclear.js).
-export function capPlan(outer, holes, tag, tri, tol, vary = false) {
+export function capPlan(outer, holes, tag, tri, tol, vary = false, holeTol = tol) {
   outer = simplifyRing(outer, tol);
-  const hs = holes.filter((h) => h.length >= 3).map((h) => simplifyRing(h, tol));
+  const hs = holes.filter((h) => h.length >= 3).map((h) => simplifyRing(h, holeTol));
   let total = outer.length;
   for (const h of hs) total += h.length;
   if (total > MAX_N) return false;
@@ -255,27 +292,37 @@ function capEmit(sink, P, topY, r, g, b, ov, soffit, tag, pitch, wall) {
   const ry = topY + rise;
   // eaves: outward past the street wall, and into the yard past the yard wall
   let eave = outer, ey = topY;
-  if (ov > 0.05) {
+  if (ov > 0.05 && !ko) {
     const out = insetRing(outer, -ov, sgn);
     if (out) { eave = out; ey = topY - ov * rise / d; }
   }
+  // The ridge follows the local wing width. Raising a courtyard wall with
+  // 20 cm of roof run to the full block height made a four-metre plaster fin.
+  // Both bands and the triangulated top share the same corner heights.
+  const ridgeY = factors => factors.map((k, i) => {
+    const local = Math.min(k, factors[(i + factors.length - 1) % factors.length]);
+    const limit = local * d < STEEP * rise ? 0.95 : rise;
+    return topY + Math.min(rise, limit, 0.2 + Math.min(1.2 * d, rise) * local);
+  });
+  const outerY = ko ? ridgeY(ko) : null, holeY = kh?.map(ridgeY);
   const fins = ko ? [] : null;
-  band(sink, outer, eave, ey, inner, ry, d, rise, sgn, 1, r, g, b, soffit, topY, ko, fins);
+  band(sink, outer, eave, ey, inner, ry, d, rise, sgn, 1, r, g, b, soffit, topY, ko, fins, outerY);
   for (let i = 0; i < hs.length; i++) {
     let he = hs[i], hy = topY;
-    if (ov > 0.05) {
+    if (ov > 0.05 && !ko) {
       const into = insetRing(hs[i], ov, hsg[i]);
       if (into && ringArea(into) > ringArea(hs[i]) * 0.3 && !ringSelfIntersects(into)) {
         he = into; hy = topY - ov * rise / d;
       }
     }
     band(sink, hs[i], he, hy, grown[i], ry, d, rise, hsg[i], -1, r, g, b, soffit, topY, kh?.[i] ?? null,
-      fins);
+      fins, holeY?.[i]);
   }
   const all = inner.concat(...grown);
+  const heights = outerY?.concat(...holeY);
   for (const [ia, ib, ic] of tris) {
     const A = all[ia], B = all[ib], C = all[ic];
-    sink.triFacing(A[0], ry, A[1], B[0], ry, B[1], C[0], ry, C[1], 0, 1, 0, r, g, b);
+    sink.triFacing(A[0], heights?.[ia] ?? ry, A[1], B[0], heights?.[ib] ?? ry, B[1], C[0], heights?.[ic] ?? ry, C[1], 0, 1, 0, r, g, b);
   }
   if (fins?.length) {
     // where a yard lies against a thin wall the two slopes have no room to
@@ -283,13 +330,13 @@ function capEmit(sink, P, topY, r, g, b, ov, soffit, tag, pitch, wall) {
     // roofCap stands up a party wall (laid last: pinned to the plain texel)
     sink.pinTo?.(PIN_U, PIN_V);
     const [wr, wg, wb] = wall ?? [r, g, b];
-    for (const [ring, top, i, s] of fins) {
+    for (const [ring, top, i, s, heights] of fins) {
       const n = ring.length, j = (i + 1) % n;
       const ex = ring[j][0] - ring[i][0], ez = ring[j][1] - ring[i][1], el = Math.hypot(ex, ez) || 1;
       const ox = ez / el * s, oz = -ex / el * s;
       // (from the wall's own top, not the eave: it is the wall going on up)
-      sink.triFacing(ring[i][0], topY, ring[i][1], ring[j][0], topY, ring[j][1], top[j][0], ry, top[j][1], ox, 0, oz, wr, wg, wb);
-      sink.triFacing(ring[i][0], topY, ring[i][1], top[j][0], ry, top[j][1], top[i][0], ry, top[i][1], ox, 0, oz, wr, wg, wb);
+      sink.triFacing(ring[i][0], topY, ring[i][1], ring[j][0], topY, ring[j][1], top[j][0], heights[j], top[j][1], ox, 0, oz, wr, wg, wb);
+      sink.triFacing(ring[i][0], topY, ring[i][1], top[j][0], heights[j], top[j][1], top[i][0], heights[i], top[i][1], ox, 0, oz, wr, wg, wb);
     }
   }
   return rise;

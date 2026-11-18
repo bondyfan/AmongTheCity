@@ -17,7 +17,7 @@
 // road side. A walker in the field behind a rail is pushed to the field side
 // once past the middle of that thick band, so nobody is pulled through.
 
-import { barrierPlan, K_MEDIAN, MEDIAN_H, RAIL_H, STRIDE } from './mwplan.js';
+import { barrierPlan, hasInterchangeSlip, K_MEDIAN, MEDIAN_H, RAIL_H, STRIDE } from './mwplan.js';
 import { d11Locate } from './d11.js';
 
 const GROW = 12;                 // m: a cell's plan reaches this far past its rect
@@ -33,7 +33,7 @@ function planFor(city, terrain, key) {
   let m = memo.get(key);
   // a tile arriving changes the cell's road list, a height map its profiles
   if (m && m.cell === cell && m.n === n && m.loads === loads) return m.plan;
-  m = { cell, n, loads, plan: barrierPlan(cell, key, terrain, GROW) };
+  m = { cell, n, loads, plan: barrierPlan(cell, key, terrain, GROW, city) };
   memo.delete(key);
   memo.set(key, m);
   if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value);
@@ -53,8 +53,8 @@ export function barrierCollide(world, pos, radius, opts) {
   if (opts?.interior) return false;
   const y = opts?.y ?? opts?.yLo;
   if (y === undefined || y === null || !world?.terrain) return false;
-  if (!d11Locate(pos.x, pos.z, _loc)) return false;          // nowhere near the corridor
   const key = Math.floor(pos.x / 120) + ',' + Math.floor(pos.z / 120);
+  if (!d11Locate(pos.x, pos.z, _loc) && !hasInterchangeSlip(world.city?.chunkIndex?.get(key))) return false;
   const plan = planFor(world.city, world.terrain, key);
   if (!plan?.length) return false;
   let pushed = false;

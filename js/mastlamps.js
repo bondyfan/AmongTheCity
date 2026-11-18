@@ -25,7 +25,7 @@
 // function of the way and the tile too). Main thread AND mesh worker: no
 // three, no DOM.
 
-import { cwOf, motorwayLit, LIT_R } from './mwplan.js';
+import { cwOf, motorwayLit, LIT_R, BRIDGE_KERB, deckY } from './mwplan.js';
 import { exitNear } from './d11.js';
 import { laneLayout } from './lanes.js';
 import { plannedMotorwaySigns } from './mwsigns.js';
@@ -34,7 +34,8 @@ export const MAST_STEP = 40;        // m between masts: about three times their 
 // m beyond the drawn asphalt edge: the rail stands 0.6 out, its working width
 // takes a metre more, and the noise walls (js/mwtall.js) stand 2.1 out
 export const MAST_OFF = 2.75;
-export const MAST1_OFF = 2.0;       // m beyond a slip road's asphalt
+export const MAST1_OFF = 6.0;       // m beyond a slip road's asphalt
+export const SLIP_CLEAR = 5.0, MOTORWAY_CLEAR = 10; // unguarded verge beside a slip / main line
 const MAST_CLEAR = 1.5;             // m a mast keeps from any carriageway's edge
 const RAIL_OUT = 0.6;               // js/mwplan.js: the rail line beyond the asphalt
 const RAIL_GAP = 1.2;               // js/mwplan.js barrierPlan: the rail breaks this near another road
@@ -81,22 +82,23 @@ function nearSign(x, z) {
  */
 export function mastsAlong(r, kind, x0, z0, x1, z1, g) {
   if (!kind) return false;
-  // a deck of a mast way is left dark: a town column on its parapet among
-  // the masts read as the wrong lamp, and a mast needs ground under it
-  if (r.br) return true;
   const lay = laneLayout(r);
   const rh = lay ? lay.ribbonHalf : (r.w ?? 6) / 2;
   const mw = kind === 'mast';
-  const off = rh + (mw ? MAST_OFF : MAST1_OFF);
+  // On a bridge the socket is cast into the outer parapet; the support
+  // height must travel with the spot through the near and far renderers.
+  const off = r.br ? rh - 0.12 : rh + (mw ? MAST_OFF : MAST1_OFF);
+  const near = r.br ? g.near.filter(o => !!o.br) : g.near;
+  const mainLines = mw ? [] : near.filter(o => o.t === 'motorway');
   // for the rail test: every carriageway but this one's own pieces (at a joint
   // the next piece's width reaches the rail line and is no gap)
-  let others = g.near;
+  let others = near;
   if (mw) {
     const cw = cwOf(r);
-    others = g.near.filter((o) => !(o.t === 'motorway' && cwOf(o) === cw));
+    others = near.filter((o) => !(o.t === 'motorway' && cwOf(o) === cw));
   }
   const sides = mw ? [1] : [1, -1];
-  let carry = (r._id % 13) * 3;
+  let carry = (r._id % 13) * 3, run = 0;
   for (let i = 0; i < r.p.length - 1; i++) {
     const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
     let dx = bx - ax, dz = bz - az;
@@ -108,20 +110,25 @@ export function mastsAlong(r, kind, x0, z0, x1, z1, g) {
       // the cell the STATION is in plants it, whichever cell its foot lands
       // in (the guards read the 3x3 cells round it, as a street lamp's do)
       if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue;
-      if (!motorwayLit(px, pz)) continue;
+      if (mw && !motorwayLit(px, pz)) continue;
       // the guard rail in front of a motorway mast: broken here (a gore, a
       // slip road's asphalt), and there is nothing to hold a car off it
-      if (mw && g.inRoad(others, null, px - dz * (rh + RAIL_OUT), pz + dx * (rh + RAIL_OUT), RAIL_GAP)) continue;
+      if (mw && !r.br && g.inRoad(others, null, px - dz * (rh + RAIL_OUT), pz + dx * (rh + RAIL_OUT), RAIL_GAP)) continue;
       for (const side of sides) {
         const nx = -dz * side, nz = dx * side;            // side 1: right of travel
         const lx = px + nx * off, lz = pz + nz * off;
-        if (g.inRoad(g.near, null, lx, lz, MAST_CLEAR) || g.onPad(lx, lz) || g.inHouse(lx, lz)
+        if ((!mw && !r.br && g.inRoad(mainLines, null, lx, lz, MOTORWAY_CLEAR))
+          || g.inRoad(near, r.br ? r : null, lx, lz, mw || r.br ? MAST_CLEAR : SLIP_CLEAR)
+          || (!r.br && (g.onPad(lx, lz) || g.inHouse(lx, lz)))
           || g.nearMapped(lx, lz) || nearSign(lx, lz)) continue;
-        (mw ? g.mast : g.mast1).push([lx, lz, Math.atan2(-nx, -nz) + Math.PI]);
+        const spot = [lx, lz, Math.atan2(-nx, -nz) + Math.PI];
+        if (r.br && g.terrain) spot.push(deckY(r, run + d, px, pz, g.terrain) + (mw ? BRIDGE_KERB : 0));
+        (mw ? g.mast : g.mast1).push(spot);
         break;
       }
     }
     carry = (carry + L) % MAST_STEP;
+    run += L;
   }
   return true;
 }

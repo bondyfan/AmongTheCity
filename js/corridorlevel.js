@@ -70,8 +70,8 @@ const _cell = new WeakMap();
 function cellLists(cell) {
   const nr = cell.roads?.length ?? 0, nl = cell.rails?.length ?? 0, nb = cell.barriers?.length ?? 0;
   let c = _cell.get(cell);
-  if (c && c.nr === nr && c.nl === nl && c.nb === nb && c.r0 === cell.roads?.[0] && c.l0 === cell.rails?.[0]) return c;
-  c = { nr, nl, nb, r0: cell.roads?.[0], l0: cell.rails?.[0], road: [], rail: [], decks: [], walls: [] };
+  if (c && c.nr === nr && c.nl === nl && c.nb === nb && c.roads === cell.roads && c.rails === cell.rails && c.barriers === cell.barriers) return c;
+  c = { nr, nl, nb, roads: cell.roads, rails: cell.rails, barriers: cell.barriers, road: [], rail: [], decks: [], walls: [] };
   for (const r of cell.roads ?? []) {
     if (!r.p || r.p.length < 2) continue;
     if (inScope(r)) c.road.push(r);
@@ -119,6 +119,13 @@ function windowIndexed(city, bb) {
 
 // ---- a member's ground, sampled once -----------------------------------------
 const _samp = new WeakMap();
+// The terrain renderer extends the nearest available tile into an unmapped
+// area. Its edge can be on another hill. Never fit railway grades or bridge
+// clearance to that visual fallback.
+function measured(terrain, x, z) {
+  return !terrain.ready || terrain.ready(x, z);
+}
+
 function samplesOf(w, terrain, sv) {
   let c = _samp.get(w);
   const loads = terrain._loads ?? 0;
@@ -131,9 +138,16 @@ function samplesOf(w, terrain, sv) {
     const P = pointOn(w, i * ds);
     x[i] = P.x; z[i] = P.z;
     if (ok && !settled(terrain, P.x, P.z)) ok = false;
+    if (!measured(terrain, P.x, P.z)) {
+      h[3 * i] = NaN;
+      continue;
+    }
     h[3 * i] = sv.heightAt(P.x, P.z);
-    h[3 * i + 1] = sv.heightAt(P.x + P.tz * hw, P.z - P.tx * hw);
-    h[3 * i + 2] = sv.heightAt(P.x - P.tz * hw, P.z + P.tx * hw);
+    const leftX = P.x + P.tz * hw, leftZ = P.z - P.tx * hw;
+    const rightX = P.x - P.tz * hw, rightZ = P.z + P.tx * hw;
+    if (!settled(terrain, leftX, leftZ) || !settled(terrain, rightX, rightZ)) ok = false;
+    h[3 * i + 1] = measured(terrain, leftX, leftZ) ? sv.heightAt(leftX, leftZ) : h[3 * i];
+    h[3 * i + 2] = measured(terrain, rightX, rightZ) ? sv.heightAt(rightX, rightZ) : h[3 * i];
   }
   c = { terrain, p: w.p, loads, settled: ok, n, ds, x, z, h, hw };
   _samp.set(w, c);
@@ -186,8 +200,9 @@ function computeCore(w, terrain, city) {
     const P = rail ? RAIL : classOf(m);
     let hint = -1;
     for (let i = 0; i < S.n; i++) {
-      const q = projectAxis(ax, S.x[i], S.z[i], hint);
-      hint = q.i;
+      if (!Number.isFinite(S.h[3 * i])) continue;
+      const q = m === ax.self.w ? { d: 0, s: ax.self.off + i * S.ds } : projectAxis(ax, S.x[i], S.z[i], hint);
+      hint = q.i ?? -1;
       // (a projection is clamped to the axis: what lies past its ends is not on it)
       if (Math.abs(q.d) > K.lat || q.s <= 1e-6 || q.s >= ax.L - 1e-6) continue;
       const b = Math.min(nb - 1, Math.round(q.s / DS));
@@ -226,7 +241,8 @@ function computeCore(w, terrain, city) {
     for (const [d0, d1] of [[dmax[b], dmax[b] + K.probe], [dmin[b], dmin[b] - K.probe]]) {
       const x0 = A.x + nx * d0, z0 = A.z + nz * d0, x1 = A.x + nx * d1, z1 = A.z + nz * d1;
       if (wallSeg.length && walled(x0, z0, x1, z1)) continue;
-      side.push(sv.heightAt(x1, z1));
+      if (ready && !settled(terrain, x1, z1)) ready = false;
+      if (measured(terrain, x1, z1)) side.push(sv.heightAt(x1, z1));
     }
     let c = 0;
     if (side.length) {
@@ -253,7 +269,7 @@ function computeCore(w, terrain, city) {
     if (!m.br || !m._cross) continue;
     for (const c of m._cross) {
       const q = projectAxis(ax, c.x, c.z);
-      if (Math.abs(q.d) > K.lat) continue;
+      if (Math.abs(q.d) > K.lat || !measured(terrain, c.x, c.z)) continue;
       floors.push({ s: q.s, y: sv.heightAt(c.x, c.z) + c.clear, g: BRIDGE_GRADE, R: curveR(m.v) });
     }
   }
@@ -268,7 +284,7 @@ function computeCore(w, terrain, city) {
       if (gd.bb[0] > gm.bb[2] || gm.bb[0] > gd.bb[2] || gd.bb[1] > gm.bb[3] || gm.bb[1] > gd.bb[3]) continue;
       for (let i = 0; i < m.p.length - 1; i++) for (let k = 0; k < d.p.length - 1; k++) {
         const hit = cross(m.p[i][0], m.p[i][1], m.p[i + 1][0], m.p[i + 1][1], d.p[k][0], d.p[k][1], d.p[k + 1][0], d.p[k + 1][1]);
-        if (!hit) continue;
+        if (!hit || !measured(terrain, hit[0], hit[1])) continue;
         const q = projectAxis(ax, hit[0], hit[1]);
         ceilings.push({ s: q.s, y: sv.heightAt(hit[0], hit[1]) + CEIL_LIFT, g: gW, R });
       }

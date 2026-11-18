@@ -133,7 +133,9 @@ test('a real chunk comes back mesh for mesh, with the same materials', () => {
       assert.deepEqual([...y.geometry.index.array], [...x.geometry.index.array], at);
   }
   assert.equal(groups, 1, 'the nested buildings group did not survive as a group');
-  assert.equal(instanced, 4, `${instanced} instanced meshes — lamps and trees are four`);
+  assert.equal(instanced, 3, 'two lamp batches and one combined crown and trunk batch');
+  assert.deepEqual(new Set(b.filter(o => o.isInstancedMesh).map(o => o.material)),
+    new Set([mats.lampPost, mats.lampHead, mats.crown]));
 });
 
 test('every vertex lands within the documented 3 mm', () => {
@@ -252,6 +254,7 @@ test('the instanced batches keep their colours, count and bounding sphere', () =
     assert.equal(!!b[i].instanceColor, !!a[i].instanceColor);
     if (!a[i].instanceColor) continue;
     withColor++;
+    assert.equal(a[i].name, 'trees-far');
     // EXACT bytes, not "within a step": the low bits of a crown's colour carry
     // the tree's species (js/treeshapes.js crownColor), and the near models and
     // the far shader both decode it from whichever path built the chunk
@@ -259,10 +262,7 @@ test('the instanced batches keep their colours, count and bounding sphere', () =
       assert.equal(Math.round(b[i].instanceColor[c](k) * 255), Math.round(a[i].instanceColor[c](k) * 255),
         'a tree changed colour, and with it its species tag');
   }
-  // Two since the trees got species: the crowns carry the leaf colour and the
-  // trunks the bark (a birch is white, a pine orange). It was one while every
-  // trunk in the world was the same brown.
-  assert.equal(withColor, 2, 'crowns and trunks are the batches that carry instanceColor');
+  assert.equal(withColor, 1, 'the combined tree batch carries the species colour');
 });
 
 test('the payload really is transferable — it survives a postMessage', () => {

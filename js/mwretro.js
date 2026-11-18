@@ -33,7 +33,7 @@
 // nothing here is chunk geometry, so the worker and the codec never see it.
 
 import * as THREE from 'three';
-import { barrierPlan, K_RAIL, MEDIAN_H, RAIL_H, STRIDE, DELIN_STEP } from './mwplan.js';
+import { barrierPlan, hasInterchangeSlip, K_RAIL, MEDIAN_H, RAIL_H, STRIDE, DELIN_STEP } from './mwplan.js';
 import { d11Locate } from './d11.js';
 
 const CHUNK = 120;
@@ -152,14 +152,17 @@ export class MwRetro {
     const m = this.mesh;
     if (!m) return;
     const on = this.src.uniforms.uOn.value;
-    if (!car || !beams || on <= 0.002 || !world?.city?.chunkIndex || !world.terrain
-      || !d11Locate(car.x, car.z)) {
+    if (!car || !beams || on <= 0.002 || !world?.city?.chunkIndex || !world.terrain) {
       m.visible = false;
       return;
     }
     const fx = -Math.sin(car.heading), fz = -Math.cos(car.heading);
     const lx = car.x + fx * 1.9, lz = car.z + fz * 1.9;
     const ccx = Math.floor(car.x / CHUNK), ccz = Math.floor(car.z / CHUNK);
+    if (!d11Locate(car.x, car.z) && !hasInterchangeSlip(world.city.chunkIndex.get(ccx + ',' + ccz))) {
+      m.visible = false;
+      return;
+    }
     // plan at most two new cells a frame, nearest first (the ring is small)
     let planned = 0;
     for (let r = 0; r <= AROUND && planned < 2; r++) {
@@ -178,7 +181,7 @@ export class MwRetro {
         const nr = cell.roads?.length ?? 0;
         if (e && e.cell === cell && e.loads === loads && e.nr === nr) continue;
         this.cells.set(key, { cell, loads, nr, cx: ccx + dx, cz: ccz + dz,
-          pts: reflectorsOf(barrierPlan(cell, key, world.terrain, 0)) });
+          pts: reflectorsOf(barrierPlan(cell, key, world.terrain, 0, world.city)) });
         planned++;
       }
     }

@@ -118,8 +118,13 @@ const _loc = { road: '', cw: '', km: 0, off: 0, dx: 0, dz: 0 };
  * its way. Every other motorway in the world (the D0, D1, D10 in the Prague
  * box) keeps the town treatment.
  */
+const cwMemo = new WeakMap();
 export function cwOf(f) {
   if (!f || f.t !== 'motorway' || !f.ow || !f.p || f.p.length < 2) return null;
+  if (!cwMemo.has(f)) cwMemo.set(f, carriageway(f));
+  return cwMemo.get(f);
+}
+function carriageway(f) {
   const i = (f.p.length - 1) >> 1, a = f.p[i], b = f.p[i + 1];
   const x = (a[0] + b[0]) / 2, z = (a[1] + b[1]) / 2;
   const l = d11Locate(x, z, _loc);
@@ -132,10 +137,10 @@ export function cwOf(f) {
 
 // is (x, z) on the asphalt of a drivable road other than `self` that is on the
 // same level (an overpass above or a road under a viaduct does not count)
-function onOther(cell, self, x, z, grow) {
-  for (const o of cell.roads) {
-    if (o === self || !o.d || !o.p || !!o.br !== !!self.br) continue;
-    if (o.t === 'motorway' && cwOf(o) === cwOf(self)) continue;   // our own next piece
+function onOther(roads, self, x, z, grow) {
+  for (const o of roads) {
+    if (o === self || !o.d || !o.p || (o.l ?? 0) !== (self.l ?? 0)) continue;
+    if (o.t === 'motorway' && self.t === 'motorway' && cwOf(o) === cwOf(self)) continue;   // our own next piece
     const half = (o.w ?? 3) / 2 + grow, p = o.p;
     for (let k = 0; k < p.length - 1; k++) {
       const ax = p[k][0], az = p[k][1], bx = p[k + 1][0], bz = p[k + 1][1];
@@ -198,14 +203,42 @@ const _q = { x: 0, z: 0 };
  * collision memo keeps.
  * grow: metres the cell rect is grown by (0 for drawing, more for collision).
  */
-export function barrierPlan(cell, key, terrain, grow = 0) {
+const slipMemo = new WeakMap();
+export function interchangeSlip(road) {
+  if (road.t !== 'motorway_link' || !road.d || !road.p?.length) return false;
+  let value = slipMemo.get(road);
+  if (value === undefined) {
+    value = road.p.some(([x, z]) => motorwayLit(x, z));
+    slipMemo.set(road, value);
+  }
+  return value;
+}
+
+const slipCells = new WeakMap();
+export function hasInterchangeSlip(cell) {
+  if (!cell?.roads) return false;
+  const cached = slipCells.get(cell);
+  if (cached?.roads === cell.roads && cached.length === cell.roads.length) return cached.found;
+  const found = cell.roads.some(interchangeSlip);
+  slipCells.set(cell, { roads: cell.roads, length: cell.roads.length, found });
+  return found;
+}
+
+export function barrierPlan(cell, key, terrain, grow = 0, city) {
   const out = [];
   if (!cell?.roads || !terrain) return out;
   const c = key.indexOf(','), cx = +key.slice(0, c), cz = +key.slice(c + 1);
   const x0 = cx * 120 - grow, z0 = cz * 120 - grow, x1 = x0 + 120 + 2 * grow, z1 = z0 + 120 + 2 * grow;
+  if (!cell.roads.some(f => cwOf(f) || interchangeSlip(f))) return out;
+  // A slip can enter the paved gore from the neighbouring 120 m cell.
+  const neighbours = new Set(cell.roads);
+  if (city) for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const near = city.chunkIndex.get((cx + dx) + ',' + (cz + dz));
+    for (const other of near?.roads ?? []) if (other.d) neighbours.add(other);
+  }
   for (const f of cell.roads) {
-    const cw = cwOf(f);
-    if (!cw) continue;
+    const cw = cwOf(f), slip = !cw && interchangeSlip(f);
+    if (!cw && !slip) continue;
     const lay = laneLayout(f);
     const rh = lay.ribbonHalf, pcw = PARTNER[cw];
     const p = f.p;
@@ -213,8 +246,8 @@ export function barrierPlan(cell, key, terrain, grow = 0) {
     // deck's kerb) and 0.2 m up: over the last FLARE m before a deck of the
     // same carriageway it bends there instead of jumping
     const len = f._len ?? lenOf(p);
-    const br0 = !f.br && (deckAt(cw, p[0]) || bridgeAt(cell, f, cw, p[0], false));
-    const br1 = !f.br && (deckAt(cw, p[p.length - 1]) || bridgeAt(cell, f, cw, p[p.length - 1], true));
+    const br0 = !!cw && !f.br && (deckAt(cw, p[0]) || bridgeAt(cell, f, cw, p[0], false));
+    const br1 = !!cw && !f.br && (deckAt(cw, p[p.length - 1]) || bridgeAt(cell, f, cw, p[p.length - 1], true));
     // the open runs of this way in this cell, one per kind and side
     let med = null, lrail = null, rrail = null;
     const flush = (r) => { if (r && r.v.length >= 2 * STRIDE) out.push(r); return null; };
@@ -262,20 +295,20 @@ export function barrierPlan(cell, key, terrain, grow = 0) {
         const mx = x + dx * h / 2, mz = z + dz * h / 2;
         const mine = mx >= x0 && mx < x1 && mz >= z0 && mz < z1;
         // ---- the left side: median barrier, or a rail of our own ----
-        const d = lineDist(pcw, x, z, _q);
+        const d = cw ? lineDist(pcw, x, z, _q) : Infinity;
         const side = (_q.x - x) * lx + (_q.z - z) * lz;          // + when the partner is left
         let wantM = false, wantL = false;
         if (d >= MEDIAN_MIN && d <= MEDIAN_MAX && side > 0.8 * d) wantM = true;
-        else if (!(d < MEDIAN_MIN && side > 0)) wantL = true;
+        else if (!slip && !(d < MEDIAN_MIN && side > 0)) wantL = true;
         // on a bridge the rails stand on the deck's edge kerb (meshes.js draws
         // the kerb), not in the air beyond it
         const fl = f.br ? 1 : Math.max(br0 ? 1 - s / FLARE : 0, br1 ? 1 - (len - s) / FLARE : 0, 0);
         const ro = rh + RAIL_OUT - (RAIL_OUT + BRIDGE_IN) * fl;
         const lxp = x + lx * ro, lzp = z + lz * ro;
-        if (wantL && onOther(cell, f, lxp, lzp, 0.6)) wantL = false;
+        if (wantL && onOther(neighbours, f, lxp, lzp, 1.2)) wantL = false;
         // ---- the right side: the outer guard rail ----
         const rx = x - lx * ro, rz = z - lz * ro;
-        const wantR = !onOther(cell, f, rx, rz, f.br ? 0.2 : 1.2);
+        const wantR = !onOther(neighbours, f, rx, rz, f.br ? 0.4 : 1.8);
         if (mine || med || lrail || rrail) {
           const y = deckY(f, s, x, z, terrain), ry = y + BRIDGE_KERB * fl;
           if (wantM) med = push(med, K_MEDIAN, (x + _q.x) / 2, (z + _q.z) / 2, y, -lx, -lz, d / 2 - FILL_IN, s, !pm, -1);
@@ -285,6 +318,12 @@ export function barrierPlan(cell, key, terrain, grow = 0) {
           else lrail = close(lrail, true);
           if (wantR) rrail = push(rrail, K_RAIL, rx, rz, ry, lx, lz, f.br ? 1 : 0, s, !pr, 1);
           else rrail = close(rrail, true);
+          if (slip && rrail && atEnd) {
+            const tip = p[p.length - 1];
+            const next = [...neighbours].some(o => o !== f && interchangeSlip(o) &&
+              o.p[0][0] === tip[0] && o.p[0][1] === tip[1]);
+            if (!next) rrail.ends |= 2;
+          }
           if (!mine) { med = flush(med); lrail = flush(lrail); rrail = flush(rrail); }
         }
         pm = wantM; pl = wantL; pr = wantR;

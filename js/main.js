@@ -3119,7 +3119,7 @@ function tick(src) {
     renderer.shadowMap.needsUpdate = shadowDue(gs, sky?.nightK ?? 0);
     // people whose shadow cannot reach the view cast none (js/citizen.js); this is
     // the radius round the camera inside which everyone still casts
-    if (renderer.shadowMap.needsUpdate) cullPeopleShadows(camera, gs.shadowRes >= 4096 ? 60 : 45);
+    if (renderer.shadowMap.needsUpdate) cullPeopleShadows(camera, gs.shadowRes >= 4096 ? 60 : 45, scene.userData.shadowSlope);
     if (wantPost && postfx) {
       // the A/B (js/lookab.js): the old post stack draws the frame instead
       // while it is switched in, with the same options

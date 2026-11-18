@@ -93,7 +93,15 @@ function poolFor(scene, spec, need) {
   let p = pools.get(spec.key);
   if (p && p.cap >= need) return p;
   const cap = Math.max(16, need + 16, p ? p.cap * 2 : 0);
-  if (p) { scene.remove(p.mesh); p.mesh.dispose(); }
+  if (p) {
+    scene.remove(p.mesh);
+    p.mesh.dispose();
+    // The wrapper owns iPaint; its other GPU buffers still serve individual cars.
+    const old = p.mesh.geometry;
+    old.setIndex(null);
+    for (const name of Object.keys(spec.geo.attributes)) old.deleteAttribute(name);
+    old.dispose();
+  }
   // a geometry of its own (sharing every vertex attribute, so nothing is
   // uploaded twice) so the instanced paint attribute belongs to this pool alone
   const geo = new THREE.BufferGeometry();
@@ -142,11 +150,12 @@ function fill(scene, camera) {
     // first pass: count per pool, so a pool grows once, before it is written
     _live.length = 0;
     _want.clear();
+    const shadowPad = 4 * (scene.userData.shadowSlope ?? 0); // tallest trucks, metres
     for (const m of _members) {
       if (!shown(m.node, scene)) continue;
       const e = m.node.matrixWorld.elements;
       _sph.center.set(e[12], e[13], e[14]);
-      _sph.radius = m.radius;
+      _sph.radius = m.radius + shadowPad;
       if (!_frustum.intersectsSphere(_sph)) continue;
       _live.push(m);
       _want.set(m.spec.key, (_want.get(m.spec.key) ?? 0) + 1);

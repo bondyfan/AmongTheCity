@@ -11,7 +11,7 @@ register(new URL('./three-alias.mjs', import.meta.url));
 const THREE = await import('three');
 const { SignalBatch, SIG_DARK } = await import('../js/signalbatch.js');
 const { BATCH } = await import('../js/batchflags.js');
-const { mergeMarks } = await import('../js/wordmarkatlas.js');
+const { atlasMark, atlasStats, mergeMarks, releaseMark } = await import('../js/wordmarkatlas.js');
 const { sigAssets } = await import('../js/signalmodel.js');
 
 const scene = () => new THREE.Group();
@@ -198,4 +198,43 @@ test('mergeMarks leaves plain-canvas labels and other pages apart', () => {
   assert.equal(root.children.length, 3);
   assert.ok(mats.includes(own) && mats.includes(p1.mat) && mats.includes(p2.mat));
   assert.equal(root.children.find((o) => o.material === p1.mat).geometry.attributes.position.count, 6);
+});
+
+test('loading the ordinary game URL enables all three optimizations', async (t) => {
+  const old = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  t.after(() => {
+    if (old) Object.defineProperty(globalThis, 'location', old);
+    else delete globalThis.location;
+  });
+  for (const [search, expected] of [['', [true, true, true]], ['?batch=marks', [false, true, false]]]) {
+    Object.defineProperty(globalThis, 'location', { configurable: true, value: { search } });
+    const { BATCH: flags } = await import('../js/batchflags.js?test=' + encodeURIComponent(search));
+    assert.deepEqual([flags.signals, flags.marks, flags.shadows], expected);
+  }
+});
+
+test('sweeping the last wordmark releases its atlas page', (t) => {
+  const ctx = {
+    save() {}, restore() {}, setTransform() {}, fillRect() {}, clearRect() {},
+    drawImage() {}, fillText() {}, measureText() { return { width: 240 }; },
+  };
+  const old = globalThis.document;
+  t.after(() => {
+    if (old === undefined) delete globalThis.document;
+    else globalThis.document = old;
+  });
+  globalThis.document = { createElement: () => ({ getContext: () => ctx }) };
+  const before = atlasStats().pages;
+  const a = atlasMark({ sign: 0x224466 }, 'Kino');
+  const b = atlasMark({ sign: 0x992200 }, 'Kavárna');
+  const { page } = a.userData.mark;
+  assert.equal(page, b.userData.mark.page);
+  let freed = 0;
+  page.tex.addEventListener('dispose', () => freed++);
+  page.mat.addEventListener('dispose', () => freed++);
+  releaseMark(a);
+  assert.equal(freed, 0);
+  releaseMark(b);
+  assert.equal(freed, 2);
+  assert.equal(atlasStats().pages, before);
 });

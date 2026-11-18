@@ -210,7 +210,7 @@ export function cellPoints(key, cell, terrain, windows = true, city = null) {
   for (const [list, arms] of [[plan.mast, 2], [plan.mast1, 1]]) {
     for (const sp of list ?? []) {
       const px = sp[0], pz = sp[1], rx = -Math.sin(sp[2]), rz = -Math.cos(sp[2]);
-      const y = H(px, pz) + MAST_Y, t = mastTint(px, pz);
+      const y = (sp[3] ?? H(px, pz)) + MAST_Y, t = mastTint(px, pz);
       for (let a = 0; a < arms; a++) {
         const o = a === 0 ? MAST_OUT : -MAST_OUT;
         out.push(px + rx * o, y, pz + rz * o, t[0], t[1], t[2]);

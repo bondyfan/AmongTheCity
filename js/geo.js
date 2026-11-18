@@ -21,9 +21,11 @@ import { workTurn as workTurnOn, queueJob as queueJobOn, guarded, addAllSteps, c
 import { onQuay } from './quayedge.js';
 import { applyDip, underCap } from './dipchain.js';
 import { corridorLevel, sameCorridor, inScope as corridorScope, outranks, surveyOf } from './corridorlevel.js';
+import { fitSlip } from './slipgrade.js';
+import { portalLevel } from './railportal.js';
 import { applyPins } from './corridorfit.js';
 import { parallel as corridorParallel } from './corridorgeom.js';
-import { indexLevelCrossings } from './levelxing.js';
+import { indexTileCrossings } from './levelxing.js';
 
 // how far ahead of the focus a tile starts loading. View streams ±600 m, so
 // 2600 m of headroom means even 130 km/h driving gives a fetch ~55 s before
@@ -482,7 +484,10 @@ export function roadProfile(way, terrain) {
   const c = way._prof;
   if (c && c.terrain === terrain
     && (c.ready || (c.loads === (terrain._loads ?? 0) && corridorFresh(c)))) return c;
-  const prof = levelWay(way, terrain, way._pins ?? null);
+  let prof = levelWay(way, terrain, way._pins ?? null);
+  if (way.t === 'motorway_link') prof = fitSlip(way, prof, terrain, _streets, roadProfile);
+  const portal = way._portal && portalLevel(way, surveyOf(terrain));
+  if (prof && typeof portal === 'number') prof = { ...prof, y: new Float32Array(prof.n).fill(portal) };
   // Terrain answers with a guess while a height tile is still on the way.
   // The guess used to be thrown away — which meant the 24-pass levelling ran
   // AGAIN for every roadGradeY call on an unready way: the whole boot was
@@ -492,6 +497,9 @@ export function roadProfile(way, terrain) {
   // still flags the chunk to rebuild.
   if (prof) {
     prof.loads = terrain._loads ?? 0;
+    // The underlying corridor can be final while a pin is still provisional.
+    // Its old stamp would make every wheel and mesh vertex re-fit this road.
+    if (prof.cor && _streets) prof.fl = featStamp();
     way._prof = prof;
     if (!prof.ready) terrain.missed = true;
   }
@@ -509,9 +517,20 @@ function levelWay(way, terrain, pinList, noDip = false) {
   // top of the levelled way, never inside it: the unpinned line a junction
   // averages (junctionY) is the street as if nothing crossed it, and the dip
   // reaches the side roads through their pins instead.
-  if (noDip || !base || !way._dipChain) return base;
+  if (noDip || !base) return base;
+  const crossings = pinList?.filter(({ node }) => node._xing);
+  if (!way._dipChain && !crossings?.length) return base;
   const y = Float32Array.from(base.y);
-  const ok = applyDip(way, y, base.ds, terrain);
+  const ok = !way._dipChain || applyDip(way, y, base.ds, terrain);
+  if (crossings?.length) {
+    // A track crossing at grade can lie on an approach to a separate rail
+    // bridge. The dip shapes that approach, but its outer taper must still
+    // pass through the level of the track the road physically intersects.
+    const profile = { ds: base.ds, n: y.length, y };
+    applyPins(y, base.ds, crossings.map(({ s, node }) => ({
+      s, d: junctionY(node, terrain) - sampleProfile(profile, s),
+    })), (d) => Math.max(PIN_TAPER, Math.abs(d) / BRIDGE_GRADE));
+  }
   return { ...base, y, ready: base.ready && ok };
 }
 // The pins a corridor way keeps: a node where a way of ANOTHER corridor that
@@ -721,6 +740,7 @@ function levelWayBase(way, terrain, pinList) {
       }
     }
     if (hardPins.length) hardFloor(y, ground, ds, hardPins, keepPins);
+
   }
   const prof = { terrain, ds, n, y, ground, gx, gz, total, ready,
     loads: terrain._loads ?? 0 };
@@ -974,7 +994,8 @@ export function bridgeDeckHeight(way, dist, terrain) {
   // headroom over what it crosses and the ground under its span as floors
   // (js/corridorlevel.js): approach and deck are one curve. (The worker
   // reads the same line, which travelled as `_prof`.)
-  if (corridorScope(way) && roadProfile(way, terrain)?.cor) return roadGradeY(way, dist, terrain);
+  const railDeck = way.t === 'rail' || way.t === 'tram';
+  if (!railDeck && corridorScope(way) && roadProfile(way, terrain)?.cor) return roadGradeY(way, dist, terrain);
 
   // ---- a chained bridge reads the CHAIN's grade, not its own --------------
   // One grade for the whole viaduct: anchored on the real approaches at its
@@ -987,19 +1008,24 @@ export function bridgeDeckHeight(way, dist, terrain) {
       || (!prof.ready && prof.loads !== (terrain._loads ?? 0))) {
       const anchor = (w, end) => {
         const link = end === 0 ? w._ap0 : w._ap1;
-        const y = link && roadGradeY(link.road, link.at, terrain);
+        const y = link && (railDeck ? railGradeY : roadGradeY)(link.road, link.at, terrain);
         if (y !== null && y !== undefined) return y;
         const yn = link ? null : deckNodeLevel(w, end, terrain);
         if (yn !== null) return yn;
         const p = w.p[end === 0 ? 0 : w.p.length - 1];
         return terrain.heightAt(p[0], p[1]);
       };
-      const hasA = (ch.headEnd === 0 ? ch.headWay._ap0 : ch.headWay._ap1) || deckNodeLevel(ch.headWay, ch.headEnd === 0 ? 0 : 1, terrain) !== null;
-      const hasB = (ch.tailEnd === 0 ? ch.tailWay._ap0 : ch.tailWay._ap1) || deckNodeLevel(ch.tailWay, ch.tailEnd === 0 ? 0 : 1, terrain) !== null;
+      const hasA = ch.headJoint || (ch.headEnd === 0 ? ch.headWay._ap0 : ch.headWay._ap1) || deckNodeLevel(ch.headWay, ch.headEnd === 0 ? 0 : 1, terrain) !== null;
+      const hasB = ch.tailJoint || (ch.tailEnd === 0 ? ch.tailWay._ap0 : ch.tailWay._ap1) || deckNodeLevel(ch.tailWay, ch.tailEnd === 0 ? 0 : 1, terrain) !== null;
+      const headApproach = (ch.headEnd === 0 ? ch.headWay._ap0 : ch.headWay._ap1)?.road;
+      const tailApproach = (ch.tailEnd === 0 ? ch.tailWay._ap0 : ch.tailWay._ap1)?.road;
+      const headPortal = railDeck && portalLevel(headApproach, surveyOf(terrain)) !== null;
+      const tailPortal = railDeck && portalLevel(tailApproach, surveyOf(terrain)) !== null;
       let A = anchor(ch.headWay, ch.headEnd === 0 ? 0 : 1);
       let B = anchor(ch.tailWay, ch.tailEnd === 0 ? 0 : 1);
       // (one end on a road and the other on nothing: the deck holds the road's level)
-      if (hasA && !hasB && way.d) B = A; else if (hasB && !hasA && way.d) A = B;
+      if (hasA && !hasB && (way.d || railDeck)) B = A;
+      else if (hasB && !hasA && (way.d || railDeck)) A = B;
       const cones = [];
       let samplesReady = true;
       const rdy = (x, z) => { if (terrain.ready && !terrain.ready(x, z)) samplesReady = false; };
@@ -1023,7 +1049,11 @@ export function bridgeDeckHeight(way, dist, terrain) {
             const local = m._chainRev ? mLen - sAt : sAt;
             const fx2 = ax + (bx - ax) * t, fz2 = az + (bz - az) * t;
             rdy(fx2, fz2);
-            cones.push([m._chainOff + local, terrain.heightAt(fx2, fz2) + FLOOR, 0]);
+            const station = m._chainOff + local;
+            // The survey measures the hillside over an unmapped rail tunnel.
+            // At its open end the viaduct enters the hill at rail grade.
+            const nearOpenRailEnd = (headPortal && station < 80) || (tailPortal && ch.total - station < 80);
+            if (!nearOpenRailEnd) cones.push([station, terrain.heightAt(fx2, fz2) + FLOOR, 0]);
           }
           along += seg;
         }
@@ -2601,8 +2631,6 @@ function* indexPayloadSteps(city, data, touched, slot = 0, heavyOnly = false, ke
     landJ = yield* indexJunctionsSteps(roads);
     yield* indexBridgeCrossingsSteps(roads, rails);
     yield;
-    indexLevelCrossings(roads, rails);   // the railway wins at grade (js/levelxing.js)
-    yield;
     indexRoundabouts(roads);
     yield;
   }
@@ -2655,6 +2683,7 @@ function* indexPayloadSteps(city, data, touched, slot = 0, heavyOnly = false, ke
   mergeStage(city.chunkIndex, stage);
   yield;
   if (landJ) yield* landJ();
+  if (!kept) yield* indexTileCrossings(city, roads, rails, stage.keys());
   appendAll(city.buildings, buildings);
   appendAll(city.trees, trees);
   yield;

@@ -269,3 +269,37 @@ test('a D11 viaduct stands its piers side by side under both decks', async () =>
     assert.ok(near < 14.5, `a pier with no twin (${near.toFixed(1)} m)`);
   }
 });
+
+test('the exit 8 slip has its own guard rail clear of the other asphalt ribbons', async () => {
+  const { nearestOnWay } = await import('../js/corridorgeom.js');
+  const { laneLayout } = await import('../js/lanes.js');
+  await ready(...EXIT8);
+  const cx = Math.floor(EXIT8[0] / 120), cz = Math.floor(EXIT8[1] / 120);
+  let checked = 0;
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const key = (cx + dx) + ',' + (cz + dz), cell = city.chunkIndex.get(key);
+    if (!cell) continue;
+    for (const run of P.barrierPlan(cell, key, terrain, 0, city)) {
+      const way = cell.roads.find(r => r._id === run.id);
+      if (!way || !P.interchangeSlip(way)) continue;
+      assert.equal(run.k, P.K_RAIL);
+      for (let i = 0; i < run.v.length; i += P.STRIDE) {
+        for (const other of cell.roads) {
+          if (!other.d || other === way || (other.l ?? 0) !== (way.l ?? 0)) continue;
+          assert.ok(nearestOnWay(other, run.v[i], run.v[i + 1]).d >= (laneLayout(other)?.ribbonHalf ?? (other.w ?? 3) / 2));
+        }
+        checked++;
+      }
+    }
+  }
+  assert.ok(checked >= 10, 'the exit should have at least ten slip guard rail stations');
+});
+
+test('a noise wall parallel to a raised motorway stands on the deck at its station', async () => {
+  const { roadsideLevel } = await import('../js/mwroadside.js');
+  const t = { heightAt: () => 180 };
+  const m = { p: [[0, 0], [100, 0]], t: 'motorway', d: 1, _id: 1,
+    _prof: { terrain: t, ready: true, ds: 100, n: 2, y: [186, 188] } };
+  assert.equal(roadsideLevel([m], 50, 8, 1, 0, t), P.deckY(m, 50, 50, 0, t));
+  assert.equal(roadsideLevel([m], 50, 8, 0, 1, t), 180);
+});

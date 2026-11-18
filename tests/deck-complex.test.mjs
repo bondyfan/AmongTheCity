@@ -95,3 +95,21 @@ test('the joints of a branched bridge lie on one grade between its banks, no saw
   }
   assert.ok(end(D4, 1) > end(D1, 0) + 5, 'the east bank is higher and the deck reaches it');
 });
+
+test('a viaduct entering an omitted tunnel carries its level through both short portal ways', () => {
+  const rail = (points, bridge) => ({ p: points, t: 'rail', br: bridge, _len: geo.polylineLength(points) });
+  const bank = rail([[10, 20], [100, 20]]);
+  const bridge = rail([[100, 20], [200, 20]], 1);
+  const stub = rail([[200, 20], [215, 20]]), tip = rail([[215, 20], [240, 20]]);
+  const ways = [bank, bridge, stub, tip];
+  const cells = new Map();
+  for (let cx = 0; cx <= 2; cx++) cells.set(cx + ',0', { roads: [], rails: ways });
+  const city = { chunkIndex: cells };
+  stitchStructures(city, [], ways);
+  const hill = { heightAt: x => 196 + Math.max(0, x - 165) * 0.5, ready: () => true };
+  for (const w of [bridge, stub, tip]) {
+    const heightAt = w.br ? geo.bridgeDeckHeight : geo.railGradeY;
+    assert.ok(Math.abs(heightAt(w, 0, hill) - 196) < 0.02);
+    assert.ok(Math.abs(heightAt(w, w._len, hill) - 196) < 0.02);
+  }
+});

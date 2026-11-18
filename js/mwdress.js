@@ -149,9 +149,9 @@ function delineator(sink, v, a, sd, kind) {
  * Draw the D11's median barriers and guard rails that this chunk owns.
  * Returns the vertices written (for the budget checks in the tests).
  */
-export function motorwayDressInto(sink, cell, key, terrain) {
+export function motorwayDressInto(sink, cell, key, terrain, city) {
   if (!terrain || !cell?.roads) return 0;
-  const plan = barrierPlan(cell, key, terrain, 0);
+  const plan = barrierPlan(cell, key, terrain, 0, city);
   if (!plan.length) return 0;
   ASPHALT ??= lin(COLORS.road.motorway ?? 0x55585c);
   const v0 = sink.pos.length;

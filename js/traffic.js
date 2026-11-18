@@ -4989,6 +4989,7 @@ export class Traffic {
         if (!this._jgrid.m.get(jn._gk)?.length) this._jgrid.m.delete(jn._gk);
         jn.group.dispose();
       }
+      this._sigBatch.flush();
       for (let i = 0; i < this.edges.length; i++) {
         const e = this.edges[i];
         if (e.sig && off.has(e.sig)) { e.sig = null; e.sigD = 1e9; }

@@ -1726,10 +1726,12 @@ that the five round 8 packages build on. Read them, never re-derive them.
   tier too. The town lamp rule plants nothing along a D11 / D35 way, nor
   along a slip road reaching `motorwayLit` (250 m round an exit's or rest
   area's slip nodes): those are lit by `js/mastlamps.js` (round 9), 12 m
-  masts walked from each way's first vertex every 40 m inside `motorwayLit`,
+  masts walked from each way's first vertex every 40 m,
   kind `mast` (two arms, the motorway's outer side, 2.75 m past the asphalt,
   only where the rail before it stands, never in a sign's keep-out box) and
-  `mast1` (one arm, beside a slip). meshes.js `lampSpots` returns them as
+  `mast1` (one arm, along the full lit slip, with 5 m clear of unguarded
+  asphalt). Mainline masts stay inside `motorwayLit`. Bridge sockets use the
+  deck height and ground sockets the terrain. meshes.js `lampSpots` returns them as
   `plan.mast` / `plan.mast1`, `lampBatch` names them `mastPosts` /
   `mast1Posts` (city.js `LAMP_BATCHES`), lightpools.js throws a pool under
   each head and farlights.js a point at each, in one colour per interchange
@@ -1853,8 +1855,8 @@ SERVER_URL, `GET /health` (the menu, `js/menuhealth.js`) and the WebSocket at
 * Tests: tests/facadefx.test.mjs.
 
 ## The ground at street level (gfx/ground): js/groundglsl.js, streetdetail.js, orthodetail.js
-Material-only: no geometry attribute, no draw call, worker/main parity untouched
-except one data vote in meshes.js. Two ground materials share the GLSL in
+The street detail shares existing draw calls and attributes. Mapped squares add
+triangles to the ground mesh. Both mesh builders use the same neighbouring cells. Two ground materials share the GLSL in
 `js/groundglsl.js`:
 - **precise world xz** (`atcWrapXZ`): the chunk origin wrapped by 4 800 m (a
   whole number of every class's tile) plus the local position. Raw world xz at

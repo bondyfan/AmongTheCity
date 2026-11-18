@@ -49,7 +49,7 @@ const _geo = new WeakMap();
 /** {L, cum, bb} of a way: cumulative arclength per vertex and its bounding box. */
 export function geomOf(w) {
   let g = _geo.get(w);
-  if (g && g.p === w.p) return g;
+  if (g && g.p === w.p && g.cum.length === w.p.length) return g;
   const p = w.p, cum = new Float64Array(p.length);
   let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
   for (let i = 0; i < p.length; i++) {

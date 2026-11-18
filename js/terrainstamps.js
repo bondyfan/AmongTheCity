@@ -30,7 +30,7 @@
 // pass and the stamps share a surface without knowing about each other.
 
 import { VALY, VALY_FLOOR } from './valyring.js';
-import { NAPLAVKY, NAPLAVKA_BEFORE, NAPLAVKA_AFTER } from './naplavky.js';
+import { NAPLAVKY, FRANTISKU_LANDING, NAPLAVKA_BEFORE, NAPLAVKA_AFTER } from './naplavky.js';
 import { VYSEHRAD } from './vysehraddata.js';
 import { ecoductCuts } from './roadpatches.js';
 
@@ -234,7 +234,7 @@ const RASINOVO = {
 // Then Vyšehrad: the rock face over the embankment road, and the road's cut
 // through the spur that its tunnel roof covers (js/vysehraddata.js).
 const PRAHA = [RASINOVO, VYSEHRAD.faceN, VYSEHRAD.faceS, VYSEHRAD.tunnel,
-  ...NAPLAVKA_BEFORE, ...NAPLAVKY, ...NAPLAVKA_AFTER].map(makeStamp);
+  ...NAPLAVKA_BEFORE, ...NAPLAVKY, FRANTISKU_LANDING, ...NAPLAVKA_AFTER].map(makeStamp);
 // the quays and the ways down to them (js/quayedge.js onQuay)
 const QUAYS = PRAHA.slice(4);
 // THE D11 under its two green bridges: the elevation model holds the bridges'

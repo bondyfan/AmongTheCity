@@ -29,6 +29,7 @@ import { Interiors } from './interiorsim.js';
 import { landmarkSolids, solidHas } from './landmarks.js';
 import { Terrain, groundFor } from './terrain.js';
 import { stampShaped, onQuay } from './quayedge.js';
+import { roadSegs, segmentNear, nearestSeg } from './roadsegments.js';
 import { BATTER, roadCorr, railCorr, groundUnder, railBedded, railBedY } from './batter.js';
 import { Canopy } from './canopy.js';
 import { GroundClass } from './groundclass.js';
@@ -88,44 +89,26 @@ const lineBB = (f) => {
 };
 const _surf = { y: 0, road: false };   // surfaceY's reusable answer
 const _pull = { w: 0, t: 0 };          // _footPull's
-const _gEnt = [], _noEnt = [];         // _groundEntries' reusable lists
+const _noEnt = [];
 // The nearest segment of way r to (x, z) within `reach`: returns its arclength
 // s there and leaves the distance and the side in _near.
 const _near = { d: Infinity, e: 1 };
-function nearestSeg(r, x, z, reach) {
-  let along = 0, bd = Infinity, bs = 0, be = 1;
-  const p = r.p;
-  for (let i = 0; i < p.length - 1; i++) {
-    const ax = p[i][0], az = p[i][1], bx = p[i + 1][0], bz = p[i + 1][1];
-    const L = Math.hypot(bx - ax, bz - az);
-    const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-    if (d < reach && d < bd) {
-      bd = d; bs = along + L * _closest.t;
-      be = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
-    }
-    along += L;
-  }
-  _near.d = bd; _near.e = be;
-  return bs;
-}
 // Another pass of the same way under or over (x, z): a segment whose
 // UNCLAMPED projection lies within the half width, further along the way than
 // a carriageway's width from the nearest one (a slip looping over itself).
 function otherPasses(r, x, z, bs, half, terrain, ground) {
-  let along = 0;
-  const p = r.p;
-  for (let i = 0; i < p.length - 1; i++) {
-    const ax = p[i][0], az = p[i][1], dx = p[i + 1][0] - ax, dz = p[i + 1][1] - az;
-    const L2 = dx * dx + dz * dz || 1e-9, L = Math.sqrt(L2);
-    const t = ((x - ax) * dx + (z - az) * dz) / L2;
-    if (t > 0 && t < 1) {
-      const s = along + L * t;
-      if (Math.abs(s - bs) > 2 * half + 2 && Math.hypot(x - ax - dx * t, z - az - dz * t) < half) {
-        const gy = r.br ? bridgeDeckHeight(r, s, terrain) : (roadGradeY(r, s, terrain) ?? ground);
-        levels.add(gy + LAYER_Y.road);
-      }
+  const segs = roadSegs(r);
+  for (let i = 0; i < segs.length; i += 10) {
+    if (!segmentNear(segs, i, x, z, half)) continue;
+    const dx = segs[i + 2], dz = segs[i + 3], L = segs[i + 4];
+    const px = x - segs[i], pz = z - segs[i + 1];
+    const t = (px * dx + pz * dz) / (L * L || 1e-9);
+    if (t <= 0 || t >= 1) continue;
+    const s = segs[i + 5] + L * t, ex = px - dx * t, ez = pz - dz * t;
+    if (Math.abs(s - bs) > 2 * half + 2 && ex * ex + ez * ez < half * half) {
+      const gy = r.br ? bridgeDeckHeight(r, s, terrain) : (roadGradeY(r, s, terrain) ?? ground);
+      levels.add(gy + LAYER_Y.road);
     }
-    along += L;
   }
 }
 // How far a kerbed street's verge can reach past its carriageway edge (a lawn
@@ -1785,7 +1768,7 @@ export class CityWorld {
       // rychlodraha rode 0.33 m over its asphalt on a vertex 5 m ahead.
       // (Another pass of the same way, a ramp looping back over itself, is
       // still a deck of its own: segmentDecks.)
-      const bs = nearestSeg(r, x, z, reach);
+      const bs = nearestSeg(r, x, z, reach, _near);
       const bd = _near.d, be = _near.e;
       if (bd < reach) {
         const bay = r._bays ? bayAt(r, bs, be) : 0;
@@ -1834,6 +1817,7 @@ export class CityWorld {
     const ground = this.terrain.heightAt(x, z);
     const cell = this.city.chunkIndex.get(chunkKey(x, z));
     if (!cell) return ground;
+    const groundEntries = this._groundEntries(x, z);
     levels.reset(near);          // (the ground is offered last: see the foot of this function)
     // rails too: the drawn bed is an absolute graded surface (sleepers at
     // grade + LAYER_Y.rail), and feet that only knew the terrain sank into
@@ -1846,9 +1830,9 @@ export class CityWorld {
       // down at the 1:1.5 batter, or the ballast between it and a track of
       // the same bed (js/batter.js railBedY), asked of the nearest segment
       if (railBedded(r)) {
-        const bs = nearestSeg(r, x, z, 2.6);
+        const bs = nearestSeg(r, x, z, 2.6, _near);
         if (_near.d < 2.6) {
-          const y = railBedY(r, bs, _near.d, x, z, this._groundEntries(x, z), this.terrain);
+          const y = railBedY(r, bs, _near.d, x, z, groundEntries, this.terrain);
           if (y !== null) levels.add(y);
         }
         continue;
@@ -1905,37 +1889,27 @@ export class CityWorld {
       const bb = lineBB(r);
       if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
       // (the verge and its pull are asked of the NEAREST segment only: see surfaceY)
-      let dist = 0, bd = Infinity, bs = 0, be = 1;
       const half = r.w / 2;
-      for (let i = 0; i < r.p.length - 1; i++) {
-        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
-        const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-        if (d < reach) {
-          const along = dist + Math.hypot(_closest.x - ax, _closest.z - az);
-          if (br) { if (d < half + 1.5) levels.add(bridgeDeckHeight(r, along, this.terrain)); }
-          else {
-            const gy = roadGradeY(r, along, this.terrain);
-            if (gy !== null && gy !== undefined) {
-              if (!r.d) {
-                // a footway, path or track: its own strip
-                // (a hand past its edge and no more: a lifted footway is a
-                // slab now, and 35 cm of grace stood people on the air beside it)
-                if (d < half + 0.12 && gy + LAYER_Y.footway > footOwn) {
-                  footOwn = gy + LAYER_Y.footway; fcx = _closest.x; fcz = _closest.z;
-                }
-              } else {
-                // (the deck itself is asked of the nearest segment, below)
-                const e = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
-                if (d < bd) { bd = d; bs = along; be = e; }
-              }
-              // (the embankment bank beside the deck is the ground as the mesh
-              // draws it, offered at the foot of this function: groundUnder)
-            }
+      if (br || !r.d) {
+        // Two stretches of one footway or bridge can pass above each other.
+        const segs = roadSegs(r);
+        const strip = br ? half + 1.5 : half + 0.12;
+        for (let i = 0; i < segs.length; i += 10) {
+          if (!segmentNear(segs, i, x, z, strip)) continue;
+          const ax = segs[i], az = segs[i + 1];
+          const d = distPointToSegment(x, z, ax, az, ax + segs[i + 2], az + segs[i + 3], _closest);
+          if (d >= strip) continue;
+          const along = segs[i + 5] + _closest.t * segs[i + 4];
+          if (br) { levels.add(bridgeDeckHeight(r, along, this.terrain)); continue; }
+          const gy = roadGradeY(r, along, this.terrain);
+          if (gy != null && gy + LAYER_Y.footway > footOwn) {
+            footOwn = gy + LAYER_Y.footway; fcx = _closest.x; fcz = _closest.z;
           }
         }
-        dist += Math.hypot(bx - ax, bz - az);
-      }
-      if (r.d && !br && bd < reach) {
+      } else {
+        const bs = nearestSeg(r, x, z, reach, _near);
+        const bd = _near.d, be = _near.e;
+        if (bd >= reach) continue;
         const gy = roadGradeY(r, bs, this.terrain);
         if (gy !== null && gy !== undefined) {
           const bay = r._bays ? bayAt(r, bs, be) : 0;
@@ -1978,7 +1952,7 @@ export class CityWorld {
     // is a bicubic of stamped claims and stood up to 0.94 m over the
     // rychlodraha's asphalt where the twin carriageway's grade was stamped
     // into it; feet stood on that invisible ground half a metre over the road.
-    const drawn = groundUnder(x, z, ground, this._groundEntries(x, z), this.terrain, this._shapedAt);
+    const drawn = groundUnder(x, z, ground, groundEntries, this.terrain, this._shapedAt);
     if (slab === -Infinity || drawn <= slab) levels.add(drawn);
     // the stone steps down to a Prague lower quay (js/quayflights.js)
     const qs = quayStairY(x, z);
@@ -1998,15 +1972,25 @@ export class CityWorld {
     const lx = x - ci * CHUNK, lz = z - cj * CHUNK, M = 22;
     const own = this._cellEntries(ci, cj);
     if (lx >= M && lx <= CHUNK - M && lz >= M && lz <= CHUNK - M) return own;
-    const out = _gEnt;
-    out.length = 0;
-    for (const e of own) out.push(e);
     const xs = lx < M ? -1 : lx > CHUNK - M ? 1 : 0, zs = lz < M ? -1 : lz > CHUNK - M ? 1 : 0;
-    for (const [dx, dz] of [[xs, 0], [0, zs], [xs, zs]]) {
-      if (!dx && !dz) continue;
-      for (const e of this._cellEntries(ci + dx, cj + dz)) out.push(e);
+    const eastWest = xs ? this._cellEntries(ci + xs, cj) : _noEnt;
+    const northSouth = zs ? this._cellEntries(ci, cj + zs) : _noEnt;
+    const diagonal = xs && zs ? this._cellEntries(ci + xs, cj + zs) : _noEnt;
+    if (!eastWest.length && !northSouth.length && !diagonal.length) return own;
+    // Key by the cell so a neighbour's list cannot keep an evicted cell's cache alive.
+    const cell = this.city.chunkIndex.get(ci + ',' + cj);
+    const memo = cell && this._gEntMemo.get(cell);
+    const borders = memo && (memo.borders ??= []);
+    const side = (xs + 1) * 3 + zs + 1;
+    const last = borders?.[side];
+    if (last && last.eastWest === eastWest
+      && last.northSouth === northSouth && last.diagonal === diagonal) return last.entries;
+    const entries = [], seen = new Set();
+    for (const list of [own, eastWest, northSouth, diagonal]) {
+      for (const e of list) if (!seen.has(e.r)) { seen.add(e.r); entries.push(e); }
     }
-    return out;
+    if (borders) borders[side] = { eastWest, northSouth, diagonal, entries };
+    return entries;
   }
   _cellEntries(ci, cj) {
     const cell = this.city.chunkIndex.get(ci + ',' + cj);
@@ -2014,11 +1998,11 @@ export class CityWorld {
     this._gEntMemo ??= new WeakMap();
     let m = this._gEntMemo.get(cell);
     const nr = cell.roads.length, nl = cell.rails?.length ?? 0;
-    if (!m || m.nr !== nr || m.nl !== nl) {
+    if (!m || m.roads !== cell.roads || m.rails !== cell.rails || m.nr !== nr || m.nl !== nl) {
       const list = [];
       for (const r of cell.roads) if (!r.br && r.p && r.p.length >= 2) list.push(roadCorr(r, lineBB(r)));
       for (const r of cell.rails ?? []) if (!r.br && r.p && r.p.length >= 2) list.push(railCorr(r, lineBB(r)));
-      this._gEntMemo.set(cell, m = { nr, nl, list });
+      this._gEntMemo.set(cell, m = { roads: cell.roads, rails: cell.rails, nr, nl, list });
     }
     return m.list;
   }
@@ -2043,16 +2027,8 @@ export class CityWorld {
       const reach = half + (vg ? VERGE_REACH + (r._bays ? BAY_W : 0) : 5);
       const bb = lineBB(r);
       if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
-      let dist = 0, bd = Infinity, bs = 0, be = 1;
-      for (let i = 0; i < r.p.length - 1; i++) {
-        const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
-        const d = distPointToSegment(x, z, ax, az, bx, bz, _closest);
-        if (d < bd) {
-          bd = d; bs = dist + Math.hypot(_closest.x - ax, _closest.z - az);
-          be = (x - ax) * (bz - az) - (z - az) * (bx - ax) >= 0 ? 1 : -1;
-        }
-        dist += Math.hypot(bx - ax, bz - az);
-      }
+      const bs = nearestSeg(r, x, z, reach, _near);
+      const bd = _near.d, be = _near.e;
       if (bd >= reach) continue;
       const gy = roadGradeY(r, bs, this.terrain);
       if (gy === null || gy === undefined) continue;

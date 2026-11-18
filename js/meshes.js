@@ -70,19 +70,21 @@ import { farTemplate, FAR_BOUND_PAD, farBoundPad, treeSpec, treeMatrices, crownC
 import { farTreeMaterials } from './treeshader.js';
 import { treePitsInto } from './treepits.js';
 import { riverLevelAt, isPooled, isCulvert } from './riverpools.js';
-import { quayPiece, embankmentNear, QUAY_MIN } from './quaywall.js';
+import { quayPiece, balustradeInto, embankmentNear, QUAY_MIN } from './quaywall.js';
 import { refineNearWeirs, paintFlow, weirSillsInto } from './weirs.js';
 import { quaySnap, GRID_SNAP, stampShaped } from './quayedge.js';
+import { roadSegs } from './roadsegments.js';
 import { roadCorr, railCorr, floorOf, vergeFaced, kerbedAt, vergeFacesInto, railShouldersInto, edgeNear } from './batter.js';
 import { vysehradInto } from './vysehrad.js';
 import { quayStairsInto } from './quaystairs.js';
-import { balustradeAt } from './quaybalustrade.js';
+import { balustradeAt, rasinovoParapet } from './quaybalustrade.js';
 import { isQuayStairWay } from './quayflights.js';
 import { forecourtFrame, islandsOf } from './forecourt.js';
 import { quayRefine, quayRefineArray, quayLiftArray, quayDrape } from './quayground.js';
 import { mwPainted, motorwayPaint } from './mwpaint.js';
 import { cwOf, osmBarrierReplaced, mwPierStations, BRIDGE_KERB as MW_BRIDGE_KERB, BRIDGE_IN as MW_BRIDGE_IN } from './mwplan.js';
 import { motorwayDressInto } from './mwdress.js';
+import { roadsideLevel, wallRoads } from './mwroadside.js';
 import { motorwayTallInto } from './mwtall.js';
 import { endsIndex } from './lanes.js';
 import { motorwayVerge, cutRects } from './mwground.js';
@@ -1088,34 +1090,6 @@ function clipSeg(ax, az, bx, bz, x0, z0, x1, z1) {
 // already, and under a bridge the deck is metres up, where min() changes
 // nothing.
 const _cl = { x: 0, z: 0, t: 0 };      // distPointToSegment's reusable answer
-// A road's centreline as flat numbers, ten per segment: ax, az, dx, dz, length,
-// distance along the way to its start, then its own box (x0, x1, z0, z1).
-// Measured in wave 3 over 169 real cells: clampUnderRoadsGen was 45 percent of
-// a full chunk build, nearly all of it walking EVERY segment of a road for a
-// vertex that its box had only said was somewhere near the road, with a
-// Math.hypot and two array reads apiece. The numbers are the same ones the
-// loop used to work out in place, in the same order, so the result is the same
-// to the last bit; the box test only skips segments that could not have been
-// within reach. Keyed on the road and checked against its point list, because
-// indexing may still splice a node into a way after the first chunk was built.
-const _segCache = new WeakMap();
-function roadSegs(r) {
-  const p = r.p, n = p.length;
-  let c = _segCache.get(r);
-  if (c && c.p === p && c.n === n && c.x0 === p[0][0] && c.z1 === p[n - 1][1]) return c.a;
-  const a = new Float64Array(Math.max(0, n - 1) * 10);
-  let along = 0;
-  for (let k = 0, o = 0; k < n - 1; k++, o += 10) {
-    const ax = p[k][0], az = p[k][1], bx = p[k + 1][0], bz = p[k + 1][1];
-    const dx = bx - ax, dz = bz - az, L = Math.hypot(dx, dz);
-    a[o] = ax; a[o + 1] = az; a[o + 2] = dx; a[o + 3] = dz; a[o + 4] = L; a[o + 5] = along;
-    a[o + 6] = Math.min(ax, bx); a[o + 7] = Math.max(ax, bx);
-    a[o + 8] = Math.min(az, bz); a[o + 9] = Math.max(az, bz);
-    along += L;
-  }
-  _segCache.set(r, c = { p, n, x0: p[0][0], z1: p[n - 1][1], a });
-  return a;
-}
 // A GENERATOR, because this is the single most expensive loop of a chunk
 // build: every vertex tests every corridor's every segment, and one big park
 // fill against a downtown 3×3's roads was 96 ms in a single call — the
@@ -5358,13 +5332,17 @@ function retainSpan(terrain, x, z, nx, nz, H, g) {
   if (hi - lo >= 0.4) return [lo - 0.1, hi + 0.9];
   return [g - 0.1, Math.min(g - 0.1 + H, hi + 1.4)];
 }
-function barrierInto(sink, f, terrain) {
+function barrierInto(sink, f, terrain, city) {
   const spec = BARRIER_SPEC[f.k];
   if (!spec || !f.p || f.p.length < 2 || !terrain) return;
   const H = f.h ?? spec.h;
   sink.at(SURF.concrete);
   _c.setHex(spec.col);
   const r = _c.r, g = _c.g, b = _c.b;
+  const balustrade = rasinovoParapet(f);
+  const roads = f.k === 'noise' ? wallRoads(city, f) : null;
+  const base = (x, z, tx, tz) => roads?.size
+    ? roadsideLevel(roads, x, z, tx, tz, terrain) : terrain.heightAt(x, z);
   const mark = sink.mark();
   const thin = f.se ? 0.02 : 0.06;          // see-through kinds are a sheet
   for (let i = 0; i < f.p.length - 1; i++) {
@@ -5378,7 +5356,7 @@ function barrierInto(sink, f, terrain) {
       const t0 = k / n, t1 = (k + 1) / n;
       const x0 = ax + (bx - ax) * t0, z0 = az + (bz - az) * t0;
       const x1 = ax + (bx - ax) * t1, z1 = az + (bz - az) * t1;
-      let g0 = terrain.heightAt(x0, z0) - 0.1, g1 = terrain.heightAt(x1, z1) - 0.1;
+      let g0 = base(x0, z0, ux, uz) - 0.1, g1 = base(x1, z1, ux, uz) - 0.1;
       let h0 = g0 + H, h1 = g1 + H;
       // A RETAINING wall holds ground up: it stands from the low side's
       // ground to just over the high side's. Drawn standing UP from the line
@@ -5388,6 +5366,10 @@ function barrierInto(sink, f, terrain) {
       if (f.k === 'retaining') {
         [g0, h0] = retainSpan(terrain, x0, z0, -uz, ux, H, g0 + 0.1);
         [g1, h1] = retainSpan(terrain, x1, z1, -uz, ux, H, g1 + 0.1);
+      }
+      if (balustrade) {
+        h0 -= 0.9; h1 -= 0.9;
+        balustradeInto(sink, x0, z0, x1, z1, h0, h1, -uz, ux);
       }
       // both faces, so a fence reads from the garden as well as from the street
       for (const e of [1, -1]) {
@@ -5408,7 +5390,7 @@ function barrierInto(sink, f, terrain) {
       for (let k2 = 0; k2 <= np; k2++) {
         const t = np ? k2 / np : 0;
         const x2 = ax + (bx - ax) * t, z2 = az + (bz - az) * t;
-        const gy = terrain.heightAt(x2, z2) - 0.1;
+        const gy = base(x2, z2, ux, uz) - 0.1;
         const w = 0.05;
         for (const [ox, oz] of [[ux, uz], [-uz, ux]]) {
           for (const flip of [1, -1]) {
@@ -5756,7 +5738,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
   // residential streets between them were not.) The walk is the same from the
   // way's first vertex whichever cell does it, so the cells agree on the spots.
   // (the D11 / D35 and their slip roads: the tall masts of js/mastlamps.js)
-  const mastGuards = { near, inRoad: lampInRoad, onPad, inHouse, nearMapped, mast, mast1 };
+  const mastGuards = { terrain, near, inRoad: lampInRoad, onPad, inHouse, nearMapped, mast, mast1 };
   for (const r of cell.roads) {
     if (mastsAlong(r, mastKind(r), x0, z0, x1, z1, mastGuards)) continue;
     if (!r.d || r.w < LAMP_MIN_W || !r.p) continue;
@@ -6685,10 +6667,10 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
     // fences, walls, noise barriers — the lines that divide one plot from the
     // next, and the reason a town stops looking like houses dropped in a field
     if (cell.barriers) for (const b of cell.barriers) {
-      if (b._home === key && !landmarkBarrier(b) && !osmBarrierReplaced(b)) { barrierInto(sink, b, mats.terrain); yield; }
+      if (b._home === key && !landmarkBarrier(b) && !osmBarrierReplaced(b)) { barrierInto(sink, b, mats.terrain, city); yield; }
     }
     // the D11's median barrier and guard rails, planned per cell (js/mwplan.js)
-    if (!roadsOnly) { motorwayDressInto(sink, cell, key, mats.terrain); yield; }
+    if (!roadsOnly) { motorwayDressInto(sink, cell, key, mats.terrain, city); yield; }
     if (!roadsOnly && cell.calming) for (const cm of cell.calming) {
       if (cm._home === key) bumpInto(sink, cm, cell, mats.terrain);
     }

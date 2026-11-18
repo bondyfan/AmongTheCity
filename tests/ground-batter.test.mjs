@@ -261,3 +261,14 @@ test('the untiled ground is known from the manifest', () => {
   assert.equal(untiledAt(city, 100, -100), true);
   assert.equal(untiledAt({ tile: 4800 }, 100, -100), false, 'no manifest: nothing is a hole');
 });
+
+test('ground queries deduplicate border ways and follow same-length tile replacements', () => {
+  const first = { t: 'primary', d: 1, w: 8, p: [[80, 50], [150, 50]] };
+  const city = cityWith([first]);
+  const world = worldOf(terrainOf(() => 220), city);
+  const x = 119, z = 50;
+  assert.deepEqual(world._groundEntries(x, z).map(e => e.r), [first]);
+  const second = { ...first, p: [[80, 55], [150, 55]] };
+  for (const cell of city.chunkIndex.values()) cell.roads = [second];
+  assert.deepEqual(world._groundEntries(x, z).map(e => e.r), [second]);
+});

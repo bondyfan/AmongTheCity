@@ -124,10 +124,10 @@ export function stairDip(q, L) {
   const s1 = Math.min(STAIR_DIP_AT, L / 3);
   return { s1, dip: Math.min(0.5, 0.78 * q * s1) };
 }
-function stair(name, a, b, y0, y1, wall = null) {
+function stair(name, a, b, y0, y1, wall = null, e1 = STAIR_RUN_TOP) {
   // (against the wall the flights mostly come in pairs from one landing, and
   // one's run-on past its foot was the other's lowest steps: kept short)
-  const e0 = wall ? 0.1 : 1, e1 = STAIR_RUN_TOP;
+  const e0 = wall ? 0.1 : 1;
   const l = wall === 'L' ? 2.4 : wall ? 1.2 : 1.4, r = wall === 'R' ? 2.4 : wall ? 1.2 : 1.4;
   const L = Math.hypot(b[0] - a[0], b[1] - a[1]), ux = (b[0] - a[0]) / L, uz = (b[1] - a[1]) / L;
   const q = (y1 - y0) / L, { s1, dip } = stairDip(q, L);
@@ -146,6 +146,12 @@ export const NAPLAVKA_BEFORE = [
   way('Dřevná ramp', 'set', [[-96145.3, -4334.5], [-96153.3, -4418.4], [-96150.9, -4436.8]],
     [FLOOR_A, 192.0, 192.4], 7, 2.6),
 ];
+
+// The paved apron in front of the Na Františku flight lies at the
+// lower-quay level. The dig stamp only cuts high survey samples; a low
+// sample near the bank otherwise pulls the edge of this square into a pit.
+export const FRANTISKU_LANDING = way('Na Františku lower landing', 'raise', [[-95865.4, -6750.2], [-95885, -6740]],
+    [FLOOR_C, FLOOR_C], 0, 8, { fl: 0.3, fr: 4, e0: 1, e1: 1 });
 
 // Laid on the floor after the quay is dug.
 export const NAPLAVKA_AFTER = [
@@ -174,8 +180,8 @@ export const NAPLAVKA_AFTER = [
   // the pairs climbing the wall's face from one landing, both ways: either
   // side of Palackého most and by Jiráskův most (a storey and a half: the
   // street there is the bridgehead, terrainstamps.js RASINOVO)
-  stair('Palackého stairs south', [-96177.1, -4671.9], [-96176.6, -4657.6], FLOOR_A, 194.8, 'L'),
-  stair('Palackého stairs north', [-96177.1, -4671.9], [-96177.7, -4686.8], FLOOR_A, 194.8, 'R'),
+  stair('Palackého stairs south', [-96177.1, -4671.9], [-96176.6, -4657.6], FLOOR_A - 0.26, 194.8, 'L'),
+  stair('Palackého stairs north', [-96177.1, -4671.9], [-96177.7, -4686.8], FLOOR_A - 0.26, 194.8, 'R'),
   stair('Jiráskův stairs south', [-96180.3, -4769.7], [-96179.7, -4753], FLOOR_A, 194.6, 'L'),
   stair('Jiráskův stairs north', [-96180.3, -4769.7], [-96180.8, -4787.5], FLOOR_A, 194.3, 'R'),
   stair('Výtoň stairs south', [-96072.6, -3780.4], [-96073.5, -3787.3], FLOOR_A, 191.9, 'L'),
@@ -200,7 +206,7 @@ export const NAPLAVKA_AFTER = [
   stair('Anežská stairs', [-95936.3, -6712.7], [-95919.3, -6722.5], FLOOR_C, 192.4, 'R'),
   // and the shorter ones to Dvořákovo nábřeží, against the wall's face
   stair('Dvořákovo stairs west', [-95747.2, -6797.6], [-95757.1, -6794.4], FLOOR_C, 190.0, 'L'),
-  stair('Dvořákovo stairs', [-95661.5, -6816.5], [-95651.4, -6818], FLOOR_C, 188.5, 'R'),
+  stair('Dvořákovo stairs', [-95661.5, -6816.5], [-95651.4, -6818], FLOOR_C, 188.5, 'R', 4.8),
   // (its foot is on the ramp, 27 m up from the quay: the OSM footway from the
   // ramp's line at x -95567 joins it; set to the floor it sat in a 0.9 m pit)
   stair('Dvořákovo stairs east', [-95564.4, -6831.4], [-95558.2, -6832.2], FLOOR_C + (189.3 - FLOOR_C) * 27.5 / 99.2, 188.9, 'R'),

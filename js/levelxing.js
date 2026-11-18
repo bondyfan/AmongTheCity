@@ -25,10 +25,18 @@ function cross(ax, az, bx, bz, cx, cz, dx, dz) {
 
 /** Pin every drivable road of this tile where it crosses a heavy-rail track of this tile at grade. */
 export function indexLevelCrossings(roads, rails) {
+  const it = indexCrossingsSteps(roads, rails);
+  let step;
+  do { step = it.next(); } while (!step.done);
+  return step.value;
+}
+
+function* indexCrossingsSteps(roads, rails) {
   const grid = new Map();
+  let count = 0;
   let any = false;
   for (const r of rails ?? []) {
-    if (r.t !== 'rail' || r.br || !(r.p?.length > 1)) continue;
+    if (r.t !== 'rail' || r.br || (r.l ?? 0) !== 0 || !(r.p?.length > 1)) continue;
     let run = 0;
     for (let i = 0; i < r.p.length - 1; i++) {
       const [ax, az] = r.p[i], [bx, bz] = r.p[i + 1];
@@ -48,9 +56,10 @@ export function indexLevelCrossings(roads, rails) {
   if (!any) return 0;
   let made = 0;
   for (const w of roads) {
+    if ((++count & 127) === 0) yield;
     if (!w.d || w.br || (w.l ?? 0) !== 0 || !(w.p?.length > 1)) continue;
     let run = 0;
-    const got = [];             // (OSM shares the crossing node: one hit per segment pair at it)
+    const got = (w._pins ?? []).filter((p) => p.node._xing).map((p) => ({ r: p.node._xing, s: p.s }));
     for (let i = 0; i < w.p.length - 1; i++) {
       const [ax, az] = w.p[i], [bx, bz] = w.p[i + 1];
       const seen = new Set();
@@ -68,6 +77,7 @@ export function indexLevelCrossings(roads, rails) {
             const node = { x: ax + (bx - ax) * hit[0], z: az + (bz - az) * hit[0], _xing: g.r, _xingS: rs, _xingLift: LIFT,
               arms: [{ r: w, i: -1, end: false, s }, { r: g.r, i: -1, end: false, s: rs }] };
             (w._pins ??= []).push({ s, node });
+            w._prof = undefined;
             made++;
           }
         }
@@ -75,4 +85,26 @@ export function indexLevelCrossings(roads, rails) {
     }
   }
   return made;
+}
+
+// A long way is stored whole in its owner tile. New track may run through
+// a road that landed earlier, just as often as the reverse. Visit only the
+// cells containing both kinds and distinguish the two arrival directions.
+export function* indexTileCrossings(city, roads, rails, keys) {
+  const incomingRoads = new Set(roads), incomingRails = new Set(rails);
+  const nearbyRails = new Set(), oldRoads = new Set();
+  let count = 0;
+  for (const key of keys) {
+    if ((++count & 255) === 0) yield;
+    const c = city.chunkIndex.get(key);
+    if (!c?.rails.length || !c.roads.length) continue;
+    if (c.roads.some((r) => incomingRoads.has(r))) {
+      for (const rail of c.rails) nearbyRails.add(rail);
+    }
+    if (c.rails.some((r) => incomingRails.has(r))) {
+      for (const road of c.roads) if (!incomingRoads.has(road)) oldRoads.add(road);
+    }
+  }
+  yield* indexCrossingsSteps(roads, nearbyRails);
+  yield* indexCrossingsSteps(oldRoads, rails);
 }

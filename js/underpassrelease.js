@@ -3,6 +3,7 @@
 // writes the links this undoes (stitchStructures, linkEnd) and owns the deck
 // cache and the abutment ledger it reads.
 
+import { forgetPortal } from './railportal.js';
 import { polylineLength } from './geo.js';
 import { deckCache, abutLedger, linkEnd, chainAcross, deckNodes } from './underpass.js';
 
@@ -35,6 +36,7 @@ export function* releaseStructures(city, gone, keys) {
   }
   // the abutments the released decks pushed onto resident ways
   for (const b of gone) {
+    if (b.br && b.t === 'rail') { forgetPortal(b, 0); forgetPortal(b, b.p.length - 1); }
     const by = abutLedger.get(b);
     if (!by) continue;
     for (let i = 0; i < by.length; i += 2) {
@@ -64,6 +66,7 @@ export function* releaseStructures(city, gone, keys) {
     for (const slot of ['_ap0', '_ap1']) {
       const l = w[slot];
       if (l && typeof l === 'object' && gone.has(l.road)) {
+        if (w.t === 'rail') forgetPortal(w, slot === '_ap0' ? 0 : w.p.length - 1);
         delete w[slot]; hit = true;
         relink.push(w, slot === '_ap0' ? 0 : w.p.length - 1);
         w._bridgeProfile = null;
@@ -101,7 +104,7 @@ export function* releaseStructures(city, gone, keys) {
     for (const p of m._pins ?? []) forget(p.node);
     rest.push(m);
   }
-  for (const m of rest) if (!m._chain && m.d && m.p?.length > 1) chainAcross(city, m);
+  for (const m of rest) if (!m._chain && (m.d || m.t === 'rail' || m.t === 'tram') && m.p?.length > 1) chainAcross(city, m);
   for (const m of rest) {
     if (m._chain || !m._cross) continue;
     const L = m._len ?? polylineLength(m.p);
@@ -113,12 +116,6 @@ export function* releaseStructures(city, gone, keys) {
   // wins, and the released tile's came first), or, for a railway deck in two
   // pieces, on the level of its other end (stitchStructures' rule).
   for (let i = 0; i < relink.length; i += 2) linkEnd(city, relink[i], relink[i + 1], rails.has(relink[i]));
-  for (let i = 0; i < relink.length; i += 2) {
-    const b = relink[i];
-    if (!rails.has(b)) continue;
-    if (b._ap0 && !b._ap1) { b._ap1 = b._ap0; b._bridgeProfile = null; }
-    else if (b._ap1 && !b._ap0) { b._ap0 = b._ap1; b._bridgeProfile = null; }
-  }
   for (const w of renode) deckNodes(city, w);
   yield;
   // The dip chains that ran through the tile are dissolved, not rebuilt: a

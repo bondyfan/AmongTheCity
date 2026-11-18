@@ -49,12 +49,12 @@ function plans(x, z, r = 6) {
   return out;
 }
 // metres from (x, z) to the asphalt edge of the nearest carriageway of the 3x3 cells round it
-function toAsphalt(x, z) {
+function toAsphalt(x, z, accept = () => true) {
   const cx = Math.floor(x / 120), cz = Math.floor(z / 120), seen = new Set();
   let best = Infinity;
   for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
     for (const r of city.chunkIndex.get((cx + dx) + ',' + (cz + dz))?.roads ?? []) {
-      if (!r.d || !r.p || seen.has(r)) continue;
+      if (!r.d || !r.p || seen.has(r) || !accept(r)) continue;
       seen.add(r);
       for (let i = 0; i + 1 < r.p.length; i++) {
         const [ax, az] = r.p[i], ex = r.p[i + 1][0] - ax, ez = r.p[i + 1][1] - az, L2 = ex * ex + ez * ez || 1e-9;
@@ -96,14 +96,31 @@ test('exit 8 Jirny is lit by masts behind the rail, and no town column stands on
   }
   for (const { s } of p.mast) {
     const l = D.d11Locate(s[0], s[1]);
-    assert.ok(l && Math.abs(Math.abs(l.off) - (6.25 + ML.MAST_OFF)) < 0.3,
+    assert.ok(l && Math.abs(Math.abs(l.off) - (s.length === 4 ? 6.25 - 0.12 : 6.25 + ML.MAST_OFF)) < 0.3,
       `a motorway mast ${l?.off.toFixed(2)} m off its line`);
-    assert.ok(toAsphalt(s[0], s[1]) > 1.4, `a mast ${toAsphalt(s[0], s[1]).toFixed(2)} m from asphalt`);
+    if (s.length < 4) assert.ok(toAsphalt(s[0], s[1]) > 1.4, `a mast ${toAsphalt(s[0], s[1]).toFixed(2)} m from asphalt`);
     // the arm reaches over the carriageway: the first head is nearer the line than the foot
     const hx = s[0] - Math.sin(s[2]) * S.MAST_OUT, hz = s[1] - Math.cos(s[2]) * S.MAST_OUT;
     assert.ok(Math.abs(D.d11Locate(hx, hz).off) < Math.abs(l.off) - 2.5, 'the arm points away from the road');
   }
-  for (const { s } of p.mast1) assert.ok(toAsphalt(s[0], s[1]) > 1.4, `a slip mast ${toAsphalt(s[0], s[1]).toFixed(2)} m from asphalt`);
+  for (const { s } of p.mast1) {
+    if (s.length === 4) continue;
+    assert.ok(toAsphalt(s[0], s[1], r => !r.br) >= ML.SLIP_CLEAR - 1e-6);
+    assert.ok(toAsphalt(s[0], s[1], r => !r.br && r.t === 'motorway') >= ML.MOTORWAY_CLEAR - 1e-6);
+  }
+});
+
+test('a lit slip keeps its distant lights and interchange bridge lights stand on the deck', () => {
+  const node = EX(8).E.div;
+  const ramp = { _id: 13, d: 1, ow: 1, t: 'motorway_link', w: 5.5, p: [[node.x, node.z], [node.x, node.z + 560]] };
+  const g = { near: [], inRoad: () => false, onPad: () => false, inHouse: () => false, nearMapped: () => false,
+    terrain, mast1: [], mast: [] };
+  const plan = r => ML.mastsAlong(r, ML.mastKind(r), node.x - 30, node.z - 10, node.x + 30, node.z + 565, g);
+  assert.ok(plan(ramp));
+  assert.ok(g.mast1.some(s => s[1] > node.z + 300), 'no light beyond the 250 m interchange radius');
+  g.mast1.length = 0;
+  assert.ok(plan({ ...ramp, br: 1 }));
+  assert.ok(g.mast1.length > 4 && g.mast1.every(s => Number.isFinite(s[3])), 'every deck light has a deck-relative socket');
 });
 
 test('no mast in a sign\'s legs or through a board, and each mast has one owner', async () => {

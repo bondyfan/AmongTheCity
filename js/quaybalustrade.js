@@ -48,3 +48,12 @@ export function balustradeAt(x, z) {
   }
   return false;
 }
+
+// The two surveyed Rašínovo retaining walls have an explicit height of
+// eight metres. Their low side faces the river on the right (OSM winding).
+export function rasinovoParapet(f) {
+  if (f.k !== 'retaining' || f.h !== 8) return false;
+  const [x, z] = f.p[0];
+  return (Math.abs(x + 96182.2) < 0.25 && Math.abs(z + 4865.3) < 0.25)
+    || (Math.abs(x + 96170.7) < 0.25 && Math.abs(z + 4579.3) < 0.25);
+}

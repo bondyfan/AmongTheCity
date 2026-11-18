@@ -16,6 +16,7 @@ register(new URL('./three-alias.mjs', import.meta.url));
 
 const THREE = await import('three');
 const { roofCapHoled, capPlan } = await import('../js/roofholes.js');
+const { courtyardPitch } = await import('../js/courtyardpitch.js');
 const { ringClearances, depthFactors, frontGap, CLEAR_GAP } = await import('../js/roofclear.js');
 const { roofInto, insetRing } = await import('../js/roofs.js');
 const { stampPartyWalls } = await import('../js/partywalls.js');
@@ -43,6 +44,37 @@ const recorder = () => {
     tri(...a) { tris.push(a); }, quad() {}, pinTo() {},
   };
 };
+
+test('irregular and very small courtyard roofs share their ridges and span only the surveyed solid', () => {
+  const outer = rect(0, 0, 5, 4), yard = rect(0.3, 0.3, 4.4, 3.4).reverse();
+  const s = recorder();
+  const rise = courtyardPitch(s, outer, [yard, [...yard].reverse()], 10, [1, 0, 0], 1.2, 4.2, tri);
+  assert.ok(rise > 0 && rise <= 0.3);
+  const seen = new Map();
+  let surface = 0;
+  for (const t of s.tris) {
+    const floor = [0, 3, 6].map(k => [t[k], t[k + 2]]);
+    assert.ok(!pip((t[0] + t[3] + t[6]) / 3, (t[2] + t[5] + t[8]) / 3, yard));
+    surface += Math.abs(polygonArea(floor));
+    for (const k of [0, 3, 6]) {
+      const key = [t[k], t[k + 2]].join(',');
+      if (seen.has(key)) assert.equal(t[k + 1], seen.get(key));
+      seen.set(key, t[k + 1]);
+    }
+  }
+  assert.ok(Math.abs(surface - (20 - 4.4 * 3.4)) < 1e-9);
+});
+
+test('rounding at a shared eave is recoverable, while a crossing or truncated triangulation emits nothing', () => {
+  const outer = rect(0, 0, 10, 10);
+  const roof = (s, yard, triangulate) => courtyardPitch(s, outer, [yard], 12, [1, 0, 0], 0.78, 4.2, triangulate);
+  assert.ok(roof(recorder(), rect(-0.05, 2, 2, 3), tri) > 0);
+  for (const [yard, triangulate] of [[rect(-1, 2, 2, 3), tri], [rect(2, 2, 3, 3), () => [[0, 1, 2]]]]) {
+    const s = recorder();
+    assert.equal(roof(s, yard, triangulate), 0);
+    assert.equal(s.tris.length, 0);
+  }
+});
 
 test('the gap in front of a wall, and ring clearances', () => {
   const up = [0, 1];
@@ -99,6 +131,7 @@ test('a yard against the back wall gets its pitched roof, inside the outline and
   const fins = s.tris.filter((t) => t[13] === 1);
   assert.ok(fins.length >= 4, 'no plaster over the thin north wing');
   for (const t of fins) {
+    assert.ok(Math.max(t[1], t[4], t[7]) < 20.7, 'the thin wing grew a full-height fin');
     assert.ok(t[10] === 0 && Math.abs(Math.abs(t[11]) - 1) < 1e-9, 'a fin that is not an upright north or south face');
     assert.ok(Math.min(t[2], t[5], t[8]) > 29.5 - 1e-9, 'plaster away from the thin wing');
   }

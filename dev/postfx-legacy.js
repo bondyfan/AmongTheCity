@@ -253,7 +253,7 @@ const COMPOSITE_FRAG = /* glsl */`
     float dens = 1.0 - texture2D(tCanopy, uv2).r;      // 0 open … →1 thick woods
     if (dens < 0.004) return 1.0;
     // response curve: moderate crown coverage (the forest floor BETWEEN
-    // trees) still reads as real shade, instead of hiding in the low end , 
+    // trees) still reads as real shade, instead of hiding in the low end ,
     // tuned to ~10% at blob edges, ~33% typical floor, ~49% in thick stands
     dens = smoothstep(0.1, 1.0, dens);
     vec2 meta = texture2D(tCanopyMeta, uv2).rg;
@@ -385,7 +385,7 @@ const COMPOSITE_FRAG = /* glsl */`
     }
     c += lamp;
     // shafts land BEFORE bloom so the brightest ones bloom too (they were
-    // additively lit by the sun, so they take the sun's current colour , 
+    // additively lit by the sun, so they take the sun's current colour ,
     // white at noon, deep gold at sunset)
     if (useRays) c += rayColor * (texture2D(tRays, vUv).r * rayStrength);
     if (useBloom) c += texture2D(tBloom, vUv).rgb * bloomStrength;

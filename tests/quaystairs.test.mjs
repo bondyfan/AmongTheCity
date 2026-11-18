@@ -126,7 +126,7 @@ test('a car is held off a flight, a walker is not', () => {
     assert.ok((top.x - a[0]) * ux + (top.z - a[1]) * uz >= F.L + 0.5 - 1e-6, `${F.name}: not pushed back up`);
     // a walker and a level-less nudge pass
     const p2 = { x, z };
-    assert.ok(!quayStairsCollide(p2, 0.38, { interior: true, yLo: F.y0 }));
+    assert.ok(!quayStairsCollide(p2, 0.38, { interior: true, yLo: walkLine(F, F.L / 2) + 0.49 }));
     assert.ok(!quayStairsCollide(p2, 2.4));
   }
 });
@@ -157,4 +157,39 @@ test('every flight and face is built by exactly one chunk, and the same each tim
   const none = [];
   quayStairsInto({ triFacing: () => none.push(1) }, 1440, -840, 1560, -720, t);
   assert.equal(none.length, 0);
+});
+
+test('the Palackého stair wall stops a walker approaching sideways from the lower quay', () => {
+  const F = FLIGHTS.find(f => f.name === 'Palackého stairs south');
+  const s = F.L * 0.7, radius = 0.38;
+  const [x, z] = at(F, s, F.r + radius + 0.06);
+  const pos = { x, z };
+  for (let i = 0; i < 25; i++) {
+    pos.x -= F.nx * 0.18; pos.z -= F.nz * 0.18;
+    assert.ok(quayStairsCollide(pos, radius, { interior: true, yLo: F.y0 + 0.49 }));
+    assert.equal(quayStairY(pos.x, pos.z), null);
+  }
+  const t = flatPrague();
+  for (const x of [-95649, -95648]) assert.ok(t.heightAt(x, -6819) >= 188.4, 'no slot at the Dvořákovo landing');
+});
+
+test('the approach at Na Františku has a flat landing and no stub up the retaining wall', () => {
+  const f = FLIGHTS.find(f => f.name === 'Na Františku stairs');
+  const stub = { t: 'footway', w: 1.8, d: 0, p: [[-95866.1, -6751.5], [-95865.4, -6750.2]] };
+  assert.equal(isQuayStairWay(stub), true);
+  const t = flatPrague(184);
+  const [x, z] = at(f, f.L / 2, 5);
+  assert.ok(Math.abs(t.heightAt(x, z) - f.y0) < 0.02);
+});
+
+test('the pedestal belongs to the middle of a balustrade joint', async () => {
+  const { balustradeInto } = await import('../js/quaywall.js');
+  const { rasinovoParapet } = await import('../js/quaybalustrade.js');
+  assert.ok(rasinovoParapet({ k: 'retaining', h: 8, p: [[-96182.2, -4865.3]] }));
+  assert.ok(!rasinovoParapet({ k: 'retaining', h: 8, p: [[-96132, -4656]] }));
+  const xs = new Set();
+  balustradeInto({ quad() {}, triFacing(...a) {
+    for (let k = 0; k < 9; k += 3) if (a[k + 1] > 1.05 && a[k] < 1) xs.add(a[k]);
+  } }, 0, 0, 10, 0, 0, 0, 0, -1);
+  assert.deepEqual([...xs].sort((a, b) => a - b), [-0.22, 0.22]);
 });

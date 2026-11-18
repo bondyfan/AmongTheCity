@@ -5,9 +5,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CHUNK } from '../js/config.js';
 import { inScope, outranks, endIndex, seriesNext, parallel, buildAxis, membersOf } from '../js/corridorgeom.js';
-import { gradeLimit, fitProfile, applyPins, gaussBlur } from '../js/corridorfit.js';
+import { gradeLimit, fitProfile, applyPins, gaussBlur, applyFloors, smax, smin, crestFall } from '../js/corridorfit.js';
 import { corridorLevel, sameCorridor } from '../js/corridorlevel.js';
-import { indexLevelCrossings } from '../js/levelxing.js';
+import { indexLevelCrossings, indexTileCrossings } from '../js/levelxing.js';
 
 let ID = 1000;
 const road = (p, o = {}) => ({ p, t: 'primary', d: 1, w: 10.5, v: 80, ow: 1, _id: ++ID, ...o });
@@ -122,4 +122,52 @@ test('a road crossing a railway at grade is pinned to the rail', () => {
   const pin = r._pins[0];
   assert.ok(Math.abs(pin.s - 100) < 1e-6 && pin.node._xing === rail && Math.abs(pin.node._xingS - 300) < 1e-6);
   assert.ok(pin.node.arms.some((a) => a.r === rail), 'the rail is an arm, so releasing it lets the pin go');
+});
+
+test('missing height tiles cannot pull a surveyed railway up a neighbouring hill', () => {
+  const track = { p: line(-300, 0, 300, 0), t: 'rail', _id: ++ID };
+  const terrain = { ready: x => x >= 0, heightAt: x => x < 0 ? 620 : 407 };
+  const p = corridorLevel(track, terrain, cityOf([], [track]), 1);
+  assert.ok(p);
+  for (const h of p.y) assert.ok(Math.abs(h - 407) < 0.01);
+});
+
+test('an at-grade crossing shared across two tiles is indexed once in either arrival order', () => {
+  for (const railFirst of [false, true]) {
+    const r = road(line(20, 0, 20, 80)), train = { p: line(0, 40, 80, 40), t: 'rail', _id: ++ID };
+    const city = cityOf([r], [train]);
+    for (let repeat = 0; repeat < 2; repeat++)
+      Array.from(indexTileCrossings(city, railFirst ? [r] : [], railFirst ? [] : [train], city.chunkIndex.keys()));
+    assert.equal(r._pins.length, 1);
+    assert.equal(r._pins[0].node._xing, train);
+    assert.equal(r._pins[0].s, 40);
+  }
+});
+
+test('batched clearance crests agree with individual floors and ceilings', () => {
+  const input = Float64Array.from({ length: 600 }, (_, i) => 104 + 0.02 * i);
+  const points = Array.from({ length: 100 }, (_, i) => ({
+    s: i * 13.35 - 123, y: 101 + 8 * Math.sin(i * 0.37), g: i % 2 ? 0.025 : 0.06, R: i % 3 ? 540 : 1333,
+  }));
+  const floors = points.filter((_, i) => i % 3), ceilings = points.filter((_, i) => !(i % 3));
+  const expected = input.map((y, i) => {
+    const s = i * 2;
+    const f = Math.max(...floors.map(c => c.y - crestFall(Math.abs(c.s - s), c.g, c.R)));
+    const c = Math.min(...ceilings.map(c => c.y + crestFall(Math.abs(c.s - s), c.g, c.R)));
+    return smin(smax(y, f, 1), c, 1);
+  });
+  applyFloors(input, 2, floors, ceilings);
+  for (let i = 0; i < input.length; i++) assert.ok(Math.abs(input[i] - expected[i]) < 1e-9);
+});
+
+test('the shared asphalt of a motorway slip follows the main road through the whole gore', async () => {
+  const { fitSlip } = await import('../js/slipgrade.js');
+  const main = road([[0, 0], [500, 0]], { t: 'motorway', w: 11 });
+  const slip = road([[0, 0], [60, 5], [200, 65]], { t: 'motorway_link', w: 5.5 });
+  const city = cityOf([main, slip]), base = { total: 212.52, ds: 2.1252, n: 101, ready: true,
+    y: new Float32Array(101).fill(200) };
+  const profile = fitSlip(slip, base, {}, city, () => ({ n: 2, ds: 500, y: [202, 202], ready: true }));
+  assert.equal(profile.y[20], 202);
+  assert.equal(profile.y.at(-1), 200);
+  assert.equal(base.y[20], 200);
 });

@@ -56,7 +56,9 @@ export function installSceneGraphPolicy(scene) {
       const ch = this.children;
       for (let i = 0, l = ch.length; i < l; i++) {
         const c = ch[i];
-        if (c.visible === false) {
+        // A manually updated child may only get this one forced visit. It
+        // cannot consume a deferred update when it becomes visible again.
+        if (c.visible === false && c.matrixWorldAutoUpdate) {
           if (force) c.matrixWorldNeedsUpdate = true;
           continue;
         }
