@@ -47,7 +47,11 @@ const SAVE_EVERY = 20;         // s between autosaves
 // Where main.js stands you up after the death card is the hospital nearest
 // to where you fell (config.js HOSPITALS, js/startplace.js nearestHospital,
 // the same call main.js makes). Only the save written as you go down needs it.
+import { storyStart } from './prologue-route.js';
+
 const store = browserStore();
+// Outside the front doors of the surveyed station hall.
+const STATION_EXIT = { x: 21.73, z: -96.52, h: 0 };
 
 let h = null;                  // main.js's host (see careerHost there)
 let state = blank();           // the loaded save, until attach() has applied it
@@ -81,7 +85,26 @@ export function choose(choice) {
   startPick = typeof choice?.start === 'string' ? choice.start : null;
   const res = store.load();
   state = res.state;
+  const story = storyStart(solo, startPick, state.prologue, res.reason === 'empty');
+  if (story && story !== 'done') {
+    state.onb.done = true;
+    if (!state.prologue || (story === 'forecourt' && !state.pos)) checkpointStory(story);
+  }
   loadNote = res.reason === 'corrupt' || res.reason === 'newer' ? res.reason : null;
+}
+
+/** Story coordinates live in the chapter, city saves stay in world metres. */
+export function activeStory() {
+  return solo && startPick !== 'praha' ? state.prologue : null;
+}
+export function checkpointStory(stage) {
+  state.prologue = stage;
+  if (applied) { save(); return; }
+  if (stage === 'forecourt') {
+    state.pos = { ...STATION_EXIT };
+    state.tod = 20.6 / 24;
+  }
+  store.save(state);
 }
 
 /** Where boot begins, before the world exists: the save's spot when it is in
@@ -89,6 +112,10 @@ export function choose(choice) {
  *  { x, z, heading, place, saved }. A start in the other city drops the
  *  saved position, so spawn() below does not walk the player back to it. */
 export function startPoint() {
+  const chapter = activeStory();
+  if (chapter && chapter !== 'done' && chapter !== 'forecourt') {
+    return { ...pickStart('pardubice', null), x: STATION_EXIT.x, z: STATION_EXIT.z, heading: STATION_EXIT.h };
+  }
   const sp = pickStart(startPick, state.pos);
   if (!sp.saved && state.pos) state = { ...state, pos: null };
   return sp;
@@ -97,6 +124,8 @@ export function startPoint() {
 /** Stand the player where the save left them. The tile under that spot is
  *  fetched first, so the boot warm-up builds the right neighbourhood. */
 export async function spawn(player, city) {
+  const chapter = activeStory();
+  if (chapter && chapter !== 'done' && chapter !== 'forecourt') return;
   const p = state.pos;
   if (!p) return;
   try {
@@ -295,7 +324,7 @@ function apply() {
     // raises is what sends the police out again)
     if (s.wanted.heat > 0) wanted.add(s.wanted.heat, s.wanted.crime);
     if (s.owed) settleOwed(s.owed.stars);
-    else toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ tam, kde jsi skončil', ms: 7000 });
+    else if (activeStory() !== 'forecourt') toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ tam, kde jsi skončil', ms: 7000 });
   }
   if (loadNote === 'corrupt')
     toast('Uložená hra se nedala načíst', { icon: '⚠️', kind: 'warn', sub: 'Začínáš novou. Původní data jsou odložená.', ms: 9000 });
@@ -322,6 +351,7 @@ function snapshot() {
   }
   return {
     money: wallet.money(),
+    prologue: state.prologue,
     pos: lastSafe,
     tod: solo ? tod() : null,
     played: Math.round(played),

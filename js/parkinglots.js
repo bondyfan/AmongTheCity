@@ -257,7 +257,7 @@ export class ParkingLots {
     this._seen = new Set();
   }
 
-  update(dt, pos, t01) {
+  update(dt, pos, t01, reserved = null) {
     this._t -= dt;
     if (this._t > 0) return;
     this._t = SCAN_DT;
@@ -292,6 +292,8 @@ export class ParkingLots {
         const dd = Math.hypot(st.x - pos.x, st.z - pos.z);
         if (!virgin && dd < NOTICE_R) continue;   // never on camera
         if (want) {
+          // Leave both door approaches free during the station handover.
+          if (reserved && Math.hypot(st.x - reserved.x, st.z - reserved.z) < 5) continue;
           if (this._count >= GLOBAL_CAP) continue;
           if (lorry && this._lorries >= LORRY_GLOBAL) continue;
           // the player's own car is standing here (left where it was bought,

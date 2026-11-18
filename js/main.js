@@ -89,6 +89,7 @@ import { makeNetUI } from './netui.js';
 // jobs, ownership, stats, the save: the whole gameplay layer hangs off this one
 // module (js/career.js lists the hooks main.js calls, and why there are so few)
 import * as career from './career.js';
+import { meetVasek } from './prologue-parking.js';
 import { exitHudText, setExitLine } from './mwhud.js';
 import { MwRetro } from './mwretro.js';
 import { setMotorwayAtlasScale } from './mwatlas.js';
@@ -143,6 +144,7 @@ const game = {
 };
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
+let journey = null, meeting = null, vasekCar = null;
 let roadWorks = null;
 let parkingLots = null;
 let cityLife = null;     // crowd, traffic and buses tied together (js/citylife.js)
@@ -829,6 +831,8 @@ function flareAmount() {
 function nearestEnterableCar() {
   let best = null, bd = 3.4;
   const px = player.pos.x, pz = player.pos.z;
+  if (meeting?.ready && Math.hypot(meeting.car.x - px, meeting.car.z - pz) < bd)
+    return meeting.car;
   for (const c of parked) {
     const d = Math.hypot(c.x - px, c.z - pz);
     if (d < bd) { bd = d; best = c; }
@@ -1045,6 +1049,8 @@ input.onKey('KeyN', () => {
 input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
   if (player.ragdoll) return;      // flying through the air is not a door
+  if (meeting && document.body.dataset.panelOpen) return;
+  if (meeting?.use(player)) return;
   let jetNear = null;              // set by the fighter branch's own test
   if (trains?.riding) {
     // only with the doors open — stepping off at 140 km/h is not a feature
@@ -1165,6 +1171,7 @@ input.onKey('KeyE', () => {
     });
   } else {
     const car = nearestEnterableCar();
+    if (meeting && car === meeting.car && !meeting.ready) { ui_hint('Nejdřív promluv s Vaškem'); return; }
     if (!car) { career.use(); return; }   // nothing to board: maybe a food counter
     // A claimed car is already out of `parked`, so this is the double-book
     // window only (two people press E inside one round trip). Say who has it,
@@ -1210,6 +1217,7 @@ input.onKey('KeyE', () => {
         camDist = CAM_DIST_MIN;
         if (s !== 0) return;             // passenger seat: no engine, no speedo
         game.car = car;
+        if (meeting?.driving(car)) { meeting = null; fpView = true; }
         // Claimed from onSeated for the same reason the helicopter is: the
         // walk-up is cancellable, and taking a car off everybody else's street
         // because somebody started strolling towards it is worse than the race
@@ -1579,14 +1587,19 @@ function placeParkedCars(city, spawn = SPAWN, base = 0) {
   // lanes (a 1.2 m disc pushed out of a wall was not a car: the first one stood
   // with its nose in a kiosk). (kx, kz) is the spot as the map gave it.
   const spots = parkSpots(city, spawn).slice(0, FLEET_STRIDE);
+  // The closest mapped car park, with the two forecourt reserves as fallback.
+  const story = career.activeStory();
+  const meetSpot = base === 0 && story && spots.length
+    ? spots.slice(2).sort((a,b) => Math.hypot(a.x-spawn.x,a.z-spawn.z) - Math.hypot(b.x-spawn.x,b.z-spawn.z))[0] ?? spots[0]
+    : null;
   for (let i = 0; i < spots.length; i++) {
     const { x: px, z: pz, h, kx: x, kz: z } = spots[i];
     const pos = { x: px, z: pz };
     // hashed off the SPOT, not off the cleared position: a client whose
     // building tile has not streamed in yet would clear it differently and
     // repaint the car.
-    const kind = PARK_KINDS[(spotRnd(x, z, 'k') * PARK_KINDS.length) | 0];
-    const color = CAR_COLORS[(spotRnd(x, z, 'c') * CAR_COLORS.length) | 0];
+    const kind = spots[i] === meetSpot ? 'octaviaCombi' : PARK_KINDS[(spotRnd(x, z, 'k') * PARK_KINDS.length) | 0];
+    const color = spots[i] === meetSpot ? 0x54695d : CAR_COLORS[(spotRnd(x, z, 'c') * CAR_COLORS.length) | 0];
     const k = base + i;
     // A fleet parked late (the second city) may meet the player's OWN copy of
     // one of its cars: js/garage.js restored it from the save at boot, before
@@ -1599,6 +1612,7 @@ function placeParkedCars(city, spawn = SPAWN, base = 0) {
     const car = vehicles.add(kind, pos.x, pos.z, h, color);
     // The claim key. Stamped at spawn and never renumbered, because `parked`
     // is spliced all session while parkedFleet is not — see the declaration.
+    if (spots[i] === meetSpot) vasekCar = car;
     car.parkIdx = k;
     parkedFleet[k] = car;
     parked.push(car);
@@ -1740,6 +1754,8 @@ function updateActors() {
 function updateBlockers() {
   _blockers.length = 0;
   const px = player.pos.x, pz = player.pos.z;
+  if (meeting?.ready && Math.hypot(meeting.car.x - px, meeting.car.z - pz) < bd)
+    return meeting.car;
   for (const c of parked) {
     const dx = c.x - px, dz = c.z - pz;
     if (dx * dx + dz * dz > 400 * 400) continue;
@@ -2658,7 +2674,7 @@ function applySettings(s, key) {
 }
 
 // ---------- boot ----------
-async function boot() {
+async function boot(arrived = null) {
   // Region manifest first (tiled world); the single-city file is the
   // fallback — ALSO when the manifest exists but its download hasn't reached
   // the spawn yet (the region fetcher writes tiles spawn-first, but a fresh
@@ -3033,6 +3049,7 @@ async function boot() {
     }, 4000);
   });
 
+  if (arrived) await arrived; // The station exit hands control to this world.
   career.attach(careerHost());
   game.mode = 'play';
   // builds pace themselves from here on — during boot the queue must drain
@@ -3089,6 +3106,7 @@ function tick(src) {
   }
   try {
     let remaining = Math.min(clock.getDelta(), fromInterval ? 1.0 : 0.05);
+    if (journey) { if (!fromInterval) journey.frame(remaining, renderer); return; }
     while (remaining > 0) {
       const dt = Math.min(remaining, 0.05);
       remaining -= dt;
@@ -3391,7 +3409,7 @@ function stepGame(dt) {
   cityLife?.trams?.blockInto(traffic.blockers);   // …and so is a tram, on its rail or in the street (js/tramyield.js)
   traffic.update(dt, player.pos, game.car);
   roadWorks?.update(dt, traffic.now(), sky?.nightK ?? 0, player.pos.x, player.pos.z);
-  parkingLots?.update(dt, player.pos, tod());
+  parkingLots?.update(dt, player.pos, tod(), career.activeStory() === 'forecourt' ? vasekCar : null);
   cityLife?.update(dt, player.pos, tod());
   // ragdoll physics needs to know what can hit a pedestrian: every SHARED AI
   // car plus whatever the player is driving, refreshed per frame because the
@@ -3536,6 +3554,10 @@ function stepGame(dt) {
   if (game.car) fuel.burn(game.car, dt);
   pumpStep(dt);
   career.update(dt);
+  if (career.activeStory() === 'forecourt' && vasekCar) {
+    meeting ??= meetVasek(vasekCar, scene, world, worldMap, career.checkpointStory);
+    meeting.update(player);
+  }
   statusbar.update(dt, _vitCtx);
 
   // ---- net: server co-op pump (menu → Multiplayer only; null in single) ----
@@ -3806,19 +3828,32 @@ async function start() {
   // co-op: the saved hour was dropped (and overwritten with none) and an owned
   // fleet car came back as a second car on top of the original.
   career.choose({ ...choice, mode: net ? 'server' : 'single' });
+  const chapter = career.activeStory();
+  const opening = chapter && chapter !== 'done';
+  const openingHour = opening ? 20.6 / 24 : 6 / 24;
   if (!net) {
-    // Every fresh single-player world starts at dawn. This is applied only
-    // after the menu choice (and also after a failed server connection), so it
-    // cannot disturb the shared multiplayer clock. Setting it before boot
-    // also makes every deterministic subsystem initialise against dawn.
-    setSoloTime(6 / 24);
-    ui.setStatus({ online: null });   // single player: no LED, no lie
+    setSoloTime(openingHour);
+    ui.setStatus({ online: null });
   }
-  await boot();
-  // Loading terrain can take several real seconds, which are several in-game
-  // minutes in a 24-minute day. Re-anchor once the world is actually ready so
-  // the first playable frame—not merely the start of loading—reads 06:00.
-  if (!net) setSoloTime(6 / 24);
+  if (opening && chapter !== 'forecourt') {
+    const { createPrologue } = await import('./prologue.js');
+    const cover = $id('enter-overlay');
+    // Warm the real forecourt while the player is aboard. Its input and city
+    // simulation only take over after they cross the hall's front doors.
+    let depart, arrive;
+    const trainReady = new Promise(resolve => { depart = resolve; });
+    const outside = new Promise(resolve => { arrive = resolve; });
+    journey = createPrologue({ checkpoint: chapter, save: career.checkpointStory,
+      input, sound: sfx, prepareCity: depart,
+      exit() { journey = null; cover.style.visibility = ''; arrive(); } });
+    cover.style.visibility = 'hidden';
+    if (chapter === 'arrival') depart();
+    await trainReady;
+    await boot(outside);
+  } else {
+    await boot();
+  }
+  if (!net) setSoloTime(openingHour);
 }
 // Leaving the tab is the ordinary way a session ends here, so say goodbye
 // properly: net.dispose() drops every remote avatar (and with it every name
@@ -3855,6 +3890,8 @@ window.addEventListener('pagehide', () => {
 });
 
 start().catch(err => {
+  journey?.dispose(); journey = null;
+  $id('enter-overlay').style.visibility = '';
   $id('enter-label').textContent = 'Chyba při načítání města: ' + err.message;
   console.error(err);
 });

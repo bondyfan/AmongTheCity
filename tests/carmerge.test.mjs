@@ -196,3 +196,15 @@ test('a semi tows a one-draw trailer whose lamps follow the tractor', () => {
   assert.equal(car.mesh.userData.carState.brake, true, 'a braking lorry did not light its brakes');
   assert.notEqual(car._tr.body.material, parked, 'the trailer kept the parked material');
 });
+
+
+test('the story estate mounts its driver cabin and steering wheel badge', () => {
+  const car = { kind: 'octaviaCombi', mesh: new THREE.Group() };
+  assert.equal(VEH.normalizeKind(car.kind), car.kind);
+  assert.ok(VEH.bodySurface(car.kind).topAt(1.75, 0) > VEH.bodySurface('octavia').topAt(1.75, 0) + 0.1);
+  const cabin = VEH.attachCabin(car);
+  assert.equal(cabin.parent, car.mesh);
+  assert.ok(cabin.children.some(part => part.material.map?.isCanvasTexture));
+  assert.equal(VEH.attachCabin(car), cabin);
+  assert.ok(VEH.detachCabin(car));
+});

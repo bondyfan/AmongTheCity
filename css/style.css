@@ -973,3 +973,20 @@ html, body { overscroll-behavior: none; touch-action: none; }
   .atc-toast, .atc-toast.out { animation-duration: 0.01s; }
   .vt-en.low > i, #objective.urgent .ob-time { animation: none; }
 }
+
+.journey-hud { position:fixed; inset:0; z-index:16; pointer-events:none; color:#fff5df; font:500 15px/1.4 system-ui,sans-serif; text-shadow:0 1px 4px #111; }
+.journey-heading { position:absolute; top:5%; left:4%; max-width:min(86vw,480px); padding:12px 20px; border-left:3px solid #e9b86b; background:linear-gradient(90deg,#111b25eb,#111b2510); }
+.journey-heading small { display:block; color:#f4cb8d; text-transform:uppercase; letter-spacing:.14em; }
+.journey-heading strong { display:block; font-size:clamp(19px,2vw,30px); line-height:1.22; }
+.journey-heading span { font-size:13px; color:#eadfcf; }
+.journey-caption { position:absolute; left:50%; bottom:17%; transform:translateX(-50%); width:max-content; max-width:min(80vw,680px); box-sizing:border-box; padding:12px 20px; background:#111820eb; border-radius:4px; }
+.journey-caption b { color:#f2c585; font-size:13px; }
+.journey-caption p { margin:2px 0; font-size:clamp(16px,1.6vw,22px); }
+.journey-hud button { position:absolute; bottom:8%; left:50%; transform:translateX(-50%); pointer-events:auto; cursor:pointer; border:1px solid #c6ad82; border-radius:4px; padding:8px 15px; background:#16202a; color:#fff5df; font:inherit; }
+.on-last-train #atc-net { display:none; }
+.journey-phone { position:absolute; right:7%; bottom:-24px; width:clamp(106px,14vw,185px); aspect-ratio: .56; padding:14px; box-sizing:border-box; border:5px solid #242931; border-radius:22px; color:#fff5e6; background:linear-gradient(156deg,#658087,#193847 70%,#152632); box-shadow:3px 7px 21px #1118; transform:rotate(9deg); text-align:center; }
+.journey-phone i { display:block; margin:auto; width:27%; height:5px; border-radius:6px; background:#182026; }
+.journey-phone small { display:block; margin:12% 0 20%; font:500 12px system-ui; opacity:.8; }
+.journey-phone strong { display:block; font-size:clamp(15px,2.1vw,27px); }
+.journey-phone span { font-size:12px; }
+@media(max-width:650px) { .journey-phone { right:2%; bottom:11%; width:85px; padding:6px; z-index:-1; } .journey-heading { top:3%; } }

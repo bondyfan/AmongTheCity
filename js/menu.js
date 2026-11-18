@@ -205,11 +205,12 @@ export function showMenu() {
       // a save in the OTHER city than the pill shows keeps its career but
       // starts on this city's square, and the line says so
       const here = sum?.pos ? placeOf(sum.pos.x, sum.pos.z).id : null;
+      const journey = start === 'pardubice' && sum?.prologue && sum.prologue !== 'done';
       const move = sum && here && here !== start ? ' · nový start ' + placeById(start).at : '';
       single.appendChild(el('small', '', undefined)).textContent = sum
-        ? kc(sum.money) + ' · odehráno ' + fmtPlayed(sum.played)
+        ? journey ? 'Poslední vlak • pokračovat v příběhu' : kc(sum.money) + ' · odehráno ' + fmtPlayed(sum.played)
           + (sum.jobs ? ' · zakázek ' + sum.jobs : '') + move
-        : 'sám ve městě';
+        : start === 'pardubice' ? 'Příběh • poslední vlak z Kolína' : 'sám ve městě';
       fresh.style.display = sum ? '' : 'none';
     };
     // Pardubice | Praha: a two-option radio group as one pill

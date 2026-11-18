@@ -213,6 +213,18 @@ function drawBadge(brand) {
   return cv;
 }
 
+// The steering wheel uses the same drawing as the exterior atlas, but its
+// single square decal needs its own sampler. Cabins share one per brand.
+const wheelBadges = new Map();
+function badgeMatFor(brand) {
+  if (!wheelBadges.has(brand)) {
+    const map = new THREE.CanvasTexture(drawBadge(brand));
+    map.colorSpace = THREE.SRGBColorSpace;
+    wheelBadges.set(brand, new THREE.MeshBasicMaterial({ map, transparent: true, depthWrite: false }));
+  }
+  return wheelBadges.get(brand);
+}
+
 // ---- license plates: white EU plate, Pardubice's "5E" series ----
 // The registration hashes off kind+paint so it is DETERMINISTIC — the same
 // blue Octavia always wears the same number, front and rear, without storing
@@ -445,6 +457,14 @@ const KIND = {
       [5.20, 0.22, 2.98, 1.00], [5.90, 0.24, 2.94, 0.98], [6.10, 0.30, 2.78, 0.92]] },
   },
 };
+// Vašek's estate keeps the Octavia running gear and front cabin. The
+// longer roof and nearly upright tailgate also shape the view from inside.
+KIND.octaviaCombi = {
+  ...KIND.octavia,
+  green: { ...KIND.octavia.green, sts: [
+    ...KIND.octavia.green.sts.slice(0, 4), [1.82, 0.91, 1.45], [2.20, 0.91, 1.03],
+  ] },
+};
 // spawn code rolls from this — traffic.js picks BY NAME from its own pools
 // (indexing broke the day the roster was renamed, so never rely on order)
 export const CAR_KINDS = ['octavia', 'fabia', 'bmw', 'mercedes', 'tesla', 'van', 'truck', 'bus'];
@@ -479,6 +499,7 @@ export function normalizeKind(k) {
 // engine trim the accel curve would immediately contradict (this Octavia
 // pulls 0–100 in 5.7 s, which no badge on a real one would justify).
 const CAR_LABELS = {
+  octaviaCombi: ['Škoda Octavia Combi', 'kombi · předokolka'],
   octavia:  ['Škoda Octavia', 'liftback · předokolka'],
   fabia:    ['Škoda Fabia', 'hatchback · předokolka'],
   bmw:      ['BMW řady 3', 'sedan G20 · zadokolka'],
@@ -889,7 +910,7 @@ function geomFor(kind) {
   if (g) return g;
   const key = KIND[kind] ? kind : 'octavia';
   const K = KIND[key];
-  const car = buildCar(key, K, cabinCut(K));
+  const car = buildCar(key === 'octaviaCombi' ? 'octavia' : key, K, cabinCut(K));
   const S = car.shape;
   _geo.set(kind, g = {
     K, zN: S.z0, zT: S.z1, shape: S, near: car.near, far: car.far, wheel: car.wheel, wx: car.wx,

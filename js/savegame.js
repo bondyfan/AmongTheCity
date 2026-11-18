@@ -23,6 +23,8 @@
 //      blob from a NEWER build is refused untouched: an older tab must not
 //      overwrite what a newer one wrote.
 
+import { stops as storyStops } from './prologue-route.js';
+
 export const SAVE_KEY = 'atc-save';
 export const SAVE_VERSION = 2;
 
@@ -40,6 +42,7 @@ export function blank() {
   return {
     v: SAVE_VERSION,
     savedAt: 0,
+    prologue: null,
     money: 2500,
     pos: null,                 // { x, z, h, y? } or null = the station forecourt
     tod: null,                 // 0..1 time of day (single player only), or null
@@ -106,6 +109,7 @@ export function sanitize(raw) {
   return {
     v: SAVE_VERSION,
     savedAt: pos(s.savedAt),
+    prologue: storyStops.includes(s.prologue) ? s.prologue : null,
     money: Math.round(clamp(fin(s.money, b.money), -MONEY_MAX, MONEY_MAX)),
     pos: sanePos(s.pos),
     tod: s.tod == null ? null : clamp(fin(s.tod, 0.25), 0, 1),
@@ -248,7 +252,7 @@ export function makeStore(storage, key = SAVE_KEY) {
       const s = res.state;
       // pos: which city the save is in, so the menu's place toggle can show it
       return { money: s.money, played: s.played, savedAt: s.savedAt, car: s.car?.kind ?? null,
-        jobs: fin(s.stats.jobsCourier, 0) + fin(s.stats.jobsTaxi, 0), pos: s.pos };
+        ...(s.prologue ? { prologue: s.prologue } : {}), jobs: fin(s.stats.jobsCourier, 0) + fin(s.stats.jobsTaxi, 0), pos: s.pos };
     },
   };
 }
