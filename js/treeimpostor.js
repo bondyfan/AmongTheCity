@@ -106,9 +106,13 @@ export function impostorFrame(geo) {
     lo = Math.min(lo, p.getY(i)); hi = Math.max(hi, p.getY(i));
   }
   const half = Math.max(w, (hi - lo) / 2) * MARGIN, yc = (hi + lo) / 2;
-  // the stem is cut a little under the foliage, and never at the cell's own
-  // edge, where it would bleed into the cell below once mipped
-  return { half, yc, foot: Math.max(lo - 0.08, yc - half * 0.96) };
+  // The wood is cut a fifth of the way UP the foliage: everything under that is
+  // the far template's own trunk, which runs to the crown's centre behind the
+  // picture. Cut under the foliage (as it was), the picture carried the near
+  // model's whole fork, wider and sunlit, over the darker real stem: every
+  // far tree stood on a pale "Y" with a broken-off top. Never at the cell's
+  // own edge either, where it would bleed into the cell below once mipped.
+  return { half, yc, foot: Math.max(lo + 0.22 * (hi - lo), yc - half * 0.96) };
 }
 
 /**

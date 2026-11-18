@@ -50,7 +50,9 @@ export const SPECIES = [
   { name: 'plane',    h: [14, 22], b: 0.30, a: [0.82, 0.98], tau: 0.072, crown: 0x648844, bark: 0xa9a892 },
   { name: 'poplar',   h: [18, 28], b: 0.07, a: [0.22, 0.28], tau: 0.110, crown: 0x4c7838, bark: 0x8f8a7c },
   { name: 'birch',    h: [9, 16],  b: 0.30, a: [0.50, 0.62], tau: 0.058, crown: 0x6d9446, bark: 0xe6e3d8 },
-  { name: 'spruce',   h: [14, 26], b: 0.10, a: [0.22, 0.28], tau: 0.085, crown: 0x3a6445, bark: 0x7d685a },
+  // (the spruce was 0x3a6445, which read teal once the far tier wore pictures:
+  // a real spruce is the darkest green in the street)
+  { name: 'spruce',   h: [14, 26], b: 0.10, a: [0.22, 0.28], tau: 0.085, crown: 0x30583a, bark: 0x7d685a },
   { name: 'pine',     h: [13, 22], b: 0.58, a: [0.95, 1.25], tau: 0.062, crown: 0x4a6d44, bark: 0xa9764f },
   { name: 'fruit',    h: [3.6, 6], b: 0.30, a: [0.95, 1.15], tau: 0.060, crown: 0x639040, bark: 0x7e6c5d },
   { name: 'shrub',    h: [0.9, 1.7], b: 0.02, a: [1.15, 1.55], tau: 0.0, crown: 0x4a7436, bark: 0x5a4d40 },

@@ -231,12 +231,23 @@ vec3 tOrgW = ( modelMatrix * vec4( tOrg, 1.0 ) ).xyz;
 		vec4 tCell = uTreeImpCell[ int( tCellI + 0.5 ) ];
 		float tV = mix( tRx, tRy, clamp( length( viewMatrix[ 1 ].xy ), 0.0, 1.0 ) );
 		vec2 tQ = uv * 2.0 - 1.0;
-		// toward the eye by half the crown, so the trunk inside it is behind
-		// the leaves and shows only through the gaps
-		vec3 tOff = vec3( tQ.x * tCell.x * tRx, ( tCell.y + tQ.y * tCell.x ) * tV, tCell.x * tRx * 0.5 );
-		vec3 tSw = treeWind( vec3( tOff.x, tOff.y, 0.0 ), tOrgW, 1.0, 1.0 );
-		mvPosition = modelViewMatrix * vec4( tOrg, 1.0 );
-		mvPosition.xyz += tOff + mat3( viewMatrix ) * tSw;
+		vec3 tOff = vec3( tQ.x * tCell.x * tRx, tQ.y * tCell.x * tV, 0.0 );
+		vec3 tSw = treeWind( vec3( tOff.x, tCell.y * tV + tOff.y, 0.0 ), tOrgW, 1.0, 1.0 );
+		// The picture's centre, then toward the eye by half the crown, so the
+		// trunk inside it is behind the leaves and shows only through the gaps.
+		// ALONG THE RAY to the eye and shrunk by as much as it came closer, so
+		// on screen it stays exactly where and as big as the crown: pushed along
+		// view z, a tree off to one side of the screen slid away from its own
+		// trunk (a metre at 60 m, the picture's limbs beside the real stem).
+		// The light's camera is orthographic (projectionMatrix[2][3] is 0 there;
+		// isOrthographic is never uploaded to a depth material).
+		vec3 tC = ( modelViewMatrix * vec4( tOrg, 1.0 ) ).xyz + vec3( 0.0, tCell.y * tV, 0.0 );
+		float tPush = tCell.x * tRx * 0.5;
+		float tL = max( length( tC ), tPush + 0.5 );
+		bool tOrtho = projectionMatrix[ 2 ][ 3 ] == 0.0;
+		vec3 tDir = tOrtho ? vec3( 0.0, 0.0, 1.0 ) : - tC / tL;
+		float tK = tOrtho ? 1.0 : ( tL - tPush ) / tL;
+		mvPosition = vec4( tC + tDir * tPush + tOff * tK + mat3( viewMatrix ) * tSw, 1.0 );
 	} else {
 		mvPosition.xyz += treeWind( tRel, tOrgW, uv.x * uv.x * 0.6, 0.0 );
 		mvPosition = modelViewMatrix * mvPosition;
@@ -386,8 +397,11 @@ const COLOR_F = /* glsl */`
 		// the lit tips a little yellower, as the near model's clumps are
 		vec3 tCol = diffuseColor.rgb * tAo;
 		tCol = mix( tCol, tCol * vec3( 1.14, 1.06, 0.72 ), smoothstep( 1.05, 1.6, tAo ) * 0.6 );
-		// a limb seen through a gap is in the crown's own shade
-		vec3 tWood = vTreeBark * ( 0.4 + ${F(0.35 / IMP_WOOD1)} * min( tT.b, ${F(IMP_WOOD1)} ) );
+		// a limb seen through a gap is in the crown's own shade. The picture is
+		// lit as if nothing shaded it (its shadow is looked up beside it, see
+		// WORLDPOS_V) while the real trunk under it sits in the crown's shadow:
+		// at the 0.4..0.75 it was, every limb was paler than the stem it grew from
+		vec3 tWood = vTreeBark * ( 0.14 + ${F(0.34 / IMP_WOOD1)} * min( tT.b, ${F(IMP_WOOD1)} ) );
 		diffuseColor.rgb = mix( tWood, tCol, tPx );
 		treeThru = tPx;
 		// the edge sharpened to a pixel at any mip, then softened by coverage
