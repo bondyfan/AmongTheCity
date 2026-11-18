@@ -26,6 +26,7 @@ import { initAudio, sfx, sfxAt, setListener, engineVoices, engineVoicesStop,
   ambientStart, nearbyTrafficHum, horn } from './audio.js';
 import { initSettings, getSettings } from './settings.js';
 import { initOrtho } from './ortho.js';
+import { GROUND_DETAIL } from './groundglsl.js';
 import { Pedestrians } from './pedestrians.js';
 import { Chatter, voiceOf } from './chatter.js';
 import * as wallet from './wallet.js';
@@ -2569,6 +2570,8 @@ function applySettings(s, key) {
   setVolume(s.volume ?? 0.8);
   renderer.setPixelRatio(s.resScale === 2 ? Math.min(window.devicePixelRatio, 2) : s.resScale);
   if (world) world.viewChunks = s.viewChunks;
+  // the ground's street-level detail is one shared uniform: no rebuild, no recompile
+  GROUND_DETAIL.value = s.groundDetail === false ? 0 : 1;
   if (traffic) traffic.maxCars = s.traffic;
   if (traffic) traffic.patrolP = s.police ?? 0.70;
   if (peds) peds.max = s.peds ?? 34;
@@ -3897,6 +3900,8 @@ window.__atc = {
   get sky() { return sky; }, get lightPools() { return lightPools; },
   openness, get farTerrain() { return farTerrain; },
   get settings() { return getSettings(); },
+  // A/B of the ground's street-level detail: __atc.groundDetail.value = 0 / 1
+  groundDetail: GROUND_DETAIL,
   get player() { return player; }, get world() { return world; },
   get traffic() { return traffic; }, get vehicles() { return vehicles; },
   get parked() { return parked; }, get peds() { return peds; },
