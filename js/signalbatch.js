@@ -123,6 +123,7 @@ varying vec3 vSigGlow;`)
 }
 
 const START_CAP = 512;
+const REANCHOR = 2000;     // metres a mast may stand from the mesh's anchor (_anchorFor)
 
 // every SignalBatch alive (one per Traffic), for the console's flag
 const _all = new Set();
@@ -283,6 +284,10 @@ export class SignalBatch {
     mesh.updateMatrix();
     const old = this.mesh;
     if (old) {
+      // the copied instances are offsets from the old mesh's anchor: keep it
+      mesh.position.copy(old.position);
+      mesh._anchored = old._anchored;
+      mesh.updateMatrix();
       mesh.instanceMatrix.array.set(old.instanceMatrix.array.subarray(0, this.live.length * 16));
       st.array.set(old.geometry.attributes.sigState.array.subarray(0, this.live.length));
       old.removeFromParent();
@@ -298,9 +303,30 @@ export class SignalBatch {
     this._dm = true;
   }
 
+  // The mesh sits at an ANCHOR near the masts it draws and the instances are
+  // offsets from it. With the instances in world coordinates the vertex shader
+  // multiplied out positions of some 95 000 m in float32, whose step there is
+  // 8 mm: a lens 2 mm proud of its housing came out of the depth test as a
+  // ragged scrap of green (seen in game, November 2026). The anchor's own
+  // offset to the camera is worked out in double precision on the CPU, as
+  // every other mesh's is, and an offset of under 2 km keeps a tenth of a
+  // millimetre. A mast coming into range farther than REANCHOR from the anchor
+  // moves the anchor onto itself and rewrites the live slots.
+  _anchorFor(p) {
+    const m = this.mesh, { x, y, z } = p.mesh.position;
+    if (m._anchored && Math.abs(x - m.position.x) < REANCHOR && Math.abs(z - m.position.z) < REANCHOR
+      && Math.abs(y - m.position.y) < REANCHOR) return;
+    m.position.set(Math.round(x), Math.round(y), Math.round(z));
+    m.updateMatrix();
+    m._anchored = true;
+    for (let i = 0; i < this.live.length; i++) this._writeM(i, this.live[i]);
+    this._dm = true;
+  }
+
   _writeM(slot, p) {
-    const e = this.mesh.instanceMatrix.array, o = slot * 16;
-    const { x, y, z } = p.mesh.position, h = p.mesh.rotation.y;
+    const e = this.mesh.instanceMatrix.array, o = slot * 16, a = this.mesh.position;
+    const x = p.mesh.position.x - a.x, y = p.mesh.position.y - a.y, z = p.mesh.position.z - a.z;
+    const h = p.mesh.rotation.y;
     const c = Math.cos(h), s = Math.sin(h);
     // T(x, y, z) · Ry(h), column-major
     e[o] = c; e[o + 1] = 0; e[o + 2] = -s; e[o + 3] = 0;
@@ -318,6 +344,7 @@ export class SignalBatch {
     }
     if (p._slot >= 0) return;
     this._ensure(this.live.length + 1);
+    this._anchorFor(p);
     const slot = this.live.length;
     this.live.push(p);
     p._slot = slot;

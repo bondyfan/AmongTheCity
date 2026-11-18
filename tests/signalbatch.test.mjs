@@ -15,9 +15,10 @@ const { mergeMarks } = await import('../js/wordmarkatlas.js');
 const { sigAssets } = await import('../js/signalmodel.js');
 
 const scene = () => new THREE.Group();
+// where an instance stands in the world: its offset plus the mesh's anchor
 const posOf = (b, slot) => {
-  const e = b.mesh.instanceMatrix.array, o = slot * 16;
-  return [e[o + 12], e[o + 13], e[o + 14]];
+  const e = b.mesh.instanceMatrix.array, o = slot * 16, a = b.mesh.position;
+  return [e[o + 12] + a.x, e[o + 13] + a.y, e[o + 14] + a.z];
 };
 
 test('masts in range are compact instances, out of range give their slot back', () => {
@@ -59,6 +60,28 @@ test('re-seating a mast on late terrain moves its instance', () => {
   g.add(a); g.visible = true; b.flush();
   a.mesh.position.y = 221.5; b.reseat(a); b.flush();
   assert.deepEqual(posOf(b, a._slot), [3, 221.5, 4]);
+});
+
+test('far from the origin the instances are small offsets from an anchor near them', () => {
+  // float32 has an 8 mm step at 95 km: world-sized instance offsets broke the
+  // 2 mm gap between a lens and its housing into a ragged scrap (seen in game)
+  const b = new SignalBatch(scene());
+  const g = b.group(), a = b.pole(-94983.2, 212.7, -5334.8, 0), c = b.pole(-94990.4, 213.1, -5300.25, 0);
+  g.add(a); g.add(c); g.visible = true; b.flush();
+  for (const q of [a, c]) {
+    const e = b.mesh.instanceMatrix.array, o = q._slot * 16;
+    assert.ok(Math.abs(e[o + 12]) < 100 && Math.abs(e[o + 14]) < 100, 'an instance offset is world-sized');
+    const w = posOf(b, q._slot);
+    assert.ok(Math.abs(w[0] - q.mesh.position.x) < 1e-3 && Math.abs(w[2] - q.mesh.position.z) < 1e-3);
+  }
+  // 95 km away (Pardubice after Prague): the anchor follows and nothing moves
+  const g2 = b.group(), d = b.pole(25, 220, -122, 0);
+  g2.add(d); g2.visible = true; b.flush();
+  assert.ok(Math.abs(b.mesh.position.x - 25) < 1, 'the anchor did not move to the new mast');
+  for (const q of [a, c, d]) {
+    const w = posOf(b, q._slot);
+    assert.ok(Math.abs(w[0] - q.mesh.position.x) < 1e-2 && Math.abs(w[2] - q.mesh.position.z) < 1e-2, 'a mast moved on re-anchoring');
+  }
 });
 
 test('the yaw is the old Group\'s rotation.y: lenses look back down the approach', () => {
