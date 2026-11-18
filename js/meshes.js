@@ -65,7 +65,7 @@ import { facadeAtlas, buildFacadeMaterial, facadeNight } from './facadeatlas.js'
 import { landmarkOf, LandmarkBatch, landmarkBarrier, landmarkClear, SWITCH as LANDMARK_SWITCH } from './landmarks.js';
 import { landmarkExtras, landmarkBridge, inLandmark } from './landmarks.js';
 import { landmarkMaterial, landmarkNight } from './landmarksmat.js';
-import { farTemplates, treeSpec, treeMatrices, crownColor, barkColor, mappedTree } from './treeshapes.js';
+import { farTemplate, FAR_BOUND_PAD, treeSpec, treeMatrices, crownColor, mappedTree } from './treeshapes.js';
 import { farTreeMaterials } from './treeshader.js';
 import { treePitsInto } from './treepits.js';
 import { riverLevelAt, isPooled, isCulvert } from './riverpools.js';
@@ -5829,9 +5829,9 @@ function lampBatch(group, spots, kind, mats, stand) {
 }
 
 // ---- trees: js/treeshapes.js says which tree stands where and how big it is,
-// and holds the two far templates every chunk instances. Nothing about a
-// tree's shape lives here any more: this file only decides WHERE they grow.
-const _spec = {}, _m4b = new THREE.Matrix4(), _c2 = new THREE.Color();
+// and holds the far template every chunk instances. Nothing about a tree's
+// shape lives here any more: this file only decides WHERE they grow.
+const _spec = {};
 
 // ---- forests: real trees where the data only says "green" ----
 // A wood drawn as a flat polygon reads as PAINT the moment you drive past it.
@@ -6080,6 +6080,9 @@ export function rebase(obj, bx, bz) {
       for (let i = 12; i + 2 < a.length; i += 16) { a[i] -= bx; a[i + 2] -= bz; }
       o.instanceMatrix.needsUpdate = true;
       o.computeBoundingSphere();
+      // a template whose shader builds more than its vertices hold (the far
+      // trees: js/treeshapes.js FAR_BOUND_PAD) says by how much
+      if (o.userData.boundPad) o.boundingSphere.radius += o.userData.boundPad;
     } else if (o.userData.localGeom) {
       // a unit quad that already carries its offset in .position (the ortho
       // photo tile, the far-ring ground plane) — its geometry is local already
@@ -6698,16 +6701,15 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
   // travel direction it governs and turned to face the oncoming driver — the
   // same convention traffic.js uses for its signal poles. Relative heights;
   // the chunk drape stands them on the ground.
-  // -- trees: two InstancedMeshes (trunks / crowns) sharing transforms --
+  // -- trees: ONE InstancedMesh, crown picture and trunk in one template --
   // Mapped street trees (natural=tree points, rendered from their home cell)
   // and FOREST trees (scattered through every wooded polygon that reaches into
   // this cell) share one batch — the draw-call budget is per chunk, not per
-  // source, and a floodplain cell would otherwise pay twice for the same pair
-  // of meshes. Settings can switch the whole lot off (mats.trees === false).
+  // source, and a floodplain cell would otherwise pay twice for the same
+  // mesh. It was two batches (trunks and crowns) until the crown became an
+  // impostor with the trunk folded into its template (js/treeshapes.js).
   if (trees.length) {
-    const [tg, cg] = farTemplates();
-    const trunk = new THREE.InstancedMesh(tg, mats.trunk, trees.length);
-    const crown = new THREE.InstancedMesh(cg, mats.crown, trees.length);
+    const crown = new THREE.InstancedMesh(farTemplate(), mats.crown, trees.length);
     for (let i = 0; i < trees.length; i++) {
       // instancing is cheap per tree, but a floodplain cell holds thousands:
       // every scratch var below is fully re-set each iteration, so the slice
@@ -6719,22 +6721,22 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       // arrive with their height; a mapped point asks the raster here.
       const spec = specOf(t);
       const gy = mats.terrain ? mats.terrain.heightAt(t.x, t.z) : 0;
-      // TWO matrices: the crown's is the unit crown sphere, the trunk's the unit
-      // trunk, so a pine can carry a small crown on a long stem
-      treeMatrices(spec, t.x, gy, t.z, _m4, _m4b);
+      // the crown's matrix is the unit crown sphere: the shader stands the
+      // species' trunk under it down to the ground
+      treeMatrices(spec, t.x, gy, t.z, _m4, null);
       crown.setMatrixAt(i, _m4);
-      trunk.setMatrixAt(i, _m4b);
       // the leaf colour carries the species in its low bits: that is how the
       // far shader and the near models learn it (see crownColor)
       crown.setColorAt(i, crownColor(spec, _c));
-      trunk.setColorAt(i, barkColor(spec, _c2));
     }
-    // instance matrices live in world space: recompute bounds or the whole
-    // batch frustum-culls against the template's origin-sized sphere
-    trunk.computeBoundingSphere(); crown.computeBoundingSphere();
-    trunk.castShadow = trunk.receiveShadow = true;
+    // instance matrices live in world space, so rebase() recomputes the bounds
+    // (or the whole batch frustum-culls against the template's origin-sized
+    // sphere) and grows them by this pad: the template only holds a
+    // placeholder of the trunk the shader stands under every crown
+    crown.userData.boundPad = FAR_BOUND_PAD;
+    crown.name = 'trees-far';
     crown.castShadow = crown.receiveShadow = true;
-    group.add(trunk, crown);
+    group.add(crown);
   }
   return done();
 }

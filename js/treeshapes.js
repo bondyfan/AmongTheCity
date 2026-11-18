@@ -9,8 +9,9 @@
 // data and BufferGeometry only: no document, no canvas, no textures.
 //
 // TWO TIERS, ONE DESCRIPTION. A chunk carries every tree as one instance of a
-// cheap template (a lumpy crown blob and a tapered trunk, FAR_VERTS vertices
-// together). js/trees.js swaps the ones near the camera for a detailed model.
+// cheap template (a picture of the crown on a five-sided trunk, FAR_VERTS
+// vertices: see "the far tier" below). js/trees.js swaps the ones near the
+// camera for a detailed model.
 // For that swap to be invisible both tiers must agree on the tree, and the only
 // thing that crosses the worker boundary per instance is a matrix and a colour.
 // So the matrix IS the crown (a unit sphere scaled to the crown's radii and
@@ -49,7 +50,9 @@ export const SPECIES = [
   { name: 'plane',    h: [14, 22], b: 0.30, a: [0.82, 0.98], tau: 0.072, crown: 0x648844, bark: 0xa9a892 },
   { name: 'poplar',   h: [18, 28], b: 0.07, a: [0.22, 0.28], tau: 0.110, crown: 0x4c7838, bark: 0x8f8a7c },
   { name: 'birch',    h: [9, 16],  b: 0.30, a: [0.50, 0.62], tau: 0.058, crown: 0x6d9446, bark: 0xe6e3d8 },
-  { name: 'spruce',   h: [14, 26], b: 0.10, a: [0.22, 0.28], tau: 0.085, crown: 0x3a6445, bark: 0x7d685a },
+  // (the spruce was 0x3a6445, which read teal once the far tier wore pictures:
+  // a real spruce is the darkest green in the street)
+  { name: 'spruce',   h: [14, 26], b: 0.10, a: [0.22, 0.28], tau: 0.085, crown: 0x30583a, bark: 0x7d685a },
   { name: 'pine',     h: [13, 22], b: 0.58, a: [0.95, 1.25], tau: 0.062, crown: 0x4a6d44, bark: 0xa9764f },
   { name: 'fruit',    h: [3.6, 6], b: 0.30, a: [0.95, 1.15], tau: 0.060, crown: 0x639040, bark: 0x7e6c5d },
   { name: 'shrub',    h: [0.9, 1.7], b: 0.02, a: [1.15, 1.55], tau: 0.0, crown: 0x4a7436, bark: 0x5a4d40 },
@@ -316,84 +319,63 @@ export function smoothNormals(pos, idx, out = new Float32Array(pos.length)) {
   return out;
 }
 
-// ---- the far tier: one blob, one trunk --------------------------------------
-// The crown every tree wears beyond the near radius, and the only crown on the
-// low preset's far field. 42 vertices: a frequency-2 sphere pushed out into
-// seven lumps so the silhouette is a mass of foliage and not a ball, flattened
-// underneath where a real crown is browsed and shaded off, with the shading
-// baked in: the NORMAL is blended toward the crown's centre so the whole thing
-// lights as one volume, and the vertex COLOUR is darker below and in the dents.
-// uv.x is how much of the wind a vertex takes, uv.y its height in the crown
-// (0 bottom, 1 top), which is what the shader squeezes a spruce into a cone by.
-const LUMPS = [
-  [0.05, 0.99, 0.10], [0.82, 0.30, 0.48], [-0.48, 0.38, 0.79], [-0.70, 0.18, -0.69],
-  [0.50, 0.08, -0.86], [0.18, -0.30, 0.94], [-0.97, -0.20, 0.12], [0.90, -0.28, -0.33],
-];
-export const FAR_VERTS = 42 + 15;
-let _farCrown = null, _farTrunk = null;
-let _farExtent = 1;
-/** The largest |coordinate| of the far crown template: see trees.js foldOf(). */
-export function farCrownExtent() {
-  if (!_farCrown) farTemplates();
-  return _farExtent;
-}
+// ---- the far tier: a picture of the crown on a real trunk --------------------
+// Every tree beyond the near radius, and every tree on the low preset's far
+// field, is ONE instance of ONE template in ONE InstancedMesh per chunk. It
+// used to be two batches (a 42-vertex crown blob and a trunk with a matrix of
+// its own) and the blob was what every square in Prague showed from 60 m: a
+// smooth ball on a stick. Now the crown is an IMPOSTOR, a quad the shader turns
+// to face the eye and paints with a picture of the species' own near model
+// (js/treeimpostor.js renders those once at start-up, with their normals, so
+// the picture is lit by the real sun), and the trunk is folded into the same
+// template. One draw call per chunk instead of two, in the main pass and in
+// the shadow pass, and 22 triangles per tree instead of 100.
+//
+// The trunk is authored in CROWN SPACE like the near models (header): the
+// crown matrix that places the picture also places the trunk, down to the
+// ground at y = -groundOf(species). That depth differs by species, so the
+// template cannot hold it: it holds a PARAMETRIC trunk instead (uv.x the
+// height along it, 0 at the ground and 1 at the top; uv.y the radius over the
+// root flare's; the normal the radial direction) and the vertex shader builds
+// the species' trunk from a small table (js/treeshader.js).
+//
+// THE CODEC. The worker ships an instanced template quantised about zero by
+// its largest coordinate, with that scale folded into the instance matrices.
+// Every coordinate here is inside [-1, 1] with the quad's corners ON 1, so the
+// scale is exactly 1, the fold is the identity and the shader may treat the
+// template as crown space on either path. farCrownExtent() says 1 and
+// js/trees.js still divides by it, so nothing downstream had to learn this.
+//
+// Telling them apart: the quad's normal points straight down (no trunk normal
+// does, they are radial with a little lift), which survives the codec's
+// eight-bit normals and needs no attribute the codec does not carry.
+export const FAR_VERTS = 4 + 15;
+export const FAR_QUAD_NY = -1;       // the quad's marker normal (0, -1, 0)
+/** The largest |coordinate| of the far template: see trees.js _treesOf(). */
+export function farCrownExtent() { return 1; }
 
-function buildFarCrown() {
-  const s = geoSphere(2), n = s.pos.length / 3;
-  const pos = new Float32Array(s.pos.length), col = new Float32Array(n * 3), uv = new Float32Array(n * 2);
-  let ext = 0;
-  for (let i = 0; i < n; i++) {
-    const x = s.pos[i * 3], y = s.pos[i * 3 + 1], z = s.pos[i * 3 + 2];
-    let lump = 0;
-    for (const d of LUMPS) {
-      const k = (x * d[0] + y * d[1] + z * d[2] - 0.5) / 0.5;
-      if (k > lump) lump = k;
-    }
-    const r = 0.76 + 0.27 * Math.sqrt(lump);
-    let py = y * r;
-    if (py < -0.5) py = -0.5 + (py + 0.5) * 0.5;      // the flat underside
-    pos[i * 3] = x * r; pos[i * 3 + 1] = py; pos[i * 3 + 2] = z * r;
-    ext = Math.max(ext, Math.abs(x * r), Math.abs(py), Math.abs(z * r));
-    const up = Math.min(1, Math.max(0, (py + 0.7) / 1.25));
-    const shade = (0.62 + 0.38 * up * up * (3 - 2 * up)) * (0.80 + 0.20 * Math.sqrt(lump));
-    // (kept inside 0..1: the worker ships vertex colour as bytes)
-    col[i * 3] = shade * (0.94 + 0.06 * up); col[i * 3 + 1] = shade; col[i * 3 + 2] = shade * (0.98 - 0.08 * up);
-    uv[i * 2] = 1; uv[i * 2 + 1] = Math.min(1, Math.max(0, (py + 1) / 2));
-  }
-  _farExtent = ext;
-  const nor = smoothNormals(pos, s.idx);
-  for (let i = 0; i < n; i++) {
-    const l = Math.hypot(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]) || 1;
-    let nx = nor[i * 3] * 0.5 + pos[i * 3] / l * 0.5, ny = nor[i * 3 + 1] * 0.5 + pos[i * 3 + 1] / l * 0.5,
-      nz = nor[i * 3 + 2] * 0.5 + pos[i * 3 + 2] / l * 0.5;
-    const m = Math.hypot(nx, ny, nz) || 1;
-    nor[i * 3] = nx / m; nor[i * 3 + 1] = ny / m; nor[i * 3 + 2] = nz / m;
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-  g.setIndex(new THREE.BufferAttribute(s.idx.slice(), 1));
-  return g;
-}
-
-// A tapered five-sided trunk standing on y = 0 and one unit tall, radius 1 at
-// the ground with a root flare under it. The instance matrix gives it girth and
-// length. Its colour is the bark (instanceColor), shaded darker toward the top
-// where the crown stands over it.
-function buildFarTrunk() {
-  const SIDES = 5, rings = [[0, 1.45, 1.0], [0.07, 1.0, 1.0], [1, 0.5, 0.62]];
+let _far = null;
+function buildFar() {
   const pos = [], nor = [], col = [], uv = [], idx = [];
-  for (const [y, r, shade] of rings) {
+  // the quad: corners on +-1, uv the corner (the shader sizes and turns it)
+  for (const [u, v] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+    pos.push(u * 2 - 1, v * 2 - 1, 0); nor.push(0, FAR_QUAD_NY, 0); col.push(1, 1, 1); uv.push(u, v);
+  }
+  idx.push(0, 1, 2, 0, 2, 3);
+  // the trunk: five sides, a root flare under it, darker toward the top where
+  // the crown stands over it. Positions are placeholders inside the unit box
+  // (the shader replaces them); only uv and the normal matter.
+  const SIDES = 5, rings = [[0, 1.45, 1.0], [0.07, 1.0, 1.0], [1, 0.5, 0.62]];
+  for (const [t, r, shade] of rings) {
     for (let k = 0; k < SIDES; k++) {
       const a = k / SIDES * Math.PI * 2, cx = Math.cos(a), cz = Math.sin(a);
-      pos.push(cx * r, y, cz * r); nor.push(cx * 0.9928, 0.1196, cz * 0.9928);   // unit length
-      col.push(shade, shade, shade); uv.push(Math.min(1, y * 0.6), 0);
+      pos.push(cx * r * 0.05, -0.9 + t * 0.8, cz * r * 0.05);
+      nor.push(cx * 0.9928, 0.1196, cz * 0.9928);   // unit length
+      col.push(shade, shade, shade); uv.push(t, r / 1.45);
     }
   }
   for (let j = 0; j < rings.length - 1; j++) for (let k = 0; k < SIDES; k++) {
-    const a = j * SIDES + k, b = j * SIDES + (k + 1) % SIDES, c = a + SIDES, d = b + SIDES;
+    const a = 4 + j * SIDES + k, b = 4 + j * SIDES + (k + 1) % SIDES, c = a + SIDES, d = b + SIDES;
     idx.push(a, c, b, b, c, d);
   }
   const g = new THREE.BufferGeometry();
@@ -406,24 +388,31 @@ function buildFarTrunk() {
 }
 
 /**
- * [trunk, crown] templates, CLONED: a chunk owns its geometry and disposes it
- * when it unloads, so a shared template would lose its GPU buffers.
+ * The far template, CLONED: a chunk owns its geometry and disposes it when it
+ * unloads, so a shared template would lose its GPU buffers.
  */
-export function farTemplates() {
-  if (!_farCrown) { _farCrown = buildFarCrown(); _farTrunk = buildFarTrunk(); }
-  return [_farTrunk.clone(), _farCrown.clone()];
+export function farTemplate() {
+  if (!_far) _far = buildFar();
+  return _far.clone();
 }
 
+// How far a far batch's bounding sphere is grown past what three computes from
+// the template: the template's trunk is a placeholder (the real one runs to
+// the ground, up to 3.8 crown radii below the crown) and the picture may be
+// 1.75 crown radii wide, so the computed sphere is too small by a tree.
+export const FAR_BOUND_PAD = 14;
+
 // How far under the ground a far trunk starts, so a slope cannot show daylight
-// under its downhill side.
+// under its downhill side (the far shader sinks its trunk by the same metres).
 export const TRUNK_SINK = 0.3;
 
 const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _v = new THREE.Vector3(),
   _s = new THREE.Vector3(), _ax = new THREE.Vector3(), _upv = new THREE.Vector3(0, 1, 0);
 /**
- * The two instance matrices of a tree standing at (x, y, z): `crown` is the
- * unit crown sphere set at the crown's centre, `trunk` the unit trunk on the
- * ground. The lean turns both about the foot of the tree.
+ * The instance matrices of a tree standing at (x, y, z): `crown` is the unit
+ * crown sphere set at the crown's centre, `trunk` (optional: the far template
+ * carries its trunk in crown space now) the unit trunk on the ground. The lean
+ * turns both about the foot of the tree.
  */
 export function treeMatrices(spec, x, y, z, crown, trunk) {
   _ax.set(Math.cos(spec.leanDir), 0, Math.sin(spec.leanDir));
@@ -434,6 +423,7 @@ export function treeMatrices(spec, x, y, z, crown, trunk) {
   _v.x += x; _v.y += y; _v.z += z;
   _s.set(spec.rx, spec.ry, spec.rx);
   crown.compose(_v, _q, _s);
+  if (!trunk) return;
   _v.set(x, y - TRUNK_SINK, z);
   _s.set(spec.rt, spec.ht + TRUNK_SINK, spec.rt);
   trunk.compose(_v, _q, _s);

@@ -1,7 +1,9 @@
 // ---- trees.js: the trees near you, and the shade under all of them ----------
-// A chunk draws each of its trees as a 57-vertex blob on a stick, which is the
-// right amount of tree at 80 m and a balloon at 10. This module owns the other
-// tier: every frame it knows which trees stand within `radius` of the camera,
+// A chunk draws each of its trees as a picture of its crown on a five-sided
+// trunk (js/treeshapes.js, the far tier), which is the right amount of tree at
+// 80 m and a cardboard cut-out at 10. This module renders those pictures once
+// at start-up (js/treeimpostor.js) and owns the other tier: every frame it
+// knows which trees stand within `radius` of the camera,
 // and draws those as the full models of js/treemodels.js, one InstancedMesh per
 // species build. The far instance of the same tree dissolves in the shader
 // across the last few metres of the radius (js/treeshader.js), so there is
@@ -27,6 +29,7 @@ import * as THREE from 'three';
 import { SP, groundOf, farCrownExtent, tagSpecies, tagVariant } from './treeshapes.js';
 import { TREE_U, nearTreeMaterial, treeDepthMaterial } from './treeshader.js';
 import { nearModel } from './treemodels.js';
+import { buildImpostors } from './treeimpostor.js';
 import { worldPhase } from './worldclock.js';
 
 const CHUNK_HALF = 60;      // half of config.CHUNK: a chunk group sits at its centre
@@ -46,7 +49,12 @@ export function treeQuality(settings) {
   // (buildingR: 80 / 160 / 280 on low / medium / high) rather than a knob of
   // its own: a third of it is 27, 54 and 95 m of real trees.
   const r = Math.max(24, Math.min(96, (settings?.buildingR ?? 160) * 0.34));
-  return { radius: r, cap: Math.round(r * r * 0.068) };   // 50, 201, 616
+  // impPx: pixels across one cell of the far tier's picture atlas. 256 is a
+  // crown 43 m away at full size; the low preset's far tier starts at 27 m
+  // but its pictures are seen at 0.75 resolution and without MSAA, and half
+  // the size is a quarter of the 11 MB.
+  return { radius: r, cap: Math.round(r * r * 0.068),     // 50, 201, 616
+    impPx: (settings?.buildingR ?? 160) <= 100 ? 128 : 256 };
 }
 
 export class Trees {
@@ -74,10 +82,40 @@ export class Trees {
     this._shadeAge = 0; this._shadeSig = -1;
     this._shadeOut = { densTex: null, metaTex: null, cx: 0, cz: 0, size: SHADE_SIZE, strength: 0.6 };
     this._shadeOn = false;
+    this._imp = null; this._impPx = 0;
+    this._cam = null;
+    // A/B switches for a console or a harness (__atc.trees.ab.near = false):
+    //   impostor  far crowns wear their picture; false draws the lumpy ball
+    //             every far crown was before (main pass only: the shadows keep
+    //             the picture's shape)
+    //   near      the full models round the camera; false leaves every tree on
+    //             the far tier at any distance (what the near tier costs)
+    //   wind      the sway and the flutter
+    this.ab = { impostor: true, near: true, wind: true };
+    // the atlas is painted by setQuality (main.js calls it right after this),
+    // at the size the tier wants, or by the first update if nothing did
+  }
+
+  /** (Re)paint the far tier's atlas at `px` per cell. */
+  _impostors(px) {
+    if (px === this._impPx) return;
+    this._impPx = px;
+    try {
+      const rt = buildImpostors(this.renderer, px);
+      this._imp?.dispose();
+      this._imp = rt;
+      TREE_U.uTreeImpLod.value = Math.max(0, Math.log2(px) - 4);
+    } catch (e) {
+      // no atlas is no far crowns at all: fall back to the ball, which
+      // needs none, rather than a city of bare trunks
+      console.warn('trees: impostor atlas failed, far crowns fall back to balls', e);
+      this.ab.impostor = false;
+    }
   }
 
   setQuality(settings) {
     const q = treeQuality(settings);
+    this._impostors(q.impPx);
     if (q.radius === this.radius && q.cap === this.cap) return;
     this.radius = q.radius; this.cap = q.cap;
     for (const p of this.pools.values()) { this.root.remove(p); p.geometry.dispose(); p.dispose(); }
@@ -133,15 +171,28 @@ export class Trees {
   }
 
   /**
-   * Once a frame. `camera` is the game camera; `nightK` 0 by day, 1 at night.
-   * Returns nothing: the shader uniforms and the pools are the result.
+   * Once a frame. `camera` is the game camera; `nightK` 0 by day, 1 at night;
+   * `lightDir` toward the one directional light (js/sky.js sky.lightDir: the
+   * sun by day, the moon by night), which a far crown looks its shadow up
+   * along. Returns nothing: the shader uniforms and the pools are the result.
    */
-  update(camera, dt, nightK = 0) {
+  update(camera, dt, nightK = 0, lightDir = null) {
+    this._cam = camera;
+    if (!this._impPx) this._impostors(256);
     TREE_U.uTreeWind.value.x = worldPhase(512);
+    TREE_U.uTreeWind.value.y = this.ab.wind ? 1 : 0;
+    TREE_U.uTreeAB.value.x = this.ab.impostor ? 1 : 0;
+    if (lightDir) TREE_U.uTreeSun.value.copy(lightDir).normalize();
+    // Every chunk's far batch casts through the tree depth material, from the
+    // frame it arrives: three's default one would draw the template as it
+    // stands, a 2 x 2 card at the crown with a matchstick under it. The
+    // groups are remembered, so after the first sight this is a lookup each.
+    for (const group of this.world.built.values()) if (group && !this.info.has(group)) this._treesOf(group);
     const ex = camera.position.x, ez = camera.position.z;
     // from a helicopter no tree is near: skip the whole tier
     // (the bare terrain: this runs every frame and needs no kerbs or bridges)
-    const high = camera.position.y - this.world.terrain.heightAt(ex, ez) > this.radius + 30;
+    const high = !this.ab.near
+      || camera.position.y - this.world.terrain.heightAt(ex, ez) > this.radius + 30;
     this._age += dt; this._shadeAge += dt;
     if (high) {
       if (this.count) { for (const p of this.pools.values()) if (p) { p.count = 0; p.visible = false; } this.count = 0; }
@@ -340,6 +391,37 @@ export class Trees {
     r.setClearColor(0x000000, 0); S.mesh.material = S.meta;
     r.setRenderTarget(S.rtMeta); r.render(S.scene, S.cam);
     r.setRenderTarget(was); r.setClearColor(S.clear, alpha); r.autoClear = auto;
+  }
+
+  /**
+   * What the trees cost in the frame `camera` sees (a debug read-out for the
+   * console: __atc.trees.stats()). Renders the scene once to read three's own
+   * render list, so the counts are exactly what the main pass draws after
+   * culling. `shadow` counts the casting batches standing in the scene, an
+   * upper bound on what the shadow pass draws (it culls to the light).
+   */
+  stats(camera = this._cam) {
+    const r = this.renderer, mats = this.world.mats, out = {
+      far: { calls: 0, tris: 0, trees: 0 }, near: { calls: 0, tris: 0, trees: this.count },
+      shadow: { calls: 0, tris: 0 }, radius: +this.rNow.toFixed(1),
+    };
+    const tris = (o) => (o.geometry.index ? o.geometry.index.count : o.geometry.getAttribute('position').count) / 3 * o.count;
+    const kind = (m) => (m === mats.crown || m === mats.trunk ? out.far : m === this.mat ? out.near : null);
+    if (!camera) return out;
+    r.render(this.scene, camera);
+    const list = r.renderLists.get(this.scene, 0);
+    for (const it of [...list.opaque, ...list.transmissive, ...list.transparent]) {
+      const k = kind(it.material);
+      if (!k || !it.object.isInstancedMesh) continue;
+      k.calls++; k.tris += tris(it.object);
+      if (k === out.far && it.material === mats.crown) k.trees += it.object.count;
+    }
+    this.scene.traverseVisible((o) => {
+      if (!o.isInstancedMesh || !o.castShadow || !o.count || !kind(o.material)) return;
+      out.shadow.calls++; out.shadow.tris += tris(o);
+    });
+    for (const k of [out.far, out.near, out.shadow]) k.tris = Math.round(k.tris);
+    return out;
   }
 
   /**

@@ -347,6 +347,23 @@ function willow(variant) {
   return S.finish(0.6);
 }
 
+// A shrub never becomes a near model (js/trees.js keeps it on the far tier at
+// any distance), but the far tier paints every crown from a model
+// (js/treeimpostor.js), so it gets one for that: a low cushion of overlapping
+// lobes reaching down to the ground, no wood worth drawing.
+export function shrubModel(variant) {
+  const sp = SP.SHRUB, rand = rng(3301 + 53 * variant), S = new Soup(-groundOf(sp));
+  S.lobe((rand() - 0.5) * 0.08, -0.16, (rand() - 0.5) * 0.08, 0.64, 0.76, 0.64, 2, rand, 0.15);
+  const a0 = rand() * 6.283;
+  for (let i = 0; i < 5; i++) {
+    const a = a0 + (i + (rand() - 0.5) * 0.5) / 5 * 6.283, d = 0.44 * (0.85 + 0.3 * rand());
+    const r = 0.42 * (0.85 + 0.3 * rand());
+    S.lobe(Math.cos(a) * d, -0.42 + rand() * 0.3, Math.sin(a) * d, r, r * 0.9, r, 2, rand, 0.17);
+  }
+  S.lobe((rand() - 0.5) * 0.2, 0.42, (rand() - 0.5) * 0.2, 0.40, 0.34, 0.40, 2, rand, 0.15);
+  return S.finish(0.6);
+}
+
 /** The near model of a species: 0 or 1 for the two builds of it. Cached by the caller. */
 export function nearModel(sp, variant) {
   if (BROAD[sp]) return broadleaf(sp, variant);
