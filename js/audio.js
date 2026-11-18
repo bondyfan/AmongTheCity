@@ -1633,8 +1633,10 @@ export function trainStop() {
 }
 
 // Per frame while the player is on a train. speed01 = |speed|/vmax. Scalar
-// math and AudioParam writes only, zero allocations.
-export function trainSet(speed01) {
+// math and AudioParam writes only, zero allocations. `level` (0..1) is how
+// much of it reaches him: 1 inside the coach, less for a train heard from the
+// platform (js/prologue-voice.js), where the street is not ducked away either.
+export function trainSet(speed01, level = 1) {
   if (!train) return;
   const s = speed01 < 0 ? 0 : speed01 > 1 ? 1 : speed01;
   const t = ctx.currentTime, tau = TRAIN.tau;
@@ -1652,9 +1654,9 @@ export function trainSet(speed01) {
   train.hum3.frequency.setTargetAtTime(
     (TRAIN.humLo + (TRAIN.humHi - TRAIN.humLo) * s) * 3, t, tau);
   train.gain.gain.setTargetAtTime(
-    TRAIN.vol * (TRAIN.volFloor + (1 - TRAIN.volFloor) * s), t, tau);
+    TRAIN.vol * level * (TRAIN.volFloor + (1 - TRAIN.volFloor) * s), t, tau);
   // inside a moving train the street is simply gone
-  duckTrain = TRAIN.duck * (0.35 + 0.65 * s);
+  duckTrain = level < 1 ? 0 : TRAIN.duck * (0.35 + 0.65 * s);
   duckUpdate();
 }
 

@@ -16,6 +16,7 @@ import { streetLife } from './prologue-life.js';
 import { roofWalk } from './prologue-ladder.js';
 import { trackGuard } from './prologue-tracks.js';
 import { storyClock } from './prologue-clock.js';
+import { trainVoice } from './prologue-voice.js';
 
 const clock = (seconds) => Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
 // `night()` is the sky's 0..1 darkness; `fail(why)` ends the campaign ('train').
@@ -29,6 +30,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     life = streetLife(scene, world),
     roofCtl = roofWalk(world, player, input),
     guard = trackGuard(world),
+    sound = trainVoice(),
     railHeight = railbed(world);
   const { lineLength, railPose, nearestMetres } = routeFor(trip.platform);
   let phase = chapter,
@@ -198,7 +200,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     if (skipped || missed) return true;
     if (film?.running) return film.use();
     if (roofCtl.state === 'ladder') return true;
-    if (roofCtl.state === 'roof') return roofCtl.mount();
+    if (roofCtl.state === 'roof' && roofCtl.mount()) return true;
     if (seat.taken) {
       if (seat.settled) seat.rise();
       hudWait = 0;
@@ -389,6 +391,8 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
         missed = 99;
         fail('train');
       }
+      // its sound: idle at the platform, the ride inside, the montage of a skip
+      sound.update(aboard, distance(pose), skipped ? 31 : speed);
       if (skipped) {
         skipped.elapsed += dt;
         if (skipped.elapsed > 0.55 && !skipped.moved) {
@@ -418,6 +422,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       if (phase === 'coach' || missed) {
         closed = Math.min(1, closed + dt * 0.65);
         if (closed === 1) {
+          sound.depart(aboard, distance(pose));
           speed = Math.min(speed + dt * 0.95, 44.4, Math.sqrt(Math.max(0, 2 * 0.85 * (lineLength - metres))));
           metres = Math.min(lineLength, metres + dt * speed);
         }
@@ -444,6 +449,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       }
     },
     dispose() {
+      sound.stop();
       film?.dispose();
       if (trains?.storyPass === passSound) trains.storyPass = null;
       if (world.storyCoach === deck) world.storyCoach = null;

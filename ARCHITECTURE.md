@@ -1950,6 +1950,9 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
   (js/career.js `storyRunning`), an unfinished chapter in a save starts again
   (`storyStart`), and a missed train or a death restarts the campaign in place
   (main.js `failStory`).
+* **The train is heard** (`prologue-voice.js`): the story train is not one of
+  js/trains.js's, so it starts the same synthesised ride itself (`trainSet`
+  takes a level for a train heard from the platform) and sounds the horn.
 * **Its own clock** (`prologue-clock.js`, `worldclock.overrideTod`): 20:00 on
   the street, 20:10 as the train leaves, 20:30 in Pardubice, 22:00 at the
   house. Only the sky, the light and the HUD follow it; `worldT()` does not.
