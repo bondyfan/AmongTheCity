@@ -19,7 +19,7 @@ import { storyClock } from './prologue-clock.js';
 
 const clock = (seconds) => Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
 // `night()` is the sky's 0..1 darkness; `fail(why)` ends the campaign ('train').
-export function createPrologue({ chapter, scene, world, player, map, trip, trains, save, input, night = () => 0, fail = () => {} }) {
+export function createPrologue({ chapter, scene, world, player, map, trip, trains, save, input, night = () => 0, fail = () => {}, crowd = () => 0 }) {
   const hud = storyHud(),
     train = trainBody(scene),
     board = departureBoard(scene, world, trip),
@@ -112,6 +112,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
           hud,
           lights,
           birds: life,
+          crowd,
           // Vašek has hung up: the roof is the player's, and the clock runs
           done: () => {
             roofCtl.begin();

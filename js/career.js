@@ -56,6 +56,7 @@ let state = blank();           // the loaded save, until attach() has applied it
 let loadNote = null;           // 'corrupt' | 'newer' | null, said once in play
 let startPick = null;          // the menu's START_PLACES id, or null
 let solo = true;
+let freeroam = false;          // ?devmode: play with no story
 let progress = null, onb = null, jobs = null, garage = null;
 let statsPanel = null, foodPanel = null, carPanel = null;
 let applied = false;           // the save has been put into the live game
@@ -83,7 +84,11 @@ export function choose(choice) {
   startPick = typeof choice?.start === 'string' ? choice.start : null;
   const res = store.load();
   state = res.state;
-  const story = storyStart(solo, startPick, state.prologue, res.reason === 'empty');
+  // ?devmode's menu can ask for a free roam (no story at all) or for the
+  // campaign outright, even over a save that never had it.
+  freeroam = !!choice?.freeroam;
+  let story = freeroam ? null : storyStart(solo, startPick, state.prologue, res.reason === 'empty');
+  if (!story && choice?.campaign && solo && startPick !== 'praha') story = 'bridge';
   if (story && story !== 'done') {
     state.onb.done = true;
     beginStory();
@@ -94,7 +99,7 @@ export function choose(choice) {
 /** A chapter selects the objective. The position is always in the streamed world. */
 export const storyTrip = () => state.storyTrip;
 export function activeStory() {
-  return solo && startPick !== 'praha' ? state.prologue : null;
+  return solo && !freeroam && startPick !== 'praha' ? state.prologue : null;
 }
 // THE CAMPAIGN IS NOT SAVED BEFORE ITS END (Frank, 18 Nov 2026): a missed train
 // or a death starts it again from the street in Kolín, and so does closing the
@@ -116,7 +121,7 @@ export function restartStory() {
   beginStory();
   return state.storyTrip;
 }
-const storyRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && startPick !== 'praha';
+const storyRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && !freeroam && startPick !== 'praha';
 
 /** Where boot begins, before the world exists: the save's spot when it is in
  *  the city the menu shows, else that city's square (js/startplace.js).

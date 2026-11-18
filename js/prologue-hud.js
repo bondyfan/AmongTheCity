@@ -69,7 +69,14 @@ export function storyHud() {
       document.body.classList.toggle('story-cinema', on);
     },
     // Fade to black (and back). A title and a line may stand on the black.
-    veil(on, title = '', line = '') {
+    // `instant` drops it without the fade (the first frame of the film).
+    veil(on, title = '', line = '', instant = false) {
+      if (instant) {
+        veil.style.transition = 'none';
+        veil.classList.toggle('on', on);
+        void veil.offsetWidth;
+        veil.style.transition = '';
+      }
       veil.classList.toggle('on', on);
       if (on || title) {
         put(veil.querySelector('strong'), title);

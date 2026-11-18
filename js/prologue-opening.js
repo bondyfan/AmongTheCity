@@ -9,13 +9,15 @@ import { rooftop } from './prologue-roof.js';
 
 // The film before the game: the call on the street, four seconds at his
 // daughter's bed, a black card, the roof, Vašek. One beat at a time:
-//   ring1 → call1 → out1 → card → est → sms → step → drop → ring2 → call2 → done
+//   title → ring1 → call1 → out1 → card → est → sms → step → drop → ring2 → call2 → done
+// The title card is also the last of the loading: it stays black until the
+// street has its cars and its traffic, so nothing arrives in front of the lens.
 // E answers a ringing phone. Speech and shots are never skipped.
 const SILENT = { est: 5.2, sms: 6.2, step: 2.6, drop: 3.6, out1: 3.1, card: 3.3 };
 const CUT_AT = 3.2, // seconds into the nurse's long sentence
   CUT_FOR = 4.2;
 
-export function opening({ scene, world, player, hud, birds, lights, done }) {
+export function opening({ scene, world, player, hud, birds, lights, done, crowd = () => 0 }) {
   const act = actor(player, lights);
   const streetSet = streetScene(world, player, act);
   const roofSet = rooftop(scene, world, player, act, lights);
@@ -62,6 +64,10 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
     ring?.stop();
     ring = null;
     if (room.on && next !== 'call1') room.show(false);
+    if (next === 'ring1') {
+      streetSet.begin();
+      hud.veil(false);
+    }
     if (next === 'ring1' || next === 'ring2') {
       line = -1;
       voice?.stop();
@@ -91,7 +97,7 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
     }
   }
   function advance() {
-    const order = ['ring1', 'call1', 'out1', 'card', 'est', 'sms', 'step', 'drop', 'ring2', 'call2', 'done'];
+    const order = ['title', 'ring1', 'call1', 'out1', 'card', 'est', 'sms', 'step', 'drop', 'ring2', 'call2', 'done'];
     const next = order[order.indexOf(beat) + 1];
     if (next === 'done') {
       // he hangs up, and the roof and the two minutes are the player's
@@ -119,7 +125,11 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
   storyClock.start(20);
   hud.cinema(true);
   streetSet.begin();
-  enter('ring1');
+  // black from the very first frame, with the film's name on it
+  beat = 'title';
+  hud.veil(true, 'Poslední vlak', 'Kolín · 20:00', true);
+  let crowded = -1,
+    calm = 0;
   const onStreet = () => beat === 'ring1' || beat === 'call1' || beat === 'out1';
   const inCut = () => beat === 'call1' && line === 2 && lineAge > CUT_AT && lineAge < CUT_AT + CUT_FOR;
   return {
@@ -135,6 +145,14 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
     update(dt) {
       if (beat === 'done') return;
       age += dt;
+      if (beat === 'title') {
+        // wait for the parked cars and the traffic to stop arriving
+        const now = crowd();
+        calm = now === crowded ? calm + dt : 0;
+        crowded = now;
+        if ((age > 3.4 && calm > 1.2) || age > 10) advance();
+        return;
+      }
       storyClock.flow(dt, 20 + 5 / 60);
       if (beat === 'call1' || beat === 'call2') {
         lineAge += dt;
@@ -152,6 +170,10 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
       if (beat === 'done') return false;
       // while the film is at her bedside he is not in it (and the two lamps are hers)
       if (room.on) return true;
+      if (beat === 'title') {
+        streetSet.begin();
+        return true;
+      }
       const speech = voice?.intensity() ?? 0;
       if (onStreet()) streetSet.pose(dt, beat === 'ring1' ? -1 : beat === 'call1' ? line : 6, speech);
       else {
@@ -171,7 +193,7 @@ export function opening({ scene, world, player, hud, birds, lights, done }) {
     camera(camera, dt) {
       if (beat === 'done') return false;
       if (room.on) room.camera(camera);
-      else if (onStreet()) streetSet.camera(camera, dt, beat === 'ring1' ? -1 : beat === 'call1' ? line : 6);
+      else if (onStreet() || beat === 'title') streetSet.camera(camera, dt, beat === 'call1' ? line : beat === 'out1' ? 6 : -1);
       else roofSet.camera(camera, dt, beat === 'call2' ? 'f' + line : beat === 'ring2' ? 'ring' : beat);
       return true;
     },

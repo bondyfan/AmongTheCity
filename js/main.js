@@ -3133,7 +3133,9 @@ async function boot() {
   if (chapter && chapter !== 'done' && chapter !== 'forecourt') {
     const { createPrologue } = await import('./prologue.js');
     startJourney = (stage) => createPrologue({ chapter: stage, scene, world, player, map: worldMap, trip: career.storyTrip(),
-      trains, save: career.checkpointStory, input, night: () => sky?.nightK ?? 0, fail: failStory });
+      trains, save: career.checkpointStory, input, night: () => sky?.nightK ?? 0, fail: failStory,
+      // how many cars the street has so far: the film waits for the number to settle
+      crowd: () => parked.length + (traffic?.cars?.size ?? 0) });
     journey = startJourney(chapter);
   }
   career.attach(careerHost());

@@ -112,7 +112,8 @@ const NOTE_IDLE = 'Uvidí ji ostatní hráči · na server bez ní nelze';
 const NOTE_MISS = 'Nejdřív si zvolte přezdívku';
 
 /**
- * showMenu() → Promise<{ mode: 'single' | 'server', name: string, start: string }>
+ * showMenu() → Promise<{ mode: 'single' | 'server', name: string, start: string,
+ *   freeroam: boolean, campaign: boolean }> (the last two are ?devmode's switch)
  * `name` is already sanitized and is '' only when the player went single
  * player without typing one. `start` is the START_PLACES id the pill shows
  * (js/startplace.js startPoint turns it and the save into a spawn point). Builds the menu, polls the server health while
@@ -192,7 +193,14 @@ export function showMenu() {
     // were. Without a save, the city picked last time.
     const sum0 = store.summary();
     const savedAt = sum0?.pos ? placeOf(sum0.pos.x, sum0.pos.z).id : null;
-    let start = savedAt ?? loadStart() ?? START_PLACES[0].id;
+    // THE MENU HAS ONE WAY IN (Frank, 18 Nov 2026): the story, or the save.
+    // Choosing a city is a developer's tool now: `?devmode` adds a switch
+    // between the campaign and a free roam, and the free roam brings the
+    // Pardubice | Praha pill back. Without it a save continues where it was
+    // and a new game is the campaign, which starts from Pardubice's side.
+    const dev = /(^|[?&])devmode(=|&|$)/.test(location.search);
+    let freeroam = false;
+    let start = dev ? savedAt ?? loadStart() ?? START_PLACES[0].id : savedAt ?? START_PLACES[0].id;
     const single = el('button', 'atc-menu-btn primary');
     const fresh = el('button', 'atc-menu-new', 'Nová hra');
     fresh.type = 'button';
@@ -205,12 +213,12 @@ export function showMenu() {
       // a save in the OTHER city than the pill shows keeps its career but
       // starts on this city's square, and the line says so
       const here = sum?.pos ? placeOf(sum.pos.x, sum.pos.z).id : null;
-      const journey = start === 'pardubice' && sum?.prologue && sum.prologue !== 'done';
+      const journey = !freeroam && start === 'pardubice' && sum?.prologue && sum.prologue !== 'done';
       const move = sum && here && here !== start ? ' · nový start ' + placeById(start).at : '';
       single.appendChild(el('small', '', undefined)).textContent = sum
         ? journey ? 'Poslední vlak • příběh začíná znovu' : kc(sum.money) + ' · odehráno ' + fmtPlayed(sum.played)
           + (sum.jobs ? ' · zakázek ' + sum.jobs : '') + move
-        : start === 'pardubice' ? 'Příběh • poslední vlak z Kolína' : 'sám ve městě';
+        : start === 'pardubice' && !freeroam ? 'Příběh • poslední vlak z Kolína' : 'sám ve městě';
       fresh.style.display = sum ? '' : 'none';
     };
     // Pardubice | Praha: a two-option radio group as one pill
@@ -237,6 +245,33 @@ export function showMenu() {
     const paintPlace = () => opts.forEach((b, i) => b.setAttribute('aria-checked', String(START_PLACES[i].id === start)));
     place.appendChild(pill);
     paintPlace();
+    // dev only: Kampaň | Freeroam, in the same pill as the cities
+    const way = el('div', 'atc-place');
+    way.appendChild(el('span', 'atc-place-label', 'Režim'));
+    const wayPill = el('div', 'atc-place-pill');
+    wayPill.setAttribute('role', 'radiogroup');
+    wayPill.setAttribute('aria-label', 'Režim hry');
+    const ways = [['Kampaň', false], ['Freeroam', true]].map(([label, free]) => {
+      const b = el('button', 'atc-place-opt');
+      b.type = 'button';
+      b.textContent = label;
+      b.setAttribute('role', 'radio');
+      b.addEventListener('click', () => {
+        if (closed) return;
+        freeroam = free;
+        paintWay();
+        paintSingle();
+      });
+      wayPill.appendChild(b);
+      return b;
+    });
+    const paintWay = () => {
+      ways.forEach((b, i) => b.setAttribute('aria-checked', String((i === 1) === freeroam)));
+      place.style.display = dev && freeroam ? '' : 'none';
+    };
+    way.appendChild(wayPill);
+    way.style.display = dev ? '' : 'none';
+    paintWay();
     paintSingle();
     fresh.addEventListener('click', async () => {
       const yes = await confirmPanel({ title: 'NOVÁ HRA',
@@ -249,7 +284,7 @@ export function showMenu() {
     const multi = el('button', 'atc-menu-btn',
       '🌐 Multiplayer (server)<small class="atc-mp-status">hledám server…</small>');
     multi.disabled = true;
-    card.append(single, place, fresh, multi);
+    card.append(single, way, place, fresh, multi);
     inner.appendChild(card);
     overlay.appendChild(inner);
 
@@ -319,7 +354,7 @@ export function showMenu() {
       if (cover) cover.style.visibility = coverVis;   // spinner covers the boot
       overlay.classList.add('atc-menu-out');        // the town rushes towards you
       setTimeout(() => { stopScene(); overlay.remove(); }, 900);
-      resolve({ mode, name: sanitizeName(nameIn.value), start });
+      resolve({ mode, name: sanitizeName(nameIn.value), start, freeroam, campaign: dev && !freeroam });
     };
     // single player never blocks on a name, you are alone, but if one is
     // typed it still rides along, so there is only ever one identity
