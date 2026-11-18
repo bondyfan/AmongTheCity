@@ -113,3 +113,15 @@ test('a viaduct entering an omitted tunnel carries its level through both short 
     assert.ok(Math.abs(heightAt(w, w._len, hill) - 196) < 0.02);
   }
 });
+
+test('a short road bridge between surveyed approach roads spreads a steep rise across its span', () => {
+  const a = road([[0, 0], [50, 0]]), b = road([[82, 0], [132, 0]]);
+  const t = { heightAt: x => x <= 50 ? 220 : x >= 82 ? 227 : 215 };
+  const w = deck([[50, 0], [82, 0]], { _ap0: { road: a, at: 50 }, _ap1: { road: b, at: 0 } });
+  const start = geo.bridgeDeckHeight(w, 0, t), end = geo.bridgeDeckHeight(w, 32, t);
+  assert.ok(Math.abs(end - start - 7) < 0.1);
+  for (let s = 10; s <= 22; s++) {
+    const y = d => geo.bridgeDeckHeight(w, d, t);
+    assert.ok(Math.abs(y(s - 10) - 2 * y(s) + y(s + 10)) < 0.25);
+  }
+});

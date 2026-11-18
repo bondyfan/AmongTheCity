@@ -1215,7 +1215,12 @@ export function bridgeDeckHeight(way, dist, terrain) {
     // Ground rising through the span (a deck slanting over a hill shoulder)
     // is the chain's case: one grade over the floor of the whole span, its
     // crests rounded, instead of a level at the knoll's top and two ramps.
-    if (!foot && deck > Math.max(start, end) + 0.3) {
+    // A short road deck between two mapped approaches can have more rise
+    // than a road-grade ramp can absorb. Use the whole span between those
+    // fixed ends, with its ground and crossing clearance floors. Climbing
+    // the full difference in the last two fifths made a near-vertical wall.
+    const steepBanks = way.d && way._ap0 && way._ap1 && Math.abs(end - start) > 0.12 * total;
+    if (!foot && (deck > Math.max(start, end) + 0.3 || steepBanks)) {
       const L = way._len ?? polylineLength(way.p);
       way._chain = { total: L, members: [way], headWay: way, headEnd: 0, tailWay: way, tailEnd: way.p.length - 1 };
       way._chainOff = 0; way._chainRev = false;
