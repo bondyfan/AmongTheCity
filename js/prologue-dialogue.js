@@ -69,6 +69,23 @@ export const hospitalMessage = [
   'Nemocnice',
   'Připomínáme: zálohu 250 000 Kč je nutné uhradit do zítřejší půlnoci. Jinak termín operace propadne.',
 ];
+// The stations' public address, one line per platform the train can leave from.
+const leaving = (platform, track) =>
+  'Vážení cestující, prosím pozor. Rychlík číslo osm set osmdesát sedm do stanice Pardubice hlavní nádraží je připraven k odjezdu u nástupiště číslo ' +
+  platform + ', kolej ' + track + '. Vlak odjede za malou chvíli. Ukončete prosím nástup.';
+const announcer = 'calm, neutral railway station announcer, even pace, clear diction';
+export const announcements = [
+  ['pa-kolin-2', 'Staniční rozhlas', leaving('dvě', 'druhá'), 'announcer', announcer],
+  ['pa-kolin-4', 'Staniční rozhlas', leaving('čtyři', 'šestá'), 'announcer', announcer],
+  ['pa-kolin-5', 'Staniční rozhlas', leaving('pět', 'osmá'), 'announcer', announcer],
+  [
+    'pa-pardubice',
+    'Staniční rozhlas',
+    'Stanice Pardubice hlavní nádraží. Vlak zde jízdu končí. Prosíme cestující, aby vystoupili. Děkujeme, že cestujete s námi.',
+    'announcer',
+    announcer,
+  ],
+];
 export const calls = [...hospitalCall, ...friendCall];
 
 export const parkingLines = [

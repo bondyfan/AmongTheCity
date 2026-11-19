@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { tableTalk, hospitalMessage } from './prologue-dialogue.js';
-import { storyRecording } from './audio.js';
+import { storyRecording, storyDuck } from './audio.js';
 import { actor } from './prologue-actor.js';
 
 // The end of part one, at Vašek's kitchen table. They come in, he sits and
@@ -62,7 +62,7 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
     safety = Math.max(15, words.length * 0.16);
     voice = storyRecording(id, {
       meter: true,
-      level: role === 'father' ? 0.95 : 1.02,
+      level: role === 'father' ? 1.8 : 1.9,
       end: () => {
         if (live && token === mine) wait = 0.55;
       },
@@ -109,6 +109,7 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
   // Vašek leaves the car's seat for the room
   scene.add(friend.group);
   set.show(true);
+  storyDuck(0.9);
   hud.cinema(true);
   hud.veil(false);
   set.room(0, 1.78, 0, lights.a.position);
@@ -147,6 +148,7 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
         voice?.stop();
         act.release();
         set.show(false);
+        storyDuck(0);
         lights.off();
         hud.cinema(false);
         hud.veil(false);
@@ -218,6 +220,7 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
     dispose() {
       live = false;
       voice?.stop();
+      storyDuck(0);
       act.dispose();
       set.show(false);
     },

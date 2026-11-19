@@ -66,6 +66,7 @@ export function meetVasek(car, scene, world, map, complete, player) {
     };
     let timer = 0;
     voice = storyRecording(id, {
+      level: 1.7,
       end: () => setTimeout(on, 450),
       // no recording yet: leave the caption up for as long as it reads
       missing: () => {

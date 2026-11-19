@@ -1,5 +1,5 @@
 import { hospitalCall, friendCall, bankMessage } from './prologue-dialogue.js';
-import { storyRecording } from './audio.js';
+import { storyRecording, storyDuck } from './audio.js';
 import { roofFrame } from './prologue-route.js';
 import { storyClock } from './prologue-clock.js';
 import { actor } from './prologue-actor.js';
@@ -32,7 +32,10 @@ export function opening({ scene, world, player, hud, birds, lights, done, crowd 
     voice = null,
     ring = null,
     live = true;
-  const music = storyRecording('roof-music', { level: 0.2, loop: true });
+  // (levels are above unity on purpose: audio.js limits the story bus, and a
+  // voice on the phone has to carry over the traffic)
+  const music = storyRecording('roof-music', { level: 0.6, loop: true });
+  storyDuck(0.75);
   const script = () => (beat === 'call1' ? hospitalCall : friendCall);
   function say(index) {
     line = index;
@@ -48,7 +51,7 @@ export function opening({ scene, world, player, hud, birds, lights, done, crowd 
     voice = storyRecording(id, {
       phone: role !== 'father',
       meter: role === 'father',
-      level: role === 'father' ? 0.95 : 1.08,
+      level: role === 'father' ? 1.8 : 2.4,
       end: () => {
         if (live && token === mine) wait = 0.55;
       },
@@ -74,7 +77,7 @@ export function opening({ scene, world, player, hud, birds, lights, done, crowd 
       hud.say();
       hud.phone(next === 'ring1' ? 'Nemocnice' : 'Vašek');
       hud.action('Přijmout hovor');
-      ring = storyRecording('phone-ring', { level: 0.49, loop: true });
+      ring = storyRecording('phone-ring', { level: 0.85, loop: true });
       if (next === 'ring2') birds?.scare('roof');
     } else if (next === 'call1' || next === 'call2') say(0);
     else {
@@ -110,6 +113,7 @@ export function opening({ scene, world, player, hud, birds, lights, done, crowd 
       roofSet.release();
       act.release();
       music.stop(2.3);
+      storyDuck(0);
       hud.veil(false);
       hud.cinema(false);
       beat = 'done';
@@ -212,6 +216,7 @@ export function opening({ scene, world, player, hud, birds, lights, done, crowd 
       voice?.stop();
       ring?.stop();
       music.stop(0.4);
+      storyDuck(0);
       room.dispose();
       roofSet.dispose();
       act.dispose();

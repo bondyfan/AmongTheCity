@@ -45,12 +45,13 @@ test('the campaign is played in one sitting: an unfinished chapter starts again,
 });
 
 test('the script: every spoken line has its own recording id and nobody uses a long dash', async () => {
-  const { hospitalCall, friendCall, parkingLines, tableTalk, bankMessage, hospitalMessage } = await import('../js/prologue-dialogue.js');
-  const lines = [...hospitalCall, ...friendCall, ...parkingLines, ...tableTalk];
+  const { hospitalCall, friendCall, parkingLines, tableTalk, announcements, bankMessage, hospitalMessage } = await import('../js/prologue-dialogue.js');
+  const lines = [...hospitalCall, ...friendCall, ...parkingLines, ...tableTalk, ...announcements];
   assert.equal(new Set(lines.map((l) => l[0])).size, lines.length);
   for (const [id, who, words, role, direction] of lines) {
     assert.ok(id && who && words && direction, id);
-    assert.ok(['care', 'father', 'friend'].includes(role), id);
+    assert.ok(['care', 'father', 'friend', 'announcer'].includes(role), id);
+    assert.ok(statSync(new URL('../public/assets/last-train/' + id + '.mp3', import.meta.url)).size > 5000, id + ' is recorded');
     assert.ok(!words.includes('\u2014'), id);
   }
   // the price and the deadline are said out loud, and the offer is the same sum
@@ -59,6 +60,10 @@ test('the script: every spoken line has its own recording id and nobody uses a l
   assert.match(friendCall.at(-2)[2], /Poslední vlak ti jede za dvě minuty! Stihni to!/);
   assert.equal(friendCall.at(-1)[2], 'No nevím. Pokusím se.');
   assert.match(hospitalMessage[1] + bankMessage[1], /250 000 Kč/);
+  // the station names the platform and the track the board shows
+  const { platforms, trackNumber } = await import('../js/prologue-route.js');
+  for (const p of platforms) assert.ok(announcements.some((l) => l[0] === 'pa-kolin-' + p), 'platform ' + p + ' is announced');
+  assert.deepEqual(trackNumber, { 2: 2, 4: 6, 5: 8 });
 });
 
 test('the three paces: a walk, the run on Shift, and a sprint that runs out of breath', async () => {
