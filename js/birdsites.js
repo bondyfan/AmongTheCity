@@ -22,19 +22,20 @@
 export const KIND = Object.freeze({ GROUND: 1, LAMP: 2, SIGN: 3, WIRE: 4, ROOF: 5, POST: 6 });
 
 /**
- * The four birds. size: scale against the pigeon the mesh is modelled as;
+ * The four birds. size: scale against the pigeon the mesh is modelled as (a
+ * fifth over life size on purpose: a bird on a lamp has to read from a car);
  * wing: extra span; hz/amp: wingbeat; cruise: m/s; nerve: how far off a threat
  * is noticed (x the base radius); bound: sparrows fly in bursts with the wings
  * shut in between; glide: share of a descent spent on set wings.
  */
 export const SPECIES = Object.freeze({
-  pigeon: { key: 'pigeon', size: 1.0, wing: 1.0, hz: 7.2, amp: 1.05, cruise: 9.5, accel: 16, nerve: 1.0, bound: 0, glide: 0.35,
+  pigeon: { key: 'pigeon', size: 1.18, wing: 1.0, hz: 7.2, amp: 1.05, cruise: 9.5, accel: 16, nerve: 1.0, bound: 0, glide: 0.35,
     tints: [0x6c7480, 0x7b838d, 0x5a626c, 0x8a8f95, 0x4d4a52, 0xb9b6ae, 0x6a5a52] },
-  sparrow: { key: 'sparrow', size: 0.46, wing: 0.86, hz: 15, amp: 1.2, cruise: 8.0, accel: 22, nerve: 1.5, bound: 1, glide: 0,
+  sparrow: { key: 'sparrow', size: 0.6, wing: 0.86, hz: 15, amp: 1.2, cruise: 8.0, accel: 22, nerve: 1.5, bound: 1, glide: 0,
     tints: [0x7a5c40, 0x6b5138, 0x86694a, 0x5e4a36] },
-  crow: { key: 'crow', size: 1.42, wing: 1.12, hz: 3.9, amp: 0.95, cruise: 9.0, accel: 11, nerve: 1.9, bound: 0, glide: 0.5,
+  crow: { key: 'crow', size: 1.6, wing: 1.12, hz: 3.9, amp: 0.95, cruise: 9.0, accel: 11, nerve: 1.9, bound: 0, glide: 0.5,
     tints: [0x16171a, 0x1c1c20, 0x121316, 0x23242a] },
-  gull: { key: 'gull', size: 1.36, wing: 1.38, hz: 3.3, amp: 0.8, cruise: 10.5, accel: 10, nerve: 1.3, bound: 0, glide: 0.75,
+  gull: { key: 'gull', size: 1.55, wing: 1.38, hz: 3.3, amp: 0.8, cruise: 10.5, accel: 10, nerve: 1.3, bound: 0, glide: 0.75,
     tints: [0xe9e8e3, 0xdcdcd8, 0xf2f1ec] },
 });
 
@@ -59,18 +60,20 @@ export const siteId = (kind, x, z) => hash32(BIRD_SEED, Math.round(x * 4), Math.
 
 /**
  * How much of the bird life is out at this hour (0..24): everything by day,
- * thinning through dusk, and at night only a few asleep on lamps and eaves.
+ * thinning through dusk, and at night half of those on lamps, signs and eaves.
  */
 export function dayK(hour, kind = KIND.GROUND) {
   const h = ((hour % 24) + 24) % 24;
-  const night = kind === KIND.GROUND || kind === KIND.SIGN ? 0 : 0.3;
+  // (a game day is 24 minutes: a night without a bird anywhere is a third of
+  // every session, so the lamps, the signs and the wires keep half of theirs)
+  const night = kind === KIND.GROUND ? 0 : 0.5;
   const up = (a, b) => Math.max(0, Math.min(1, (h - a) / (b - a)));
   if (h < 12) return night + (1 - night) * up(4.8, 6.3);
   return night + (1 - night) * (1 - up(19.2, 21.2));
 }
 
 // share of candidates of a kind that hold a flock, by day
-const OCC = { [KIND.GROUND]: 0.2, [KIND.LAMP]: 0.15, [KIND.SIGN]: 0.1, [KIND.WIRE]: 0.2, [KIND.ROOF]: 0.16, [KIND.POST]: 0.12 };
+const OCC = { [KIND.GROUND]: 0.3, [KIND.LAMP]: 0.5, [KIND.SIGN]: 0.6, [KIND.WIRE]: 0.3, [KIND.ROOF]: 0.2, [KIND.POST]: 0.4 };
 
 // [species, weight] by where and by how built-up it is (urban 0..1)
 function table(kind, urban, water) {
@@ -169,7 +172,7 @@ export const SKY_CELL = 420, SKY_T = 46;
  */
 export function skyFlight(ci, cj, slot, ctx = {}) {
   const h = hash32(BIRD_SEED, ci, cj, slot, 0x5c1);
-  if (rnd01(h) > 0.62 * dayK(ctx.hour ?? 12, KIND.ROOF)) return null;
+  if (!(rnd01(h) < 0.9 * dayK(ctx.hour ?? 12, KIND.GROUND))) return null;      // (nothing crosses the sky at night)
   const urban = Math.max(0, Math.min(1, ctx.urban ?? 0.6));
   const t = [['pigeon', 20 + 40 * urban], ['crow', 20 + 40 * (1 - urban)], ['sparrow', 12]];
   if (ctx.water) t.push(['gull', 50]);
@@ -182,7 +185,8 @@ export function skyFlight(ci, cj, slot, ctx = {}) {
   // through a point somewhere in the cell, entering one cell-width before it
   const px = (ci + rnd01(hash32(h, 3))) * SKY_CELL, pz = (cj + rnd01(hash32(h, 4))) * SKY_CELL;
   const run = SKY_CELL * 1.6, speed = sp.cruise * (0.95 + 0.25 * rnd01(hash32(h, 5)));
-  const lo = key === 'sparrow' ? 14 : 26, hi = key === 'gull' || key === 'crow' ? 70 : 48;
+  // (low enough to be noticed from the street: just over the roofs of a town)
+  const lo = key === 'sparrow' ? 12 : 18, hi = key === 'gull' || key === 'crow' ? 52 : 38;
   return {
     species: key, seed: h,
     n: key === 'sparrow' ? 5 + (hash32(h, 6) % 8) : key === 'pigeon' ? 4 + (hash32(h, 6) % 9) : 1 + (hash32(h, 6) % 5),

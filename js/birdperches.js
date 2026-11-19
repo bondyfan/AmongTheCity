@@ -9,7 +9,8 @@
 //   sign   the top edge of a road sign (meshes.signPerches: the mesher's own plan)
 //   wire   the trolley wire, a few metres of it every so often
 //   roof   the eave or the parapet of a building, along one of its walls
-//   ground a patch of footway, square or quiet street; in open country a field
+//   ground a patch of footway, square or quiet street, the pavement beside
+//          a street; in open country a field
 //
 // Three-free and DOM-free; it reads the world through the small `env` it is
 // handed, so a test can stand in a plain object for the city.
@@ -26,7 +27,11 @@ import { KIND, hash32, rnd01, BIRD_SEED } from './birdsites.js';
 const TW_H = 5.5, TW_GAP = 0.6;              // the trolley wire: meshes.js trolleyInto draws it there
 const WALKED = new Set(['footway', 'pedestrian', 'path', 'living_street', 'track']);
 const QUIET = new Set(['residential', 'service', 'unclassified']);
-const GROUND_STEP = 34, ROAD_STEP = 70, WIRE_STEP = 26, ROOF_STEP = 30;
+const GROUND_STEP = 34, ROAD_STEP = 70, WIRE_STEP = 26, ROOF_STEP = 30, KERB_STEP = 30;
+// streets with a pavement a pigeon would stand on, and how far behind the kerb it stands
+const STREET = new Set(['residential', 'unclassified', 'tertiary', 'secondary', 'primary', 'living_street']);
+const KERB_IN = 1.3;
+const MAST_TOP = 6.1;                        // a trolley mast's top over its foot, where the mast cannot be asked
 
 const q4 = (v) => Math.round(v * 4);
 
@@ -124,6 +129,21 @@ export function chunkPerches(key, env) {
     return false;
   };
 
+  // on some OTHER carriageway of the cell? (a pavement spot beside one street can be the middle of the next)
+  const onRoad = (x, z, self) => {
+    for (const o of cell.roads ?? []) {
+      if (o === self || !o.d || !o.p) continue;
+      const half = (o.w ?? 3) / 2 + 0.4;
+      for (let k = 0; k < o.p.length - 1; k++) {
+        const ax = o.p[k][0], az = o.p[k][1], ex = o.p[k + 1][0] - ax, ez = o.p[k + 1][1] - az;
+        let t = ((x - ax) * ex + (z - az) * ez) / (ex * ex + ez * ez || 1e-9);
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        if (Math.hypot(x - ax - ex * t, z - az - ez * t) < half) return true;
+      }
+    }
+    return false;
+  };
+
   // ---- lamps ----
   const [ci, cj] = key.split(',').map(Number);
   const cx = (ci + 0.5) * CHUNK, cz = (cj + 0.5) * CHUNK;
@@ -138,6 +158,19 @@ export function chunkPerches(key, env) {
     } else if (p.kind === 'park') {
       poles++;
       push({ kind: KIND.POST, x: p.x, y: p.y + PARK_Y + 0.215, z: p.z, dx: 1, dz: 0, len: 0 });
+    } else if (p.kind === 'trolley') {
+      // The top of a trolley mast. How tall it stands depends on the wire it
+      // carries (meshes.trolleyMastInto), so the mast is asked: js/trolleymasts.js
+      // hands js/poles.js the shape that falls over, built about its foot, and
+      // the top of that is the top of the mast. Measured once and kept.
+      poles++;
+      if (p._birdTop === undefined) {
+        const geo = p.look?.geo;
+        geo?.computeBoundingBox?.();
+        p._birdTop = geo?.boundingBox?.max?.y ?? MAST_TOP;
+        geo?.dispose?.();
+      }
+      push({ kind: KIND.POST, x: p.x, y: p.y + p._birdTop + 0.005, z: p.z, dx: 1, dz: 0, len: 0 });
     }
   }
 
@@ -162,6 +195,19 @@ export function chunkPerches(key, env) {
         const a = r.p[i], b = r.p[i + 1];
         const y0 = terrain.heightAt(a[0] - dz * c, a[1] + dx * c), y1 = terrain.heightAt(b[0] - dz * c, b[1] + dx * c);
         push({ kind: KIND.WIRE, x: wx, y: y0 + (y1 - y0) * t + TW_H + 0.035, z: wz, dx, dz, len: 3.2 });
+      }
+    }
+    // ---- the pavement beside a street: what somebody driving past sees ----
+    // (both sides of a street; one side, further apart, of a service road)
+    if (r.d && (STREET.has(r.t) || r.t === 'service')) {
+      const street = STREET.has(r.t), off = (r.w ?? 6) / 2 + (street ? KERB_IN : 0.9), step = street ? KERB_STEP : KERB_STEP * 2;
+      for (const [x, z, dx, dz] of alongWay(r.p, step, rnd01(hash32(rid, 5)) * step)) {
+        const one = hash32(rid, q4(x), q4(z), 6) & 1 ? 1 : -1;
+        for (const sd of street ? [1, -1] : [one]) {
+          const gx = x - dz * off * sd, gz = z + dx * off * sd;
+          if (!inside(gx, gz) || inBuilding(gx, gz) || onRoad(gx, gz, r)) continue;
+          push({ kind: KIND.GROUND, x: gx, z: gz, kerb: true });
+        }
       }
     }
     // ---- the ground: footways and squares, and the odd quiet street ----

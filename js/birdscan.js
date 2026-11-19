@@ -51,7 +51,7 @@ function judge(B, key, ch) {
     seen.add(fl.id); ids.push(fl.id);
     if (B.flocks.has(fl.id)) continue;
     B.flocks.set(fl.id, { ...fl, home: cand, cand, sp: SPECIES[fl.species], birds: null, state: 'idle',
-      x: cand.x, z: cand.z, calm: 0, roam: 50 + 200 * rnd01(hash32(fl.id, 77)) });
+      x: cand.x, z: cand.z, calm: 0, roam: 20 + 120 * rnd01(hash32(fl.id, 77)) });
   }
   // a flock the hour has sent home leaves if it is out, and is forgotten if it is not
   for (const id of ch.ids) {
