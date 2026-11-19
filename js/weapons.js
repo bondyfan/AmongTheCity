@@ -356,7 +356,9 @@ export class Weapons {
     // so the shove becomes "spun and flung down your own axis", which at these
     // magnitudes reads exactly like being swatted.
     if (ctx?.cars) for (const c of ctx.cars) {
-      const d = Math.hypot(c.x - x, c.z - z);
+      // (a sphere, not a column: a blast under a bridge does not throw the
+      // traffic on the deck about, nor one on the deck the street below)
+      const d = Math.hypot(c.x - x, (c.y ?? y) + 0.7 - y, c.z - z);
       if (d > r * 2.2) continue;
       const k = 1 - d / (r * 2.2);
       const away = Math.atan2(-(c.x - x), -(c.z - z));

@@ -142,12 +142,12 @@ export function rideStep(sys, r, dt, wt, cx, cz) {
   // what the traffic is told
   if (r.lane) {
     const o = r.block;
-    o.x = x; o.z = z;
+    o.x = x; o.z = z; o.y = r.y;       // (the height too: js/levelsep.js)
     sys.lane.push(o);
   }
   if (r.noteOn && sys.peds) {
     const o = r.note;
-    o.x = x; o.z = z;
+    o.x = x; o.z = z; o.y = r.y;
     sys.peds.crossers.push(o);
   }
 

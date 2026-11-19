@@ -323,6 +323,7 @@ import { worldT } from './worldclock.js';
 // roster does. traffic.js does exactly this dance for pickCarColor.
 import * as TRF from './traffic.js';
 import * as VEH from './vehicles.js';
+import { sameLevel } from './levelsep.js';
 
 // ---- where the hospital is ------------------------------------------------
 // Transcribed from main.js's own HOSPITAL, which is where it respawns you, so
@@ -1546,6 +1547,7 @@ export class Ambulance {
         const fwd = rx * fx + rz * fz;
         if (fwd <= 0 || fwd > reach) continue;
         if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
+        if (!sameLevel(u.y, o.y, fwd)) continue;     // on another level (js/levelsep.js)
         const gap = fwd - 3.9;                       // centres → bumpers
         if (gap < TRAFFIC.stopGap) { v = 0; hard = true; }
         else { const fv = (gap - TRAFFIC.stopGap) / 2; if (fv < v) v = fv; }
@@ -1559,6 +1561,7 @@ export class Ambulance {
       const fwd = rx * fx + rz * fz;
       if (fwd <= 0 || fwd > reach) continue;
       if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
+      if (!sameLevel(u.y, o.y, fwd)) continue;
       const gap = fwd - 4.4;                         // a van is longer than a sedan
       if (gap < TRAFFIC.stopGap) { v = 0; hard = true; }
       else { const fv = (gap - TRAFFIC.stopGap) / 2; if (fv < v) v = fv; }

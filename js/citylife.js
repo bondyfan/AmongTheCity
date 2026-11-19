@@ -40,7 +40,7 @@ export function wireCityLife({ city, traffic, peds, vehicles = null, world = nul
     // baked into the shared timelines), and whether something is bearing down
     // on a crossing right now (local, like the lag it causes)
     peds.signalWait = (x, z, rdx, rdz, t, crossT) => traffic.walkWait(x, z, rdx, rdz, t, crossT);
-    peds.roadBusy = (cx, cz, hw, need, stops) => traffic.threatens(cx, cz, hw, need, stops);
+    peds.roadBusy = (cx, cz, hw, need, stops, y) => traffic.threatens(cx, cz, hw, need, stops, y);
   }
   // buses and trolleybuses on their lines (js/buses.js, the real ones through
   // js/realtransit.js): trips are traffic schedules, the crowd reads the
@@ -79,7 +79,7 @@ export function wireCityLife({ city, traffic, peds, vehicles = null, world = nul
   if (trams) buses.real.onTramRoute = (file, r) => trams.addRoute(file, r);
   if (trams && peds?.roadBusy) {
     const busy = peds.roadBusy;
-    peds.roadBusy = (cx, cz, hw, need, stops) => busy(cx, cz, hw, need, stops) || trams.threatens(cx, cz, hw);
+    peds.roadBusy = (cx, cz, hw, need, stops, y) => busy(cx, cz, hw, need, stops, y) || trams.threatens(cx, cz, hw);
   }
   // …people wait at their platforms, and get on and off (js/tramwait.js):
   // the crowd asks the same three questions it asks of a bus

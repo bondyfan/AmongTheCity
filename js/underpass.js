@@ -109,12 +109,12 @@ function segCross(ax, az, bx, bz, cx, cz, dx, dz) {
  * the whole 3.4 m from Štvanice to Holešovice on its own 15 to 55 m, and the
  * deck was a saw, 21 steps over 12 %.)
  */
-export function deckNodeLevel(w, end, terrain) {
+export function deckNodeLevel(w, end, terrain, gradeY = roadGradeY) {
   const links = end === 0 ? w._apN0 : w._apN1;
   if (!links) return null;
   let near = null, sw = 0, sy = 0;
   for (const l of links) {
-    const y = roadGradeY(l.road, l.at, terrain);
+    const y = gradeY(l.road, l.at, terrain);
     if (y === null || y === undefined) continue;
     const d = l.d ?? 0;
     // an approach AT the node (on another member's end) is the level
@@ -127,13 +127,21 @@ function sameLinks(a, b) {
   return a?.length === b?.length && (!a || a.every((v, i) =>
     v.road === b[i].road && v.at === b[i].at && v.d === b[i].d));
 }
-function deckNodes(city, w) {
+// A RAILWAY'S DECKS MEET AT JOINTS TOO (`rail`): a set of points on a bridge
+// is three decks sharing a node over the street, and none of them has an
+// approach there. Left to the ground under the node, which under a railway
+// bridge is the cutting of the street it crosses, the three spans of the
+// bridge over Jana Palacha dived 8.8 m from the track bed to the carriageway
+// and back, a V standing in the road. So a rail joint holds the level of the
+// structure's own approaches, like a road's.
+function deckNodes(city, w, rail = false) {
   const previous0 = w._apN0, previous1 = w._apN1;
   // (from scratch every time: a structure that grew since is measured whole;
   // a lone deck's own chain, made when its profile was first asked for, is
-  // made again from what is known now)
+  // made again from what is known now. A rail deck keeps the chain
+  // chainAcross gave it: it carries which of its ends are joints.)
   delete w._apN0; delete w._apN1;
-  if (w._chain && w._chain.members.length === 1 && w._chain.members[0] === w) {
+  if (!rail && w._chain && w._chain.members.length === 1 && w._chain.members[0] === w) {
     delete w._chain; delete w._chainOff; delete w._chainRev;
   }
   for (const end of [0, 1]) {
@@ -143,10 +151,10 @@ function deckNodes(city, w) {
     if (!c) continue;
     const k0 = KEY(x, z);
     let n = 0, main = false;
-    for (const o of c.roads) {
+    for (const o of rail ? c.rails : c.roads) {
       // (a drivable deck counts and holds drivable decks only, as it always
-      // did; a footway deck counts every deck it meets)
-      if (!o.br || (w.d && !o.d) || !o.p || o.p.length < 2) continue;
+      // did; a footway deck counts every deck it meets; a track, tracks of its kind)
+      if (!o.br || (rail ? o.t !== w.t : w.d && !o.d) || !o.p || o.p.length < 2) continue;
       const last = o.p.length - 1;
       if (KEY(o.p[0][0], o.p[0][1]) === k0 || KEY(o.p[last][0], o.p[last][1]) === k0) {
         n++;
@@ -165,8 +173,8 @@ function deckNodes(city, w) {
     // (Hlávkův most's to nábřeží Kapitána Jaroše lands 6 m below the deck),
     // the bridge does not follow it. The node is the same for every member
     // meeting there, so the slip deck's end agrees with the main ones.
-    let links = complexLinks(city, w, k0, x, z);
-    if (main) {
+    let links = complexLinks(city, w, k0, x, z, rail);
+    if (main && !rail) {
       const kept = links.filter((l) => !SLIP.test(l.road.t));
       if (kept.length) links = kept;
     }
@@ -183,12 +191,14 @@ function deckNodes(city, w) {
 // and counts approaches that are roads you can drive (the stairs down to an
 // island are not where the carriageway goes); a footway deck walks every deck.
 // Bounded: a complex is a few dozen members at most.
-function complexLinks(city, w, k0, x, z) {
-  const drive = !!w.d;
+function complexLinks(city, w, k0, x, z, rail = false) {
+  // (a railway's joints lie on the grade between its approaches, as a
+  // carriageway's do: `drive` is "weigh by distance")
+  const drive = rail || !!w.d;
   const dist = new Map([[k0, 0]]), at = new Map([[k0, [x, z]]]), done = new Set();
   const best = new Map();                 // link -> shortest distance to it
   const take = (l, d) => {
-    if (!l || typeof l !== 'object' || (drive && !l.road?.d)) return;
+    if (!l || typeof l !== 'object' || (drive && !rail && !l.road?.d)) return;
     const o = best.get(l);
     if (o === undefined || d < o) best.set(l, d);
   };
@@ -202,8 +212,8 @@ function complexLinks(city, w, k0, x, z) {
     const [nx, nz] = at.get(k);
     const c = cellAt(city, nx, nz);
     if (!c) continue;
-    for (const o of c.roads) {
-      if (!o.br || !o.p || o.p.length < 2 || (drive && !o.d)) continue;
+    for (const o of rail ? c.rails : c.roads) {
+      if (!o.br || !o.p || o.p.length < 2 || (rail ? o.t !== w.t : drive && !o.d)) continue;
       const last = o.p.length - 1;
       const at0 = KEY(o.p[0][0], o.p[0][1]) === k, at1 = !at0 && KEY(o.p[last][0], o.p[last][1]) === k;
       if (!at0 && !at1) continue;
@@ -225,7 +235,7 @@ function complexLinks(city, w, k0, x, z) {
 }
 
 // Every deck joined end to end with `b` (any cell, any tile loaded so far).
-function complexOf(city, b, into) {
+function complexOf(city, b, into, rail = false) {
   const stack = [b];
   into.add(b);
   while (stack.length && into.size < 256) {
@@ -234,8 +244,8 @@ function complexOf(city, b, into) {
       const c = cellAt(city, e[0], e[1]);
       if (!c) continue;
       const k = KEY(e[0], e[1]);
-      for (const o of c.roads) {
-        if (!o.br || into.has(o) || !o.p || o.p.length < 2) continue;
+      for (const o of rail ? c.rails : c.roads) {
+        if (!o.br || into.has(o) || !o.p || o.p.length < 2 || (rail && o.t !== b.t)) continue;
         const last = o.p.length - 1;
         if (KEY(o.p[0][0], o.p[0][1]) !== k && KEY(o.p[last][0], o.p[last][1]) !== k) continue;
         into.add(o); stack.push(o);
@@ -286,6 +296,10 @@ export function* stitchStructuresSteps(city, roads, rails) {
   for (const b of bridges) if (!isRail.has(b) && !decks.has(b)) complexOf(city, b, decks);
   yield;
   for (const b of decks) if (!isRail.has(b)) deckNodes(city, b);
+  // …and a railway's: every member of a rail structure this tile touched
+  const railDecks = new Set();
+  for (const b of bridges) if (isRail.has(b) && !railDecks.has(b)) complexOf(city, b, railDecks, true);
+  for (const b of railDecks) deckNodes(city, b, true);
   yield;
   // ---- underpasses: every crossing of a bridge over a way, either tile ----
   // (only ways that pass through a cell holding a deck: the city keeps those

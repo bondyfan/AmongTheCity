@@ -295,6 +295,7 @@ import { wantsFree, enterFree, freeStep, rejoin, BLEND } from './policeram.js';
 import { Officers } from './policecops.js';
 import { Gunfire } from './copfire.js';
 import * as VITALS from './vitals.js';
+import { sameLevel } from './levelsep.js';
 
 // ---- how many, and when --------------------------------------------------
 // …and two more RECORDS than that, because a unit that has given up does not
@@ -748,7 +749,7 @@ export class Police {
         this.cars.push(u.car);
         if (Math.abs(u.speed) < 1 && nb < blk.length) {
           const b = blk[nb++];
-          b.x = u.car.x; b.z = u.car.z; b.half = (u.car.len ?? 4.4) / 2 + 0.35;
+          b.x = u.car.x; b.z = u.car.z; b.half = (u.car.len ?? 4.4) / 2 + 0.35; b.y = u.car.y;
           this.blockers.push(b);
         }
       }
@@ -757,7 +758,7 @@ export class Police {
     const out = this.officers?.out;
     if (out) for (let i = 0; i < out.length && nb < blk.length; i++) {
       const b = blk[nb++];
-      b.x = out[i].x; b.z = out[i].z; b.half = 0.9;
+      b.x = out[i].x; b.z = out[i].z; b.half = 0.9; b.y = out[i].y;
       this.blockers.push(b);
     }
   }
@@ -1262,6 +1263,7 @@ export class Police {
         const fwd = rx * fx + rz * fz;
         if (fwd <= 0 || fwd > reach) continue;
         if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
+        if (!sameLevel(u.y, o.y, fwd)) continue;     // on another level (js/levelsep.js)
         const gap = fwd - 3.9;                       // centres → bumpers
         if (gap < TRAFFIC.stopGap) { v = 0; hard = true; }
         else { const fv = (gap - TRAFFIC.stopGap) / 2; if (fv < v) v = fv; }
@@ -1275,6 +1277,7 @@ export class Police {
       const fwd = rx * fx + rz * fz;
       if (fwd <= 0 || fwd > reach) continue;
       if (Math.abs(fx * rz - fz * rx) > LAT_GATE) continue;
+      if (!sameLevel(u.y, o.y, fwd)) continue;
       const gap = fwd - 3.9;
       if (gap < TRAFFIC.stopGap) { v = 0; hard = true; }
       else { const fv = (gap - TRAFFIC.stopGap) / 2; if (fv < v) v = fv; }

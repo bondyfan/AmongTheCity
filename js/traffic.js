@@ -355,6 +355,8 @@
 import * as THREE from 'three';
 import { TRAFFIC, CAR_COLORS } from './config.js';
 import { bridgeDeckHeight, distPointToSegment, roadGradeY, junctionsIn, clustersIn, junctionHull, clusterHull, pointInPolygon } from './geo.js';
+import { deckSlope, surfaceLift } from './roadpose.js';
+import { sameLevel } from './levelsep.js';
 import { yieldSpeed, needsHardBrake, mayEnter, walkPhaseWait, CTL } from './roadrules.js';
 import { bayAt, roadRank, cornerLift } from './streets.js';
 import { LAYER_Y } from './config.js';
@@ -378,6 +380,8 @@ const BRAKE_SOFT = 7.0;       // actual decel when above target (catches up)
 const BRAKE_HARD = 14.0;      // slam when something fills the stop gap
 const TURN_RATE = 7.0;        // heading exponential-smoothing rate (1/s)
 const CORNER_LOOK = 16;       // meters of polyline scanned ahead for curves
+const SURF_EVERY = 6;        // sim steps between two looks at the surface under an AI car (js/roadpose.js surfaceLift)
+const OBST_N = 4;            // one obstacle in _obst: x, z, half length, the height it stands at (NaN: not told)
 const LAT_GATE = 2.0;         // half-width of the follow corridor (m) — an
                               // oncoming car in the opposite lane sits wider
 const HEAD_GATE = 0.61;       // ±35° same-direction test for AI-AI following
@@ -2418,12 +2422,15 @@ export class Traffic {
    * crossing where drivers are expected to stop (`stops`), only a car that
    * cannot is a threat; anywhere else the walker wants `need` seconds of gap.
    */
-  threatens(cx, cz, hw, need, stops) {
+  threatens(cx, cz, hw, need, stops, y) {
     for (const car of this.cars) {
       const p = car.ai;
       if (!p || !(car.speed > 0.3)) continue;                // standing: not coming
       const dx = cx - p.sx, dz = cz - p.sz;
       if (dx * dx + dz * dz > 60 * 60) continue;
+      // (`y`: the level of the asker's road. The traffic on the viaduct over
+      // a path is no threat to whoever crosses under it.)
+      if (!sameLevel(p.sy, y)) continue;
       const half = (car.len ?? 4.6) / 2;
       // a body still PASSING over the spot (an 11 m bus takes a while): nobody
       // walks into the side of a moving vehicle
@@ -3342,7 +3349,7 @@ export class Traffic {
       // follow corridor of the centreline): a car park beside the street is
       // full of hulls and is nobody's obstacle.
       let hull = false;
-      for (let i = 0; i < this._obst.length && !hull; i += 3) {
+      for (let i = 0; i < this._obst.length && !hull; i += OBST_N) {
         const rx = this._obst[i] - pose.x, rz = this._obst[i + 1] - pose.z;
         const fwd = rx * pose.dx + rz * pose.dz;
         hull = fwd > -4 && fwd < 32 && Math.abs(pose.dx * rz - pose.dz * rx) < TRAFFIC.laneOffsetMax + LAT_GATE + 0.4;
@@ -3474,6 +3481,8 @@ export class Traffic {
       ? bridgeDeckHeight(e.road, e.off0 + e.offSign * p.s, this.world?.terrain)
       : (roadGradeY(e.road, e.off0 + e.offSign * p.s, this.world?.terrain) ?? gnd);
     p.sy = p.py = bridgeY + LAYER_Y.road;
+    // the grade it lies along, off the same road (js/roadpose.js)
+    p.sg = e.offSign * deckSlope(e.road, e.off0 + e.offSign * p.s, this.world?.terrain);
     const car = p.police ? this._buildPatrol(p.sx, p.sz, heading)
       : this.vehicles.add(kind, p.sx, p.sz, heading, color);
     if (p.stops) {
@@ -3704,10 +3713,11 @@ export class Traffic {
     if (this.actors && this.actors.length) {
       for (const a of this.actors)
         if (Number.isFinite(a?.x) && Number.isFinite(a?.z))
-          this._obst.push(a.x, a.z, a.half ?? 3.9);
+          this._obst.push(a.x, a.z, a.half ?? 3.9, a.y ?? NaN);
     } else {
       this._obst.push(playerCar ? playerCar.x : playerPos.x,
-        playerCar ? playerCar.z : playerPos.z, playerCar ? 3.9 : 2.3);
+        playerCar ? playerCar.z : playerPos.z, playerCar ? 3.9 : 2.3,
+        (playerCar ? playerCar.y : playerPos.y) ?? NaN);
     }
     // …and every parked hull main.js reports (the player's abandoned car
     // included). Same wall rule as players: a car standing on the lane stops
@@ -3715,7 +3725,7 @@ export class Traffic {
     if (this.blockers) {
       for (const b of this.blockers)
         if (Number.isFinite(b?.x) && Number.isFinite(b?.z))
-          this._obst.push(b.x, b.z, b.half ?? 2.6);
+          this._obst.push(b.x, b.z, b.half ?? 2.6, b.y ?? NaN);
     }
 
     // (v11) a car that has just been hit, or lies wrecked, is a hull too: it
@@ -3724,7 +3734,7 @@ export class Traffic {
     this._absorbHits(playerCar);
     for (const car of this.cars) {
       const p = car.ai;
-      if (p && (p.wreck || car._rammedT > 0)) this._obst.push(car.x, car.z, (car.len ?? 4.6) / 2 + 2);
+      if (p && (p.wreck || car._rammedT > 0)) this._obst.push(car.x, car.z, (car.len ?? 4.6) / 2 + 2, car.y ?? NaN);
     }
 
     // ---- fixed steps on a SHARED grid ----
@@ -4104,8 +4114,9 @@ export class Traffic {
     if (lag > 0.5) {
       catchK = CATCH_K;
       let near = false;
-      for (let i = 0; i < this._obst.length && !near; i += 3)
-        near = dist(this._obst[i] - p.sx, this._obst[i + 1] - p.sz) < LAG_FREE_R;
+      for (let i = 0; i < this._obst.length && !near; i += OBST_N)
+        near = dist(this._obst[i] - p.sx, this._obst[i + 1] - p.sz) < LAG_FREE_R
+          && sameLevel(p.sy, this._obst[i + 3]);
       if (!near) catchK = CATCH_FAR;
     }
     let tgt = desire * catchK;
@@ -4191,6 +4202,11 @@ export class Traffic {
       const rx = o.sx - p.sx, rz = o.sz - p.sz;
       const fwd = rx * fx + rz * fz;
       if (fwd <= 0 || fwd > look2) continue;
+      // ON ANOTHER LEVEL it is neither a leader nor a crossing conflict: the
+      // traffic on the deck overhead, the street under this bridge. Read on
+      // the plan alone, a car under a viaduct stood on its brakes for
+      // everything that crossed over it (js/levelsep.js).
+      if (!sameLevel(p.sy, o.sy, fwd)) continue;
       const lat = fx * rz - fz * rx;
       if (Math.abs(lat) > LAT_GATE || Math.abs(angWrap(o.sh - p.sh)) > HEAD_GATE) {
         // A carriageway has no level crossing: whatever a car on one meets
@@ -4283,11 +4299,14 @@ export class Traffic {
     const obstReach = Math.max(TRAFFIC.lookAhead, 2 * car.speed + 10);
     const obstGate = LAT_GATE + Math.max(0, ((car.wid ?? 1.8) - 1.8) / 2);
     const obstLong = Math.max(0, ((car.len ?? 4.6) - 4.6) / 2);
-    for (let i = 0; i < this._obst.length; i += 3) {
+    for (let i = 0; i < this._obst.length; i += OBST_N) {
       const rx = this._obst[i] - p.sx, rz = this._obst[i + 1] - p.sz;
       const fwd = rx * fx + rz * fz;
       if (fwd <= 0 || fwd > obstReach) continue;
       if (Math.abs(fx * rz - fz * rx) > obstGate) continue;
+      // (a hull on another level, where it said its height: the player on
+      // the bridge is no wall to the street under it)
+      if (!sameLevel(p.sy, this._obst[i + 3], fwd)) continue;
       // (obstLong: the 3.9 m is two car halves; a bus has three metres more nose)
       const gap = fwd - this._obst[i + 2] - obstLong;
       if (gap < TRAFFIC.stopGap) { tgt = 0; hard = true; held = true; blocked = true; }
@@ -4338,6 +4357,9 @@ export class Traffic {
         const w = W[i];
         const wx = w.x - p.sx, wz = w.z - p.sz;
         if (wx * wx + wz * wz > r2) continue;
+        // (somebody on the path under this bridge, or on the footbridge over
+        // this street, is not on this road: js/levelsep.js)
+        if (!sameLevel(p.sy, w.y)) continue;
         // Where is it ON MY ROUTE? Not "in front of my bonnet": a car coming
         // round a corner has the zebra off to one side until the last metres,
         // and a straight-ahead test let it arrive at speed.
@@ -4456,6 +4478,9 @@ export class Traffic {
             const dn2 = ox * ox + oz * oz;
             if (dn2 > 70 * 70) continue;
             const dn = Math.sqrt(dn2);
+            // (inside the box no route is asked: a car crossing on the bridge
+            // over this junction is in nobody's way, js/levelsep.js)
+            if (!sameLevel(p.sy, o.sy, dn)) continue;
             const toward = dn > 0.5 ? (ox * -Math.sin(o.sh) + oz * -Math.cos(o.sh)) / dn : 1;
             // (only a car whose own way leads through this junction: one on the
             // next street over, pointing roughly here, held the line for nothing)
@@ -4783,7 +4808,25 @@ export class Traffic {
     const bridgeY = fe.road.br
       ? bridgeDeckHeight(fe.road, fe.off0 + fe.offSign * p.s, this.world?.terrain)
       : (roadGradeY(fe.road, fe.off0 + fe.offSign * p.s, this.world?.terrain) ?? gnd2);
-    p.sy = bridgeY + LAYER_Y.road;
+    // ON THE ASPHALT THAT IS DRAWN THERE. Its own road's level is where the
+    // car is, but not always what is on top: a slip road runs for a stretch
+    // inside the carriageway it leaves, a junction's pad lies over the arms
+    // that reach it, and whichever sheet is higher is the one the eye sees
+    // and the player's wheels ride (city.surfaceY). An AI car on the lower
+    // one drove with its wheels, at worst its sills, under the road. Asked a
+    // few times a second per car (the sheets overlap for metres), eased, and
+    // only ever UP by less than a step: a deck overhead is another level.
+    const own = bridgeY + LAYER_Y.road;
+    const wd = this.world;
+    if (wd?.surfaceY && (p.sfN = (p.sfN | 0) + 1) % SURF_EVERY === 1) {
+      const sf = wd.surfaceY(p.sx, p.sz, own + 0.3);
+      p.liftT = surfaceLift(own, sf.y, sf.road);
+    }
+    if (p.liftT !== undefined) p.lift = (p.lift ?? p.liftT) + (p.liftT - (p.lift ?? p.liftT)) * 0.2;
+    p.sy = own + (p.lift ?? 0);
+    // …and so does its attitude: the grade of that road under the length of
+    // the body, not the terrain under its corners (js/roadpose.js)
+    p.sg = fe.offSign * deckSlope(fe.road, fe.off0 + fe.offSign * p.s, this.world?.terrain, b.len);
   }
 
   /** Ground under a point. 0 for the bare {roads:[…]} fixtures the tests use. */
