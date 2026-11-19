@@ -17,7 +17,12 @@ import { roofWalk } from './prologue-ladder.js';
 import { trackGuard } from './prologue-tracks.js';
 import { storyClock } from './prologue-clock.js';
 import { trainVoice } from './prologue-voice.js';
+import { announcements } from './prologue-dialogue.js';
 
+// A skipped ride is not a cut to a standing train: the last half minute is
+// ridden, braking into the station. 25.5 m/s at the train's own 0.85 m/s².
+const ROLL_SPEED = 25.5,
+  ROLL_IN = (ROLL_SPEED * ROLL_SPEED) / (2 * 0.85);
 const clock = (seconds) => Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
 // `night()` is the sky's 0..1 darkness; `fail(why)` ends the campaign ('train').
 export function createPrologue({ chapter, scene, world, player, map, trip, trains, save, input, night = () => 0, fail = () => {}, crowd = () => 0 }) {
@@ -30,7 +35,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     life = streetLife(scene, world),
     roofCtl = roofWalk(world, player, input),
     guard = trackGuard(world),
-    sound = trainVoice(),
+    sound = trainVoice(hud),
     railHeight = railbed(world);
   const { lineLength, railPose, nearestMetres } = routeFor(trip.platform);
   let phase = chapter,
@@ -52,6 +57,8 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     guideTarget = null,
     hudWait = 0,
     platformSet = null,
+    announced = false,
+    rolled = false, // the ride was skipped once: no second skip on the way in
     nextJunction = 240,
     exitStep = 0;
   const frame = world.stationPassages.stations;
@@ -216,7 +223,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     return aboard && phase === 'coach';
   }
   function skip() {
-    if (!seat.settled || skipped || (phase !== 'station' && phase !== 'coach')) return;
+    if (!seat.settled || skipped || rolled || (phase !== 'station' && phase !== 'coach')) return;
     if (phase === 'station') beginRun();
     const destination = railPose(lineLength);
     world.city.ensureTiles(destination.x, destination.z).catch(() => {});
@@ -234,7 +241,8 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     speed = 0;
     change('arrival');
     storyClock.to(20.5);
-    storyRecording('open', { level: 0.55 });
+    storyRecording('open', { level: 0.9 });
+    sound.announce(announcements.at(-1), 0.85);
   }
   // The two lamps after the film: one under the canopy beside him, one in the coach.
   function lamps() {
@@ -265,7 +273,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     if (distance(stationEntry) < 220) board.update(status);
     platformSet?.update(0, night(), status, player.pos.x, player.pos.z);
     hud.countdown(phase === 'station' && !missed && !skipped ? clock(remaining) : '', remaining < 45);
-    hud.seated(seat.settled && !skipped && phase !== 'arrival');
+    hud.seated(seat.settled && !skipped && !rolled && phase !== 'arrival');
     if (phase === 'bridge' || missed) return;
     if (phase === 'station' && !aboard) {
       if (roofCtl.state !== 'off') {
@@ -377,6 +385,11 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       if (!platformSet && kolin.group && distance(kolin) < 420) platformSet = dressPlatform(scene, world, kolin, trip.platform);
       platformSet?.update(dt, night(), undefined, player.pos.x, player.pos.z);
       if (phase === 'station' && !missed) {
+        // the station says where the train is, the way stations do
+        if (!announced && roofCtl.state === 'off' && !aboard && distance(stationEntry) < 120) {
+          announced = true;
+          sound.announce(announcements.find((a) => a[0] === 'pa-kolin-' + trip.platform), 1);
+        }
         trip.remaining = Math.max(0, trip.remaining - dt);
         if (trip.remaining === 0) beginRun();
       }
@@ -390,7 +403,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       if (skipped) {
         skipped.elapsed += dt;
         if (skipped.elapsed > 0.55 && !skipped.moved) {
-          metres = lineLength;
+          metres = Math.max(skipped.from, lineLength - ROLL_IN);
           closed = 1;
           place();
           skipped.moved = true;
@@ -401,9 +414,11 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
           world.terrain.ready(pose.x, pose.z) &&
           world.built.has(chunkKey(pose.x, pose.z))
         ) {
+          // the picture comes back with the train still running in
           skipped = null;
+          rolled = true;
           hud.travel(false);
-          arrive();
+          speed = Math.min(ROLL_SPEED, Math.sqrt(Math.max(0, 2 * 0.85 * (lineLength - metres))));
         } else if (skipped.elapsed > 70) {
           metres = skipped.from;
           skipped = null;
@@ -417,6 +432,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
         closed = Math.min(1, closed + dt * 0.65);
         if (closed === 1) {
           sound.depart(aboard, distance(pose));
+          if (phase === 'coach') sound.brake(lineLength - metres, speed);
           speed = Math.min(speed + dt * 0.95, 44.4, Math.sqrt(Math.max(0, 2 * 0.85 * (lineLength - metres))));
           metres = Math.min(lineLength, metres + dt * speed);
         }

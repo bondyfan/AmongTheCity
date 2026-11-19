@@ -1,6 +1,6 @@
 // ELEVENLABS_API_KEY=… node scripts/gen-prologue-audio.mjs
 import { mkdir, writeFile, rename, stat } from 'node:fs/promises';
-import { calls, parkingLines, tableTalk } from '../js/prologue-dialogue.js';
+import { calls, parkingLines, tableTalk, announcements } from '../js/prologue-dialogue.js';
 const out = new URL('../public/assets/last-train/', import.meta.url);
 const key = process.env.ELEVENLABS_API_KEY;
 if (!key) throw Error('Set ELEVENLABS_API_KEY to render recordings.');
@@ -8,8 +8,9 @@ const voices = {
   care: 'EXAVITQu4vr4xnSDxMaL',
   father: 'iP95p4xoKVk53GoZ742B',
   friend: 'CwhRBWXzGAHq8TQ4Fs17',
+  announcer: 'EXAVITQu4vr4xnSDxMaL',
 };
-const tracks = [...calls, ...parkingLines, ...tableTalk]
+const tracks = [...calls, ...parkingLines, ...tableTalk, ...announcements]
   .filter((l) => l[3])
   .map(([id, , text, role, direction]) => [
     id,
@@ -51,6 +52,11 @@ const effects = [
     'passenger',
     3.4,
     'Close interior of a quiet railway coach. One passenger walks past on carpet with a coat brushing a seat and a faint rustle of a newspaper. No intelligible speech.',
+  ],
+  [
+    'brake',
+    6,
+    'A passenger train braking to a stop at a station platform, heard from inside the coach: a long steel brake squeal that rises and then settles, the train stops, a final short hiss of air released. No voices, no horn.',
   ],
   [
     'skip-rail',

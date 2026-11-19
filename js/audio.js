@@ -551,7 +551,7 @@ let amb = null;          // { src, lp, gain } while the loop is actually playing
 let ambWant = false;     // ambientStart() called and not yet stopped
 let ambPending = false;  // a load is in flight — don't start a second one
 let ambDuck = 1, ambDuckAt = -1;   // live duck factor + the last one WRITTEN
-let duckDrive = 0, duckHeli = 0, duckTrain = 0;   // the claimants, 0..1 each
+let duckDrive = 0, duckHeli = 0, duckTrain = 0, duckStory = 0;   // the claimants, 0..1 each
 
 // exponential (pitch-linear) cutoff travel — a linear Hz ramp would spend
 // almost all its audible movement in the last 10 % of the slider
@@ -608,6 +608,7 @@ function ambBuild() {
 function duckUpdate() {
   let d = duckDrive > duckHeli ? duckDrive : duckHeli;
   if (duckTrain > d) d = duckTrain;
+  if (duckStory > d) d = duckStory;
   ambDuck = 1 - (1 - AMB.duckMin) * d;
   if (!amb || Math.abs(ambDuck - ambDuckAt) < AMB.step) return;
   ambDuckAt = ambDuck;
@@ -2667,8 +2668,46 @@ export function windSet(speed) {
     (WIND.cutLo + (WIND.cutHi - WIND.cutLo) * windLvl) * (1 + 0.8 * windG), t, 0.12);
 }
 
+// While somebody in the story is speaking the city is turned down under them
+// (0 = not at all, 1 = as far as the bed ducks for anything).
+export function storyDuck(k) {
+  duckStory = k < 0 ? 0 : k > 1 ? 1 : k;
+  duckUpdate();
+}
+// Every story sound goes through one limiter, so a line can be asked for well
+// above unity (a voice has to carry over traffic) without ever clipping.
+let _storyBus = null;
+function storyBus() {
+  if (_storyBus) return _storyBus;
+  const c = ctx.createDynamicsCompressor();
+  c.threshold.value = -8; c.knee.value = 6; c.ratio.value = 14;
+  c.attack.value = 0.003; c.release.value = 0.18;
+  c.connect(dry ?? master);                        // said in the car, not outside it
+  return (_storyBus = c);
+}
+// A station's public address: the voice thinned to a horn loudspeaker and
+// thrown round the hall by two echoes that feed themselves.
+function hallEcho(input) {
+  const out = ctx.createGain();
+  let voice = input;
+  for (const [type, frequency] of [['highpass', 520], ['lowpass', 2900]]) {
+    const f = ctx.createBiquadFilter();
+    f.type = type; f.frequency.value = frequency;
+    voice.connect(f); voice = f;
+  }
+  voice.connect(out);
+  for (const [seconds, back, wet] of [[0.17, 0.38, 0.5], [0.29, 0.3, 0.34]]) {
+    const delay = ctx.createDelay(1), loop = ctx.createGain(), send = ctx.createGain();
+    delay.delayTime.value = seconds; loop.gain.value = back; send.gain.value = wet;
+    voice.connect(delay); delay.connect(loop); loop.connect(delay);
+    delay.connect(send); send.connect(out);
+  }
+  return out;
+}
+
 // Story dialogue and Foley use the same master volume as the rest of the city.
-export function storyRecording(id, {level = 1, phone = false, loop = false, meter = false, end, missing} = {}) {
+// `hall` plays it as a station announcement (see hallEcho).
+export function storyRecording(id, {level = 1, phone = false, loop = false, meter = false, hall = false, end, missing} = {}) {
   let source, gain, analyser, samples, stopped = false;
   // `missing` is told when there is nothing to play (no recording on disk, or
   // no sound yet), so a caption can be timed by its length instead.
@@ -2689,6 +2728,7 @@ export function storyRecording(id, {level = 1, phone = false, loop = false, mete
         output = filter;
       }
     }
+    if (hall) output = hallEcho(output);
     if(meter){
       analyser=ctx.createAnalyser();analyser.fftSize=256;samples=new Uint8Array(analyser.fftSize);
       output.connect(analyser);output=analyser;
@@ -2696,7 +2736,7 @@ export function storyRecording(id, {level = 1, phone = false, loop = false, mete
     gain = ctx.createGain();
     gain.gain.value = level;
     output.connect(gain);
-    gain.connect(dry ?? master);                   // said in the car, not outside it
+    gain.connect(storyBus());
     source.onended = () => { gain.disconnect(); if (!stopped) end?.(); };
     source.start();
   });

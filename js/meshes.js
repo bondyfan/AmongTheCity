@@ -6056,11 +6056,40 @@ function woodedGreen(f) {
 // scatterForest has planted it.
 const CANOPY_MIN = 3.5;                   // m — a hedge, and below that a bush
 const CANOPY_ROAD = 1.2;                  // m of clearance beyond the kerb
+// …and nothing grows in a railway. The raster reads catenary masts, a standing
+// train and the platform canopies as crowns, so a station yard came out as an
+// orchard, with a lime tree inside the coach the player arrived in (Frank,
+// 19 Nov 2026: "nikdy nesmí být strom prostě na kolejích"). Half-widths of the
+// strip kept clear round a track's centre line, and every platform is clear.
+const CANOPY_RAIL = 4.4, CANOPY_TRAM = 2.4;
 // A mapped tree is its own canopy: the raster read ITS crown, so a measured
 // tree within CANOPY_TWIN of it is the same tree counted twice (a third of the
 // street trees had a second trunk beside them). A wood's lattice does not know
 // about mapped points either, but only a trunk nearly touching one is wrong.
 const CANOPY_TWIN = 5, FOREST_TWIN = 2.5; // m
+// The tracks and platforms of a cell, and whether a point stands in them.
+function railwayOf(cell) {
+  return [
+    (cell.rails ?? []).filter((r) => r.p?.length > 1),
+    (cell.paved ?? []).filter((f) => f.t === 'platform' && f.o?.length > 2),
+  ];
+}
+function inRailway(rails, platforms, x, z) {
+  for (const r of rails) {
+    const half = r.t === 'tram' ? CANOPY_TRAM : CANOPY_RAIL;
+    const bb = bboxOfLine(r);
+    if (x < bb[0] - half || x > bb[2] + half || z < bb[1] - half || z > bb[3] + half) continue;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      if (distPointToSegment(x, z, r.p[i][0], r.p[i][1], r.p[i + 1][0], r.p[i + 1][1], null) < half) return true;
+    }
+  }
+  for (const f of platforms) {
+    const bb = bboxOfRing(f);
+    if (x < bb[0] || x > bb[2] || z < bb[1] || z > bb[3]) continue;
+    if (pointInPolygon(x, z, f.o)) return true;
+  }
+  return false;
+}
 function scatterCanopy(cell, x0, z0, x1, z1, waters, canopy, out) {
   if (!canopy) return;
   // Same contract as Terrain.missed: a chunk that wanted the canopy and did not
@@ -6069,6 +6098,7 @@ function scatterCanopy(cell, x0, z0, x1, z1, waters, canopy, out) {
   if (!canopy.ready(x0 + 1, z0 + 1)) { canopy.missed = true; return; }
   const greens = (cell.green ?? []).filter(woodedGreen);
   const roads = (cell.roads ?? []).filter((r) => r.d);
+  const [rails, platforms] = railwayOf(cell);
   const gi0 = Math.floor(x0 / FOREST_STEP), gj0 = Math.floor(z0 / FOREST_STEP);
   let n = 0;
   for (let gi = gi0; gi * FOREST_STEP < x1; gi++) {
@@ -6097,6 +6127,7 @@ function scatterCanopy(cell, x0, z0, x1, z1, waters, canopy, out) {
         }
         if (!ok) break;
       }
+      if (ok && inRailway(rails, platforms, x, z)) ok = false;
       if (ok && waters.length && inWater(x, z, waters)) ok = false;
       if (!ok) continue;
       // the measured height IS the tree's height — no more guessing a scale
@@ -6532,7 +6563,9 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       yield;
     }
     scatterCanopy(cell, x0, z0, x1, z1, wet, mats.canopy, trees);
-    // no scattered tree on top of a mapped one (see CANOPY_TWIN)
+    // no scattered tree on top of a mapped one (see CANOPY_TWIN), and none in
+    // the railway: a wood's polygon can run across a line as easily as the raster
+    const [rails, platforms] = railwayOf(cell);
     let keep = mapped;
     for (let i = mapped; i < trees.length; i++) {
       const t = trees[i], reach = t.wild ? CANOPY_TWIN : FOREST_TWIN;
@@ -6540,7 +6573,7 @@ export function* buildChunkMeshesGen(city, cx, cz, mats, lod = 'full') {
       if (!t.bush) for (const m of cell.trees) {
         if (Math.hypot(m.p[0][0] - t.x, m.p[0][1] - t.z) < reach) { twin = true; break; }
       }
-      if (!twin && !landmarkClear(t.x, t.z)) trees[keep++] = t;   // nor in a landmark's doorway
+      if (!twin && !landmarkClear(t.x, t.z) && !inRailway(rails, platforms, t.x, t.z)) trees[keep++] = t;   // nor in a landmark's doorway
     }
     trees.length = keep;
   }
