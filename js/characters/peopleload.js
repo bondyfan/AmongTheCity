@@ -22,7 +22,7 @@ export const PEOPLE_BASE = 'assets/people/';
 const PARALLEL = 6;
 
 let _loading = null;
-let _stats = { state: 'idle', avatars: 0, clips: 0, ms: 0, failed: [] };
+let _stats = { state: 'idle', avatars: 0, total: 0, clips: 0, ms: 0, failed: [] };
 export const peopleStats = () => _stats;
 
 function load(loader, url) {
@@ -65,7 +65,7 @@ async function loadAvatar(loader, base, m, e, farTex) {
 
 async function run(base) {
   const t0 = performance.now();
-  _stats = { state: 'loading', avatars: 0, clips: 0, ms: 0, failed: [] };
+  _stats = { state: 'loading', avatars: 0, total: 0, clips: 0, ms: 0, failed: [] };
   let m;
   try {
     const r = await fetch(base + 'manifest.json', { cache: 'no-cache' });
@@ -75,6 +75,7 @@ async function run(base) {
     _stats.state = 'none';
     return false;
   }
+  _stats.total = (m.avatars ?? []).length;
   const loader = new GLTFLoader(), images = new THREE.TextureLoader();
   // glTF's texture coordinates count from the top, so nothing is flipped
   const texture = (file) => new Promise((res) => images.load(base + file, (t) => {
@@ -138,9 +139,16 @@ export function loadPeople(base = PEOPLE_BASE) {
   }));
 }
 
-/** The bank, or false after `ms`: boot waits this long for it and no longer. */
-export function whenPeople(ms = 20000) {
+/**
+ * The bank, or false after `ms`: boot waits this long for it and no longer.
+ * `tell(done, total)` is called while it waits, so a slow line shows a count
+ * instead of a spinner that explains nothing. A bank that is not there at all
+ * (no manifest) answers at once.
+ */
+export function whenPeople(ms = 20000, tell = null) {
   if (peopleReady()) return Promise.resolve(true);
   const p = loadPeople();
-  return Promise.race([p, new Promise((res) => setTimeout(() => res(peopleReady()), ms))]);
+  let timer = 0;
+  if (tell) timer = setInterval(() => { if (_stats.state === 'loading' && _stats.total) tell(_stats.avatars, _stats.total); }, 300);
+  return Promise.race([p, new Promise((res) => setTimeout(() => res(peopleReady()), ms))]).finally(() => clearInterval(timer));
 }

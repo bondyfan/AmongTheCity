@@ -4137,7 +4137,13 @@ async function start() {
   // Everything else wears what was chosen before, or the default for this
   // uid. Without a people bank (no files, a failed download) none of this
   // runs and the game draws its own figures.
-  if (devPeople !== 'off' && await whenPeople(opening ? 30000 : 15000)) {
+  // The first visit downloads the bank (24 MB); on a slow line that is a minute
+  // or two, and the wait says how far it is. After that it comes from the cache.
+  const label = document.getElementById('enter-label'), was = label?.textContent;
+  const tell = (done, total) => { if (label) label.textContent = `Načítám postavy… ${done} z ${total}`; };
+  const people = devPeople !== 'off' && await whenPeople(180000, tell);
+  if (label && was != null) label.textContent = was;
+  if (people) {
     // (a code this bank cannot show, from an older build, counts as none)
     if (opening && !validLook(loadMyLook())) await showCreator();
     wearLook(myLook());
