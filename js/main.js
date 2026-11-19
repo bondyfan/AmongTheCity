@@ -635,6 +635,11 @@ function updateCamera(dt) {
   let px = tx + Math.sin(camYaw) * flat;
   let pz = tz + Math.cos(camYaw) * flat;
   let py = ty + height * (indoors ? 0.25 : 1) * hk + Math.sin(pitch) * dist;
+  // under a station canopy the lens stays under it too (js/station-passages.js lid)
+  if (indoors && !enclosed) {
+    const lid = world.stationPassages?.lid(tx, tz);
+    if (lid != null && py > lid - 0.35) py = lid - 0.35;
+  }
   // …and then it still has to not be inside a wall. March the boom back in
   // from full length until the camera sits in air: the same trick every
   // third-person game uses, done against the interior's own boxes rather than
@@ -3504,7 +3509,7 @@ function stepGame(dt) {
   // world streams around whoever leads the view. `onFoot` is what gates the
   // interior streamer: rooms only matter to somebody who can walk into them,
   // and building them for a car doing 130 km/h would be a hitch for nothing.
-  world.stationPassages.update(player.pos.x,player.pos.z);
+  world.stationPassages.update(player.pos.x,player.pos.z,sky?.nightK ?? 0);
   world.stationPassages.advanceEscalator(dt,player);
   journey?.update(dt, !!(game.car || game.heli || game.jet || trains?.riding), vasekCar);
   if (journey?.finished) { journey.dispose(); journey = null; }

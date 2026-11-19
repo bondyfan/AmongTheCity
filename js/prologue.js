@@ -3,7 +3,7 @@ import { storyRecording } from './audio.js';
 import { trainBody, doorX, carriageAt } from './prologue-coach.js';
 import { trainDeck, inside } from './prologue-deck.js';
 import { storyHud } from './prologue-hud.js';
-import { stationEntry, stationExit, DEPARTS_IN } from './prologue-route.js';
+import { stationEntry, stationExit, DEPARTS_IN, wayOut } from './prologue-route.js';
 import { routeFor, localAt, worldAt } from './story-rail.js';
 import { departureBoard } from './prologue-board.js';
 import { railbed } from './prologue-railbed.js';
@@ -57,14 +57,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
   const frame = world.stationPassages.stations;
   const kolin = frame[0],
     pardubice = frame[1];
-  const inbound = [
-    [18, 0],
-    [0, 0],
-    [0, -39],
-    [18, -39],
-    [18, -46],
-    [7, -46],
-  ];
+  let inbound = null; // the way out of Pardubice, chosen where he steps off (prologue-route.js)
   function nextTurn(station, points, index) {
     while (index < points.length && distance(worldAt(station, ...points[index])) < 2.1) index++;
     return index;
@@ -316,6 +309,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     }
     if (phase === 'arrival') {
       if (!aboard) {
+        inbound ??= wayOut(localAt(pardubice, player.pos.x, player.pos.z).u);
         exitStep = nextTurn(pardubice, inbound, exitStep);
         guideTo(exitStep < inbound.length ? worldAt(pardubice, ...inbound[exitStep]) : stationExit);
       }

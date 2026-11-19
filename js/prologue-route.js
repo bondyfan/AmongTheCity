@@ -21,6 +21,21 @@ export const stationEntry = { x: -38850.9, z: 761.7, h: 0 };
 export const stationExit = { x: 21.73, z: -96.52, h: 0 };
 export const kolinPlatform = { x: -38832, z: 724, h: 0 };
 export const pardubicePlatform = { x: 31, z: -32, h: 0 };
+// From the platform between tracks 4 and 5 in Pardubice to the forecourt, in
+// the station's frame (js/station-layout.js: u east, v south): down by the
+// western underpass's stairs or, for whoever got off behind them, by its
+// moving stairs; along the corridor, up the moving stairs into the hall and
+// through it to the doors on the square.
+export function wayOut(u) {
+  return [
+    u < -8 ? [-15.6, 0.8] : [15.6, 0],
+    [0, 0],
+    [1.5, -20.5],
+    [1.5, -30],
+    [5.4, -41],
+    [5.4, -57],
+  ];
+}
 export const stops = ['bridge', 'station', 'coach', 'arrival', 'forecourt', 'done'];
 
 // The campaign is played in one sitting: nothing is saved before its end, so
