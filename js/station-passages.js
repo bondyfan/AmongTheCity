@@ -73,7 +73,8 @@ export class StationPassages {
       for (const f of s.flights) {
         const top = landing(f, s.beyond),
           p = worldAt(s, top.u, top.v);
-        f.top = this.world.heightAt(p.x, p.z, this.world.terrain.heightAt(p.x, p.z) + 1);
+        // (Kolín reads it as it always did; Pardubice has a bridge overhead)
+        f.top = s.deck ? this.world.heightAt(p.x, p.z, this.world.terrain.heightAt(p.x, p.z) + 1) : this.world.heightAt(p.x, p.z);
       }
       const tops = s.flights.map((f) => f.top);
       s.tops = new Map(s.flights.map((f) => [f.c, f.top]));
@@ -93,8 +94,11 @@ export class StationPassages {
     s.dress?.update(night, x, z);
   }
   cut(group, cx, cz, chunk) {
-    const s = this.nearby((cx + 0.5) * chunk, (cz + 0.5) * chunk, chunk * 1.5);
-    if (!s || !group) return;
+    // only the chunks a stair mouth can lie in: within reach of the underground
+    const x = (cx + 0.5) * chunk,
+      z = (cz + 0.5) * chunk,
+      s = group && this.stations.find((st) => inRect(st.under, local(st, x, z).u, local(st, x, z).v, chunk * 1.5));
+    if (!s) return;
     group.traverse((o) => {
       if (!o.isMesh || o.isInstancedMesh || !o.material || o.material.isShaderMaterial) return;
       o.material = Array.isArray(o.material)
