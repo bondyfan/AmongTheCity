@@ -25,7 +25,12 @@ const P = {
   prop: q.get('prop') ? (q.get('prop') === 'all' ? ['bag', 'phone', 'pram', 'dog'] : q.get('prop').split(',')) : null,
   birds: q.get('birds') === '1',      // a row of each bird: seated, pecking, flying
 };
+// &rig=dummy: the crash-test humans of js/characters/dummy.js stand in for every citizen
+if (q.get('rig') === 'dummy') (await import('../js/characters/dummy.js')).installDummies();
+// &rig=bank: the real people bank (public/assets/people/); &who=av:m01,av:f12 picks people by id
+if (q.get('rig') === 'bank') await (await import('../js/characters/peopleload.js')).loadPeople('/assets/people/');
 const CIT = await import('../js/citizen.js');
+window.__av = await import('../js/characters/avatars.js');      // for the console: the bank this page drew from
 const { ARCHETYPES, archetypeAt } = await import('../js/people.js');
 const { seededRnd } = await import('../js/wardrobe.js');
 const SCALE = 0.9;      // config.js PLAYER_SCALE: people are drawn at this size
@@ -101,7 +106,8 @@ const lend = (seed, fn) => {       // what js/pedestrians.js does: a seeded Math
 const PROPS = await import('../js/pedprops.js');
 let made = 0;
 const make = (who, seed) => lend(seed, () => {
-  if (who === 'police' || who === 'medic') return CIT.makeCitizen({ role: who });
+  if (who.startsWith('av:')) return CIT.makeCitizen({ avatar: who.slice(3) });
+  if (who === 'police' || who === 'medic') return CIT.makeCitizen({ role: who, seed });
   if (who === 'player') return CIT.makeCitizen({ uid: 'showroom-' + seed });
   const prop = P.prop ? P.prop[made++ % P.prop.length] : null;
   const tint = prop ? PROPS[{ bag: 'BAG_TINTS', pram: 'PRAM_TINTS', dog: 'DOG_TINTS' }[prop]]?.[(seed + made) % 7] ?? 0 : 0;

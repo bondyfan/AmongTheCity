@@ -152,7 +152,7 @@ export function mountRider(sys, s, wt) {
   try {
     Math.random = () => rnd01(hash32(s.seed, 0xc17, n++));
     // (a handbag is not carried on a bicycle: a rucksack, or nothing)
-    c = makeCitizen({ archetype: s.arch, style: { bag: rnd01(hash32(s.seed, 0xba6)) < 0.35 ? 'backpack' : null } });
+    c = makeCitizen({ archetype: s.arch, seed: s.seed, style: { bag: rnd01(hash32(s.seed, 0xba6)) < 0.35 ? 'backpack' : null } });
   } finally { Math.random = real; }
   const g = PLAYER_SCALE * (s.child ? CHILD_K : 1);
   c.group.scale.setScalar(g);

@@ -115,7 +115,7 @@ export class JobFare {
   show(x, z, heading, world, seed = 0, linger = 0) {
     this.hide();
     let c;
-    try { c = makeCitizen({ archetype: ARCHS[(seed >>> 0) % ARCHS.length] }); }
+    try { c = makeCitizen({ archetype: ARCHS[(seed >>> 0) % ARCHS.length], seed: seed >>> 0 }); }
     catch { c = makeCitizen(); }             // an unknown archetype key must not cost the job
     c.group.scale.setScalar(PLAYER_SCALE);
     const y = world?.footing?.heightAt?.(x, z) ?? world?.heightAt?.(x, z) ?? 0;

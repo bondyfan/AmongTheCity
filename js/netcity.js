@@ -27,6 +27,7 @@ import { makeCitizen } from './citizen.js';
 import { PLAYER_SCALE, WALK } from './config.js';
 import { NameTags } from './nametags.js';
 import { strHash, lookForUid, baseUid, localUid, shortId } from './identity.js';
+import { sanitizeLook, setLookFor } from './characters/appearance.js';
 import { setEpoch } from './worldclock.js';
 import { CLOSE_CODES } from './netnotice.js';
 
@@ -317,6 +318,15 @@ function setMyName(name) { return (_myName = sanitizeName(name)); }
 export { setMyName as setPlayerName };
 export function getPlayerName() { return _myName; }
 
+// ---- appearance ----
+// The code of the look the local player chose (js/characters/appearance.js),
+// a dozen characters. It rides inside the state blob exactly as the nickname
+// does and for the same reason: the relay re-broadcasts state untouched, so a
+// new field needs no server change. Every receiver sanitises it and checks it
+// against its own catalogue; an id it does not have shows the uid's default.
+let _myLook = '';
+export function setPlayerLook(code) { return (_myLook = sanitizeLook(code)); }
+
 const SEND_S = 0.1;         // own state at ~10 Hz
 const REAP_MS = 30000;      // a peer silent this long crashed — reap the avatar
                             // (30 s, not less: a backgrounded tab also goes quiet)
@@ -485,6 +495,12 @@ class NetGame {
     if (typeof s.nm === 'string') {
       const nm = sanitizeName(s.nm);
       if (nm && nm !== r.name) { r.name = nm; this._emitStatus(); }
+    }
+    // their look: kept by the person (the base uid), and a body already built
+    // in the old one is retired so the next frame builds the new
+    if (typeof s.ap === 'string' && s.ap.length < 40 && setLookFor(baseUid(uid), s.ap) && r.cit) {
+      r.cit.dispose();
+      r.cit = null;
     }
     r.state = s;
     r.lastSeen = nowMs();
@@ -679,6 +695,7 @@ class NetGame {
       wt: +(p.walkT % TAU).toFixed(2),
       veh: this._vehDesc(ctx),
       ...(_myName ? { nm: _myName } : {}),
+      ...(_myLook ? { ap: _myLook } : {}),
     }, 0);   // our own 10 Hz gate already throttled; don't double-gate
   }
 
@@ -769,7 +786,7 @@ class NetGame {
         // been interpolating all along, so they appear where they belong
         // instead of sliding in from wherever the last owner of the record was.
         if (!this._scene) continue;
-        r.cit = makeCitizen(lookForUid(baseUid(uid)));
+        r.cit = makeCitizen({ ...lookForUid(baseUid(uid)), uid: baseUid(uid) });
         r.cit.group.scale.setScalar(PLAYER_SCALE);
         this._scene.add(r.cit.group);
       }

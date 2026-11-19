@@ -177,11 +177,34 @@ export class Player {
   // uid defaults to this tab's identity, so main.js needs to pass nothing; a
   // caller that already knows the uid (a replay, a test, a second local body)
   // may hand it in. jacketIdx lets an authority override just the jacket later.
+  /**
+   * Wear the look the uid has NOW (the character creator changed it): a new
+   * body where the old one stood, in the same parent, at the same scale.
+   * Only on foot and out of every scripted move: callers check `canReskin()`.
+   */
+  reskin() {
+    const old = this._cit, g = old.group;
+    this.look = lookForUid(this.baseUid);
+    const c = makeCitizen({ ...this.look, uid: this.baseUid }, { faceDetail: true });
+    c.group.position.copy(g.position); c.group.rotation.copy(g.rotation);
+    c.group.scale.copy(g.scale); c.group.visible = g.visible;
+    (g.parent ?? this._scene).add(c.group);
+    old.dispose();
+    this._cit = c; this.mesh = c.group;
+    this._animate = c.walk; this._sit = c.sitPose; this._stand = c.standPose;
+    return c;
+  }
+  canReskin() {
+    return !this.inCar && !this.boarding && !this.exiting && !this.ragdoll && !this.doorAnim && !this.vault && !this.held && this.grounded;
+  }
+
   constructor(scene, x, z, heading, uid = localUid(), jacketIdx = null) {
     this.uid = uid;                        // 'base:tab' — what goes on the wire
     this.baseUid = baseUid(uid);           // the person: look and name come from here
     this.look = lookForUid(this.baseUid, jacketIdx);
-    const c = makeCitizen(this.look, { faceDetail: true });
+    // the uid rides along: a modelled body (js/characters/) is cast by WHO this
+    // is, the lofted one by the look record, and both come from the same uid
+    const c = makeCitizen({ ...this.look, uid: this.baseUid }, { faceDetail: true });
     this._cit = c;
     this.mesh = c.group;
     this._animate = c.walk;

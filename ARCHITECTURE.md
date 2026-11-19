@@ -2237,3 +2237,132 @@ red footbridge to Dukla. Kolín keeps the underpass the campaign was built on.
   4 and 5, the western underpass, the moving stairs into the hall, the doors
   to the square. `prologue-tracks.js` is unchanged: the footbridge and its
   ramps count as floor, so they are allowed inside the yard.
+
+## Modelled people and the character creator (js/characters/, Nov 2026)
+
+Frank, 19 Nov 2026: the lofted figures of `js/citizen.js` still read as
+puppets; every character should be a real rigged 3D person with recorded
+motion, and a new campaign should start by choosing who you are.
+
+`makeCitizen()` keeps its interface and gains a second body behind it. When
+the PEOPLE BANK is loaded (`public/assets/people/manifest.json`, fetched while
+the menu is up by `peopleload.js`) it returns a `makeHuman()`; without a bank
+(headless tests, a failed download) it builds the lofted figure as before. No
+caller knows which it holds.
+
+* **One pose, any skeleton** (`skeletonmap.js`, `retarget.js`). A downloaded
+  rig is found by bone NAME (Unreal, Mixamo, 3ds Max Biped, VRM families) and
+  described against one reference pose: standing, arms and legs hanging
+  straight down. A pose is then a rotation per SLOT away from that reference,
+  which means the same thing on every skeleton. The game's own seventeen
+  joints (`js/bodyjoints.js`, shared with the lofted figure) are the simplest
+  such rig, so every move ever written for them (the walk solver, sitting, the
+  car door, the vault, getting up, the arrest, the campaign's keyframes)
+  carries across unchanged. The same bridge bakes a clip recorded on one
+  skeleton for another.
+* **Clips are numbers** (`clipbank.js`, `animset.js`). A clip is sampled once,
+  at load, into local rotations of the skeleton that will be drawn: no
+  AnimationMixer anywhere. Gaits are blended by speed and advanced by DISTANCE
+  over the ground each recording covers, so a planted foot stays planted;
+  every gait is turned to start on the same foot and stood on the ground of
+  the body it plays on. Standing is one calm loop with an occasional fidget,
+  drawn per person.
+* **Clip or game, joint by joint** (`resolve.js`). The owner's base call
+  (walk, stand, sit on a bench) picks a recording. The game's joints are then
+  compared with the base it last asked for: a joint something moved since (a
+  hand out to a door, a pistol raised, a scripted gesture) takes the game's
+  angle, added to the clip while the difference is small and replacing it by
+  0.35 rad. No recording for a state (a car seat, a ragdoll, a bicycle) means
+  the game's pose for the whole body. A change of clip cross-fades.
+* **A skeleton as flat arrays** (`skinpose.js`, `human.js`). Bones are not
+  scene objects. A body's pose is resolved in `onBeforeRender`, so a person
+  behind the camera costs nothing, and the skinning matrices are written
+  straight into the skeleton's texture (a detached-mode SkinnedMesh with a
+  no-op `Skeleton.update`). The shadow pass sees the pose of the frame before.
+  Hands are sockets on the real wrist in the game's joint frame, so a pistol,
+  a lead or a phone attaches as it always did. The driver joints sit in a
+  hidden group, which the scene-graph policy does not traverse.
+* **Far bodies** (`farbody.js`). Past `FAR_OUT` (62 m, `js/peopleshadows.js`)
+  a person is an InstancedMesh of one whose vertex shader skins from a float
+  texture baked once per modelled person: a row per frame of each gait, an
+  idle and a seat. The row number rides in `instanceColor.r` (a per-object
+  uniform on a shared built-in material is not re-sent between two objects
+  drawn back to back). The processor's whole cost is that one number.
+* **Who is who** (`cast.js`, `appearance.js`). A pedestrian's body is a pure
+  function of its shared seed and its archetype (which already decided its
+  voice); uniforms and the story's named people are tables. A player is
+  `'1-<head>-<body>'`: the catalogue ids picked in the creator, a dozen
+  characters, kept in localStorage (`atc-look`) and in the save, and sent in
+  the co-op state blob as `ap` beside the nickname (`js/netcity.js`), where the
+  relay never looks. Every receiver checks a code against its own catalogue.
+* **The creator** (`creator.js`, `creatorstage.js`, `creatorstyle.js`). Opens
+  before a campaign that starts from its first frame when no look has been
+  chosen ("Nová hra" forgets the look), and from Nastavení, Hra, "Vzhled
+  postavy" over a running game (`player.reskin()`). Its lists are computed
+  from the catalogue. As a dialog it closes on Escape and on a click whose
+  press and release both land outside the card.
+* **Looking at it without a bank**: `js/characters/dummy.js` is a crash-test
+  person (Biped names, T pose, centimetres, facing +z, arbitrary bone axes)
+  whose clips are the game's own moves recorded onto its bones.
+  `dev/people.html?rig=dummy`, `dev/moves.html?rig=dummy`, `dev/creator.html`,
+  and the whole game with `?devmode&people=dummy`.
+
+### The bank itself (public/assets/people/, scripts/people/)
+
+The people are 44 of the Microsoft Rocketbox avatars (MIT licence, kept beside
+them in `LICENSE.txt` and credited in the menu): 33 everyday adults, four
+police, two paramedics, a nurse, a doctor, two children and a uniformed man who
+plays the conductor. Their motion is 77 Rocketbox clips, recorded separately
+for men and for women: three walks and three runs each, standing loops and
+fidgets, sitting, the phone, a held bag, pushing, talking. The sources (1.8 GB
+of FBX and uncompressed textures) live OUTSIDE the repository; nothing here is
+part of a build. By hand:
+
+    scripts/people/fetch-rocketbox.sh previews | avatars NAME... | anims NAME...
+    scripts/people/build-people.sh          (Blender headless, Pillow, node)
+
+* `people.json` is the catalogue: who is in, their sex, age, skin tone, style,
+  the story's cast (`named`) and which clip plays which role.
+* `convert-rocketbox.py` (Blender): one FBX to `avatars/<id>.glb` with no
+  images. The mesh is split into `near_body`, `near_head`, `near_hair` (so the
+  game can draw one person's head on another's body), a `far` copy at 1 300
+  triangles, the 28 face bones folded into the head (52 bones remain), and the
+  UVs moved into the atlas layout.
+* `build-atlas.py`: body, head and the alpha-cut hair cards in ONE texture per
+  person (`atlas/<id>.webp`, 1792 x 1280), so a person is one draw call; every
+  atlas again at 224 x 160 in `far.webp`; and `manifest.json`.
+* `bake-clips.mjs`: the 77 clips in one `clips.bin` (16-bit rotations, fingers
+  held still, 4.7 MB) read back by `js/characters/rawclips.js`.
+
+What the game does with it:
+
+* **One family, one bake.** Rocketbox clips are used as recorded (`family`
+  matches), so their rotations are the same for every body: 41 of the 44 share
+  a single bake and differ only in the path of the hips, scaled by leg length
+  and stood on that body's own ground. The first body of a family fixes the
+  bone ORDER; files that list their bones another way round are sorted to it.
+* **A root that is not a bone.** A Biped's root (travel, and the turn of the
+  hips) is the armature node above the bones, animated in a clip and standing
+  still in a person's file. `bakeClip` carries the WORLD rotation across for a
+  bone whose parents differ (`sameParent`), and follows node scale down the
+  chain (the armature is in centimetres).
+* **Sharp textures only near.** Every material starts on its tile of
+  `far.webp`. A person's own atlas is fetched when the first near body of that
+  person appears and dropped half a minute after the last has gone
+  (`retainHi` / `releaseHi`). A body is born FAR unless it is a player or one
+  of the story's people, so somebody spawned out of sight asks for nothing.
+* **A head on another body** (`partGeometry`, `makeHuman({ head })`): the
+  body's geometry without its head, and the other person's head and hair
+  bound to the body's bones through its own inverse bind matrices. The creator
+  offers it within one sex and skin tone.
+
+Measured on the M1 Pro, medium preset, 1024 x 768, the same session, the bank
+switched off and on (`?devmode&people=off`): Pardubice by the castle 6.1 ms a
+frame with the lofted figures and 5.2 ms with people; Václavské náměstí 7.4
+and 5.6. A showroom crowd of 24 costs 1.45 ms near and 0.69 ms far.
+
+Not done: the driver drawn behind a car's glass is still the shader's own
+(`js/carglass.js`); nobody's lips move when they speak; the Quaternius
+Universal Animation Library (CC0, downloaded with the sources) is not wired
+in, so jumping, punching, aiming and getting up are still the game's own poses
+carried onto the new bodies.

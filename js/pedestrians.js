@@ -2290,7 +2290,9 @@ export class Pedestrians {
       // a pram, a dog. Off the same seed through its own salt, like the body.
       const arch = archetypeAt(rnd01(hash32(s.seed, ARCH_SALT))).key;
       prop = propFor(s.seed, arch);
-      c = makeCitizen({ archetype: arch, prop: prop.key, propTint: prop.tint });
+      // `seed` is the citizen's shared identity: a modelled body (js/characters/cast.js)
+      // is picked from it alone, so every co-op screen sees the same person
+      c = makeCitizen({ archetype: arch, prop: prop.key, propTint: prop.tint, seed: s.seed });
     } finally { Math.random = real; }
 
     // people share ONE scale with the player — a half-size hero among

@@ -28,6 +28,7 @@ import * as wanted from './wanted.js';
 import { PRICE, kc } from './prices.js';
 import { tod, setSoloTime } from './worldclock.js';
 import { browserStore, blank } from './savegame.js';
+import { loadMyLook, saveMyLook } from './characters/appearance.js';
 import { Progress } from './progress.js';
 import { Onboarding } from './onboarding.js';
 import { CareerJobs } from './careerjobs.js';
@@ -84,6 +85,9 @@ export function choose(choice) {
   startPick = typeof choice?.start === 'string' ? choice.start : null;
   const res = store.load();
   state = res.state;
+  // the look chosen in the creator lives in localStorage; a save made with one
+  // brings it back to a browser that lost it
+  if (state.look && !loadMyLook()) saveMyLook(state.look);
   // ?devmode's menu can ask for a free roam (no story at all) or for the
   // campaign outright, even over a save that never had it.
   freeroam = !!choice?.freeroam;
@@ -380,6 +384,7 @@ function snapshot() {
     onb: { ...onb.toJSON(), tips },
     wanted: { heat: wanted.heat(), crime: wanted.lastCrime() },
     owed: null,
+    look: loadMyLook(),
   };
 }
 

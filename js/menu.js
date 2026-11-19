@@ -27,6 +27,7 @@
 // it is still remembered and handed back, so a player who types a name once
 // never has to think about it again.
 
+import { saveMyLook } from './characters/appearance.js';
 import { startHealthPoll } from './menuhealth.js';
 import { browserStore, fmtPlayed } from './savegame.js';
 import { confirmPanel } from './panel.js';
@@ -279,6 +280,7 @@ export function showMenu() {
         yes: 'Smazat a začít znovu', no: 'Zpět', danger: true });
       if (!yes || closed) return;
       store.clear();
+      saveMyLook('');          // a new game begins with choosing who you are
       paintSingle();
     });
     const multi = el('button', 'atc-menu-btn',
@@ -292,7 +294,7 @@ export function showMenu() {
     overlay.appendChild(el('div', 'atc-menu-foot',
       '<div class="atc-menu-keys">' + keys.map(([k, t]) => `<kbd>${k}</kbd>${t}`).join('<span class="sep">·</span>')
       + '<span class="sep">·</span>nastavení pod ⚙️ vpravo nahoře</div>'
-      + '<div class="atc-menu-credit">Mapová data © přispěvatelé OpenStreetMap · Ortofoto © ČÚZK · Podlažnost © IPR Praha</div>'));
+      + '<div class="atc-menu-credit">Mapová data © přispěvatelé OpenStreetMap · Ortofoto © ČÚZK · Podlažnost © IPR Praha · Postavy © Microsoft (Rocketbox, licence MIT)</div>'));
     document.body.appendChild(overlay);
     const stopScene = startMenuScene(scene);
     const clock = setInterval(tick, 15000);

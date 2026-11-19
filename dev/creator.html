@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <title>Among The City: tvůrce postavy (dev)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>html, body { margin: 0; height: 100%; background: #0a0c1a; color: #e8edf2; font: 13px/1.4 system-ui, sans-serif; }
+    #out { position: fixed; left: 10px; bottom: 8px; opacity: 0.8; z-index: 40; pointer-events: none; }</style>
+  <script type="importmap">
+    { "imports": { "three": "../libs/three.module.js" } }
+  </script>
+</head>
+<body>
+  <!-- Dev-only page: the character creator on its own.
+       ?rig=dummy   the crash-test catalogue (default when no people bank is deployed)
+       ?modal=1     as it opens over a running game (Escape and a click outside cancel) -->
+  <div id="out"></div>
+  <script type="module">
+    const q = new URLSearchParams(location.search);
+    const out = document.getElementById('out');
+    const { loadPeople } = await import('../js/characters/peopleload.js');
+    let bank = q.get('rig') === 'dummy' ? false : await loadPeople('../assets/people/');
+    if (!bank) (await import('../js/characters/dummy.js')).installDummies({ many: true });
+    const { showCreator, myLook } = await import('../js/characters/creator.js');
+    out.textContent = (bank ? 'banka lidí' : 'figuríny') + ' · výchozí ' + myLook();
+    const open = async () => {
+      const code = await showCreator({ modal: q.get('modal') === '1' });
+      out.textContent = 'zvoleno: ' + code;
+      window.__picked = code;
+    };
+    window.__open = open;
+    open();
+  </script>
+</body>
+</html>

@@ -39,52 +39,34 @@ import * as THREE from 'three';
 import { lookForUid, baseUid } from './identity.js';
 import { archetype } from './people.js';
 import { pickOutfit } from './wardrobe.js';
-import { bodyDims, BONE } from './bodyshape.js';
+import { bodyDims } from './bodyshape.js';
+import { buildJoints } from './bodyjoints.js';
 import { BodyMesh } from './bodymesh.js';
 import { buildBody } from './bodybuild.js';
 import { buildHead } from './bodyhead.js';
 import { makeGait } from './gait.js';
 import { addBlob, removeBlob, blobsIn, disposeBlobs } from './groundblob.js';
 import { makePoses } from './poses.js';
-import { lampDirectPatch } from './lampmap.js';
-import { BATCH, onBatchFlag } from './batchflags.js';
-import { holdFor } from './pedprops.js';
+import { patchPeopleMaterial } from './peoplemat.js';
+import { FAR_OUT, FAR_IN, trackBody, untrackBody, cullPeopleShadows } from './peopleshadows.js';
 
-// Where the distance variant takes over, metres from the rendering camera,
-// with a gap so a person standing at the line does not flicker between two.
-const FAR_OUT = 62, FAR_IN = 55;
+export { cullPeopleShadows };
+import { holdFor } from './pedprops.js';
+import { peopleReady, avatar } from './characters/avatars.js';
+import { castFor } from './characters/cast.js';
+import { lookOf } from './characters/appearance.js';
+import { makeHuman } from './characters/human.js';
+
 
 // ONE material for every citizen, for the whole session: the colours ride in
 // the geometry. Standard, not Lambert, so skin and cloth pick up a little of
 // the sky's reflection (scene.environment is specular only, js/envmap.js).
-//
-// THE SKY WRAP. A hemisphere light gives a vertical surface half of what it
-// gives the pavement, and a person is nothing but vertical surfaces: in a
-// building's shadow, and at night outside a lamp pool (the pools light the
-// ground, not what stands on it), the figure went to a black cut-out against
-// a lit street. The patch below adds the scene's OWN sky colour as a little
-// flat fill plus a rim where the surface turns away from the eye. It reads
-// hemisphereLights[0], which sky.js drives from noon to midnight, so it is the
-// same term by day (a faint bright edge, the way a figure outdoors really
-// has one) and by night (a dim blue outline under the moon). Nothing here is
-// emissive: with the hemisphere light off, a person is black.
-//
-// STREET LIGHT. With the post stack the composite lights a figure from the lamp
-// map like everything else. Without it (the low preset) nothing did: a man
-// under a lamp was a dark shape on a lit pavement. lampDirectPatch gives the
-// material the same map to read on that path (js/lampmap.js).
+// The sky wrap and the street light it carries are js/peoplemat.js.
 let bodyMat = null;
 function material() {
   if (!bodyMat) {
     bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0, envMapIntensity: 0.55 });
-    bodyMat.onBeforeCompile = (sh) => {
-      sh.fragmentShader = sh.fragmentShader.replace('#include <lights_fragment_begin>', `#include <lights_fragment_begin>
-#if ( NUM_HEMI_LIGHTS > 0 ) && defined( RE_IndirectDiffuse )
-	irradiance += hemisphereLights[ 0 ].skyColor * ( 0.10 + 0.85 * pow( 1.0 - saturate( dot( geometryNormal, geometryViewDir ) ), 3.0 ) );
-#endif`);
-      lampDirectPatch(sh);
-    };
-    bodyMat.customProgramCacheKey = () => 'citizen-skywrap-2-lamp';
+    patchPeopleMaterial(bodyMat);
   }
   return bodyMat;
 }
@@ -116,59 +98,28 @@ function pickLod(renderer, scene, camera) {
   this.castShadow = !far && u.shNear !== false;
 }
 
-// ---- who casts into the sun's shadow map ------------------------------------
-// pickLod above only runs for a person the CAMERA drew, so everybody behind
-// it or beside it kept whatever castShadow they last had: true from birth for
-// most of a crowd, and the shadow box (js/sky.js, 230 m across on medium and
-// leading the view) takes in a good deal of what is behind the camera. Each
-// of them was a whole skinned draw call in the shadow pass. Every live body is
-// listed here and, once per shadow-map update (main.js, before the render),
-// a person casts only
-//   - within `r` of the camera, in any direction (a shadow from just behind
-//     the camera can fall forward into the view), or
-//   - when a sphere of SH_REACH round them touches the view frustum, which is
-//     where their shadow could be seen at all; there pickLod's own far line
-//     (FAR_OUT) keeps deciding, exactly as before.
-// So nothing on screen changes: a figure in view casts as it always did, and
-// only people whose shadow cannot reach the picture stop drawing one. The
-// first version cut everyone past 45 m, in view too, which put a second line
-// in the picture (walkers 45 to 62 m away losing their shadow) next to the
-// far LOD's own at 62. Both tests have some give, so nobody flickers on one.
-// `__batch.shadows = false` (js/batchflags.js) puts back cast-always.
-const _bodies = new Set();
-const SH_GIVE = 3;
-// metres round a body that its shadow may reach: a 1.8 m figure under a sun
-// 10 degrees up throws some 10 m; the larger value holds a caster until it is
-// well clear, the smaller one lets a new one in
-const SH_REACH_KEEP = 14, SH_REACH_JOIN = 11;
-const _frustum = new THREE.Frustum(), _pv = new THREE.Matrix4(), _sph = new THREE.Sphere();
-
-/** Once per shadow update: people whose shadow cannot reach the view stop casting. */
-export function cullPeopleShadows(camera, r = 45, shadowSlope = 0) {
-  if (!BATCH.shadows || !camera) return;
-  camera.updateWorldMatrix(true, false);
-  _pv.multiplyMatrices(camera.projectionMatrix, _pv.copy(camera.matrixWorld).invert());
-  _frustum.setFromProjectionMatrix(_pv);
-  const c = camera.matrixWorld.elements, cx = c[12], cy = c[13], cz = c[14];
-  const rIn = (r - SH_GIVE) ** 2, rOut = (r + SH_GIVE) ** 2, far2 = (FAR_OUT + SH_GIVE) ** 2;
-  const shadowReach = Math.max(SH_REACH_JOIN, 1.8 * shadowSlope);
-  for (const m of _bodies) {
-    const u = m.userData, e = m.matrixWorld.elements;
-    const dx = e[12] - cx, dy = e[13] - cy, dz = e[14] - cz, d2 = dx * dx + dy * dy + dz * dz;
-    let near = u.shNear ? d2 < rOut : d2 < rIn;
-    if (!near && d2 < far2) {
-      _sph.center.set(e[12], e[13], e[14]);
-      _sph.radius = shadowReach + (u.shNear ? SH_REACH_KEEP - SH_REACH_JOIN : 0);
-      near = _frustum.intersectsSphere(_sph);
-    }
-    u.shNear = near;
-    m.castShadow = near && !u.far;
+// Who plays this citizen, and the body for them. The seed is the caller's when
+// it has one; otherwise it is drawn from Math.random, which js/pedestrians.js
+// lends seeded for the length of the call, so the body is as shared between
+// co-op screens as the coat was.
+function humanFor(look, faceDetail) {
+  const uid = look.uid ?? null;
+  const seed = look.seed != null ? look.seed >>> 0 : (Math.random() * 0x100000000) >>> 0;
+  const cast = castFor(look, seed, uid != null ? lookOf(baseUid(uid)) : null);
+  const av = cast && avatar(cast.body);
+  if (!av) return null;
+  try {
+    // players and the story's people keep the skinned body at any distance:
+    // their joints are posed by hand, and tags and seats were measured on an adult
+    const own = uid != null || faceDetail;
+    const height = own ? Math.min(1.84, Math.max(1.62, av.height)) : Math.min(1.94, Math.max(1.2, av.height));
+    return makeHuman(av, { ...look, height: look.height ?? height }, { near: own, seed: (seed % 100003) / 100003, unit: uid != null ? 5.6 : 1.4,
+      head: cast.head ? avatar(cast.head) : null });
+  } catch (e) {
+    console.warn('[people] ' + av.id + ' could not be built, drawing the plain figure', e);
+    return null;
   }
 }
-onBatchFlag('shadows', (on) => {
-  if (on) return;                         // the next cull sets them
-  for (const m of _bodies) { m.userData.shNear = true; m.castShadow = !m.userData.far; }
-});
 
 // how far a bulky top holds the arms off the ribs, radians
 const TOPSY = { puffer: 0.07, coat: 0.04, jacket: 0.03, hoodie: 0.03 };
@@ -191,6 +142,12 @@ const TOPSY = { puffer: 0.07, coat: 0.04, jacket: 0.03, hoodie: 0.03 };
  * makes the same citizen wear the same coat on every co-op screen.
  */
 export function makeCitizen(look = {}, { faceDetail = false } = {}) {
+  // A modelled human when the people bank is loaded (js/characters/), the
+  // lofted figure below when it is not: headless tests, a failed download.
+  if (peopleReady()) {
+    const h = humanFor(look, faceDetail);
+    if (h) return h;
+  }
   const a = archetype(look.archetype);
   const D = bodyDims(a.key, a.h);
   const id = look.uid ?? null;
@@ -226,42 +183,10 @@ export function makeCitizen(look = {}, { faceDetail = false } = {}) {
   // while the OWNER keeps authority over group.position (ground, bridge decks).
   const body = new THREE.Group();
   group.add(body);
-  const bones = [];
-  const bone = (i, parent, x, y, z) => {
-    const b = new THREE.Bone();
-    b.position.set(x, y, z);
-    parent.add(b);
-    if (i >= 0) bones[i] = b;
-    return b;
-  };
   const k = D.k;
-  const pelvis = bone(BONE.pelvis, body, 0, D.hipY, 0);
-  // The stoop bends the BACK at the hip and leaves the legs standing under it,
-  // which is why the trunk has its own joint there instead of leaning `body`.
-  const torso = bone(BONE.torso, body, 0, D.hipY, 0);
-  const chest = bone(BONE.chest, torso, 0, D.spineY - D.hipY, 0);
-  const head = bone(BONE.head, chest, 0, D.shoulderTopY + 0.012 * k - D.spineY, 0.008 * k);
-  const arm = (sx, ia) => {
-    // a collar joint that only ever holds the resting angle of the arm away
-    // from the ribs, so the poses' own shoulder angles compose on top of it
-    const collar = bone(-1, chest, sx * (D.shoulderX + 0.004 * k), D.shoulderY - D.spineY, 0);
-    const shoulder = bone(ia, collar, 0, 0, 0);
-    const elbow = bone(ia + 1, shoulder, 0, -D.upper, 0);
-    const hand = bone(ia + 2, elbow, 0, -D.fore, 0);
-    return { collar, shoulder, elbow, hand };
-  };
-  const aL = arm(-1, BONE.armL), aR = arm(1, BONE.armR);
-  const leg = (sx, il) => {
-    const hip = bone(il, body, sx * D.hipX, D.hipY, 0);
-    const knee = bone(il + 1, hip, 0, -D.thigh, 0);
-    const foot = bone(il + 2, knee, 0, -D.shin, 0);
-    return { hip, knee, foot };
-  };
-  const lL = leg(-1, BONE.legL), lR = leg(1, BONE.legR);
-  const cane = bone(BONE.cane, aR.hand, 0.008 * k, -0.065 * k, -0.02 * k);
-  const armL = aL.shoulder, armR = aR.shoulder, elbowL = aL.elbow, elbowR = aR.elbow;
-  const handL = aL.hand, handR = aR.hand;
-  const legL = lL.hip, legR = lR.hip, kneeL = lL.knee, kneeR = lR.knee, footL = lL.foot, footR = lR.foot;
+  const { bones, J, collarL, collarR } = buildJoints(D, group, body);
+  const { pelvis, torso, chest, head, armL, armR, elbowL, elbowR, handL, handR,
+    legL, legR, kneeL, kneeR, footL, footR } = J;
 
   group.updateMatrixWorld(true);
   const skeleton = new THREE.Skeleton(bones);
@@ -277,15 +202,13 @@ export function makeCitizen(look = {}, { faceDetail = false } = {}) {
   mesh.userData.force = null;
   mesh.userData.shNear = true;            // until the first cullPeopleShadows
   mesh.onBeforeRender = pickLod;
-  _bodies.add(mesh);
+  trackBody(mesh);
   const shade = addBlob(group, mesh);
   // …and only now the resting angles, so the bind pose stays the modelled one
   const rest = (0.05 + D.s.belly * 0.7 + (D.s.hip - 1) * 0.15) + ((TOPSY[o.top] ?? 0));
-  aL.collar.rotation.z = 0 - (rest + (o.bag === 'shoulder' ? 0.10 : 0));
-  aR.collar.rotation.z = rest;
+  collarL.rotation.z = 0 - (rest + (o.bag === 'shoulder' ? 0.10 : 0));
+  collarR.rotation.z = rest;
 
-  const J = { group, body, pelvis, torso, chest, head, armL, armR, elbowL, elbowR, handL, handR,
-    legL, legR, kneeL, kneeR, footL, footR, cane };
   const gait = makeGait(J, D, { unit: byUid || look.outfit?.player ? 5.6 : 1.4, seed,
     cane: !!o.cane, carry: o.bag === 'hand' ? 'L' : null, hold });
   const { stamp, sitPose: sitBare, ragdollPose, standPose: standFree, punchPose, kickPose, aimPose, handsPose } =
@@ -330,7 +253,7 @@ export function makeCitizen(look = {}, { faceDetail = false } = {}) {
   // minutes, so an owner that does `scene.remove(group)` and stops leaks both.
   const dispose = () => {
     group.parent?.remove(group);
-    _bodies.delete(mesh);
+    untrackBody(mesh);
     removeBlob(shade);
     geo.dispose();
     skeleton.dispose();

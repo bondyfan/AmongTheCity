@@ -72,7 +72,10 @@ import { SpeedStreaks } from './speedfx.js';
 import { SkidMarks } from './skidmarks.js';
 import { MISSILE } from './config.js';
 import { showMenu } from './menu.js';
-import { connectCity, queueEvent, getPlayerName, CityNetWS } from './netcity.js';
+import { loadPeople, whenPeople } from './characters/peopleload.js';   // modelled people, fetched while the menu is up
+import { showCreator, myLook } from './characters/creator.js';
+import { loadMyLook, setLookFor, validLook } from './characters/appearance.js';
+import { connectCity, queueEvent, getPlayerName, setPlayerLook, CityNetWS } from './netcity.js';
 import { closeNotice, connectNotice } from './netnotice.js';
 // ---- the co-op wave, wired in here and nowhere else ----
 // worldclock: the day is a pure function of the shared wall clock now, so two
@@ -88,7 +91,7 @@ import { StreetLife } from './streetlife.js';           // birds, dogs on leads,
 import { Cyclists } from './cyclists.js';
 import { inKerbStall } from './kerbparking.js';
 import { parkSpots } from './parkspot.js';
-import { localUid, strHash } from './identity.js';
+import { localUid, strHash, baseId } from './identity.js';
 import { hash32 } from './jobgen.js';
 import { makeGhostCars } from './netvehicles.js';
 import { makeNetUI } from './netui.js';
@@ -4033,6 +4036,31 @@ function onNetEvent(ev) {
   }
 }
 
+// The local player's look, told to everything that draws or sends it: the
+// registry every body is built from (js/characters/appearance.js) and the
+// state packet (js/netcity.js).
+function wearLook(code) {
+  if (!code) return;
+  setLookFor(baseId(), code);
+  setPlayerLook(code);
+}
+// "Vzhled postavy" in the settings: the creator as a dialog over the game.
+window.addEventListener('atc:look', async () => {
+  if (!player || !(await whenPeople(0))) { ui?.toast?.('Postavy se ještě načítají.', 'info'); return; }
+  // the story holds the player's body by hand (js/prologue-actor.js), and a
+  // seat or a fall is no place to change clothes
+  const chapter = career.activeStory();
+  if ((chapter && chapter !== 'done') || !player.canReskin()) {
+    ui?.toast?.('Vzhled jde změnit, až budeš stát na ulici mimo příběh.', 'info');
+    return;
+  }
+  const code = await showCreator({ modal: true });
+  if (!code || !player.canReskin()) return;
+  wearLook(code);
+  player.reskin();
+  career.save();
+});
+
 async function start() {
   initSettings(applySettings);
   initDev();                 // ?devmode only — attaches to that panel
@@ -4042,6 +4070,13 @@ async function start() {
   // The HUD comes up BEFORE the socket, because the thing it most needs to be
   // able to say is that the socket did not come up.
   ui = makeNetUI();
+  // the people bank starts downloading now, behind the menu (js/characters/)
+  // (?devmode&people=dummy puts the crash-test figures of js/characters/dummy.js
+  // in its place: the whole path, creator to crowd, without one downloaded file)
+  // …and ?devmode&people=off leaves the bank out, for a before and after on one machine in one hour
+  const devPeople = /(^|[?&])devmode(=|&|$)/.test(location.search) ? /[?&]people=(dummy|off)(&|$)/.exec(location.search)?.[1] : null;
+  if (devPeople === 'dummy') (await import('./characters/dummy.js')).installDummies({ many: true });
+  else if (devPeople !== 'off') loadPeople();
   const choice = await showMenu();
   ui.setSelf({ name: choice.name || getPlayerName(), uid: localUid() });
   if (choice.mode === 'server') {
@@ -4096,6 +4131,16 @@ async function start() {
   if (!net) {
     setSoloTime(openingHour);
     ui.setStatus({ online: null });
+  }
+  // WHO YOU ARE. A campaign that begins from its first frame opens the
+  // character creator (once: the choice is kept, and "Nová hra" forgets it).
+  // Everything else wears what was chosen before, or the default for this
+  // uid. Without a people bank (no files, a failed download) none of this
+  // runs and the game draws its own figures.
+  if (devPeople !== 'off' && await whenPeople(opening ? 30000 : 15000)) {
+    // (a code this bank cannot show, from an older build, counts as none)
+    if (opening && !validLook(loadMyLook())) await showCreator();
+    wearLook(myLook());
   }
   await boot();
   if (!net) setSoloTime(openingHour);

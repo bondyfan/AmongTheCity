@@ -1,0 +1,647 @@
+{
+ "v": 1,
+ "family": "rocketbox",
+ "faces": "+z",
+ "credits": "People: Microsoft Rocketbox avatar library, MIT licence, (c) 2020 Microsoft. https://github.com/microsoft/Microsoft-Rocketbox",
+ "avatars": [
+  {
+   "id": "m01",
+   "name": "Male_Adult_01",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m03",
+   "name": "Male_Adult_03",
+   "sex": "m",
+   "kind": "adult",
+   "age": "old",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m04",
+   "name": "Male_Adult_04",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 1,
+   "style": "casual"
+  },
+  {
+   "id": "m05",
+   "name": "Male_Adult_05",
+   "sex": "m",
+   "kind": "adult",
+   "age": "old",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m06",
+   "name": "Male_Adult_06",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m07",
+   "name": "Male_Adult_07",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m08",
+   "name": "Male_Adult_08",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m10",
+   "name": "Male_Adult_10",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "sport"
+  },
+  {
+   "id": "m11",
+   "name": "Male_Adult_11",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m12",
+   "name": "Male_Adult_12",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 2,
+   "style": "casual"
+  },
+  {
+   "id": "m13",
+   "name": "Male_Adult_13",
+   "sex": "m",
+   "kind": "adult",
+   "age": "old",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m14",
+   "name": "Male_Adult_14",
+   "sex": "m",
+   "kind": "adult",
+   "age": "old",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m16",
+   "name": "Male_Adult_16",
+   "sex": "m",
+   "kind": "adult",
+   "age": "young",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "m20",
+   "name": "Male_Adult_20",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f01",
+   "name": "Female_Adult_01",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f02",
+   "name": "Female_Adult_02",
+   "sex": "f",
+   "kind": "adult",
+   "age": "old",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f03",
+   "name": "Female_Adult_03",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f04",
+   "name": "Female_Adult_04",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f05",
+   "name": "Female_Adult_05",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f08",
+   "name": "Female_Adult_08",
+   "sex": "f",
+   "kind": "adult",
+   "age": "young",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f09",
+   "name": "Female_Adult_09",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f11",
+   "name": "Female_Adult_11",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f12",
+   "name": "Female_Adult_12",
+   "sex": "f",
+   "kind": "adult",
+   "age": "young",
+   "tone": 0,
+   "style": "sport"
+  },
+  {
+   "id": "f13",
+   "name": "Female_Adult_13",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f14",
+   "name": "Female_Adult_14",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f15",
+   "name": "Female_Adult_15",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "f17",
+   "name": "Female_Adult_17",
+   "sex": "f",
+   "kind": "adult",
+   "age": "young",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "fp02",
+   "name": "Female_Party_02",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 2,
+   "style": "party"
+  },
+  {
+   "id": "bm01",
+   "name": "Business_Male_01",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "smart"
+  },
+  {
+   "id": "bm02",
+   "name": "Business_Male_02",
+   "sex": "m",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "smart"
+  },
+  {
+   "id": "bf02",
+   "name": "Business_Female_02",
+   "sex": "f",
+   "kind": "adult",
+   "age": "old",
+   "tone": 0,
+   "style": "smart"
+  },
+  {
+   "id": "bf03",
+   "name": "Business_Female_03",
+   "sex": "f",
+   "kind": "adult",
+   "age": "adult",
+   "tone": 0,
+   "style": "smart"
+  },
+  {
+   "id": "sm04",
+   "name": "Sports_Male_04",
+   "sex": "m",
+   "kind": "adult",
+   "age": "young",
+   "tone": 0,
+   "style": "sport"
+  },
+  {
+   "id": "pm03",
+   "name": "Police_Male_03",
+   "sex": "m",
+   "kind": "police",
+   "age": "adult",
+   "tone": 0,
+   "style": "work"
+  },
+  {
+   "id": "pm06",
+   "name": "Police_Male_06",
+   "sex": "m",
+   "kind": "police",
+   "age": "adult",
+   "tone": 0,
+   "style": "work"
+  },
+  {
+   "id": "pm07",
+   "name": "Police_Male_07",
+   "sex": "m",
+   "kind": "police",
+   "age": "adult",
+   "tone": 0,
+   "style": "work"
+  },
+  {
+   "id": "pf01",
+   "name": "Security_Female_01",
+   "sex": "f",
+   "kind": "police",
+   "age": "adult",
+   "tone": 0,
+   "style": "work"
+  },
+  {
+   "id": "mf03",
+   "name": "Medical_Female_03",
+   "sex": "f",
+   "kind": "medic",
+   "age": "adult",
+   "tone": 0,
+   "style": "work"
+  },
+  {
+   "id": "mm02",
+   "name": "Medical_Male_02",
+   "sex": "m",
+   "kind": "medic",
+   "age": "adult",
+   "tone": 0,
+   "style": "work"
+  },
+  {
+   "id": "mf01",
+   "name": "Medical_Female_01",
+   "sex": "f",
+   "kind": "nurse",
+   "age": "adult",
+   "tone": 0,
+   "style": "work"
+  },
+  {
+   "id": "mm03",
+   "name": "Medical_Male_03",
+   "sex": "m",
+   "kind": "doctor",
+   "age": "old",
+   "tone": 0,
+   "style": "work"
+  },
+  {
+   "id": "cf01",
+   "name": "Female_Child_01",
+   "sex": "f",
+   "kind": "child",
+   "age": "young",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "cm01",
+   "name": "Male_Child_01",
+   "sex": "m",
+   "kind": "child",
+   "age": "young",
+   "tone": 0,
+   "style": "casual"
+  },
+  {
+   "id": "pi01",
+   "name": "Pilot_Male_01",
+   "sex": "m",
+   "kind": "conductor",
+   "age": "adult",
+   "tone": 0,
+   "style": "work"
+  }
+ ],
+ "named": {
+  "kolin-dcera": "cf01",
+  "kolin-pruvodci": "pi01",
+  "vasek": "m07"
+ },
+ "roles": {
+  "walkSlow": {
+   "m": "m_walk_slow_01",
+   "f": "f_walk_slow_01"
+  },
+  "walk": {
+   "m": "m_walk_neutral_01",
+   "f": "f_walk_neutral_01"
+  },
+  "walkFast": {
+   "m": "m_walk_fast_01",
+   "f": "f_walk_fast_01"
+  },
+  "jog": {
+   "m": "m_run_slow_01",
+   "f": "f_run_slow_01"
+  },
+  "run": {
+   "m": "m_run_neutral_01",
+   "f": "f_run_neutral_01"
+  },
+  "sprint": {
+   "m": "m_run_fast_01",
+   "f": "f_run_fast_01"
+  },
+  "idle": {
+   "m": [
+    "m_idle_neutral_01",
+    "m_idle_neutral_02",
+    "m_idle_neutral_03",
+    "m_idle_breathe_01"
+   ],
+   "f": [
+    "f_idle_neutral_01",
+    "f_idle_neutral_02",
+    "f_idle_neutral_03",
+    "f_idle_breathe_01"
+   ]
+  },
+  "fidget": {
+   "m": [
+    "m_idle_look_around_01",
+    "m_idle_look_around_02",
+    "m_idle_scratch_head_01",
+    "m_idle_shake_leg_01",
+    "m_idle_waiting_01",
+    "m_idle_touch_face_01",
+    "m_idle_stretch_arms_01",
+    "m_idle_yawn_01",
+    "m_idle_roll_head_01",
+    "m_idle_shake_arms_01"
+   ],
+   "f": [
+    "f_idle_look_around_01",
+    "f_idle_look_around_02",
+    "f_idle_scratch_head_01",
+    "f_idle_shake_leg_01",
+    "f_idle_waiting_01",
+    "f_idle_touch_face_01",
+    "f_idle_touch_hair_01",
+    "f_idle_stretch_arms_01",
+    "f_idle_yawn_01",
+    "f_idle_move_leg_01"
+   ]
+  },
+  "sit": {
+   "m": "m_sit_chair_idle_neutral_01",
+   "f": "f_sit_chair_idle_neutral_01"
+  },
+  "sitIdle": {
+   "m": [
+    "m_sit_chair_idle_look_around",
+    "m_sit_chair_idle_relaxed_01",
+    "m_sit_chair_breathe_01"
+   ],
+   "f": [
+    "f_sit_chair_idle_look_around",
+    "f_sit_chair_idle_relaxed_01",
+    "f_sit_chair_breathe_01"
+   ]
+  },
+  "phone": {
+   "m": "m_cell_phone_talk_01",
+   "f": "f_cell_phone_talk_01"
+  },
+  "phoneWalk": {
+   "m": "m_cell_phone_talk_02",
+   "f": "f_cell_phone_talk_02"
+  },
+  "text": {
+   "m": "m_cell_phone_textmessage",
+   "f": "f_cell_phone_textmessage"
+  },
+  "bag": {
+   "m": "m_hold_bag_idle",
+   "f": "f_hold_bag_idle_01"
+  },
+  "push": {
+   "m": "m_trolley_idle",
+   "f": "f_trolley_idle"
+  },
+  "talk": {
+   "m": [
+    "m_gestic_talk_neutral_01",
+    "m_gestic_talk_neutral_02",
+    "m_gestic_talk_relaxed_01"
+   ],
+   "f": [
+    "f_gestic_talk_neutral_01",
+    "f_gestic_talk_neutral_02",
+    "f_gestic_talk_relaxed_01"
+   ]
+  },
+  "listen": {
+   "m": "m_gestic_listen_neutral_01",
+   "f": "f_gestic_listen_neutral_01"
+  },
+  "wave": {
+   "m": "m_wave_01",
+   "f": "f_wave_01"
+  },
+  "turnL": {
+   "m": "m_turn_left_90",
+   "f": "f_turn_left_90"
+  },
+  "turnR": {
+   "m": "m_turn_right_90",
+   "f": "f_turn_right_90"
+  }
+ },
+ "clips": {
+  "m_idle_look_around_01": {
+   "loop": false
+  },
+  "m_idle_look_around_02": {
+   "loop": false
+  },
+  "m_idle_scratch_head_01": {
+   "loop": false
+  },
+  "m_idle_shake_leg_01": {
+   "loop": false
+  },
+  "m_idle_waiting_01": {
+   "loop": false
+  },
+  "m_idle_touch_face_01": {
+   "loop": false
+  },
+  "m_idle_stretch_arms_01": {
+   "loop": false
+  },
+  "m_idle_yawn_01": {
+   "loop": false
+  },
+  "m_idle_roll_head_01": {
+   "loop": false
+  },
+  "m_idle_shake_arms_01": {
+   "loop": false
+  },
+  "m_wave_01": {
+   "loop": false
+  },
+  "m_turn_left_90": {
+   "loop": false,
+   "travel": "keep"
+  },
+  "m_turn_right_90": {
+   "loop": false,
+   "travel": "keep"
+  },
+  "m_sit_chair_idle_neutral_01": {
+   "seat": true
+  },
+  "m_sit_chair_idle_look_around": {
+   "seat": true
+  },
+  "m_sit_chair_idle_relaxed_01": {
+   "seat": true
+  },
+  "m_sit_chair_breathe_01": {
+   "seat": true
+  },
+  "f_idle_look_around_01": {
+   "loop": false
+  },
+  "f_idle_look_around_02": {
+   "loop": false
+  },
+  "f_idle_scratch_head_01": {
+   "loop": false
+  },
+  "f_idle_shake_leg_01": {
+   "loop": false
+  },
+  "f_idle_waiting_01": {
+   "loop": false
+  },
+  "f_idle_touch_face_01": {
+   "loop": false
+  },
+  "f_idle_touch_hair_01": {
+   "loop": false
+  },
+  "f_idle_stretch_arms_01": {
+   "loop": false
+  },
+  "f_idle_yawn_01": {
+   "loop": false
+  },
+  "f_idle_move_leg_01": {
+   "loop": false
+  },
+  "f_wave_01": {
+   "loop": false
+  },
+  "f_turn_left_90": {
+   "loop": false,
+   "travel": "keep"
+  },
+  "f_turn_right_90": {
+   "loop": false,
+   "travel": "keep"
+  },
+  "f_sit_chair_idle_neutral_01": {
+   "seat": true
+  },
+  "f_sit_chair_idle_look_around": {
+   "seat": true
+  },
+  "f_sit_chair_idle_relaxed_01": {
+   "seat": true
+  },
+  "f_sit_chair_breathe_01": {
+   "seat": true
+  }
+ }
+}

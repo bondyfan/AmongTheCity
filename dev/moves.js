@@ -10,6 +10,9 @@ const DOOR = await import('../js/cardoor.js');
 const MOVES = await import('../js/bodymoves.js');
 
 const q = new URLSearchParams(location.search);
+// &rig=dummy: the crash-test humans of js/characters/dummy.js play the player
+if (q.get('rig') === 'dummy') (await import('../js/characters/dummy.js')).installDummies();
+if (q.get('rig') === 'bank') await (await import('../js/characters/peopleload.js')).loadPeople('/assets/people/');
 const P = {
   scene: q.get('scene') || 'enter',
   t: parseFloat(q.get('t') ?? '1'), t0: parseFloat(q.get('t0') ?? '0'),

@@ -189,6 +189,11 @@ const CSS = `
   background: rgba(0,0,0,0.35); color: inherit; border: 1px solid rgba(255,255,255,0.25);
   border-radius: 7px; padding: 4px 8px; font-size: 13px; cursor: pointer;
 }
+.atc-set-act {
+  background: rgba(127,168,232,0.18); color: inherit; border: 1px solid rgba(140,170,220,0.55);
+  border-radius: 7px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.atc-set-act:hover { background: rgba(127,168,232,0.3); }
 .atc-opt input[type="checkbox"] { width: 20px; height: 20px; margin: 0; cursor: pointer;
   accent-color: #7fa8e8; }
 .atc-opt input[type="range"] { width: 120px; accent-color: #7fa8e8; cursor: pointer; }
@@ -241,6 +246,16 @@ export function initSettings(apply) {
     cb.addEventListener('change', () => change(key, cb.checked));
     refreshers.push(() => { cb.checked = S[key]; });
     row.appendChild(cb);
+    return row;
+  }
+  // a row that DOES something instead of holding a value: the listener is whoever
+  // catches the window event (main.js), so this file needs to know nothing of it
+  function actionRow(label, text, event) {
+    const row = el('div', 'atc-opt', `<span class="atc-opt-label">${label}</span>`);
+    const b = el('button', 'atc-set-act', text); b.type = 'button';
+    // the dialog it opens takes the screen: this panel steps aside first
+    b.addEventListener('click', () => { closePanel(); window.dispatchEvent(new CustomEvent(event)); });
+    row.appendChild(b);
     return row;
   }
   function sliderRow(key, label) { // 0..1 range with a live % readout in the label
@@ -351,6 +366,7 @@ export function initSettings(apply) {
       [NAME_RANGES[1], 'Střední (400 m)'], [NAME_RANGES[2], 'Daleko (900 m)'],
       [NAME_RANGES[3], 'Přes celé město (2 km)']]),
     sliderRow('volume', 'Hlasitost'),
+    actionRow('Vzhled postavy', 'Změnit…', 'atc:look'),
   );
   hPage.appendChild(hGrid);
   gPage.appendChild(el('p', 'atc-set-note', 'Změna pokročilé volby přepne kvalitu na '

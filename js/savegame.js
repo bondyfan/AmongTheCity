@@ -24,6 +24,7 @@
 //      overwrite what a newer one wrote.
 
 import { stops as storyStops } from './prologue-route.js';
+import { sanitizeLook } from './characters/appearance.js';
 
 export const SAVE_KEY = 'atc-save';
 export const SAVE_VERSION = 2;
@@ -61,6 +62,11 @@ export function blank() {
     // (and the police, per star) have not been paid yet, and loading this save
     // is what pays them. null in every other save.
     owed: null,                // { stars } or null
+    // Who the player chose to be (js/characters/appearance.js): a short code,
+    // '' until the character creator has been through. Also kept in
+    // localStorage, which is what free roam and co-op read; the save's copy
+    // brings it back when that storage was cleared.
+    look: '',
   };
 }
 
@@ -140,6 +146,7 @@ export function sanitize(raw) {
     wanted: { heat: +pos(wanted.heat, 260).toFixed(1), crime: str(wanted.crime, 40) },
     owed: s.owed && typeof s.owed === 'object' && !Array.isArray(s.owed)
       ? { stars: pos(s.owed.stars, 5) | 0 } : null,
+    look: sanitizeLook(s.look),
   };
 }
 
