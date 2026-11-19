@@ -23,6 +23,7 @@
 
 import { WALK, INTERIOR, PLAYER_SCALE } from './config.js';
 import { jumpPose, landPose, vaultPose } from './bodymoves.js';
+import { sameLevel } from './levelsep.js';
 
 export const JUMP_V = 5.5;         // m/s up: with the game's gravity, 0.72 m and half a second
 const PROBE = 0.75;                // m ahead: "right in front of you"
@@ -42,10 +43,11 @@ function pushed(world, x, z, r, y0, y1) {
 }
 
 // the car whose hull the point is in, if any, with the point in its frame
-function carAt(world, x, z, out) {
+function carAt(world, x, z, out, y) {
   const hulls = world.carHulls?.();
   if (!hulls) return null;
   for (const c of hulls) {
+    if (!sameLevel(y, c.y)) continue;      // (not the one on the deck overhead: js/levelsep.js)
     const dx = x - c.x, dz = z - c.z;
     const ch = Math.cos(c.heading), sh = Math.sin(c.heading);
     const lx = dx * ch - dz * sh, lz = dx * sh + dz * ch;
@@ -65,7 +67,7 @@ export function findVault(p, world) {
   const nx = p.pos.x + fx * PROBE, nz = p.pos.z + fz * PROBE;
   if (pushed(world, nx, nz, 0.2, y + 0.30, y + 0.95) < 0.04) return null;   // nothing there
   let top = y + 0.9;
-  const car = carAt(world, nx, nz, _car);
+  const car = carAt(world, nx, nz, _car, y);
   if (car) {
     // over the bonnet only: forward of the windscreen (about a sixth of the
     // length ahead of the middle on every kind here), and not a van's flat nose
