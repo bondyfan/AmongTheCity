@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import {
-  definitions, prepare, PARDUBICE, worldAt, landing, floorAt, flightY, nearestInside, lanes, along, inRect,
+  definitions, prepare, PARDUBICE, worldAt, landing, floorAt, flightY, nearestInside, deckAt, nearestOnDeck, fencedOut, lanes, along, inRect,
   HALF, WIDTH, DEPTH, STEPS,
 } from '../js/station-layout.js';
 import { tracksOf, sectorAt } from '../js/pardubice-signs.js';
@@ -179,4 +179,86 @@ test('a moving stair carries up on the right of whoever climbs it', () => {
     west = s.flights.find((f) => f.kind === 'escalator' && f.b < f.a);
   assert.ok(along(east, east.a + 1, east.c + 1).q > 0);
   assert.ok(along(west, west.a - 1, west.c - 1).q > 0);
+});
+
+test('the footbridge: over every track on piers that miss them, reached from platforms 2, 3 and 4', () => {
+  const s = station(1);
+  s.deck.y = 220 + s.deck.rise;
+  for (const f of s.ramps) {
+    f.base = 220;
+    f.top = s.deck.y;
+  }
+  assert.ok(s.deck.v1 - s.deck.v0 > 250, 'it is some 290 m with its stairs');
+  assert.deepEqual(s.ramps.filter((f) => f.kind === 'escalator').map((f) => f.from), [2, 3, 4, 'terminal']);
+  // the rails it crosses, and how far each pier column is from the nearest
+  const uc = (s.deck.u0 + s.deck.u1) / 2;
+  const railGap = (u, v) => {
+    let best = Infinity;
+    for (const way of rails)
+      for (let i = 1; i < way.p.length; i++) {
+        const [a, b] = [way.p[i - 1], way.p[i]].map(([x, z]) => [(x - s.x) * s.c + (z - s.z) * s.s, (z - s.z) * s.c - (x - s.x) * s.s]);
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1,
+          t = Math.max(0, Math.min(1, ((u - a[0]) * (b[0] - a[0]) + (v - a[1]) * (b[1] - a[1])) / (len * len)));
+        best = Math.min(best, Math.hypot(u - a[0] - t * (b[0] - a[0]), v - a[1] - t * (b[1] - a[1])));
+      }
+    return best;
+  };
+  for (const v of s.deck.piers) for (const side of [-1.15, 1.15]) assert.ok(railGap(uc + side, v) > 2.1, `pier at v=${v} stands ${railGap(uc + side, v).toFixed(2)} m from a rail`);
+  for (const f of s.ramps) {
+    const [u, v] = f.axis === 'u' ? [f.a, f.c] : [f.c, f.a];
+    assert.ok(railGap(u, v) > 2.4, 'the foot of the ramp from ' + f.from + ' is clear of the rails');
+  }
+  // somebody on the platform under it is not on it; somebody at its level is
+  const foot = s.ramps[0];
+  assert.equal(deckAt(s, uc, 10, 220.55), null);
+  assert.equal(deckAt(s, uc, 10, s.deck.y + 0.55), s.deck.y);
+  assert.ok(Math.abs(deckAt(s, foot.a - 0.05, foot.c, 220.55) - 220) < 0.05, 'the ramp is stepped onto at its foot');
+  assert.equal(deckAt(s, (foot.a + foot.b) / 2, foot.c, 220.55), null, 'and walked under further up');
+  // the glass holds him: a step through the deck's wall comes back
+  const out = nearestOnDeck(s, s.deck.u0 - 0.4, 100, 0.38);
+  assert.ok(out.d > 0.7 && out.d < 0.9 && out.y === s.deck.y);
+  // and every ramp is joined to the deck
+  for (const f of s.ramps) {
+    const dir = Math.sign(f.b - f.a),
+      top = f.axis === 'u' ? [f.b + dir * 0.6, f.c] : [f.c, f.b + dir * 0.6];
+    assert.ok(nearestOnDeck(s, ...top, 0.38).d < 1e-9, 'the head of the ramp from ' + f.from + ' is on the bridge');
+    assert.ok(inRect(s.deck, ...top), 'and inside the deck');
+  }
+});
+
+test('a stair mouth is fenced: nobody on the platform drops into it from the side', () => {
+  const s = station(1),
+    f = s.flights.find((x) => x.to === 2 && x.kind === 'stairs' && x.a < 10),
+    mid = (f.a + f.b) / 2;
+  // walking across the middle of the mouth at platform level: put back outside it
+  const out = fencedOut(s, mid, f.c + f.half - 0.1, f.top, 0.38);
+  assert.ok(out && out.v > f.c + f.half + 0.38 - 1e-6 && Math.abs(out.u - mid) < 1e-9);
+  // on the top steps, and climbing the stairs themselves, nobody is pushed
+  assert.equal(fencedOut(s, f.b - 0.4, f.c, f.top, 0.38), null);
+  assert.equal(fencedOut(s, mid, f.c, s.bottom + (f.top - s.bottom) / 2 + 0.1, 0.38), null);
+  // beside the mouth there is nothing to be pushed from
+  assert.equal(fencedOut(s, mid, f.c + f.half + 1, f.top, 0.38), null);
+  // the hall's door onto platform 1 is left free by the mouth in front of it
+  const p1 = s.flights.find((x) => x.to === 1 && x.a < 10);
+  assert.ok(p1.span.u0 - 0.38 > 1.4 + 2, 'two metres of the door bay stay clear of the stairs');
+  // Kolín's mouths stay as they were: open
+  assert.ok(!station(0).walled);
+});
+
+test('the way out of Pardubice for the campaign follows the new underpass', async () => {
+  const { wayOut, stationExit } = await import('../js/prologue-route.js');
+  const s = station(1);
+  for (const from of [-40, 30]) {
+    const path = wayOut(from),
+      [first] = path;
+    // it starts at the head of a flight from platform 2 in the western underpass
+    const flight = s.flights.find((f) => f.to === 2 && Math.abs(f.a) < 3 && Math.sign(f.b) === Math.sign(first[0]));
+    assert.ok(Math.abs(first[0] - flight.b) < 1.6 && Math.abs(first[1] - flight.c) < flight.half);
+    // ...passes along the corridor and ends in the hall, by the door to the square
+    assert.ok(path.some(([u, v]) => inRect(s.rooms[0], u, v)));
+    const last = path.at(-1);
+    assert.ok(inRect(PARDUBICE.hall, ...last));
+    const exit = { u: (stationExit.x - s.x) * s.c + (stationExit.z - s.z) * s.s, v: (stationExit.z - s.z) * s.c - (stationExit.x - s.x) * s.s };
+    assert.ok(Math.hypot(exit.u - last[0], exit.v - last[1]) < 8, 'the last turn is at the doors to the forecourt');
+  }
 });

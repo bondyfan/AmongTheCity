@@ -68,16 +68,16 @@ export function buildPlatforms(s, k, Y) {
 
   function lines() {
     for (const [u0, v0, u1, v1, side] of edges) {
-      const count = Math.ceil((u1 - u0) / 30);
+      const count = Math.ceil((u1 - u0) / 10); // short pieces: the paving is not level
       for (let i = 0; i < count; i++) {
         const a = u0 + ((u1 - u0) * i) / count,
           b = u0 + ((u1 - u0) * (i + 1)) / count,
           c = (a + b) / 2,
           v = v0 + ((v1 - v0) * (i + 0.5)) / count,
           y = Y(c, v + side);
-        k.box(c, y + 0.012, v + side * 0.14, b - a, 0.02, 0.28, 'white');
-        k.box(c, y + 0.014, v + side * 0.56, b - a, 0.02, 0.4, 'concrete');
-        k.box(c, y + 0.016, v + side * 0.86, b - a, 0.022, 0.12, 'yellow');
+        k.box(c, y + 0.02, v + side * 0.14, b - a, 0.04, 0.28, 'white');
+        k.box(c, y + 0.022, v + side * 0.56, b - a, 0.04, 0.4, 'concrete');
+        k.box(c, y + 0.024, v + side * 0.86, b - a, 0.044, 0.12, 'yellow');
       }
     }
   }

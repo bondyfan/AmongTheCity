@@ -64,6 +64,10 @@ export const PARDUBICE = {
   ],
   // the bay platform west of the building: tracks 1 and 2 end at its sides
   bay: { tracks: [1, 2], v0: -29.1, v1: -21.3, u0: -181, u1: -78.6, roof: [-145, -81] },
+  // the covered red footbridge of 2024 at the western end, from the bus
+  // terminal over every track to the Dukla estate: its deck (rise: metres
+  // above the hall floor) and where its piers stand clear of the rails (v)
+  bridge: { u0: -169.2, u1: -165.2, v0: -38.4, v1: 216.2, rise: 7, piers: [-36, -20.8, 1.9, 23.5, 41.6, 60.5, 77.4, 97.2, 117.7, 140, 162, 184, 206] },
   // where the lifts of the eastern underpass stand on each platform
   lifts: [
     { n: 1, u: 53.4, v: -18.6 },
@@ -84,7 +88,9 @@ function pardubice() {
     { axis: 'v', a: -21, b: -29, c: A, half: HALF, kind: 'hall', to: 'hall' },
     { axis: 'v', a: -26, b: -34, c: 36.8, half: HALF, kind: 'hall', to: 'hall' },
     // platform 1 (track 3, and the bay tracks 1 and 2 along it)
-    stairs(-18.6, A + HALF, A + HALF + top, 1),
+    // (the western one starts beyond a short passage, as the real one does:
+    // its mouth must leave the hall's door onto the platform free)
+    stairs(-18.6, 3.9, A + HALF + top, 1),
     stairs(-18.6, 44.8, 34.2, 1),
   ];
   west.forEach((v, i) => {
@@ -102,11 +108,25 @@ function pardubice() {
     // (side rooms reach 1.2 m into the corridor: shrunk by a walker's radius
     // they must still overlap it, or nearestInside would not let him through)
     { u0: 44.8, u1: B - HALF + 1.2, v0: -18.6 - WIDTH, v1: -18.6 + WIDTH },
+    { u0: A + HALF - 1.2, u1: 3.9, v0: -18.6 - WIDTH, v1: -18.6 + WIDTH },
     // short passages to the lift doors
     ...PARDUBICE.lifts.slice(1).map((l) => ({ u0: l.u + 1.1, u1: B - HALF + 1.2, v0: l.v - 1.3, v1: l.v + 1.3 })),
     { u0: B + HALF - 1.2, u1: PARDUBICE.lifts[0].u - 1.1, v0: -18.6 - 1.3, v1: -18.6 + 1.3 },
   ];
-  return { x: 14.9, z: -32.9, angle: 0.02, name: 'Pardubice hl. n.', rooms, flights };
+  // up to the footbridge: moving stairs from the west end of platforms 2, 3
+  // and 4 and from the forecourt, plain stairs at both ends of the deck
+  const { bridge } = PARDUBICE,
+    edge = bridge.u1,
+    axis = (bridge.u0 + bridge.u1) / 2;
+  const ramps = [
+    ...[[0.6, 2], [23.6, 3], [41, 4], [-36.4, 'terminal']].map(([v, from]) => ({ axis: 'u', a: -144.5, b: edge, c: v, half: 1.7, kind: 'escalator', to: 'bridge', from })),
+    { axis: 'v', a: -57, b: bridge.v0, c: axis, half: 1.6, kind: 'stairs', to: 'bridge', from: 'terminal' },
+    { axis: 'u', a: -145, b: edge, c: 214.6, half: 1.6, kind: 'stairs', to: 'bridge', from: 'Dukla' },
+  ];
+  // walled: a stair mouth is fenced, nobody drops into it from the side
+  // beyond: read a landing's height this far past the flight (the mapped
+  // stairs under it are drawn a step above the paving)
+  return { x: 14.9, z: -32.9, angle: 0.02, name: 'Pardubice hl. n.', rooms, flights, ramps, deck: { ...bridge }, walled: true, beyond: 1.3 };
 }
 
 export const definitions = [kolin(), pardubice()];
@@ -122,8 +142,23 @@ export function spanOf(f) {
     ? { u0: lo, u1: hi, v0: f.c - f.half, v1: f.c + f.half }
     : { u0: f.c - f.half, u1: f.c + f.half, v0: lo, v1: hi };
 }
-// The point on the surface where it lands.
-export const landing = (f) => (f.axis === 'u' ? { u: f.b, v: f.c } : { u: f.c, v: f.b });
+// The point on the surface where it lands (or `beyond` metres past it).
+export function landing(f, beyond = 0) {
+  const b = f.b + Math.sign(f.b - f.a) * beyond;
+  return f.axis === 'u' ? { u: b, v: f.c } : { u: f.c, v: b };
+}
+// Somebody on the surface at height y who is over a stair mouth without being
+// on its top steps: where the fence round it puts him back (or null).
+export function fencedOut(s, u, v, y, r) {
+  for (const f of s.flights) {
+    const m = f.span;
+    if (!inRect(m, u, v, r) || y - flightY(s, f, Math.max(m.u0, Math.min(m.u1, u)), Math.max(m.v0, Math.min(m.v1, v))) < 0.7) continue;
+    const gaps = [[u - (m.u0 - r), -1, 0], [m.u1 + r - u, 1, 0], [v - (m.v0 - r), 0, -1], [m.v1 + r - v, 0, 1]];
+    const [gap, du, dv] = gaps.reduce((a, b) => (b[0] < a[0] ? b : a));
+    return { u: u + du * (gap + 0.01), v: v + dv * (gap + 0.01) };
+  }
+  return null;
+}
 // Along and across a flight: t runs 0 at the bottom to 1 at the top, q is the
 // offset from its centre line, positive on the right of somebody climbing.
 export function along(f, u, v) {
@@ -155,8 +190,9 @@ export function flightAt(s, u, v) {
 export function flightY(s, f, u, v) {
   const { t, q } = along(f, u, v),
     k = Math.max(0, Math.min(1, t));
-  const step = laneAt(f, q).move ? k : Math.min(1, Math.ceil(k * STEPS) / STEPS);
-  return s.bottom + (f.top - s.bottom) * step;
+  const step = laneAt(f, q).move ? k : Math.min(1, Math.ceil(k * STEPS) / STEPS),
+    base = f.base ?? s.bottom; // a ramp to the footbridge starts from the ground
+  return base + (f.top - base) * step;
 }
 // What a walker at (u, v) whose head is at `limit` stands on, or null.
 export function floorAt(s, u, v, limit) {
@@ -191,17 +227,57 @@ export function nearestInside(s, u, v, r) {
   return best && { ...best, d: Math.sqrt(d) };
 }
 
-// A station ready for use: its axes, every flight's footprint, the box that
-// holds everything below ground.
+// The footbridge and its ramps, for a walker whose head is at `limit`: he is
+// on it when he is up at its level, under it otherwise.
+export function deckAt(s, u, v, limit) {
+  if (!s.deck) return null;
+  for (const f of s.ramps)
+    if (inRect(f.span, u, v)) {
+      const y = flightY(s, f, u, v);
+      return limit >= y - 0.3 ? y : null;
+    }
+  return inRect(s.deck, u, v) && limit >= s.deck.y - 0.3 ? s.deck.y : null;
+}
+// The nearest point of the bridge to (u, v) and its height there: the deck,
+// and each ramp from half a metre before its foot to 2 m into the deck.
+export function nearestOnDeck(s, u, v, r) {
+  let best = null,
+    d = Infinity;
+  const candidate = (u0, u1, v0, v1, f) => {
+    const q = Math.max(u0, Math.min(u1, u)),
+      t = Math.max(v0, Math.min(v1, v)),
+      err = (q - u) ** 2 + (t - v) ** 2;
+    if (err < d) {
+      d = err;
+      best = { u: q, v: t, f };
+    }
+  };
+  const k = s.deck;
+  candidate(k.u0 + r, k.u1 - r, k.v0 + r, k.v1 - r, null);
+  for (const f of s.ramps) {
+    const dir = Math.sign(f.b - f.a),
+      lo = Math.min(f.a - dir * 0.5, f.b + dir * 2),
+      hi = Math.max(f.a - dir * 0.5, f.b + dir * 2);
+    if (f.axis === 'u') candidate(lo, hi, f.c - f.half + r, f.c + f.half - r, f);
+    else candidate(f.c - f.half + r, f.c + f.half - r, lo, hi, f);
+  }
+  const y = best.f && inRect(best.f.span, best.u, best.v) ? flightY(s, best.f, best.u, best.v) : k.y;
+  return { u: best.u, v: best.v, d: Math.sqrt(d), y, base: best.f && inRect(best.f.span, best.u, best.v) ? best.f.base : -Infinity };
+}
+
+// A station ready for use: its axes, every flight's footprint, the boxes that
+// hold everything below ground and everything it has built.
 export function prepare(d) {
   const s = { ...d, c: Math.cos(d.angle), s: Math.sin(d.angle) };
   s.flights = d.flights.map((f) => ({ ...f, span: spanOf(f) }));
-  const all = [...s.rooms, ...s.flights.map((f) => f.span)];
-  s.box = {
-    u0: Math.min(...all.map((r) => r.u0)),
-    u1: Math.max(...all.map((r) => r.u1)),
-    v0: Math.min(...all.map((r) => r.v0)),
-    v1: Math.max(...all.map((r) => r.v1)),
-  };
+  s.ramps = (d.ramps ?? []).map((f) => ({ ...f, span: spanOf(f) }));
+  const around = (rects) => ({
+    u0: Math.min(...rects.map((r) => r.u0)),
+    u1: Math.max(...rects.map((r) => r.u1)),
+    v0: Math.min(...rects.map((r) => r.v0)),
+    v1: Math.max(...rects.map((r) => r.v1)),
+  });
+  s.under = around([...s.rooms, ...s.flights.map((f) => f.span)]); // everything below ground
+  s.box = around([s.under, ...s.ramps.map((f) => f.span), ...(d.deck ? [d.deck] : [])]); // and the bridge
   return s;
 }

@@ -2186,3 +2186,54 @@ that makes people run also puts the birds up.
   `.flockNear(x, z, r)`, `.flush(flock, x, z, hard)`; `life.birds.enabled`,
   `life.dogs.enabled` and `life.prams.enabled` switch a part off in a running
   game, which is how its frame cost is measured.
+
+## Pardubice hlavní nádraží as it stands (js/station-*.js, js/pardubice-*.js, Nov 2026)
+
+The station used to be one straight corridor with four exits. It is now the
+station of the 2020 to 2024 rebuild, read off OpenStreetMap (Overpass, 19 Nov
+2026), the ČÚZK aerial photo and photographs of the finished building: five
+platforms, tracks 1 to 11 for passengers (the station is signed by track
+alone, with sectors A to H), two underpasses from the hall, and the covered
+red footbridge to Dukla. Kolín keeps the underpass the campaign was built on.
+
+* **The plan is data** (`js/station-layout.js`, no three.js, tested by
+  `tests/station-layout.test.mjs` against the shipped tiles). Each station has
+  a frame (u along the platforms, v across the tracks), ROOMS (rectangles of
+  corridor floor) and FLIGHTS (axis-aligned ramps of steps from that floor to
+  the surface: `axis, a, b, c, half, kind`). `kind` gives the lanes across a
+  flight: plain steps, two belts (`escalator`), or steps and two belts
+  (`hall`). Pardubice also has a `deck` and `ramps` up to it (the footbridge).
+  Everything a walker needs is arithmetic on these: `floorAt`, `deckAt`,
+  `nearestInside`, `nearestOnDeck`, `fencedOut`.
+* **`js/station-passages.js`** is the same `world.stationPassages` as before
+  (`floor`, `contain`, `inside`, `covered`, `cut`, `update`, `stations`), now
+  generic over the plan, plus `lid(x, z)`: the underside of whatever roof the
+  station built there. main.js keeps the camera below it, so the lens never
+  looks down through a canopy. `cut` discards the ground inside every flight's
+  footprint (the list of rectangles is written into the shader).
+* **Pardubice's choices that are not reality**: the eastern underpass enters
+  the hall round a corner (the real hall is 90 m long, the game's 72, and its
+  own well would be under the annex); the lifts are towers and doors only;
+  the departure boards show a fixed evening.
+* **Walled mouths** (`walled`): somebody at platform level who is over a
+  stair mouth, and not on its top steps, is put back outside it; on the bridge
+  the glass does the same (`contain`). Kolín's mouths stay open as they were.
+* **Landing heights** are read `beyond` the head of a flight: the mapped
+  stairs under it are drawn a step above the paving.
+* **Drawing** (`js/stationkit.js`): boxes and drums instanced per finish, the
+  pattern of a finish (tiles, bricks, roof seams) laid in metres by the
+  fragment shader, every plate of text in one atlas packed at `finish()`, and
+  additive pools of light for the night. One draw call per finish. Finishes
+  that light themselves are turned down as the game opens its exposure after
+  dark (`night(k)`). `pardubice-underpass.js` builds the corridors, flights,
+  plates and boards; `pardubice-platforms.js` the canopies (salmon red from
+  above, as in the aerial photo), brick benches, clocks, names and sector
+  plates; `pardubice-lavka.js` the footbridge; `pardubice-signs.js` holds
+  what is written; `pardubice-station.js` puts them together.
+* **Moving stairs** (`js/station-belts.js`): every tread of a station in one
+  instanced mesh; a belt is a ramp underfoot and carries whoever stands on it.
+* **The campaign** reads its way out of Pardubice from `prologue-route.js
+  wayOut(u)`: the stairs or the moving stairs of the platform between tracks
+  4 and 5, the western underpass, the moving stairs into the hall, the doors
+  to the square. `prologue-tracks.js` is unchanged: the footbridge and its
+  ramps count as floor, so they are allowed inside the yard.

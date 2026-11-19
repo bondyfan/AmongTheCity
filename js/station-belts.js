@@ -1,12 +1,12 @@
 import * as THREE from 'three';
-import { along, lanes, laneAt, flightAt, flightY, local, STEPS, BELT } from './station-layout.js';
+import { along, lanes, laneAt, flightAt, flightY, inRect, local, STEPS, BELT } from './station-layout.js';
 
 // The moving stairs of one station: every tread of every belt in a single
 // instanced mesh, and the push that carries whoever stands on one. A belt is
 // a lane of a flight with `move` set (js/station-layout.js lanes()).
 export function makeBelts(s, group) {
   const belts = [];
-  for (const f of s.flights) for (const lane of lanes(f)) if (lane.move) belts.push({ f, lane });
+  for (const f of [...s.flights, ...s.ramps]) for (const lane of lanes(f)) if (lane.move) belts.push({ f, lane });
   if (!belts.length) return null;
   const mesh = new THREE.InstancedMesh(
     new THREE.BoxGeometry(1, 1, 1),
@@ -20,7 +20,8 @@ export function makeBelts(s, group) {
   function place() {
     let n = 0;
     for (const { f, lane } of belts) {
-      const rise = f.top - s.bottom,
+      const foot = (f.base ?? s.bottom) - s.bottom, // the group stands on the corridor floor
+        rise = f.top - (f.base ?? s.bottom),
         length = f.b - f.a,
         dir = Math.sign(length),
         tread = Math.abs(length) / STEPS,
@@ -31,10 +32,10 @@ export function makeBelts(s, group) {
         const t = (i + (lane.move > 0 ? phase : 1 - phase)) / STEPS,
           p = f.a + length * t;
         if (f.axis === 'u') {
-          pose.position.set(p, rise * t - 0.1, f.c + mid);
+          pose.position.set(p, foot + rise * t - 0.1, f.c + mid);
           pose.scale.set(tread + 0.01, 0.23, wide);
         } else {
-          pose.position.set(f.c - mid, rise * t - 0.1, p);
+          pose.position.set(f.c - mid, foot + rise * t - 0.1, p);
           pose.scale.set(wide, 0.23, tread + 0.01);
         }
         pose.updateMatrix();
@@ -52,7 +53,7 @@ export function makeBelts(s, group) {
       travel += dt * BELT;
       place();
       if (player.inCar || player.boarding || player.ragdoll || !player.grounded) return;
-      const f = flightAt(s, u, v);
+      const f = flightAt(s, u, v) ?? s.ramps.find((ramp) => inRect(ramp.span, u, v));
       if (!f) return;
       const { t, q, dir } = along(f, u, v),
         lane = laneAt(f, q);

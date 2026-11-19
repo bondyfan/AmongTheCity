@@ -1,5 +1,5 @@
 import { chunkKey, pointInPolygon } from './geo.js';
-import { definitions, prepare, local, worldAt, landing, floorAt, nearestInside, inRect, DEPTH } from './station-layout.js';
+import { definitions, prepare, local, worldAt, landing, floorAt, deckAt, nearestOnDeck, nearestInside, fencedOut, inRect, DEPTH } from './station-layout.js';
 import { makeBelts } from './station-belts.js';
 import { kolinPassage } from './station-kolin.js';
 import { pardubiceStation } from './pardubice-station.js';
@@ -32,7 +32,7 @@ function cutMaterial(s, source) {
     const check = s.flights
       .map(({ span: r }) => `(u>${n(r.u0 - 0.01)} && u<${n(r.u1 + 0.01)} && v>${n(r.v0 - 0.01)} && v<${n(r.v1 + 0.01)})`)
       .join(' || ');
-    const { box } = s;
+    const box = s.under;
     shader.fragmentShader =
       'varying vec3 stationPoint; uniform float stationTop;\n' +
       shader.fragmentShader.replace(
@@ -71,13 +71,22 @@ export class StationPassages {
     if (!s.group) {
       if (!this.world.terrain.ready(s.x, s.z)) return;
       for (const f of s.flights) {
-        const p = worldAt(s, landing(f).u, landing(f).v);
+        const top = landing(f, s.beyond),
+          p = worldAt(s, top.u, top.v);
         f.top = this.world.heightAt(p.x, p.z, this.world.terrain.heightAt(p.x, p.z) + 1);
       }
       const tops = s.flights.map((f) => f.top);
       s.tops = new Map(s.flights.map((f) => [f.c, f.top]));
       s.bottom = Math.min(...tops) - DEPTH;
       s.ceiling.value = Math.max(...tops) + 1.5;
+      if (s.deck) {
+        s.deck.y = this.world.terrain.heightAt(s.x, s.z) + s.deck.rise;
+        for (const f of s.ramps) {
+          const p = worldAt(s, ...(f.axis === 'u' ? [f.a, f.c] : [f.c, f.a]));
+          f.base = this.world.heightAt(p.x, p.z, this.world.terrain.heightAt(p.x, p.z) + 1);
+          f.top = s.deck.y;
+        }
+      }
       s.group = builders[s.name](s, this.scene, this.world);
       s.belts = makeBelts(s, s.group);
     }
@@ -97,12 +106,15 @@ export class StationPassages {
     const s = this.nearby(x, z);
     if (!s?.group) return null;
     const { u, v } = local(s, x, z);
-    return floorAt(s, u, v, limit) ?? s.dress?.floor?.(u, v, limit) ?? null;
+    return floorAt(s, u, v, limit) ?? deckAt(s, u, v, limit);
   }
   inside(x, z, y) {
     const s = this.nearby(x, z);
-    if (!s?.group || y > s.bottom + DEPTH + 3) return false;
+    if (!s?.group) return false;
     const { u, v } = local(s, x, z);
+    // up on the footbridge, between its glass walls
+    if (s.deck && y > s.bottom + DEPTH + 3) return deckAt(s, u, v, y + 0.5) !== null && y > s.deck.y - 4;
+    if (y > s.bottom + DEPTH + 3) return false;
     if (floorAt(s, u, v, y + 0.5) !== null && y < s.bottom + DEPTH - 0.22) return true;
     const buildings = this.world.city.chunkIndex.get(chunkKey(x,z))?.buildings;
     return buildings?.some(b => b.t === 'train_station' && pointInPolygon(x,z,b.o)) ?? false;
@@ -137,8 +149,22 @@ export class StationPassages {
     const s = this.nearby(pos.x, pos.z);
     if (!s?.group) return false;
     const { u, v } = local(s, pos.x, pos.z);
-    if (s.dress?.contain?.(pos, u, v, y, r)) return true;
-    if (y > s.bottom + DEPTH - 0.35 || !inRect(s.box, u, v, 1)) return false;
+    if (s.deck && y > s.bottom + DEPTH + 1) {
+      // on the bridge or high on one of its ramps: the glass keeps him on it
+      const on = inRect(s.box, u, v, 2) ? nearestOnDeck(s, u, v, r) : null;
+      if (!on || on.d > 1.2 || on.d < 1e-6 || Math.abs(y - on.y) > 0.9 || on.y - on.base < 1.2) return false;
+      Object.assign(pos, worldAt(s, on.u, on.v));
+      return true;
+    }
+    if (!inRect(s.under, u, v, 1)) return false;
+    if (s.walled) {
+      const out = fencedOut(s, u, v, y, r);
+      if (out) {
+        Object.assign(pos, worldAt(s, out.u, out.v));
+        return true;
+      }
+    }
+    if (y > s.bottom + DEPTH - 0.35) return false;
     const best = nearestInside(s, u, v, r);
     if (!best || best.d > 1.2) return false;
     Object.assign(pos, worldAt(s, best.u, best.v));

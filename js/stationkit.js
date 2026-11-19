@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { EXPOSURE_DAY, EXPOSURE_NIGHT } from './sky.js';
 
 // Building blocks for the permanent station furniture (the Pardubice
 // underpasses, platforms and footbridge): boxes and drums instanced per
@@ -27,7 +28,7 @@ export const FINISH = {
   teal: { color: 0x1f8f86 },
   red: { color: 0xd1241f },
   roof: { color: 0xe07a68, grid: [8, 40], grout: 0xf6e9e2, night: 0 },
-  soffit: { color: 0xc9cdca, grid: [0.5, 40], grout: 0xa8aeaa, night: 0.5 },
+  soffit: { color: 0xc9cdca, grid: [0.5, 40], grout: 0xa8aeaa, lit: 0.22, night: 0.2 },
   yellow: { color: 0xf2c230 },
   white: { color: 0xe6e3da },
   navy: { color: 0x1b2f55, lit: 0.4 },
@@ -52,6 +53,7 @@ function material(name) {
   if (lit) mat.color.multiplyScalar(1 - lit * 0.75);
   mat.userData.night = f.night ?? 0;
   mat.userData.hex = f.color;
+  mat.userData.lit = lit;
   const grid = f.grid,
     grout = new THREE.Color(f.grout ?? f.color);
   mat.onBeforeCompile = (shader) => {
@@ -96,55 +98,61 @@ function material(name) {
 
 // Signs: every plate is a rectangle of one canvas. `draw(ctx, w, h)` paints
 // it with the origin at the plate's corner; `px` is its width in pixels.
-function atlas(parent, size = 2048) {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  const position = [],
-    uv = [],
-    index = [];
-  let x = 0,
-    y = 0,
-    row = 0;
-  const cache = new Map();
-  function slot(key, pw, ph, draw) {
-    if (key && cache.has(key)) return cache.get(key);
-    if (x + pw > size) {
-      x = 0;
-      y += row + 2;
-      row = 0;
-    }
-    if (y + ph > size) return null; // the atlas is full: the plate stays blank
-    const at = { x, y, w: pw, h: ph };
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.beginPath();
-    ctx.rect(0, 0, pw, ph);
-    ctx.clip();
-    draw(ctx, pw, ph);
-    ctx.restore();
-    x += pw + 2;
-    row = Math.max(row, ph);
-    if (key) cache.set(key, at);
-    return at;
-  }
+// Plates are only collected by add(); finish() packs them tallest first into
+// a canvas just high enough, so a late big board never finds the sheet full.
+function atlas(parent, width = 2048) {
+  const slots = new Map(), // key -> { w, h, draw, x, y }
+    plates = [];
+  let unnamed = 0;
   // A plate centred on (cx, cy, cz), facing +z turned by yaw.
   function add(cx, cy, cz, w, h, yaw, px, draw, key = null) {
-    const at = slot(key, px, Math.max(8, Math.round((px * h) / w)), draw);
-    if (!at) return;
-    const c = Math.cos(yaw),
-      s = Math.sin(yaw),
-      base = position.length / 3;
-    for (const [dx, dy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
-      position.push(cx + (dx * w * c) / 2, cy + (dy * h) / 2, cz - (dx * w * s) / 2);
-      uv.push((at.x + (dx > 0 ? at.w : 0)) / size, 1 - (at.y + (dy > 0 ? 0 : at.h)) / size);
-    }
-    index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    key ??= 'plate' + unnamed++;
+    if (!slots.has(key)) slots.set(key, { w: px, h: Math.max(8, Math.round((px * h) / w)), draw });
+    plates.push({ cx, cy, cz, w, h, yaw, slot: slots.get(key) });
   }
   let mesh = null,
     map = null;
   function finish() {
-    if (!index.length) return;
+    if (!plates.length) return;
+    let x = 0,
+      y = 0,
+      row = 0;
+    for (const slot of [...slots.values()].sort((a, b) => b.h - a.h)) {
+      if (x + slot.w > width) {
+        x = 0;
+        y += row + 2;
+        row = 0;
+      }
+      Object.assign(slot, { x, y });
+      x += slot.w + 2;
+      row = Math.max(row, slot.h);
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = Math.min(4096, 2 ** Math.ceil(Math.log2(y + row + 2)));
+    const ctx = canvas.getContext('2d');
+    for (const slot of slots.values()) {
+      ctx.save();
+      ctx.translate(slot.x, slot.y);
+      ctx.beginPath();
+      ctx.rect(0, 0, slot.w, slot.h);
+      ctx.clip();
+      slot.draw(ctx, slot.w, slot.h);
+      ctx.restore();
+    }
+    const position = [],
+      uv = [],
+      index = [];
+    for (const { cx, cy, cz, w, h, yaw, slot } of plates) {
+      const c = Math.cos(yaw),
+        s = Math.sin(yaw),
+        base = position.length / 3;
+      for (const [dx, dy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        position.push(cx + (dx * w * c) / 2, cy + (dy * h) / 2, cz - (dx * w * s) / 2);
+        uv.push((slot.x + (dx > 0 ? slot.w : 0)) / width, 1 - (slot.y + (dy > 0 ? 0 : slot.h)) / canvas.height);
+      }
+      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(position, 3));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
@@ -155,13 +163,15 @@ function atlas(parent, size = 2048) {
     mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map }));
     mesh.frustumCulled = false;
     parent.add(mesh);
+    return canvas.height;
   }
   function dispose() {
     mesh?.geometry.dispose();
     mesh?.material.dispose();
     map?.dispose();
   }
-  return { add, finish, dispose };
+  const dim = (k) => mesh?.material.color.setScalar(k);
+  return { add, finish, dim, dispose };
 }
 
 // A plate of text: lines of equal height, centred.
@@ -220,7 +230,7 @@ export function stationKit(parent) {
       if (FINISH[name].glass) mesh.renderOrder = 2;
       parent.add(mesh);
       meshes.push(mesh);
-      if (mat.userData?.night) nightly.push(mat);
+      if (mat.userData?.night || mat.userData?.lit) nightly.push(mat);
     }
     batches.clear();
     signs.finish();
@@ -253,9 +263,13 @@ export function stationKit(parent) {
     }
   }
   // 0 by day, 1 at night: the pools on the paving and whatever the lamps reach.
+  // The game opens its exposure after dark (js/sky.js), which would blow out
+  // anything that lights itself, so that is turned down by as much.
   function night(k) {
+    const dim = Math.pow(EXPOSURE_DAY / EXPOSURE_NIGHT, k);
     if (pool) pool.mat.opacity = 0.5 * k;
-    for (const mat of nightly) mat.emissive.setHex(mat.userData.hex).multiplyScalar(mat.userData.night * k);
+    for (const mat of nightly) mat.emissive.setHex(mat.userData.hex).multiplyScalar((mat.userData.lit + mat.userData.night * k) * dim);
+    signs.dim(dim);
   }
   function dispose() {
     for (const m of meshes) {

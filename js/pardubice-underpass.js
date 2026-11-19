@@ -95,7 +95,9 @@ function flight(s, k, f) {
   }
   const well = f.kind === 'hall';
   for (const side of [-f.half, f.half]) {
-    put(mid, rise / 2, side + Math.sign(side) * (WALL / 2), run, rise, WALL, well ? 'blacktile' : 'tile');
+    put(mid, rise / 2, side + Math.sign(side) * (WALL / 2), run, rise, WALL, 'tile');
+    // (in the hall the wells are edged in the building's black ceramic)
+    if (well) put(mid, rise - 0.3, side + Math.sign(side) * (WALL / 2 - 0.01), run, 0.6, WALL, 'blacktile');
     if (well) {
       // a glass balustrade round the opening in the hall floor
       put(mid, rise + 0.5, side, run, 0.9, 0.03, 'glass');
@@ -164,6 +166,9 @@ function boards(s, k) {
     k.both(axis, 2.62, v0 + 4.5, 2.4, 0.34, Math.PI, 512, plate(['↑  Hala · Východ · náměstí Jana Pernera'], '#1b2f55'), 'out', 0.02);
     k.sign(axis, 2.1, v1 - 0.02, 2.4, 0.5, Math.PI, 512, plate(['Koleje 10 · 11', '←   →'], '#1b2f55'), 'end');
   }
+  // round the corner the eastern underpass takes under the hall
+  k.sign(36.8 - HALF + 0.03, 2.1, -23.7, 2.6, 0.5, Math.PI / 2, 512, plate(['Koleje 1 až 11  →', 'Výtahy  →'], '#1b2f55'), 'corner');
+  k.sign(B + HALF - 0.03, 2.1, -23.7, 2.6, 0.5, -Math.PI / 2, 512, plate(['←  Hala · Východ', 'Koleje 1 až 11  ↓'], '#1b2f55'), 'corner2');
   // the plaque of the aviator Jan Kašpar, which hangs in the underpass
   k.box(A - HALF + 0.02, 1.7, 9, 0.04, 0.84, 0.64, 'dark');
   k.sign(A - HALF + 0.045, 1.7, 9, 0.56, 0.76, Math.PI / 2, 192, plate(['JAN KAŠPAR', '1883–1927', 'první český', 'aviatik'], '#6b5234', '#e9d7a8', 600), 'kaspar');
