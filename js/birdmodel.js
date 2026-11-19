@@ -19,7 +19,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from '../libs/BufferGeometryUtils.js';
 
 /** Instances the one mesh holds: perched, flying and passing overhead together. */
-export const BIRD_MAX = 260;
+export const BIRD_MAX = 420;
 
 // where a wing is hinged, in the bird's own frame (the shader needs the same)
 const ROOT_X = 0.04, ROOT_Y = 0.132, ROOT_Z = -0.022;

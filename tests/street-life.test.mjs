@@ -46,7 +46,8 @@ test('a flock is a pure function of its place: same answer in any order, on any 
 test('the birds keep the hours of birds, and each kind keeps to its country', () => {
   assert.equal(S.dayK(13, KIND.GROUND), 1);
   assert.equal(S.dayK(1, KIND.GROUND), 0, 'nothing pecks about on the pavement at night');
-  assert.ok(S.dayK(1, KIND.LAMP) > 0 && S.dayK(1, KIND.LAMP) < 0.5, 'a few asleep on the lamps');
+  assert.ok(S.dayK(1, KIND.LAMP) >= 0.4 && S.dayK(1, KIND.LAMP) < 0.7, 'half of them asleep on the lamps: a night is a third of every session');
+  assert.equal(S.dayK(1, KIND.SIGN), S.dayK(1, KIND.LAMP), 'and on the signs');
   assert.ok(S.dayK(20.2, KIND.GROUND) < 1 && S.dayK(20.2, KIND.GROUND) > 0, 'dusk thins them');
   const tally = (ctx, kind) => {
     const n = {};
@@ -113,11 +114,11 @@ test('the flocks overhead are a closed form of the shared clock', () => {
       air++;
     }
   }
-  assert.ok(flights > 15 && flights < 55 && air > 100);
+  assert.ok(flights > 40 && flights <= 60 && air > 100, `most slots send a flock over by day (${flights} of 60)`);
   assert.equal(S.skyFlight(3, -2, 120, { urban: 0.7, hour: 12, })?.seed, S.skyFlight(3, -2, 120, { urban: 0.7, hour: 12 })?.seed);
   let night = 0;
   for (let slot = 0; slot < 200; slot++) if (S.skyFlight(0, 0, slot, { hour: 1 })) night++;
-  assert.ok(night < 60, 'few fly at night');
+  assert.equal(night, 0, 'nothing crosses the sky at night');
 });
 
 // ------------------------------------------------------------------ flight ----
@@ -224,6 +225,14 @@ test('perches: in their own chunk, out of the houses, each where its fixture sta
   const wires = by(KIND.WIRE);
   assert.ok(wires.length >= 3);
   for (const w of wires) assert.ok(Math.abs(w.y - (2 + 5.5 + 0.035)) < 1e-9 && Math.abs(w.z - 100) < 3);
+  // the pavement beside the residential street (7 m wide at x = 60): behind its kerb, on either side
+  const K = by(KIND.GROUND).filter((c) => c.kerb);
+  assert.ok(K.length >= 2, 'somebody driving down the street passes birds');
+  for (const c of K) {
+    const off = Math.min(Math.abs(Math.abs(c.x - 60) - 4.8), Math.abs(Math.abs(c.z - 100) - 6.3));
+    assert.ok(off < 1e-6, `a step behind the kerb, not on the asphalt (${c.x.toFixed(1)}, ${c.z.toFixed(1)})`);
+    assert.ok(!c.road);
+  }
   // the ground: some, and none inside the house the second footway runs through
   const G = by(KIND.GROUND);
   assert.ok(G.length >= 4);
@@ -357,6 +366,22 @@ test('the hour is a new answer about the same places: night sends the ground flo
   run(birds, 12, { x: 1500, z: 60 });
   run(birds, 12, here);
   assert.equal(birds.count - birds.sky.rows, day, 'in the morning the same flocks are back');
+});
+
+test('a flock on the pavement sits through the traffic, and goes for the car that comes at it', () => {
+  const { birds } = birdWorld();
+  const here = { x: 60, z: 60 };
+  run(birds, 2, here);
+  const f = [...birds.flocks.values()].find((q) => q.birds && q.state === 'sit' && Math.hypot(q.x - here.x, q.z - here.z) > 12);
+  assert.ok(f && !f.cand.road, 'a flock on a footway');
+  f.roam = 1e9;
+  const th = (car) => ({ x: here.x, z: here.z, speed: 0, inCar: false, car: null, cars: [car], peds: [] });
+  // fifty kilometres an hour, three metres away: the near lane of the street beside it
+  run(birds, 1, here, th({ x: f.x + 3, z: f.z, speed: 14 }));
+  assert.equal(f.state, 'sit', 'used to it');
+  // the same car a metre from them
+  run(birds, 0.4, here, th({ x: f.x + 1, z: f.z, speed: 14 }));
+  assert.notEqual(f.state, 'sit', 'not used to that');
 });
 
 test('switched off, the birds cost nothing and show nothing', () => {

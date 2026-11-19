@@ -29,7 +29,7 @@ import { MODE, makeBird, launch, stepBird, routeTo, routeAway, routeHop } from '
 import { roofTopAt } from './birdperches.js';
 import { scanStep } from './birdscan.js';
 import { BirdSky } from './birdsky.js';
-import { storyFlutter } from './audio.js';
+import { sfxAt } from './audio.js';
 
 const ON_R = 105, OFF_R = 140;          // a flock gets its rows inside ON_R and keeps them to OFF_R
 const SKY_ROWS = 44;                    // rows kept back for the flocks passing overhead
@@ -233,12 +233,15 @@ export class Birds {
     return best;
   }
 
+  // The wings: a recording by how many went up and of what (scripts/
+  // gen-bird-audio.mjs), placed where the flock was, so it is heard from the
+  // side it happened on and fades with distance like every other street sound.
   _flutter(f, hard) {
-    if (this._t - this._soundT < 0.4 || !this._ears) return;
-    const d = Math.hypot(f.x - this._ears.x, f.z - this._ears.z);
-    if (d > 32) return;
+    if (this._t - this._soundT < 0.3) return;
     this._soundT = this._t;
-    storyFlutter((hard ? 0.13 : 0.06) * (1 - d / 32) * Math.min(1, 0.3 + f.n / 8) * f.sp.size, Math.min(12, 3 + f.n));
+    const name = f.species === 'sparrow' ? 'birds_takeoff_small' : f.species === 'crow' ? 'birds_takeoff_crow'
+      : f.n <= 1 ? 'birds_takeoff_one' : f.n <= 5 ? 'birds_takeoff_few' : 'birds_takeoff_flock';
+    sfxAt(name, hard ? 1 : 0.55, f.x, f.z, 75);
   }
 
   // ---- who is too near -------------------------------------------------------------
@@ -266,9 +269,14 @@ export class Birds {
         if (pd < r && (up < 1 || ps > 3.4)) { this._flushFlock(f, px, pz, ps > 2.3 || up > 1 || nerve > 1.2); continue; }
       }
       if (up < 3.2) {
+        // A flock ON the carriageway goes well before the bumper. One on the
+        // pavement is used to traffic: it sits while cars pass and goes only
+        // for one that all but mounts the kerb, or the street would be empty.
+        const onRoad = up < 1 && !!f.cand.road;
         let hit = null;
         for (const c of cars) {
-          const sp = Math.abs(c.speed), r = Math.min(15, 4.5 + 0.5 * sp) * nerve * (up > 1 ? 0.4 : 1);
+          const sp = Math.abs(c.speed);
+          const r = onRoad ? Math.min(15, 4.5 + 0.5 * sp) * nerve : up > 1 ? (1.8 + 0.2 * sp) * nerve * 0.4 : 1.5 + 0.07 * sp;
           if (Math.hypot(f.x - c.x, f.z - c.z) < r && (up < 1 || sp > 8)) { hit = c; break; }
         }
         if (hit) { this._flushFlock(f, hit.x, hit.z, true); continue; }
@@ -328,7 +336,7 @@ export class Birds {
         }
       } else if (f.state === 'sit' && !asleep && (f.roam -= 0.25) <= 0) {
         // nobody scared them: they just go and sit somewhere else for a while
-        f.roam = 70 + 220 * rnd01(hash32(f.seed, this._t | 0, 3));
+        f.roam = 35 + 115 * rnd01(hash32(f.seed, this._t | 0, 3));
         const a = rnd01(hash32(f.seed, this._t | 0, 4)) * 6.283;
         if (Math.hypot(f.x - focus.x, f.z - focus.z) < 95) this._flushFlock(f, f.x + Math.cos(a) * 3, f.z + Math.sin(a) * 3, true);
       }
