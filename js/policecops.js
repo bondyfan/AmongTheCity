@@ -43,6 +43,7 @@
 import * as THREE from 'three';
 import { makeCitizen } from './citizen.js';
 import { FIRE_R } from './policetune.js';
+import { sameLevel } from './levelsep.js';
 
 const POOL_N = 10;              // 5 units × 2 officers, the most there can be
 const EXIT_T = 0.6;
@@ -268,6 +269,7 @@ export class Officers {
     const dx = r.x - c.x, dz = r.z - c.z;
     const a = dx * fx + dz * fz, b = dx * -fz + dz * fx;
     if (Math.abs(a) > (c.len ?? 4.4) / 2 + 0.35 || Math.abs(b) > (c.wid ?? 1.8) / 2 + 0.3) return;
+    if (!sameLevel(c.y, r.y)) return;      // the car is on the deck over him, or under his bridge
     r.state = 'down'; r.aimK = 0;
     this.stats.downs++;
     if (r.body) {

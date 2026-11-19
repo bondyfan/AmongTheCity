@@ -24,6 +24,7 @@
 import { inZone } from './cycleplan.js';
 import { CLS } from './cyclenet.js';
 import { SHIFT_V } from './cyclistride.js';
+import { sameLevel } from './levelsep.js';
 
 const BRK_EASY = 1.6;                 // what a rider plans a stop with
 const CLEAR = 0.9;                    // m of room a walker is given
@@ -51,9 +52,10 @@ function bears(car, c, need) {
 let _cap = 0, _shiftT = 0, _minS = 0, _maxS = 0;
 
 // something as wide as a car, at (cx, cz) heading h with speed sp along it
-function carAhead(r, cx, cz, h, sp, len, wid, look) {
+function carAhead(r, cx, cz, h, sp, len, wid, look, cy) {
   const rx = cx - r.x, rz = cz - r.z;
   if (rx > 34 || rx < -34 || rz > 34 || rz < -34) return;
+  if (!sameLevel(r.y, cy, 20)) return;          // the car is on another level (js/levelsep.js)
   const fwd = rx * r.dx + rz * r.dz;
   if (fwd < 0 || fwd > look + len) return;
   const lat = rz * r.dx - rx * r.dz;
@@ -191,7 +193,7 @@ export function senseStep(sys, r, pc, foot) {
     } else if (de < v * v / (2 * BRK_EASY) + 4) {
       const need = Math.min(8, (c.a1 - c.a0) / Math.max(2.2, s.v0 * 0.7) + 1.2);
       const unsafe = r.holdT < HOLD_MAX
-        && (bears(pc, c, need) || (sys.traffic ? sys.traffic.threatens(c.cx, c.cz, c.hw, need, !c.give) : false));
+        && (bears(pc, c, need) || (sys.traffic ? sys.traffic.threatens(c.cx, c.cz, c.hw, need, !c.give, r.y) : false));
       if (unsafe) {
         const k = Math.sqrt(2 * BRK_EASY * Math.max(0, de - 0.9));
         if (k < _cap) _cap = k;
@@ -211,8 +213,8 @@ export function senseStep(sys, r, pc, foot) {
   // ---- cars ----
   const look = v * v / (2 * 2.2) + 6;
   const cars = sys.traffic?.cars;
-  if (cars) for (const car of cars) carAhead(r, car.x, car.z, car.heading, car.speed ?? 0, car.len ?? 4.4, car.wid ?? 1.8, look);
-  if (pc && !(cars && cars.has?.(pc))) carAhead(r, pc.x, pc.z, pc.heading, pc.speed ?? 0, pc.len ?? 4.4, pc.wid ?? 1.8, look);
+  if (cars) for (const car of cars) carAhead(r, car.x, car.z, car.heading, car.speed ?? 0, car.len ?? 4.4, car.wid ?? 1.8, look, car.y);
+  if (pc && !(cars && cars.has?.(pc))) carAhead(r, pc.x, pc.z, pc.heading, pc.speed ?? 0, pc.len ?? 4.4, pc.wid ?? 1.8, look, pc.y);
 
   // ---- people, riders slower than this one, and cars somebody left standing ----
   _on = 0;

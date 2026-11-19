@@ -216,7 +216,17 @@ export function siblingTop(x, z, f, entries, terrain) {
 
 // ---- how far a face runs ----------------------------------------------------------
 const STEPS = [0.15, 0.4, 0.8, 1.5, 2.5, 3.5, FACE_MAX];
-const _run = { e: 0, y: 0, toe: 0 };
+const _run = { e: 0, y: 0, toe: 0, wall: 0 };
+// AN ABUTMENT, NOT A SAIL. Where another way holds the ground down beside
+// this one (the cutting of a street under a railway bridge is wider than the
+// bridge, so the last metres of the track's bank stand over the street's
+// floor) the batter never reaches the ground: the face ran its 4.5 m into the
+// air and a toe hung from its end, a dark triangular sheet beside every such
+// bridge. A bank that cannot be built is a WALL: straight down from the edge
+// of the deck to the ground under it, in concrete.
+const WALL_RUN = 0.2;             // m: the lip between the deck edge and the wall
+const WALL_DROP = 0.6;            // m the foot of a full-length face may hang over the ground
+export const WALL_COL = [0.27, 0.26, 0.24];   // (0x8f8c86, the bridge supports' concrete)
 /**
  * The face from edge point (px, pz) at deck level Y, out along unit (nx, nz):
  * down at 1:BATTER until it is under the drawn ground there. Into _run: `e` the
@@ -227,6 +237,7 @@ const _run = { e: 0, y: 0, toe: 0 };
 export function faceRun(px, pz, nx, nz, Y, entries, terrain, shaped) {
   let pe = 0;
   let ph = Y - (groundUnder(px, pz, terrain.heightAt(px, pz), entries, terrain, shaped) - 0.02);
+  _run.wall = 0;
   if (ph <= 0) { _run.e = 0; _run.y = Y; _run.toe = Y; return _run; }
   let G;
   for (const e of STEPS) {
@@ -241,6 +252,13 @@ export function faceRun(px, pz, nx, nz, Y, entries, terrain, shaped) {
     pe = e; ph = h;
   }
   _run.e = FACE_MAX; _run.y = Y - FACE_MAX / BATTER;
+  if (_run.y - G > WALL_DROP) {
+    // the bank cannot be built: a wall at the deck's edge (see WALL_RUN)
+    const x = px + nx * WALL_RUN, z = pz + nz * WALL_RUN;
+    _run.e = WALL_RUN; _run.y = Y - WALL_RUN / BATTER; _run.wall = 1;
+    _run.toe = groundUnder(x, z, terrain.heightAt(x, z), entries, terrain, shaped) - 0.05;
+    return _run;
+  }
   _run.toe = Math.min(_run.y - 0.12, G - 0.05);
   return _run;
 }
@@ -281,6 +299,7 @@ function wallQuad(sink, ax, az, bx, bz, yTa, yTb, yBa, yBb, fx, fz, r, g, b) {
 export function vergeFacesInto(sink, f, q, per, ys, hw, terrain, entries, shaped, col, kerbed = null) {
   const n = q.length;
   const run = new Float32Array(n * 2), fy = new Float32Array(n * 2), ty = new Float32Array(n * 2);
+  const wl = new Uint8Array(n * 2);
   for (let i = 0; i < n; i++) {
     for (let s = 0; s < 2; s++) {
       const e = s ? 1 : -1, nx = per[i][0] * e, nz = per[i][1] * e;
@@ -291,7 +310,7 @@ export function vergeFacesInto(sink, f, q, per, ys, hw, terrain, entries, shaped
       // the edge lies on a sibling's deck within SIB_EPS: nothing to face
       if (siblingTop(px, pz, f, entries, terrain) >= Y - SIB_EPS) { run[o] = 0; fy[o] = Y; ty[o] = Y; continue; }
       const r = faceRun(px, pz, nx, nz, Y, entries, terrain, shaped);
-      run[o] = r.e; fy[o] = r.y; ty[o] = r.toe;
+      run[o] = r.e; fy[o] = r.y; ty[o] = r.toe; wl[o] = r.wall;
     }
   }
   const [cr, cg, cb] = col;
@@ -305,7 +324,9 @@ export function vergeFacesInto(sink, f, q, per, ys, hw, terrain, entries, shaped
       const F0x = X0 + ax * run[a], F0z = Z0 + az * run[a], F1x = X1 + bx * run[b], F1z = Z1 + bz * run[b];
       upQuad(sink, X0, ys[i], Z0, X1, ys[i + 1], Z1, F1x, fy[b], F1z, F0x, fy[a], F0z, cr, cg, cb);
       // the toe: into the ground, so no crease of it opens a slit under the face
-      wallQuad(sink, F0x, F0z, F1x, F1z, fy[a], fy[b], ty[a], ty[b], ax + bx, az + bz, cr * 0.82, cg * 0.82, cb * 0.82);
+      // (or the abutment wall, where the bank could not be built)
+      if (wl[a] || wl[b]) wallQuad(sink, F0x, F0z, F1x, F1z, fy[a], fy[b], ty[a], ty[b], ax + bx, az + bz, WALL_COL[0], WALL_COL[1], WALL_COL[2]);
+      else wallQuad(sink, F0x, F0z, F1x, F1z, fy[a], fy[b], ty[a], ty[b], ax + bx, az + bz, cr * 0.82, cg * 0.82, cb * 0.82);
     }
   }
 }
@@ -355,6 +376,7 @@ function bedNeighbour(f, x, z, nx, nz, ux, uz, entries, terrain) {
 export function railShouldersInto(sink, f, q, per, g, terrain, entries, shaped, col) {
   const n = q.length;
   const off = new Float32Array(n * 2), fy = new Float32Array(n * 2), ty = new Float32Array(n * 2);
+  const wl = new Uint8Array(n * 2);
   for (let i = 0; i < n; i++) {
     const j = Math.min(i + 1, n - 1), k = j === i ? i - 1 : i;
     let ux = q[j][0] - q[k][0], uz = q[j][1] - q[k][1];
@@ -374,6 +396,7 @@ export function railShouldersInto(sink, f, q, per, g, terrain, entries, shaped, 
       const r = faceRun(px, pz, nx, nz, Y, entries, terrain, shaped);
       off[o] = RAIL_HALF + Math.max(0.15, r.e);
       fy[o] = r.e > 0 ? r.y : Y - 0.1; ty[o] = r.e > 0 ? r.toe : Y - 0.22;
+      wl[o] = r.wall;
     }
   }
   const [cr, cg, cb] = col;
@@ -388,7 +411,9 @@ export function railShouldersInto(sink, f, q, per, g, terrain, entries, shaped, 
       const F1x = q[i + 1][0] + bx * off[b], F1z = q[i + 1][1] + bz * off[b];
       upQuad(sink, X0, ya, Z0, X1, yb, Z1, F1x, fy[b], F1z, F0x, fy[a], F0z, cr, cg, cb);
       if (ty[a] < fy[a] || ty[b] < fy[b]) {
-        wallQuad(sink, F0x, F0z, F1x, F1z, fy[a], fy[b], ty[a], ty[b], ax + bx, az + bz, cr * 0.86, cg * 0.86, cb * 0.86);
+        const w = wl[a] || wl[b];       // an abutment wall is concrete, a toe is ballast
+        wallQuad(sink, F0x, F0z, F1x, F1z, fy[a], fy[b], ty[a], ty[b], ax + bx, az + bz,
+          w ? WALL_COL[0] : cr * 0.86, w ? WALL_COL[1] : cg * 0.86, w ? WALL_COL[2] : cb * 0.86);
       }
     }
   }

@@ -36,6 +36,7 @@ import { Chatter, voiceOf } from './chatter.js';
 import * as wallet from './wallet.js';
 import * as vitals from './vitals.js';
 import { shouldEject, launchDamage, impactDamage } from './ejection.js';
+import { sameLevel } from './levelsep.js';
 import * as fuel from './fuel.js';
 import { indexPumps, pumpAt as pumpAtForecourt } from './pumps.js';
 import * as statusbar from './statusbar.js';
@@ -909,16 +910,19 @@ function flareAmount() {
 // ---------- enter / exit cars ----------
 function nearestEnterableCar() {
   let best = null, bd = 3.4;
-  const px = player.pos.x, pz = player.pos.z;
+  const px = player.pos.x, pz = player.pos.z, py = player.y;
   if (meeting?.ready && Math.hypot(meeting.car.x - px, meeting.car.z - pz) < bd)
     return meeting.car;
   for (const c of parked) {
+    // (a car on the deck overhead, or in the street under this bridge, has
+    // no door within reach: js/levelsep.js)
+    if (!sameLevel(py, c.y)) continue;
     const d = Math.hypot(c.x - px, c.z - pz);
     if (d < bd) { bd = d; best = c; }
   }
   if (traffic) for (const c of traffic.cars) {
     // a ghost is on borrowed time and belongs to nobody — the door is locked
-    if (isGhostCar(c)) continue;
+    if (isGhostCar(c) || !sameLevel(py, c.y)) continue;
     const d = Math.hypot(c.x - px, c.z - pz);
     // moving traffic must slow right down before you can yank the door
     if (d < bd && Math.abs(c.speed) < 3) { bd = d; best = c; }
@@ -1940,10 +1944,12 @@ function trafficTimeK(t01) {
 // twenty fresh little objects a frame is 1200 allocations a second for nothing.
 const _actors = [];
 const _actorPool = [];
-function pushActor(x, z, half) {
+// (`y`: the height they stand at. The traffic of another level, the street
+// under the bridge you are on, does not brake for you: js/levelsep.js.)
+function pushActor(x, z, half, y) {
   if (!Number.isFinite(x) || !Number.isFinite(z)) return;
-  const a = _actorPool[_actors.length] ??= { x: 0, z: 0, half: 0 };
-  a.x = x; a.z = z; a.half = half;
+  const a = _actorPool[_actors.length] ??= { x: 0, z: 0, half: 0, y: NaN };
+  a.x = x; a.z = z; a.half = half; a.y = Number.isFinite(y) ? y : NaN;
   _actors.push(a);
 }
 function updateActors() {
@@ -1957,8 +1963,8 @@ function updateActors() {
   // player takes off, and the traffic on both screens stops agreeing along the
   // whole flight path. Fliers are not on the road; nobody's are.
   const flying = !!(game.heli || game.jet || player.inCar?.airborne);
-  if (game.car) pushActor(game.car.x, game.car.z, 3.9);
-  else if (!flying) pushActor(player.pos.x, player.pos.z, 2.3);
+  if (game.car) pushActor(game.car.x, game.car.z, 3.9, game.car.y);
+  else if (!flying) pushActor(player.pos.x, player.pos.z, 2.3, player.y);
   if (!net) return _actors;
   for (const [uid, r] of net.remotes) {
     const p = ghosts?.pose(uid);
@@ -1974,8 +1980,8 @@ function updateActors() {
     const vk = r.state?.veh?.k;
     if (vk === 'heli' || vk === 'jet') continue;
     if (p && !p.riding) {
-      if (p.kind !== 'heli') pushActor(p.x, p.z, 3.9);
-    } else if (!p) pushActor(r.x, r.z, 2.3);
+      if (p.kind !== 'heli') pushActor(p.x, p.z, 3.9, p.y);
+    } else if (!p) pushActor(r.x, r.z, 2.3, r.y);
   }
   return _actors;
 }
@@ -1992,7 +1998,7 @@ function updateBlockers() {
     const dx = c.x - px, dz = c.z - pz;
     if (dx * dx + dz * dz > 400 * 400) continue;
     if (inKerbStall(c)) continue;   // at the kerb, out of the lane: traffic steers round (traffic.kerbOf)
-    _blockers.push({ x: c.x, z: c.z, half: (c.len ?? 4.4) / 2 + 0.35 });
+    _blockers.push({ x: c.x, z: c.z, half: (c.len ?? 4.4) / 2 + 0.35, y: c.y });
   }
   if (police) for (const b of police.blockers) _blockers.push(b);   // a stopped unit, officers on foot
   return _blockers;

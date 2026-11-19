@@ -1022,7 +1022,7 @@ export function bridgeDeckHeight(way, dist, terrain) {
         const link = end === 0 ? w._ap0 : w._ap1;
         const y = link && (railDeck ? railGradeY : roadGradeY)(link.road, link.at, terrain);
         if (y !== null && y !== undefined) return y;
-        const yn = link ? null : deckNodeLevel(w, end, terrain);
+        const yn = link ? null : deckNodeLevel(w, end, terrain, railDeck ? railGradeY : roadGradeY);
         if (yn !== null) return yn;
         const p = w.p[end === 0 ? 0 : w.p.length - 1];
         return terrain.heightAt(p[0], p[1]);

@@ -1573,6 +1573,47 @@ and merged; these are the rules they agreed on.
   hard (`geo.junctionY`); minor roads, overlaps and level crossings
   (`js/levelxing.js`) adapt to it. A line is final only once its window's data
   and height tiles have all answered.
+* **Levels: bridges and underpasses** (`js/levelsep.js`, `js/roadpose.js`,
+  `js/drawnground.js`, all pure and worker safe, 18 Nov 2026). Three rules.
+  (1) Two things on different LEVELS do not meet. Every contact, blocking,
+  following and giving-way test used to be a plan test in x and z; each now
+  also asks `sameLevel(ya, yb, dist)` (heights where the two STAND differ by at
+  most 2.4 m, plus 8 % of the plan distance) or `inBand` for a tall body (a
+  tram's stand-in, a lamp mast). That is `vehicles.carCarPass` and `polePass`,
+  the hull block of `city.collide` (the asker's level is `opts.y ?? opts.yLo ??
+  opts.aboveY`), `poles.collide/strike(…, y)`, in traffic.js the follow and
+  crossing loop, the give-way box, the walkers and `threatens(…, y)`, and the
+  obstacle list `_obst`, which is now FOUR numbers per hull (x, z, half, y;
+  NaN: not told, separates nothing). Everybody who feeds it sends a `y`:
+  `main.js pushActor` and `updateBlockers`, `police.blockers`, the cyclists'
+  `block` and `note`, the trams' hull points, the walkers' crossing records.
+  A new producer or consumer must carry the height too. An unknown height
+  never separates, so an old caller behaves as before.
+  (2) An AI car lies along its ROAD. Its height always came off the road
+  (levelled grade or deck at its arclength), its attitude came off the terrain
+  under its corners, which under a deck is the valley and in a cutting the
+  grid's arch. traffic.js now writes `p.sg` (`roadpose.deckSlope`, signed
+  along travel) and `vehicles.update` pitches by it, no roll; a car with
+  another kind of driver asks `world.surfaceY` at its own level. A few times a
+  second a car also asks the surface drawn at its wheels and is lifted onto a
+  sheet lying over its road (`surfaceLift`: a slip road inside its
+  carriageway, a junction pad), never by a whole step.
+  (3) A prop stands on the ground that is DRAWN. The grid cannot hold a 9 m
+  cutting between 20 m samples; the ground mesh is clamped under every
+  corridor and the feet stand on that, but fences, lamp columns, signs,
+  benches and trees asked the grid (2.8 m over the pavement in the Jana
+  Palacha underpass). `drawnGround(terrain, corr)` answers `heightAt` by the
+  mesher's own per-vertex rule (`batter.groundUnder`); buildChunkMeshesGen
+  makes one per chunk from the corridor list it already had and hands it to
+  `standingOn`, `barrierInto`, the sink's drape and the trees. It is not a
+  Terrain: grades are still asked with the real one (the levelling caches
+  compare it by identity). No street lamp is planted under a deck lower than
+  its column (`roadpose.deckOver`, in `lampSpots`, so the far lights agree).
+  And a rail joint on a bridge (a set of points: three decks sharing a node)
+  holds the level of the structure's approaches like a road's joint does
+  (`underpass.deckNodes(…, rail)`): left to the ground under it, the bridge
+  over Jana Palacha dived 8.8 m into the street. Pinned by
+  tests/levels.test.mjs.
 * **Trams** (`js/trams.js`, `js/tramlines.js`). A tram's position is a pure
   function of route id, trip number and the shared clock: no state that two
   co-op clients could disagree on, no Math.random. A tram yields to a car on its
