@@ -2154,10 +2154,19 @@ that makes people run also puts the birds up.
   them back past 140 m; the pool is 260 rows including the flocks that only
   pass overhead (`birdsky.js`, a closed form of the shared clock).
 * **What scares them.** The player on foot (a hop of a few metres when
-  strolling, the whole flock up when running), any car by its speed, a walker
-  passing through (a hop), and any bang. A bird on a lamp, a wire or a roof
-  ignores the street and goes only for a bang. Scared flocks land on a free
-  perch nearby or leave for a minute; flocks also move about on their own.
+  strolling, the whole flock up when running), a car that comes AT them (a
+  flock on the carriageway goes well before the bumper; one on the pavement
+  sits through the traffic), a walker passing through (a hop), and any bang.
+  A bird on a lamp, a wire or a roof ignores the street and goes only for a
+  bang. Scared flocks land on a free perch nearby or leave for a minute;
+  flocks also move about on their own. The wings are recordings
+  (`scripts/gen-bird-audio.mjs`, ElevenLabs: one bird, a few, a flock,
+  sparrows, a crow), played from where the flock was.
+* **Seen from a car.** A game day is 24 minutes, so the night keeps half of
+  the birds on lamps, signs and wires; birds are drawn a fifth over life size;
+  and the roadside has its own perches: lamp arms, the tops of trolley masts
+  (measured off the mast's own geometry), and patches of pavement a step
+  behind the kerb on both sides of a street.
 * **Dogs** (`dogs.js`, `dogwalk.js`). A dog belongs to its owner's body and
   arrives and leaves with it, under the crowd's own no-pop rule. It heels,
   pulls until the lead is tight, stops to sniff and is waited for, sits when
