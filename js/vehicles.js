@@ -201,13 +201,18 @@ function drawBadge(brand) {
       x.closePath(); x.fill();
     }
     disc(8, '#d7dde4');
-  } else if (brand === 'tesla') {
-    // the T on transparent ground: curved top bar + tapering blade
-    x.fillStyle = '#d8dde3';
-    x.beginPath(); x.moveTo(18, 36); x.quadraticCurveTo(64, 20, 110, 36);
-    x.lineTo(102, 50); x.quadraticCurveTo(64, 36, 26, 50); x.closePath(); x.fill();
-    x.beginPath(); x.moveTo(52, 40); x.quadraticCurveTo(64, 46, 76, 40);
-    x.lineTo(68, 112); x.lineTo(60, 112); x.closePath(); x.fill();
+  } else if (brand === 'tesla' || brand === 'teslaTi') {
+    // the T on transparent ground: curved top bar + tapering blade.
+    // teslaTi is the Roadster's: dark titanium with a bright edge, because most
+    // Roadsters are white and a silver T on white paint cannot be seen.
+    const ti = brand === 'teslaTi';
+    const bar = () => { x.beginPath(); x.moveTo(18, 36); x.quadraticCurveTo(64, 20, 110, 36);
+      x.lineTo(102, 50); x.quadraticCurveTo(64, 36, 26, 50); x.closePath(); };
+    const blade = () => { x.beginPath(); x.moveTo(52, 40); x.quadraticCurveTo(64, 46, 76, 40);
+      x.lineTo(68, 112); x.lineTo(60, 112); x.closePath(); };
+    if (ti) { x.strokeStyle = '#d8dde3'; x.lineWidth = 5; x.lineJoin = 'round'; bar(); x.stroke(); blade(); x.stroke(); }
+    x.fillStyle = ti ? '#33373d' : '#d8dde3';
+    bar(); x.fill(); blade(); x.fill();
   } else {
     // 'plain': the fleet-van roundel — VW-ish monogram, deliberately generic
     disc(60, '#2b2f34'); ring(52, 6, '#c9cfd6');
@@ -413,7 +418,11 @@ const KIND = {
     len: 4.56, wid: 2.0, wheelR: 0.345, wheelW: 0.30, axle: 1.4125,
     accel: 33.5, vmax: 111, grip: 12.5, mass: 1.7,
     thrust: 0.6, cgH: 0.30, brakeK: 1.5,
-    brand: 'plain',
+    // the T on the nose and on the tail (Frank, 20 Nov 2026: "Přidej logo")
+    // (the rear one sits on the painted tail above the light bar: a badge shows
+    // the PAINT through its clear part, so on the black fascia it was a white square)
+    brand: 'teslaTi',
+    badgeF: { size: 0.10, y: 0.43 }, badgeR: { size: 0.085, y: 0.85 },
     plateF: 0.30, plateR: 0.39,
     hull: { sh: 0.84, bw: 0.90, yA: 0.34, yB: 0.80, sts: [
       [-2.342, 0.17, 0.33, 0.66], [-2.20, 0.12, 0.44, 0.85], [-1.80, 0.10, 0.56, 0.95],

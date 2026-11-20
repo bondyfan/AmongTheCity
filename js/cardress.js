@@ -14,7 +14,7 @@
 // exterior-only refinement of the nose and tail, DRESS_NEW the drawings. Each
 // dress is called as fn(c, T): c the drawing context, T the tools of
 // cardetail.js, so this file imports nothing from it (no cycle).
-// No brand marks are drawn here: shapes and proportions only.
+// No brand marks are drawn here: a kind's badge is vehicles.js's (KIND.brand, badgeF, badgeR).
 
 import { rect, rrect } from './carbody.js';
 
@@ -171,7 +171,7 @@ export const DRESS_NEW = {
     c.d('front', [[0.56, 0.19], [0.84, 0.215], [0.82, 0.34], [0.60, 0.30]], M.gloss, { mirror: true, eps: 0.004, h: 0.05, hu: 0.07 });
     c.near(() => {
       // a spine down the bonnet
-      c.d('top', [[-0.004, -2.2], [0.004, -2.2], [0.004, -1.0], [-0.004, -1.0]], M.gloss, { eps: 0.0025, h: 0.3, hu: 0.1 });
+      c.d('top', [[-0.004, -2.0], [0.004, -2.0], [0.004, -1.0], [-0.004, -1.0]], M.gloss, { eps: 0.0025, h: 0.3, hu: 0.1 });   // (it stops short of the badge)
     });
     T.plinth(c, false, c.K.plateF, 0.50, 0.11);
     // the side: an intake cut into the flank ahead of the rear wheel, a dark sill
