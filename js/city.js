@@ -15,7 +15,7 @@ import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
 import { holdVerges } from './geo.js';
 import { vergeAt, vergeLift, inZone, bayAt, cornerLift, FOOT_LIFT, BAY_W } from './streets.js';
 import { makeMaterials, buildChunkMeshes, buildChunkMeshesGen, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
-import { footPullW } from './meshes.js';
+import { streetPull } from './footslab.js';
 import { railGradeY } from './geo.js';
 import { takeMeshPool, prewarmMeshPool } from './meshpool.js';
 import { Poles } from './poles.js';
@@ -2011,44 +2011,9 @@ export class CityWorld {
   get _shapedAt() { return (this.__shaped ??= (x, z) => stampShaped(this.terrain, x, z)); }
 
   // The strongest pull of a carriageway on a footway whose centreline passes
-  // (x, z), into _pull: the pavement level of a kerbed street out to 6 m and
-  // fading over the next 4, a touch under the asphalt of any other within
-  // 3.5 m. The same numbers, asked at the same place, as meshes.roadRibbon
-  // blends each footway station with, and capped by the same function
-  // (meshes.footPullW) against `own`, the footway's own level there: a street
-  // up on an embankment does not lift the path at the foot of it.
-  _footPull(cell, x, z, own) {
-    let upW = 0, upT = 0;
-    // (a stair or ramp down to a Prague lower quay stands where its stamp
-    // built it: pulled toward the street over the wall it floated 1.6 m over
-    // its own foot. meshes.roadRibbon draws it the same way.)
-    if (stampShaped(this.terrain, x, z)) { _pull.w = 0; _pull.t = own; return; }
-    for (const r of cell.roads) {
-      if (!r.d || r.br || !r.p) continue;
-      const vg = streetOf(r), half = r.w / 2;
-      const reach = half + (vg ? VERGE_REACH + (r._bays ? BAY_W : 0) : 5);
-      const bb = lineBB(r);
-      if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
-      const bs = nearestSeg(r, x, z, reach, _near);
-      const bd = _near.d, be = _near.e;
-      if (bd >= reach) continue;
-      const gy = roadGradeY(r, bs, this.terrain);
-      if (gy === null || gy === undefined) continue;
-      const bay = r._bays ? bayAt(r, bs, be) : 0;
-      const xo = bd - half - bay;
-      const v = vg ? vergeAt(r, bs, be > 0 ? 1 : 0) : null;
-      if (v && v.u) {
-        const t = gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo) + FOOT_LIFT;
-        const w = footPullW(xo <= 6 ? 1 : xo >= 10 ? 0 : 1 - (xo - 6) / 4, t - own, xo, v.w);
-        if (w > upW) { upW = w; upT = t; }
-      } else {
-        const t = gy + LAYER_Y.road - 0.04;
-        const w = footPullW(xo + bay <= 0 ? 1 : 1 - (xo + bay) / 3.5, t - own, xo + bay);
-        if (w > upW) { upW = w; upT = t; }
-      }
-    }
-    _pull.w = upW; _pull.t = upT;
-  }
+  // (x, z), into _pull: js/footslab.js streetPull, the one function the
+  // props (meshes.standingOn) ask as well.
+  _footPull(cell, x, z, own) { streetPull(cell, x, z, own, this.terrain, _pull); }
 
   // Where a WALKER's feet are at (x, z), for callers that only have a position
   // and no height of their own to hint with (the crowd): the highest surface

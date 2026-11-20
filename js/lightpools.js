@@ -53,11 +53,12 @@
 // felled mast leaves the registry, so its pool goes out within half a second.
 
 import * as THREE from 'three';
-import { LampMap, SHAPES_GLSL, LAMP_DIRECT_U } from './lampmap.js';
+import { LampMap, SHAPES_GLSL, BEND_GLSL, LAMP_DIRECT_U } from './lampmap.js';
 import { FarLights } from './farlights.js';
 import { addLandmarkLamps } from './landmarklamps.js';
-import { MAST_OUT, MAST_Y } from './streetlamps.js';
-import { mastTint } from './mastlamps.js';
+import { poolSpot, beamLie, LIFT, PARK_POOL, BEAM_LEN, BEAM_WIDE, BEAM_NOSE } from './poolspot.js';
+// (where a pool and a fan LIE is js/poolspot.js: numbers only, and tested there)
+export { beamSlope } from './poolspot.js';
 
 const MAX = 2048;                 // instances; a full ring of the city holds ~1500
 const RANGE = 430;                // m: pools and glows fade out by here
@@ -65,37 +66,6 @@ const REACH = RANGE + 70;         // m: how far out a rebuild collects
 const MOVE_REBUILD = 55;          // m of camera travel that forces a rebuild
 const CHECK_T = 0.5;              // s between looks at the registry
 
-// the lamps, as js/streetlamps.js builds them. A STREET column holds its LED
-// head 1.8 m out over the carriageway (the mast's local -z) and 7.5 m up; a
-// PARK lantern (p.kind === 'park') carries its light on its own axis, 4 m up,
-// and throws a smaller round pool.
-const HEAD_OUT = 1.8, HEAD_Y = 7.5;
-const PARK_Y = 4.0, PARK_POOL = 8.5;
-// The pool. A street luminaire at 7 m throws an oval: long along the road,
-// shorter across it, and centred a few metres out from the kerb. Lamps stand
-// 34 m apart, so 15 m of half-length leaves a visible dark neck between two
-// pools, which is what makes a street read as a CHAIN of them.
-const POOL_LONG = 17, POOL_WIDE = 13, POOL_OUT = 3.4;
-// A motorway mast (js/mastlamps.js, kinds 'mast' and 'mast1'): heads at 12 m
-// on 3 m arms spread wider and longer pools, 40 m apart, centred past the
-// head over the carriageway. A two-armed mast throws one pool per arm.
-const MAST_LONG = 24, MAST_WIDE = 17, MAST_POOL_OUT = MAST_OUT + 2.0;
-// Direct path only: height of the quads above the road surface. They have to
-// clear the lane paint and any kerb or raised pavement (KERB_H 0.12 plus the
-// paving), and a quad cannot follow a kerb.
-const LIFT = 0.17;
-// A pool on a bridge. The quad is 26 m across and a deck is 9: left alone, eight
-// metres of lit sheet hung in the air past each parapet, over the valley (and
-// on the light map its height took the street below out of its own lamps'
-// light). A pool whose road stands more than DECK_UP over the bare ground is
-// measured against the deck: the surface is probed across the road in
-// DECK_STEP strides until it falls DECK_DROP away, and the quad is fitted
-// between the two edges.
-const DECK_UP = 1.0, DECK_DROP = 1.2, DECK_STEP = 0.5;
-// city.js surfaceY answers "road" out to 0.35 m past the carriageway (a wheel
-// just off the kerb), and the edge lies somewhere inside the last stride:
-// taken at its near end, so the quad never reaches past the deck
-const DECK_TRIM = 0.35 + DECK_STEP;
 // Everything a look at the screen might want to move, in one object so that a
 // harness can retune a live page (window.__atc.lightPools.tune).
 //   level   how bright the middle of a pool is, as light per unit albedo in
@@ -131,16 +101,14 @@ export const TUNE = { level: 0.85, beam: 0.62, knee: 0.6, lit: 1.3, top: 8.5, su
 // alternate): high-pressure sodium, the orange of every Czech housing estate,
 // and the warm-white LED that has been replacing it.
 const SODIUM = [1.0, 0.56, 0.21], LED = [1.0, 0.80, 0.56];
-const DISTRICT = 260;             // m: the size of a "same lamps" block
-const LED_SHARE = 0.34;
-// Headlight fans. Dipped beams reach about 35 m and are as wide as the road.
+// Headlight fans (their footprint: js/poolspot.js).
 const BEAM_MAX = 96, BEAM_RANGE = 190;
-const BEAM_LEN = 36, BEAM_WIDE = 7.5, BEAM_NOSE = 1.9;
 const BEAM_COL = [0.95, 0.90, 0.74];
-// The fan's pitch is read off the road this far ahead of the car: where most
-// of the light lands, and near enough to still be on the deck round a bend.
-// One look at the surface per car every BEAM_EVERY frames, not every frame.
-const BEAM_AHEAD = 13, BEAM_EVERY = 6;
+// One look at the road ahead per car every BEAM_EVERY frames, not every frame.
+const BEAM_EVERY = 6;
+// A fan is a strip, not a quad: BEAM_SEGS spans along its length, so that it
+// can follow a road whose grade changes under it (aBend, below).
+const BEAM_SEGS = 12;
 const BEAM_EASE = 0.25;           // share of the way to the new pitch taken each frame
 
 const POOL_VERT = /* glsl */`
@@ -148,11 +116,18 @@ const POOL_VERT = /* glsl */`
   varying vec2 vP;
   varying vec3 vCol;
   varying float vFade;
+  #ifdef ATC_BEAM
+    attribute vec2 aBend;    // m: the road over the fan's chord at its two inner nodes (js/poolspot.js)
+    ${BEND_GLSL}
+  #endif
   #include <fog_pars_vertex>
   void main() {
     vP = position.xz;
     vCol = instanceColor;
     vec4 world = modelMatrix * instanceMatrix * vec4(position, 1.0);
+    #ifdef ATC_BEAM
+      world.y += beamBend(aBend, position.z);
+    #endif
     vec3 centre = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vFade = 1.0 - smoothstep(uRange * 0.76, uRange, distance(centre.xz, cameraPosition.xz));
     vec4 mvPosition = viewMatrix * world;
@@ -272,15 +247,9 @@ const GLOW_FRAG = /* glsl */`
     if (uDirect > 0.5) gl_FragColor.rgb *= 0.7;
   }`;
 
-// deterministic, allocation-free hash of two integers to 0..1
-function hash2(i, j) {
-  let h = Math.imul(i | 0, 374761393) ^ Math.imul(j | 0, 668265263);
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
-}
-
 const _m = new THREE.Matrix4(), _c = new THREE.Color();
 const _x = new THREE.Vector3(), _y = new THREE.Vector3(), _z = new THREE.Vector3();
+const _lie = { ahead: 0, slope: 0, y0: 0, b1: 0, b2: 0 };
 
 export class LightPools {
   constructor(scene) {
@@ -306,7 +275,14 @@ export class LightPools {
     this.beamMat = this.poolMat.clone();
     this.beamMat.defines = { ATC_BEAM: '' };
     this.beamMat.uniforms.uRange.value = BEAM_RANGE;
-    this.beams = new THREE.InstancedMesh(pg, this.beamMat, BEAM_MAX);
+    // (a strip along its length, with two more numbers per fan: how far the
+    // road stands off the fan's chord at its inner nodes. The light map's
+    // twin shares both.)
+    const bg = new THREE.PlaneGeometry(2, 2, 1, BEAM_SEGS).rotateX(-Math.PI / 2);
+    this.bend = new THREE.InstancedBufferAttribute(new Float32Array(BEAM_MAX * 2), 2);
+    this.bend.setUsage(THREE.DynamicDrawUsage);
+    bg.setAttribute('aBend', this.bend);
+    this.beams = new THREE.InstancedMesh(bg, this.beamMat, BEAM_MAX);
 
     // ---- glows: camera-facing quads at the lamp heads
     const gg = new THREE.PlaneGeometry(2, 2);
@@ -446,7 +422,7 @@ export class LightPools {
     if (cars) for (const c of cars) { if (c !== own && k < BEAM_MAX) k = this._beam(k, c, cx, cz, world); }
     this.beams.count = k;
     this.beams.visible = k > 0;
-    if (k > 0) this.beams.instanceMatrix.needsUpdate = true;
+    if (k > 0) this.beams.instanceMatrix.needsUpdate = this.bend.needsUpdate = true;
     // nothing to bake from: the maps on the GPU are a place left behind
     if (!show && k === 0) LAMP_DIRECT_U.uLampDK.value.x = 0;
   }
@@ -507,11 +483,15 @@ export class LightPools {
     this._baking = false;
   }
 
-  // one car's fan: a quad from its bumper out along its nose, lying on the
-  // slope of the ROAD ahead. It used to take that slope from the bare terrain,
-  // which a graded road follows and a bridge does not: over a valley the fan
-  // dived under the deck (and was cut off at the bumper) or climbed metres
-  // above it.
+  // one car's fan: a strip from its bumper out along its nose, lying on the
+  // ROAD ahead. It used to take one slope from the bare terrain, which a
+  // graded road follows and a bridge does not: over a valley the fan dived
+  // under the deck (and was cut off at the bumper) or climbed metres above it.
+  // Then one slope from the road 13 m ahead, which is a plane, and a road is
+  // not one where its grade changes: over the top of the ramp into the Jana
+  // Palacha underpass the far end of every fan stood a metre in the air. Now
+  // the chord from its near end to its far end, and between them the road
+  // itself at two more places (js/poolspot.js beamLie).
   _beam(k, c, cx, cz, world) {
     const dx = c.x - cx, dz = c.z - cz;
     if (dx * dx + dz * dz > BEAM_RANGE * BEAM_RANGE) return k;
@@ -519,16 +499,20 @@ export class LightPools {
     const terr = world?.terrain;
     const carY = c.mesh?.position.y ?? terr?.heightAt?.(c.x, c.z) ?? 0;
     const y = carY + LIFT - 0.03;
-    // kept on the car between looks; k staggers the cars over the frames
-    let want = c._beamSlope;
-    if (want === undefined || (this._frame + k) % BEAM_EVERY === 0) {
-      want = c._beamSlope = beamSlope(world, c.x, c.z, fx, fz, carY);
+    // kept on the car between looks (what the look found, then where the fan
+    // is: slope, near end, the two nodes); k staggers the cars over the frames
+    let f = c._fan;
+    const first = f === undefined;
+    if (first) f = c._fan = new Float32Array(8);
+    if (first || (this._frame + k) % BEAM_EVERY === 0) {
+      const lie = beamLie(world, c.x, c.z, fx, fz, carY, _lie);
+      f[0] = lie.slope; f[1] = lie.y0; f[2] = lie.b1; f[3] = lie.b2;
     }
     // ...and the fan EASES to what the look found. Set outright, the pitch
     // changed on one frame in six, and at the foot of a ramp the far end of
     // the fan went up the road in steps of a quarter of a metre and more.
-    let slope = c._beamPitch;
-    slope = c._beamPitch = slope === undefined ? want : slope + (want - slope) * BEAM_EASE;
+    for (let i = 0; i < 4; i++) f[4 + i] = first ? f[i] : f[4 + i] + (f[i] - f[4 + i]) * BEAM_EASE;
+    const slope = f[4];
     // +0.004: a fan that floats a hand above the far tarmac is invisible, one
     // that dips under it is cut off in a line
     _z.set(-fx, -(slope + 0.004), -fz).normalize();   // local +z points BACK at the car
@@ -537,10 +521,11 @@ export class LightPools {
     const half = BEAM_LEN / 2, mid = BEAM_NOSE + half;
     _m.set(
       _x.x * BEAM_WIDE, _y.x, _z.x * half, c.x + fx * mid,
-      _x.y * BEAM_WIDE, _y.y, _z.y * half, y + (slope + 0.004) * mid,
+      _x.y * BEAM_WIDE, _y.y, _z.y * half, y + f[5] + 0.004 * BEAM_NOSE + (slope + 0.004) * half,
       _x.z * BEAM_WIDE, _y.z, _z.z * half, c.z + fz * mid,
       0, 0, 0, 1);
     this.beams.setMatrixAt(k, _m);
+    this.bend.array[k * 2] = f[6]; this.bend.array[k * 2 + 1] = f[7];
     return k + 1;
   }
 
@@ -594,97 +579,6 @@ export class LightPools {
     this.glows.setColorAt(k, _c.setRGB(t[0], t[1], t[2]));
     return k + 1;
   }
-}
-
-// Everything about one mast's pool that does not change while it stands.
-// A two-armed motorway mast gets a second record, `twin`, for its back arm.
-function poolSpot(p, world) {
-  const rot = p.posts.userData?.spots?.[p.i * 3 + 2] ?? 0;
-  if (p.kind === 'mast' || p.kind === 'mast1') {
-    const tint = mastTint(p.x, p.z);
-    const s = pool(p, world, rot, 'mast', tint);
-    if (p.kind === 'mast') s.twin = pool(p, world, rot + Math.PI, 'mast', tint);
-    return s;
-  }
-  return pool(p, world, rot, p.kind === 'park' ? 'park' : 'street', null);
-}
-
-// one pool under one head of mast p, whose arm points along heading `rot`
-function pool(p, world, rot, kind, tint) {
-  // The mast's local axes in the world (a Y rotation by rot): +x runs ALONG
-  // the kerb, and −z points at the carriageway it was placed beside (rot is a
-  // heading, and a heading's forward is −z).
-  const ax = Math.cos(rot), az = -Math.sin(rot);        // along the road
-  const rx = -Math.sin(rot), rz = -Math.cos(rot);       // toward the road
-  const park = kind === 'park', mast = kind === 'mast';
-  const out = park ? 0 : mast ? MAST_POOL_OUT : POOL_OUT, ho = park ? 0 : mast ? MAST_OUT : HEAD_OUT;
-  const wide = mast ? MAST_WIDE : POOL_WIDE;
-  let x = p.x + rx * out, z = p.z + rz * out;
-  // surfaceY hands back ONE reused object: take the number, not the object.
-  // It is told where the mast's foot is (p.y), so a lamp on the street UNDER
-  // a viaduct lights the street and not the deck over its head.
-  const ground = world.terrain?.heightAt?.(x, z) ?? p.y;
-  const y0 = world.surfaceY?.(x, z, p.y)?.y ?? ground;
-  let pw = park ? PARK_POOL : wide;
-  if (!park && world.surfaceY && y0 - ground > DECK_UP) {
-    const a = deckEdge(world, x, z, rx, rz, y0), b = deckEdge(world, x, z, -rx, -rz, y0);
-    if (a + b < 2 * POOL_WIDE) {
-      // between the two edges, so the window (lampmap.js poolShape) is zero
-      // where the deck ends. Where only one side falls away (a street cut
-      // into a slope) the pool moves over no further than it already hangs
-      // out from its mast, and gives up the width instead.
-      const sh = Math.max(-POOL_OUT, Math.min(POOL_OUT, (a - b) / 2));
-      x += rx * sh; z += rz * sh;
-      pw = Math.max(1, Math.min(a - sh, b + sh));
-    }
-  }
-  const y1 = world.surfaceY?.(x + ax * 8, z + az * 8, y0)?.y ?? y0;
-  const y2 = world.surfaceY?.(x - ax * 8, z - az * 8, y0)?.y ?? y0;
-  // a graded road or a bridge ramp tilts the pool with it; a sample that fell
-  // off the road onto a bank (more than a metre away in height) is ignored
-  const slope = (Math.abs(y1 - y0) < 1.2 && Math.abs(y2 - y0) < 1.2) ? (y1 - y2) / 16 : 0;
-  const cellI = Math.floor(p.x / DISTRICT), cellJ = Math.floor(p.z / DISTRICT);
-  return {
-    x, z, ax, az, slope,
-    // above the surfacing whatever it is: the carriageway where there is one,
-    // otherwise the whole layer ladder over bare ground
-    y: Math.max(y0 + LIFT, ground + 0.20 + LIFT),
-    // the head hangs TOWARD the road (it used to be drawn along the kerb)
-    hx: p.x + rx * ho, hy: p.y + (park ? PARK_Y : mast ? MAST_Y : HEAD_Y) - 0.12, hz: p.z + rz * ho,
-    pl: park ? PARK_POOL : mast ? MAST_LONG : POOL_LONG, pw,
-    led: hash2(cellI, cellJ) < LED_SHARE, tint,
-    var: 0.88 + 0.24 * hash2(Math.round(p.x * 10), Math.round(p.z * 10)),
-    twin: null,
-  };
-}
-
-// How far from (x, z) the deck at height y0 runs in the direction (ux, uz),
-// POOL_WIDE at most: the last stride that was still on it.
-function deckEdge(world, x, z, ux, uz, y0) {
-  for (let d = DECK_STEP; d <= POOL_WIDE; d += DECK_STEP) {
-    if (y0 - world.surfaceY(x + ux * d, z + uz * d, y0).y > DECK_DROP) return Math.max(0, d - DECK_TRIM);
-  }
-  return POOL_WIDE;
-}
-
-// The pitch of the road in front of a car standing at height carY: rise over
-// run to the surface BEAM_AHEAD metres along its nose. `carY` tells surfaceY
-// which of two stacked roads is meant, so a car on a bridge reads the deck.
-// Where the look ahead lands beside the road (a bend, a T junction) there is
-// no surface to read: a car on the ground falls back to the lie of the land,
-// as before, and a car on a deck (nothing but air out there) keeps its fan
-// level. Anything steeper than one in five is a drop, not a road.
-export function beamSlope(world, x, z, fx, fz, carY) {
-  const terr = world?.terrain;
-  const ax = x + fx * BEAM_AHEAD, az = z + fz * BEAM_AHEAD;
-  let slope = 0;
-  const s = world?.surfaceY?.(ax, az, carY);
-  if (s?.road) slope = (s.y - carY) / BEAM_AHEAD;
-  else if (terr?.heightAt) {
-    const here = terr.heightAt(x, z);
-    if (carY - here < DECK_UP) slope = (terr.heightAt(ax, az) - here) / BEAM_AHEAD;
-  }
-  return (slope > 0.2 || slope < -0.2) ? 0 : slope;
 }
 
 // ---- the player's headlights, under a night exposure ----

@@ -76,6 +76,8 @@ import { quaySnap, quayGroundY, GRID_SNAP, stampShaped } from './quayedge.js';
 import { roadSegs } from './roadsegments.js';
 import { roadCorr, railCorr, floorOf, vergeFaced, kerbedAt, vergeFacesInto, railShouldersInto, edgeNear } from './batter.js';
 import { drawnGround } from './drawnground.js';
+import { footPullW, slabLevel } from './footslab.js';
+export { footPullW } from './footslab.js';
 import { deckOver } from './roadpose.js';
 import { vysehradInto } from './vysehrad.js';
 import { quayStairsInto } from './quaystairs.js';
@@ -1879,6 +1881,8 @@ function downQuad(sink, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b)
 // js/furniture.js asks it, with the pavement where there is one: the generated
 // band, a mapped footway lifted to the street's level, the corner round a
 // junction. The same numbers city.js heightAt gives the player's feet.
+const FOOT_ON = 0.12;      // m past a path's edge that is still its slab
+const FOOT_STEP = 0.5;     // m: a slab further over the drawn ground than this is carried, not laid
 function standingOn(cell, key, terrain, drawn = terrain) {
   if (!terrain || !cell) return terrain;
   const pads = [...(junctionsIn(key) ?? []), ...(clustersIn(key) ?? [])];
@@ -1887,7 +1891,8 @@ function standingOn(cell, key, terrain, drawn = terrain) {
       // (the DRAWN ground, js/drawnground.js: in a cutting the grid is metres
       // over the pavement, and `best` below only ever goes up from here)
       const ground = drawn.heightAt(x, z);
-      let best = ground, footOwn = -Infinity, upW = 0, upT = 0, upX = 0, upB = 0, onRoad = false;
+      let best = ground, footOwn = -Infinity, fcx = 0, fcz = 0, fbd = 0, onRoad = false;
+      const shaped = stampShaped(terrain, x, z);
       for (const r of cell.roads) {
         if (r.br || !r.p || r.p.length < 2) continue;
         const half = (r.w ?? 3) / 2, vg = r.d ? streetOf(r) : null;
@@ -1896,33 +1901,44 @@ function standingOn(cell, key, terrain, drawn = terrain) {
         const bb = bboxOfLine(r);
         if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
         // the NEAREST segment speaks for the way (see city.js surfaceY on why)
-        let run = 0, bd = Infinity, bs = 0, be = 1;
+        let run = 0, bd = Infinity, bs = 0, be = 1, qx = x, qz = z;
         for (let i = 0; i < r.p.length - 1; i++) {
           const ax = r.p[i][0], az = r.p[i][1], bx = r.p[i + 1][0], bz = r.p[i + 1][1];
           const ex = bx - ax, ez = bz - az, L2 = ex * ex + ez * ez || 1e-9, L = Math.sqrt(L2);
           let t = ((x - ax) * ex + (z - az) * ez) / L2;
           t = t < 0 ? 0 : t > 1 ? 1 : t;
           const d = Math.hypot(x - (ax + ex * t), z - (az + ez * t));
-          if (d < bd) { bd = d; bs = run + L * t; be = (x - ax) * ez - (z - az) * ex >= 0 ? 1 : -1; }
+          if (d < bd) { bd = d; bs = run + L * t; be = (x - ax) * ez - (z - az) * ex >= 0 ? 1 : -1; qx = ax + ex * t; qz = az + ez * t; }
           run += L;
         }
         if (bd >= reach) continue;
         const gy = roadGradeY(r, bs, terrain);
         if (gy === null || gy === undefined) continue;
-        if (!r.d) { footOwn = Math.max(footOwn, gy + LAYER_Y.footway); continue; }
+        if (!r.d) {
+          // ON the slab (the strip feet stand on, city.js heightAt), or beside
+          // one that lies on the ground. A path CARRIED over the ground beside
+          // it is not what a prop a hand off its edge stands on: the column
+          // 30 cm off the cycleway on its wall over 17. listopadu stood at the
+          // path's level, 1.9 m over the pavement it was planted in.
+          // The level is the SLAB's, as it is drawn and as feet stand on it
+          // (js/footslab.js: pulled toward the street it runs beside, asked at
+          // the path's centreline), not the path's own profile.
+          const fy = gy + LAYER_Y.footway;
+          if (fy > footOwn) { footOwn = fy; fcx = qx; fcz = qz; fbd = bd - half; }
+          continue;
+        }
         const xo = bd - half - bayAt(r, bs, be), v = vergeAt(r, bs, be > 0 ? 1 : 0);
         if (xo < 0.3) onRoad = true;
-        if (v.u) {
-          if (xo > 0 && v.w > 0.05 && xo <= v.w && !inZone(r, bs)) best = Math.max(best, gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo));
-          const w = xo <= 6 ? 1 : xo >= 10 ? 0 : 1 - (xo - 6) / 4;
-          if (w > upW) { upW = w; upT = gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo) + FOOT_LIFT; upX = xo; upB = v.w; }
-        }
+        // (…but not out over a flight or ramp a stamp cut down to a Prague lower
+        // quay, as the feet are not offered it there either: the lamp of
+        // Masarykovo nábřeží stood 1.8 m over the stairs at the street's level)
+        if (v.u && xo > 0 && v.w > 0.05 && xo <= v.w && !inZone(r, bs) && !shaped) best = Math.max(best, gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo));
       }
-      // (capped as the slab itself is: a bench on a path at the foot of an
+      // (the slab as it is drawn: a bench on a path at the foot of an
       // embankment stands on the path, not at the street's level over it)
       if (footOwn > -Infinity && !onRoad) {
-        const pw = stampShaped(terrain, x, z) ? 0 : footPullW(upW, upT - footOwn, upX, upB);
-        best = Math.max(best, footOwn + (upT - footOwn) * pw);
+        const slab = slabLevel(cell, fcx, fcz, footOwn, terrain);
+        if (fbd <= FOOT_ON || slab - ground <= FOOT_STEP) best = Math.max(best, slab);
       }
       for (const o of pads) {
         if (o._cluster || (!o.members && o._ring) || !o._edge) continue;
@@ -2167,48 +2183,7 @@ function onDeck(fc, self, x, z, grow = 0) {
   return false;
 }
 
-// ---- how hard a street may pull a footway off its own level ---------------------
-// The pull below (roadRibbon, and city._footPull for the feet) takes a footway
-// to the level of the street it runs beside, and it asked only how FAR the
-// street was, never how much higher or lower. Beside a street on an embankment
-// that dragged the path up the full height of the fill, six metres out from
-// the kerb: the cycleway under the flyover by Kaufland was drawn on a ramp
-// 4.8 m over the ground it lies on, and 1.6 km of footway within 2.4 km of the
-// spawn stood more than a metre off its own level.
-//
-// How much higher or lower can a path beside a street really be? A few steps
-// from the kerb, hardly at all: no bank is steep enough, and what the path's
-// own profile says there (PULL_SMEAR) is the survey's 20 m grid smearing the
-// street's embankment across it. On the street's own band (the pavement, or
-// the lawn it draws out to a mapped footway, `band` wide) the path is part of
-// that surface by construction. Only a WALL puts a path right beside a kerb on
-// another level: the abutment of a bridge, with the path passing under the
-// deck, and that is more than PULL_WALL. Further out the path may just as
-// well be at the foot of the bank, and its own levelled profile, which has the
-// real earthworks in it, is what says which: PULL_FADE past the band the pull
-// is whole only while street and path are within PULL_LEVEL of each other, and
-// gone by PULL_OFF. Between the two distances the two answers are blended.
-// (The lawn itself stops reaching for a footway more than a metre off the
-// street's level: geo.levelVerge.) One function, because the paving and the
-// feet on it have to get the same number.
-const PULL_NEAR = 2.5, PULL_FADE = 2;        // m past the kerb line (or the asphalt edge)
-const PULL_LEVEL = 0.5, PULL_OFF = 1.5;      // m between the street's level and the path's own
-const PULL_SMEAR = 2, PULL_WALL = 3;         // …and the same right beside the kerb
-/**
- * The weight `w` of a street's pull on a footway, capped: `dy` is the level it
- * pulls toward less the footway's own, `xo` the metres past its kerb line,
- * `band` the width of the street's own band there (0: no kerb).
- */
-export function footPullW(w, dy, xo, band = 0) {
-  const a = dy < 0 ? -dy : dy;
-  if (a <= PULL_LEVEL) return w;
-  const near = band + 0.3 > PULL_NEAR ? band + 0.3 : PULL_NEAR;
-  const kn = a <= PULL_SMEAR ? 1 : a >= PULL_WALL ? 0 : (PULL_WALL - a) / (PULL_WALL - PULL_SMEAR);
-  if (xo <= near) return w * kn;
-  const kf = a >= PULL_OFF ? 0 : (PULL_OFF - a) / (PULL_OFF - PULL_LEVEL);
-  const kx = xo >= near + PULL_FADE ? 0 : (near + PULL_FADE - xo) / PULL_FADE;
-  return w * (kf + (kn - kf) * kx);
-}
+// (how hard a street may pull a footway off its own level: js/footslab.js footPullW)
 
 /**
  * One edge of a slab that stands over the ground (a footway lifted to its
@@ -5707,6 +5682,8 @@ function lampInHouse(houses, x, z) {
  * which used to be drawn as bare unlit masts), the every-34-metres rule along
  * the wider carriageways, and lanterns along pedestrian and living streets.
  */
+/** m: a tram's own half width and a hand, from a track's centreline (its panel is 1.42 m either side). */
+const TRAM_CLEAR = 1.5;
 function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
   const street = [], park = [], mapped = [], mast = [], mast1 = [];
   for (const f of cell.furniture ?? []) if (f.k === 'lamp') mapped.push(f.p[0][0], f.p[0][1]);
@@ -5723,6 +5700,24 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
   // (And the pad may be a neighbouring cell's: see lampGround.)
   const { roads: near, pads } = lampGround(city, cell, key, raw);
   const onPad = (x, z) => { const j = inPads(pads, x, z); return !!j && cornerLift(j, x, z) < 0; };
+  // A COLUMN DOES NOT STAND IN A TRAM'S TRACK. A carriageway is tested above
+  // and a track is not one: where the kerb offset of a street, or a surveyed
+  // node, fell on the rails in its middle (Seifertova, Sokolovská, nábřeží
+  // Kapitána Jaroše: 10 to 50 cm off a track's centreline) the mast stood in
+  // the tram's way and, the panel being a hand over the asphalt it was
+  // planted at, up to 1.9 m into the ground of the higher of two tracks.
+  // Inside a tram's own width of any track of this cell: no lamp there.
+  const trams = (cell.rails ?? []).filter((r) => r.t === 'tram' && r.p && r.p.length > 1);
+  const inTram = (x, z) => {
+    for (const r of trams) {
+      const bb = bboxOfLine(r);
+      if (x < bb[0] - TRAM_CLEAR || x > bb[2] + TRAM_CLEAR || z < bb[1] - TRAM_CLEAR || z > bb[3] + TRAM_CLEAR) continue;
+      for (let i = 0; i < r.p.length - 1; i++) {
+        if (distPointToSegment(x, z, r.p[i][0], r.p[i][1], r.p[i + 1][0], r.p[i + 1][1], null) < TRAM_CLEAR) return true;
+      }
+    }
+    return false;
+  };
   // A COLUMN DOES NOT COME UP THROUGH A BRIDGE. A street under a railway or a
   // flyover is lit like any other, every 34 metres, and where that fell under
   // the deck a 7.5 m mast stood up through a carriageway 6 m overhead with its
@@ -5779,6 +5774,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
       }
     }
     if (bd >= LAMP_REACH) {
+      if (inTram(x, z)) continue;
       if (decks.length && underDeck(x, z, terrain.heightAt(x, z), LANTERN_TALL)) continue;
       park.push([x, z, rnd(Math.abs(Math.round(x * 7 + z * 13)), 3) * Math.PI * 2]);
       continue;
@@ -5798,7 +5794,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
       // on the parapet, up to 4.6 m past our carriageway). It goes where the
       // rule puts a bridge's own columns: on the deck's edge, at the deck.
       lx = qx + nx * (bh - 0.25); lz = qz + nz * (bh - 0.25);
-      if (lampInRoad(near, br, lx, lz, LAMP_CLEAR)) continue;
+      if (lampInRoad(near, br, lx, lz, LAMP_CLEAR) || inTram(lx, lz)) continue;
       if (decks.length && underDeck(lx, lz, levelBy(br, bs, lx, lz), COLUMN_TALL)) continue;
       const spot = [lx, lz, Math.atan2(-nx, -nz) + Math.PI];
       if (terrain) spot.push(bridgeDeckHeight(br, bs, terrain) + LAYER_Y.road);
@@ -5806,7 +5802,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
       continue;
     }
     if (bd - bay < 0.5) { lx = qx + nx * (bh + bay + 0.6); lz = qz + nz * (bh + bay + 0.6); }
-    if (lampInRoad(near, null, lx, lz, LAMP_CLEAR) || onPad(lx, lz) || inHouse(lx, lz)) continue;
+    if (lampInRoad(near, null, lx, lz, LAMP_CLEAR) || onPad(lx, lz) || inHouse(lx, lz) || inTram(lx, lz)) continue;
     if (decks.length && underDeck(lx, lz, levelBy(br, bs, lx, lz), COLUMN_TALL)) continue;
     street.push([lx, lz, Math.atan2(-nx, -nz) + Math.PI]);
   }
@@ -5864,7 +5860,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
           // other leg of the same street comes closer than the kerb offset
           // (0.25 m into the lane at 3836,-1403). The leg it was offset from
           // is 0.7 m away and the clearance 0.45, so that one never objects.
-          if (lampInRoad(near, r.br ? r : null, lx, lz, LAMP_CLEAR)
+          if (lampInRoad(near, r.br ? r : null, lx, lz, LAMP_CLEAR) || inTram(lx, lz)
             || (!r.br && (onPad(lx, lz) || inHouse(lx, lz)))) continue;
           // (under a deck there is no far kerb to try: the other side is under it too)
           if (decks.length && underDeck(lx, lz, levelBy(r, run + d, lx, lz), COLUMN_TALL)) break;
@@ -5899,7 +5895,7 @@ function lampSpots(cell, key, x0, z0, x1, z1, terrain, city, raw = false) {
         // outside a shared surface means outside its lay-by too
         const o2 = ped ? off : off + bayAt(r, run + d, -side);
         const lx = px - dz * side * o2, lz = pz + dx * side * o2;
-        if (nearMapped(lx, lz) || lampInRoad(near, r, lx, lz, LAMP_CLEAR) || onPad(lx, lz) || inHouse(lx, lz)) continue;
+        if (nearMapped(lx, lz) || lampInRoad(near, r, lx, lz, LAMP_CLEAR) || onPad(lx, lz) || inHouse(lx, lz) || inTram(lx, lz)) continue;
         if (decks.length && underDeck(lx, lz, levelBy(r, run + d, lx, lz), LANTERN_TALL)) continue;
         park.push([lx, lz, rnd(r._id, 40 + nth) * Math.PI * 2]);
       }

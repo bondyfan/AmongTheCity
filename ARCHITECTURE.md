@@ -1614,6 +1614,51 @@ and merged; these are the rules they agreed on.
   (`underpass.deckNodes(…, rail)`): left to the ground under it, the bridge
   over Jana Palacha dived 8.8 m into the street. Pinned by
   tests/levels.test.mjs.
+* **Light lies on the road that is drawn** (`js/poolspot.js`, numbers only,
+  20 Nov 2026). Where a lamp's pool and a car's headlight fan LIE is worked
+  out there; `js/lightpools.js` only draws them (quads, the fans' strip, the
+  two light maps of `js/lampmap.js`). Two rules. (1) A pool lies `LIFT` over
+  what is DRAWN at its centre, asked at the level of the mast's foot:
+  `world.heightAt` (carriageway, pavement, a path's slab, the ground under
+  every corridor's ceiling), or surfaceY's own sheet where that is a thin
+  layer or a deck's asphalt within half a metre of it. It used to take the
+  higher of the road and the height GRID plus a layer ladder, and in a cutting
+  the grid arches over the carriageway: on the ramp down to the Jana Palacha
+  underpass the pools hung 1.1 to 1.3 m in the air (2.75 m at the worst on
+  that tile). (2) A fan FOLLOWS its road. It was one plane at the pitch read
+  13 m ahead, which over the top of a ramp left its far end a metre and more
+  in the air and in a dip put its middle in the tarmac. `beamLie` now looks
+  three times along the nose (13 m, half way on, the far end), the two
+  further looks asked where the ones before say the surface will be. A look
+  takes the carriageway, and where the nose has left it (a bend, a junction)
+  what is DRAWN there (`world.heightAt`: pavement, path, ground), so the fan
+  lies on the verge of a bend and follows a hillside falling away where a road
+  ends; it is refused when what it finds is out of reach of the line (a deck
+  overhead that surfaceY offers for want of anything lower, a street under the
+  end of a deck, a terrace more than a metre up). A rise steeper than one in
+  five counts as road only on a carriageway whose point half way lies on the
+  same line (a street of up to 40 %, not a step). The chord goes into the
+  instance matrix as before and the two inner nodes' heights over it into the
+  instanced attribute `aBend`, which both vertex shaders add through ONE
+  shared `BEND_GLSL` (`beamBend`). The fans' geometry is a 12-span strip of
+  its own for that; a pool is still a quad. A look that fails leaves the plane
+  it was. Pinned by tests/poolspot.test.mjs.
+* **A prop stands on the paving that is drawn** (`js/footslab.js`, 20 Nov
+  2026). The level of a footway's slab (its own profile blended toward the
+  street it runs beside: `footPullW`, `streetPull`, `slabLevel`) is ONE pure
+  function now, read by the feet (`city._footPull`) and by the props
+  (`meshes.standingOn`). standingOn had a copy that knew only kerbed streets,
+  asked the pull under the prop instead of at the path's centreline and
+  picked the strongest pull before the cap: a lamp on the riverside path
+  under Povltavská stood 1.8 m under its paving, one at the foot of Bubenské
+  nábřeží 2.2 m over the ground. A path counts for a prop ON its slab (12 cm
+  past the edge, as for feet) or beside a slab lying on the ground (within
+  0.5 m of the drawn ground): a path carried on a wall does not lift the
+  column 30 cm off its edge. Like the feet, a prop is not offered a street's
+  pavement out over a stamped Prague quay. And no lamp is planted within
+  `TRAM_CLEAR` (1.5 m) of a tram track's centreline (`lampSpots` `inTram`):
+  kerb offsets and surveyed nodes fell on the rails in the middle of
+  Seifertova and Sokolovská. Pinned by tests/prop-beside-path.test.mjs.
 * **Trams** (`js/trams.js`, `js/tramlines.js`). A tram's position is a pure
   function of route id, trip number and the shared clock: no state that two
   co-op clients could disagree on, no Math.random. A tram yields to a car on its
