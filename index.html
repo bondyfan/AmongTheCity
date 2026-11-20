@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Among The City: Pardubice</title>
   <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/loading.css">
   <script type="importmap">
     { "imports": { "three": "./libs/three.module.js" } }
   </script>
@@ -15,9 +16,28 @@
 
   <!-- boot cover: hides the world while the city streams in around the spawn -->
   <div id="enter-overlay">
-    <div class="enter-inner">
-      <div class="enter-spinner"></div>
-      <div id="enter-label">Přijíždíte do Pardubic…</div>
+    <audio id="loading-music" src="/assets/loading/prvni-svetlo.mp3" preload="none" loop></audio>
+    <div class="loading-art" aria-hidden="true">
+      <div class="loading-scene loading-platform">
+        <img class="loading-backdrop" src="/assets/loading/kolin.webp" alt="" decoding="async">
+        <img class="loading-subject" src="/assets/loading/traveller.webp" alt="" decoding="async">
+      </div>
+      <div class="loading-scene loading-tramstop">
+        <img class="loading-backdrop" src="/assets/loading/mala-strana.webp" alt="" decoding="async" fetchpriority="low">
+        <img class="loading-subject" src="/assets/loading/tram.webp" alt="" decoding="async" fetchpriority="low">
+      </div>
+      <div class="loading-scene loading-forecourt">
+        <img class="loading-backdrop" src="/assets/loading/pardubice.webp" alt="" decoding="async" fetchpriority="low">
+        <img class="loading-subject" src="/assets/loading/estate.webp" alt="" decoding="async" fetchpriority="low">
+      </div>
+      <div class="loading-scene loading-riverside">
+        <img class="loading-backdrop" src="/assets/loading/naplavka.webp" alt="" decoding="async" fetchpriority="low">
+        <img class="loading-subject" src="/assets/loading/courier.webp" alt="" decoding="async" fetchpriority="low">
+      </div>
+    </div>
+    <div class="loading-footer">
+      <div class="loading-wordmark">Among The City</div>
+      <div class="loading-status" lang="cs" role="status"><span id="enter-label">Načítání hry…</span></div>
     </div>
   </div>
 

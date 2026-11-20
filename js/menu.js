@@ -121,7 +121,7 @@ const NOTE_MISS = 'Nejdřív si zvolte přezdívku';
  * it's open, resolves on the player's pick and removes itself (restoring the
  * boot spinner underneath).
  */
-export function showMenu() {
+export function showMenu(onStart) {
   return new Promise((resolve) => {
     // idempotent: a second showMenu() must not stack a second <style> (and a
     // second copy of the shake keyframes) into <head>
@@ -356,6 +356,7 @@ export function showMenu() {
       if (cover) cover.style.visibility = coverVis;   // spinner covers the boot
       overlay.classList.add('atc-menu-out');        // the town rushes towards you
       setTimeout(() => { stopScene(); overlay.remove(); }, 900);
+      onStart?.(); // Start loading music within the click that unlocks playback.
       resolve({ mode, name: sanitizeName(nameIn.value), start, freeroam, campaign: dev && !freeroam });
     };
     // single player never blocks on a name, you are alone, but if one is

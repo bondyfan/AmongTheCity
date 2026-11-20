@@ -7,22 +7,6 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
 
 .hidden { display: none !important; }
 
-/* boot cover */
-#enter-overlay {
-  position: fixed; inset: 0; z-index: 40; background: #0d1016;
-  display: flex; align-items: center; justify-content: center;
-  transition: opacity 0.5s ease;
-}
-#enter-overlay.fade { opacity: 0; pointer-events: none; }
-.enter-inner { text-align: center; color: #cfd6e4; }
-.enter-spinner {
-  width: 46px; height: 46px; margin: 0 auto 14px;
-  border: 3px solid #232a38; border-top-color: #7fa8e8; border-radius: 50%;
-  animation: spin 0.9s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-#enter-label { font-size: 15px; letter-spacing: 0.4px; }
-
 /* HUD */
 #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
 #location-name {

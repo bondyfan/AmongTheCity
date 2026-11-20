@@ -139,7 +139,7 @@ test('the player and every peer are cast by uid; a pedestrian by its shared seed
 
 test('a new campaign opens the creator once; a new game forgets the look', () => {
   const main = src('main.js'), menu = src('menu.js');
-  assert.match(main, /if \(opening && !validLook\(loadMyLook\(\)\)\) await showCreator\(\);/);
+  assert.match(main, /if \(opening && !validLook\(loadMyLook\(\)\)\) \{\s*music\.pause\(\);\s*await showCreator\(\);\s*playLoadingMusic\(\);\s*\}/);
   assert.match(main, /wearLook\(myLook\(\)\);/);
   assert.match(menu, /store\.clear\(\);\s*saveMyLook\(''\);/);
 });
