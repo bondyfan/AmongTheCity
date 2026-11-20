@@ -43,11 +43,28 @@
   transform-origin: bottom center;
 }
 
-.loading-forecourt {
-  z-index: 1;
-  background: #3d3333;
+/* Kolín stays underneath. Each incoming scene fades over a fully opaque
+   predecessor. The last fades directly back to Kolín at the 40-second mark. */
+.loading-tramstop, .loading-forecourt, .loading-riverside {
   opacity: 0;
-  animation: loading-dissolve 20s linear infinite;
+  background: #303539;
+  animation: loading-slide 40s linear infinite;
+}
+.loading-forecourt { animation-delay: 10s; }
+.loading-riverside { animation-name: loading-return; }
+
+.loading-tramstop .loading-subject {
+  width: 64%;
+  height: 81%;
+  right: 0;
+  bottom: 2%;
+}
+.loading-riverside .loading-subject {
+  width: 54%;
+  height: 101%;
+  right: 0;
+  bottom: -5%;
+  transform-origin: bottom center;
 }
 .loading-forecourt .loading-backdrop { animation-direction: alternate-reverse; }
 .loading-forecourt .loading-subject {
@@ -66,9 +83,13 @@
   from { transform: translateX(2%) scale(1.015); }
   to { transform: translateX(-4%) scale(1.065); }
 }
-@keyframes loading-dissolve {
-  0%, 44%, 100% { opacity: 0; }
-  50%, 94% { opacity: 1; }
+@keyframes loading-slide {
+  0%, 22%, 52%, 100% { opacity: 0; }
+  25%, 50% { opacity: 1; }
+}
+@keyframes loading-return {
+  0%, 72%, 100% { opacity: 0; }
+  75%, 97% { opacity: 1; }
 }
 
 /* Dropping the art from layout under these panels also restarts it when play begins. */
@@ -122,6 +143,10 @@ body:has(#atc-menu:not(.atc-menu-out), #atc-creator) .loading-art { display: non
   .loading-backdrop { object-position: 30% 50%; }
   .loading-platform .loading-backdrop { object-position: 16% 50%; }
   .loading-platform .loading-subject { width: 85%; height: 78%; right: -7%; bottom: -2%; }
+  .loading-tramstop .loading-backdrop { object-position: 23% 50%; }
+  .loading-tramstop .loading-subject { width: 98%; height: 55%; right: -2%; bottom: 10%; }
+  .loading-riverside .loading-backdrop { object-position: 23% 50%; }
+  .loading-riverside .loading-subject { width: 87%; height: 76%; right: -5%; bottom: -1%; }
   .loading-forecourt .loading-subject { width: 94%; height: 49%; right: 1%; bottom: 12%; }
   .loading-footer { align-items: flex-start; flex-direction: column; gap: 12px; }
 }
