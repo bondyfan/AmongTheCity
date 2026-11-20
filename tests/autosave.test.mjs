@@ -135,6 +135,18 @@ test('the campaign writes nothing before its end, and its end is the mission poi
   ({ c, h } = await session(campaign));
   assert.equal(c.activeStory(), 'done', 'the finished campaign started again');
   assert.deepEqual([h.player.pos.x, h.player.pos.z], [1213, 1448]);
+
+  // part two (js/heist.js) is pending from here: nothing is written while it
+  // runs, and its end is the next mission point
+  assert.equal(c.heistPending(), true);
+  play(c, h, 10, 3);
+  assert.equal(c.autosave('mission'), false, 'an autosave in the middle of part two');
+  assert.equal(onDisk().heist, null);
+  Object.assign(h.player.pos, { x: 2400, z: -900 });
+  c.completeHeist();
+  assert.equal(onDisk().heist, 'done');
+  assert.equal(onDisk().point, 'mission');
+  assert.deepEqual([onDisk().pos.x, onDisk().pos.z], [2400, -900]);
 });
 
 test('the points: a mission and a night in your own flat, nothing else', async () => {

@@ -2013,8 +2013,8 @@ the police: "nesmí to tam být vůbec jako v možnostech nastavení".
 * **One writer** (js/career.js `autosave(point)`): no timer, no `pagehide` or
   `visibilitychange` save, none on the death card, none after a purchase or a
   look change. A point is a key of js/autosave.js `POINTS`: `mission` (part
-  one calls it from `checkpointStory('done')`, later missions call it at their
-  end) and `sleep` (for the flat that does not exist yet: its bed calls
+  one calls it from `checkpointStory('done')`, part two from `completeHeist`,
+  later missions at their end) and `sleep` (for the flat that does not exist yet: its bed calls
   `career.autosave('sleep')`). Anything else is refused. The save records the
   point (`point`) and a card says "Uloženo".
 * **A reload is the last point**: quitting, dying, closing the tab lose what
@@ -2032,6 +2032,42 @@ the police: "nesmí to tam být vůbec jako v možnostech nastavení".
   a developer's stored choice nor writes over it (`forStorage`). The presets no
   longer carry `traffic` or `peds`. The panel's CSS is js/settingsstyle.js.
 * Tests: tests/autosave.test.mjs, tests/world-settings.test.mjs.
+
+## Part two of the Last Train: the car under Kunětická hora (js/heist*.js, Nov 2026)
+
+Part one ends saved at Vašek's table. Part two is a third owner beside
+`journey` and `meeting` in main.js (`heist`, same four hooks: `use`, `update`,
+`frameCamera`, `posePlayer`), created whenever `career.heistPending()` says the
+save has part one and not part two. Like part one it is played in one sitting:
+`career.storyRunning()` is true while it runs, nothing is written, and
+`completeHeist()` writes `heist: 'done'`.
+
+* **Stages** (`js/heist.js`): wake (02:30, Dražkovická) → tofarm (the estate to
+  Brozany) → farm (Jarda) → ride (his van, the player in the passenger seat) →
+  drop → walk (Vašek on the phone) → theft (the villa where the map has
+  "Perníková chaloupka") → run (home at daybreak) → end (the lock-up in Na Staré
+  poště, `js/heist-garage.js`). Places are in `js/heist-route.js`, all read off
+  the map tiles; lines in `js/heist-dialogue.js`; `js/heist-talk.js` plays them
+  one after another with nothing to press.
+* **The van** (`js/heist-farmer.js`) is a real car with Jarda in `seats[0]`, so
+  E gives the player seat 1 by the game's own rule. Nobody simulates it: the
+  file writes `x, z, heading, speed, steer, y` along a smoothed polyline
+  (`track`). It stays locked until he is behind the wheel.
+* **The Mercedes** (`js/heist-car.js`): leaves found by dropping rays on the
+  body, two plates (a dark holder goes over the plate the body draws), a window
+  that unlocks it, and `car.hotwire`, which main.js reads in two places (no
+  `carStart` in `onSeated`, no gas in the drive step) until the wires meet.
+* **The police** (`js/heist-police.js`): plates left on are read on the way in
+  and the heat never cools (`host.fail('plate')` after a while); a bare car
+  draws a patrol that gets a close look; two `traffic.spawnPatrol` cars stand
+  across the end of 17. listopadu. Arrests are the game's own.
+* **Failing** goes through main.js `failStory`: with a heist it shows
+  `heist.failText(why)`, stands the player where `heist.rewind()` says (the
+  villa's gate once reached, else Vašek's street) and plays on.
+* **The balaclava** (`js/heist-mask.js`) hangs on `parts.headS`, a head socket
+  added to the modelled human beside the two hand sockets.
+* **Sound**: `scripts/gen-heist-audio.mjs` (ElevenLabs, run only when asked).
+  `storyRecording()` gained `set(level)` for looping beds (the van's radio).
 
 ## Doors, locks, jumps and arrests: the step before part two (Nov 2026)
 

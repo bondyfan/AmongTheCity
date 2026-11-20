@@ -2746,6 +2746,10 @@ export function storyRecording(id, {level = 1, phone = false, loop = false, mete
     let energy=0;
     for(const v of samples) energy+=((v-128)/128)**2;
     return Math.min(1,Math.sqrt(energy/samples.length)*4.6);
+  }, set(next, glide = 0.12) {
+    // a looping bed (the van's radio, the forest) follows the distance to it
+    level = next;
+    if (gain && !stopped) gain.gain.setTargetAtTime(next, ctx.currentTime, glide);
   }, stop(fade = 0.035) {
     if (stopped) return;
     stopped = true;

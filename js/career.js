@@ -51,6 +51,7 @@ import { discover, contextTips, payAwards, food, foodScan } from './careertips.j
 import { startPoint as pickStart } from './startplace.js';
 import { standY, groundReady, motorwaySave } from './savespot.js';
 import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
+import { start as heistStart } from './heist-route.js';
 
 const store = browserStore();
 
@@ -120,15 +121,29 @@ function beginStory() {
 }
 export function checkpointStory(stage) {
   state.prologue = stage;
-  // part one of the campaign is a mission completed: its end is a point
-  if (stage === 'done' && applied) autosave('mission');
+  // part one of the campaign is a mission completed: its end is a point, and
+  // the one write made while part two is still ahead (only part one holds it)
+  if (stage === 'done' && applied) write('mission', partOneRunning());
 }
 /** The campaign from its first frame again: a new platform, a full countdown. */
 export function restartStory() {
   beginStory();
   return state.storyTrip;
 }
-const storyRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && !freeroam && startPick !== 'praha';
+const partOneRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && !freeroam && startPick !== 'praha';
+const storyRunning = () => partOneRunning() || heistPending();
+
+// PART TWO (js/heist.js) follows the saved end of part one and is played in
+// one sitting like it: nothing is written while it runs, and the next write is
+// the one that says it is over. A save that ends at Vašek's table therefore
+// opens on his street at half past four in the morning.
+export function heistPending() {
+  return !!state && solo && !freeroam && startPick !== 'praha' && state.prologue === 'done' && state.heist !== 'done';
+}
+export function completeHeist() {
+  state.heist = 'done';
+  if (applied) autosave('mission');      // part two is a mission completed too
+}
 
 /** Where boot begins, before the world exists: the save's spot when it is in
  *  the city the menu shows, else that city's square (js/startplace.js).
@@ -141,6 +156,10 @@ export function startPoint() {
     const p = state.pos ?? fallback;
     const place = p.x < -38000 ? { name: 'Kolín', to: 'do Kolína' } : pickStart(null, p).place;
     return { x: p.x, z: p.z, heading: p.h, place, saved: !!state.pos };
+  }
+  if (heistPending()) {
+    const p = heistStart;
+    return { x: p.x, z: p.z, heading: p.h, place: pickStart(null, p).place, saved: true };
   }
   const sp = pickStart(startPick, state.pos);
   if (!sp.saved && state.pos) state = { ...state, pos: null };
@@ -351,6 +370,7 @@ function snapshot() {
   return {
     money: wallet.money(),
     prologue: state.prologue,
+    heist: state.heist ?? null,
     storyTrip: state.storyTrip,
     pos: lastSafe,
     tod: solo ? tod() : null,
@@ -372,10 +392,15 @@ function snapshot() {
  * "Uloženo". The ONLY writer of the save. Refused (false, nothing written)
  * for a point that is not one, while down (the body is mid-teleport), before
  * the loaded save has been applied (that would overwrite it blank) and while
- * a campaign chapter runs (its end is the point, js/career.js checkpointStory).
+ * a campaign part runs (its end is the point: checkpointStory, completeHeist).
  */
 export function autosave(point) {
-  if (!isPoint(point) || !applied || !h || vitals.down() || storyRunning()) return false;
+  return write(point, storyRunning());
+}
+// `held`: a story still running holds the write back. The end of part one
+// passes only partOneRunning(), because part two is pending from that frame on.
+function write(point, held) {
+  if (!isPoint(point) || !applied || !h || vitals.down() || held) return false;
   // where you stand NOW: a mission's end may have just put you somewhere
   // (part one stands you at Vašek's door), and update() has not seen it yet
   markSafe(true);
@@ -424,7 +449,7 @@ function buyFood(plate) {
 
 /** E on foot with no car in reach: the food counter, if this is one. */
 export function use() {
-  if (!playable() || !h.player) return false;
+  if (!playable() || !h.player || heistPending()) return false;
   const v = foodPlaceAt(h.world?.city, h.player.pos.x, h.player.pos.z);
   if (!v) return false;
   foodPanel.show(v);
@@ -434,6 +459,7 @@ export function use() {
 function openCar() {
   const p = h.player;
   const car = garage.carAt(p.pos.x, p.pos.z);
+  if (car?.story) return;
   if (!car) { toast('Postav se k zaparkovanému autu', { icon: '🚗', sub: 'B: koupit auto nebo opravit svoje' }); return; }
   carPanel.show(garage.view(car));
 }
@@ -467,7 +493,7 @@ export function footHint(el, car) {
   if (car) {
     // B deals in PARKED cars (garage.carAt). A car stopped in traffic can be
     // boarded but not bought from the pavement, so it keeps main.js's own hint.
-    if (!h.parked.includes(car)) return;
+    if (!h.parked.includes(car) || car.story) return;   // (a car of the story is not for sale)
     el.innerHTML = car === garage.car
       ? '<kbd>E</kbd> nastoupit · <kbd>B</kbd> tvoje auto'
       : '<kbd>E</kbd> nastoupit · <kbd>B</kbd> koupit';
@@ -565,7 +591,7 @@ function markSafe(now) {
 // Everything that does not need to run every frame.
 function slow(x, z, onFoot, car) {
   discover(progress, h.placeFinder?.town ?? null);
-  foodScan(h.world?.city, x, z, onFoot);
+  foodScan(h.world?.city, x, z, onFoot && !heistPending());   // (part two's villa is a restaurant on the map)
   // the introduction's targets come from the world, so they are found here
   if (onb.needsTarget && !jobs.runner.active) {
     if (onb.name === 'car') {
