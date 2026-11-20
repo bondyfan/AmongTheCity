@@ -2004,6 +2004,35 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
   Shift, and a sprint on a double tap of Shift that spends `stamina`
   (js/stamina.js draws the bar).
 
+## Saving only at autosave points; the world's numbers fixed (Nov 2026)
+
+Frank, 20 Nov 2026: "To se musí ukládat jenom jako na autosavy", later also
+"i když budeme spát, když budeme mít svůj byt"; and of traffic, the crowd and
+the police: "nesmí to tam být vůbec jako v možnostech nastavení".
+
+* **One writer** (js/career.js `autosave(point)`): no timer, no `pagehide` or
+  `visibilitychange` save, none on the death card, none after a purchase or a
+  look change. A point is a key of js/autosave.js `POINTS`: `mission` (part
+  one calls it from `checkpointStory('done')`, part two from `completeHeist`,
+  later missions at their end) and `sleep` (for the flat that does not exist yet: its bed calls
+  `career.autosave('sleep')`). Anything else is refused. The save records the
+  point (`point`) and a card says "Uloženo".
+* **A reload is the last point**: quitting, dying, closing the tab lose what
+  happened since; an arrest steps back to it too (`reloadLast`). The campaign,
+  the free roam after it, `?devmode` Freeroam and co-op follow the same rule.
+* **Older saves** (v2, written every 20 s and on quit) migrate to v3 without
+  the quit spot and hour: a finished part one stands you at its end
+  (`PART_ONE_END`, Vašek's door), anyone else on the square; money, car and
+  stats stay. A v2 death-card save keeps its hospital and pays its bill.
+* **Traffic, crowd, police** (js/worldsettings.js `WORLD`: 120 cars, 60
+  walkers, patrols 0.70; "Běžná", "Rušno", "Běžně"): fixed outside `?devmode`
+  whatever storage holds, and not in the panel. With `?devmode` they are on
+  the dev tab ("Provoz a lidé"); co-op locks them again (`shareWorld`), since
+  every client builds the same fleet from them. The classic game neither reads
+  a developer's stored choice nor writes over it (`forStorage`). The presets no
+  longer carry `traffic` or `peds`. The panel's CSS is js/settingsstyle.js.
+* Tests: tests/autosave.test.mjs, tests/world-settings.test.mjs.
+
 ## Part two of the Last Train: the car under Kunětická hora (js/heist*.js, Nov 2026)
 
 Part one ends saved at Vašek's table. Part two is a third owner beside
@@ -2402,6 +2431,123 @@ Not done: the driver drawn behind a car's glass is still the shader's own
 Universal Animation Library (CC0, downloaded with the sources) is not wired
 in, so jumping, punching, aiming and getting up are still the game's own poses
 carried onto the new bodies.
+
+## Chain stores and fast food as they stand in Czechia (js/stores/, Nov 2026)
+
+Frank, 20 Nov 2026: every Lidl, Albert, Billa, Kaufland, Penny, McDonald's and
+KFC should look as it does in reality, inside as well, and you should be able
+to do there what you do in reality. The Billa in Pardubice "looks nothing like
+a Billa"; a Lidl "is one of those big glazed buildings".
+
+The tiles already name them (`n`, `u`, js/interiors.js had a BRANDS table for
+the fascia): 143 buildings called Lidl, 167 Penny, 138 Albert, 109 Billa, 59
+Kaufland, 45 McDonald's, 32 KFC. Nine in ten stand on their own. What they
+lacked was everything else: a Lidl was a grey shed with strip windows and
+grey boxes for shelves.
+
+* **A store is a generated landmark** (`landmark.js`, `chains.js`).
+  `landmarkOf()` asks `storeLandmark(f)` after the hand-made list: a building
+  whose name is a chain's and which stands alone (not housing, not over 11 m,
+  no courtyard, the right trade, a plausible size) answers with an entry shaped
+  like the hand-made ones. The far mesh then skips it, the destructible
+  interiors skip it, and its own generator draws it in every tier. A Lidl under
+  six storeys of offices on Wenceslas Square stays the office block it is.
+  `?devmode&stores=off` makes every store generic again (a before and after).
+* **Fitted, not placed** (`site.js`). One answer per building for the mesh, the
+  collision, the interior and the people: its own axes, which wall is the
+  front, where the door is, which runs of wall are glass. THE FRONT IS THE WALL
+  THAT LOOKS AT THE CAR PARK (the mapped parking polygons, weighed by size and
+  by how squarely the wall faces them), not the wall nearest a pavement: the
+  Lidl by Pardubice station has a service lane three metres off its gable and
+  its car park along the whole north side. The choice is a plain memo on the
+  feature (`_sf`), made on the main thread before a chunk's inputs are copied
+  (`pinStores` in js/meshpool.js), so the mesh worker reads it and both builds
+  agree. The drive-through (`drive.js`, `_sd`) travels the same way.
+* **The shell** (`build.js`, `dress.js`, `dressfast.js`), by js/landmarkskit.js:
+  walls on the footprint's own edges in three courses (plinth, sandwich panel,
+  the chain's band), the glazing as REAL HOLES with their frames, a mono-pitch
+  or a flat roof with its plant, and the inside of the same box (floor,
+  ceiling, inner wall faces, lit after dark). In front: the canopy on its
+  columns, the trolley bay, the hours board, the sign on the front and the
+  flanks, the pylon. A restaurant gets the brand fin, a terrace with parasols,
+  a playground (McDonald's) and, where OpenStreetMap maps the lane (the two ways
+  round the Pardubice McDonald's are named "McDrive"), the order post, the
+  hatch and the height bar. Three new surface kinds in the landmark material
+  (`K.panel`, `K.slats`, `K.paving`, appended).
+* **Signs** (`signs.js`, `signpaint.js`, `logodraw.js`) ride the chunk's
+  wordmark stream, so they batch with every other fascia. Only
+  `{ label, sign, trim }` of a brand crosses from the worker, so the label says
+  what to paint: `@lidl/sq`, `@kfc/band`, `@albert/hours`. What a sign shows is
+  one switch (`SIGN_STYLE.logos`): `'drawn'`, each mark rebuilt from plain
+  shapes in code (no logo file is ever loaded), which is what ships since the
+  owner chose it on 20 Nov 2026; `'plain'`, the chain's colours and its name
+  in type, which is what the fascias always showed (`?devmode&signs=plain` to
+  compare).
+* **A store on a slope** (`site.js floorRel`, `apronOf`). The floor is laid
+  over the highest ground under the footprint (up to 1.6 m over the founding
+  height), so no turf comes up through the tiles, and the paved apron before
+  the doors is a ramp from the floor down to the ground as it lies: the mesh
+  draws it and `world.stores.floor` lets feet walk it.
+* **Near the player** (`world.js`, one `StoreWorld` on `world.stores`). Within
+  380 m: the glass in the holes, the sliding door, the lit room
+  (`shellfx.js`), three draw calls a store. Within 130 m: the fittings
+  (`layout.js`, `eatlayout.js`, `fixtures.js`, `fixgeo.js`), one InstancedMesh
+  per kind of fitting, every instance showing its own cell of ONE procedural
+  sheet of stocked shelves (`goodstex.js`, 8 x 8 cells, nothing copied from a
+  photograph, no pack carries a name). A 2 600 m2 Lidl is some 400 modules in a
+  dozen draw calls. `world.stores` answers `floor` (city.supportY), `collide`
+  (city.collide: fittings and a shut door), `covered` and `lid` (the camera),
+  `use` (E), `hint`, `posePlayer` (seated).
+* **Shopping** (`shopping.js`, `cart.js`, `panels.js`, `catalog.js`). A basket
+  inside the door or a trolley from the bay; E at a shelf opens the department
+  with Czech shelf prices of late 2025 (ČSÚ averages where there is one, a
+  discounter a few per cent under the list); a till with a cashier or a
+  self-checkout scans the cart item by item; `wallet.pay` settles it and the
+  food goes into the BAG (key I), from which it is eaten through
+  `vitals.heal` and `vitals.eat` like any meal. Walking out with unpaid goods
+  sets off the alarm at the door and is a crime (`wanted.add`).
+* **Eating** (`eating.js`). Order and pay at a kiosk or the counter, wait for
+  the number, collect the tray, sit on a free chair: the meal heals and fills
+  bite by bite while seated. From the driver's seat the same order is placed at
+  the order post and handed out at the window.
+* **People** (`schedule.js`, `crowd.js`). Nobody is simulated. Where slot 4 of
+  a store is at a given second of the SHARED clock is a function of the store's
+  key, the slot and the clock: a visit is a plan of nodes along the free
+  corridors (door, gate, two to four shelves, a till, out; or kiosk, counter,
+  table, out), so two co-op players see the same woman at the same shelf with
+  nothing on the wire. The bodies are the game's own people with their recorded
+  walk, stand and sit; a reaching hand, a scanning arm and a bite are added
+  joint by joint. Cashiers sit at as many tills as the hour needs.
+* **Car parks** (js/parkinglots.js `shopLot`, `lotStalls`; `lotpaint.js`): a
+  lot within 75 m of a chain store fills by day and empties at night, where a
+  housing estate's does the opposite, and its bays are painted: the lines are
+  the very stalls the parked cars stand in.
+* **A chain as a tenant** (`world.stores.tenant`, called from js/career.js): a
+  Lidl under an office block has no shop floor to walk, so E opens one screen
+  with the chain's own goods at its own prices (into the bag), or its own menu
+  (eaten at the counter), instead of the generic food counter.
+
+Over the whole world 669 buildings are rebuilt this way (Penny 152, Lidl 131,
+Albert 102, Billa 92, Kaufland 52, Tesco 46, McDonald's 37, KFC 25, Norma 14,
+Burger King 10, Makro 5, Globus 3), about 1 500 triangles each, 60 of the
+restaurants with a mapped drive-through. Measured on the M1 Pro (medium, noon,
+1024 x 768, the pane hidden, the machine under other load): standing 22 m from
+the front of a store with its whole interior in view costs about 1 to 2 ms a
+frame over the same spot with the stores switched off (Pardubice Lidl 5.3 to
+some 7 ms, Prague Kaufland 4.2 to 5.6 ms), of which the people are most; the
+simulation step pays 0.06 ms; away from a store nothing.
+
+Not done: a chain that is a tenant of a bigger building (a quarter of the
+Alberts) keeps the generic building, with the one-screen counter above; nobody
+drives through the drive-through but the player; the saddle-roofed stores of the
+1990s are built as flat-roofed boxes; a store has no back-of-house; the
+shelves cannot be blown up (a store is no longer a destructible building).
+
+Tests: `tests/stores.test.mjs` (17): recognition against the real tiles, every
+wall accounted for with one door on the front, the door open and every other
+run solid, sound geometry on fifty real footprints, worker parity, the
+drive-through on the mapped lane, layouts inside their walls, visits that are
+deterministic and never teleport, the cart, the bag and the order.
 
 ## Cars: true shapes, paint with a history, a solid hull, the Roadster (Nov 2026)
 

@@ -2143,6 +2143,9 @@ export class CityWorld {
     let best = this.heightAt(x, z, maxY);
     const roof = this.roofY(x, z, maxY);
     if (roof > best) best = roof;
+    // the floor of a chain store (js/stores/world.js): a slab over its own ground
+    const shop = this.stores?.floor(x, z, maxY);
+    if (shop > best) best = shop;
     if (coach > best) best = coach;
     const inside = this.interiors.supportY(x, z, maxY);
     return inside > best ? inside : best;
@@ -2303,6 +2306,8 @@ export class CityWorld {
     pushed = mwCollide(pos, radius, opts?.aboveY, this) || pushed;
     // …and a flight of steps down to a Prague lower quay is a wall to a car
     pushed = quayStairsCollide(pos, radius, opts) || pushed;
+    // the shelves, tills and shut doors of a chain store (js/stores/world.js)
+    pushed = this.stores?.collide(pos, radius, opts) || pushed;
     const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
     if (!cell) return pushed;
     const walker = !!opts?.interior;

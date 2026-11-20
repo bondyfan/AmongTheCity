@@ -132,7 +132,8 @@ function mountPose(actions, host) {
   btn.type = 'button';
   btn.id = 'atc-dev-copy';
   btn.textContent = '⧉ Kopírovat pozici a pohled';
-  host.append(txt, btn);
+  // first on the tab, above the traffic and crowd rows settings.js put there
+  host.prepend(txt, btn);
 
   // A timer, not requestAnimationFrame: rAF does not fire in a background tab,
   // and a readout that goes blank the moment you alt-tab is exactly the readout

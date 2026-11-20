@@ -1,7 +1,9 @@
 // ---- Save game: one versioned blob in localStorage ----
 // What survives a reload: money, where you stood, how long you have played,
 // the car you own and where you left it, the body, the stats, the job you had
-// taken and how far through the introduction you are.
+// taken and how far through the introduction you are. All of it as it was at
+// the last AUTOSAVE POINT (js/autosave.js): the game is written only there,
+// never while it is played and never on the way out.
 //
 // THE SAVE IS THE LOCAL PLAYER'S AND NOTHING ELSE. No traffic, no pedestrians,
 // no wrecks in the street: those are a shared schedule in co-op (every client
@@ -25,9 +27,10 @@
 
 import { stops as storyStops } from './prologue-route.js';
 import { sanitizeLook } from './characters/appearance.js';
+import { isPoint, PART_ONE_END } from './autosave.js';
 
 export const SAVE_KEY = 'atc-save';
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 const WORLD_MAX = 400000;      // m: nothing in the region is further than this
 const MONEY_MAX = 999999999;
@@ -68,6 +71,9 @@ export function blank() {
     // localStorage, which is what free roam and co-op read; the save's copy
     // brings it back when that storage was cleared.
     look: '',
+    // Which autosave point wrote this save ('mission', 'sleep'), or '' for a
+    // new game and for a save from before the points existed.
+    point: '',
   };
 }
 
@@ -149,6 +155,7 @@ export function sanitize(raw) {
     owed: s.owed && typeof s.owed === 'object' && !Array.isArray(s.owed)
       ? { stars: pos(s.owed.stars, 5) | 0 } : null,
     look: sanitizeLook(s.look),
+    point: isPoint(s.point) ? s.point : '',
   };
 }
 
@@ -160,8 +167,9 @@ export function sanitize(raw) {
 // unversioned blob) and v1 (the first versioned draft) are the two shapes this
 // file went through while it was being written, kept as real steps so that the
 // chain, the "old save" path and their tests exist BEFORE the first migration
-// that matters has to be added under pressure. The next schema change appends
-// `2: (s) => ...` and bumps SAVE_VERSION.
+// that matters has to be added under pressure. v2 to v3 below is the first
+// one that does. The next schema change appends `3: (s) => ...` and bumps
+// SAVE_VERSION.
 export const MIGRATIONS = {
   // v0: flat { money, x, z, heading, hp }. No stats, no car.
   0: (s) => ({
@@ -181,6 +189,24 @@ export const MIGRATIONS = {
       stats: { ...obj(s.stats), jobsCourier: fin(jobsDone, 0) },
       jobs: { day: '', shift: 0, done: [], active: null },
       onb: { step: 0, done: true, tips: {} },
+    };
+  },
+  // v2 to v3: the save is written only at autosave points (Frank, 20 Nov
+  // 2026). A v2 save was written every twenty seconds and on the way out, so
+  // its position and its hour are where and when the tab was closed, which is
+  // exactly what a load must never return to. The rest (money, the car, the
+  // stats) is kept: it is the player's, and there is nothing truer to put
+  // instead. Whoever has finished part one of the campaign is stood where it
+  // ends; anyone else starts on the square of the save's city. The one v2 save
+  // whose spot is not the quit spot is the one written on the death card: it
+  // stands you at the hospital with the bill still open, and stays so.
+  2: (s) => {
+    const deathCard = obj(s.owed) === s.owed;
+    return {
+      ...s, v: 3,
+      pos: deathCard ? s.pos : s.prologue === 'done' ? { ...PART_ONE_END } : null,
+      tod: null,
+      point: '',
     };
   },
 };

@@ -10,6 +10,14 @@ import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR, START_PLACES, FLEET_STRIDE, HOSP
 import { arriveText, nearestHospital, tilesReady } from './startplace.js';
 import { loadCity, chunkKey, venueAt, forEachChunkInRadius } from './geo.js';
 import { StationPassages } from './station-passages.js';
+import { STORES } from './stores/chains.js';
+import { SIGN_STYLE } from './stores/signpaint.js';
+import { setStoreCity } from './stores/site.js';
+import { StoreWorld } from './stores/world.js';
+import { makeCitizen } from './citizen.js';
+import './stores/crowd.js';
+import './stores/eating.js';
+import { worldT } from './worldclock.js';
 import { CityWorld } from './city.js';
 import { planRings, planCarRings } from './streamplan.js';
 import { input } from './input.js';
@@ -28,7 +36,7 @@ import { initAudio, sfx, sfxOr, sfxAt, setListener, setVolume,
   windStart, windStop, windSet, windLoad,
   ambientStart, nearbyTrafficHum } from './audio.js';
 import { carStart, carStop, carDrive, carAudioFrame, carHorn } from './caraudio.js';
-import { initSettings, getSettings } from './settings.js';
+import { initSettings, getSettings, shareWorld } from './settings.js';
 import { initOrtho } from './ortho.js';
 import { GROUND_DETAIL } from './groundglsl.js';
 import { Pedestrians } from './pedestrians.js';
@@ -672,7 +680,8 @@ function updateCamera(dt) {
   // the one that crosses a block every fifth of a second.
   const flying = !!(game.heli || game.jet);
   const enclosed = !flying && !game.car && (journey?.aboard || world.stationPassages?.inside(tx, tz, player.y));
-  const indoors = enclosed || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
+  const inShop = !flying && !game.car && !!world.stores?.covered(tx, tz);
+  const indoors = enclosed || inShop || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
   if (indoors) dist = Math.min(dist, enclosed ? 0.85 : 3.4);
   const flat = Math.cos(pitch) * dist;
   let px = tx + Math.sin(camYaw) * flat;
@@ -680,7 +689,7 @@ function updateCamera(dt) {
   let py = ty + height * (indoors ? 0.25 : 1) * hk + Math.sin(pitch) * dist;
   // under a station canopy the lens stays under it too (js/station-passages.js lid)
   if (indoors && !enclosed) {
-    const lid = world.stationPassages?.lid(tx, tz);
+    const lid = world.stationPassages?.lid(tx, tz) ?? (inShop ? world.stores.lid(tx, tz) : null);
     if (lid != null && py > lid - 0.35) py = lid - 0.35;
   }
   // …and then it still has to not be inside a wall. March the boom back in
@@ -700,12 +709,14 @@ function updateCamera(dt) {
   // the direct source of the reported zoom-pop. The march pad is now the
   // larger one, so a spot that trips the entry test also holds the pull.
   let wantT = 1;
-  if (!flying && world.interiors?.occupied(px, py, pz, 0.28)) {
+  // (in a chain store the walls are the store's own: js/stores/world.js outside)
+  const camHit = (x, y, z, pad) => world.interiors?.occupied(x, y, z, pad) || (inShop && world.stores.outside(tx, tz, x, z));
+  if (!flying && camHit(px, py, pz, 0.28)) {
     const bx = px - tx, by = py - ty, bz = pz - tz;
     const MIN_T = 0.2;
     let t = 0.82;
     for (; t > MIN_T; t -= 0.05)
-      if (!world.interiors.occupied(tx + bx * t, ty + by * t, tz + bz * t, 0.32)) break;
+      if (!camHit(tx + bx * t, ty + by * t, tz + bz * t, 0.32)) break;
     wantT = Math.max(MIN_T, t);
   }
   _camPullT += (wantT - _camPullT) * Math.min(1, dt * (wantT < _camPullT ? 10 : 1.6));
@@ -1186,6 +1197,8 @@ input.onKey('KeyE', () => {
   if (journey?.use()) return;
   if (meeting?.use(player)) return;
   if (heist?.use()) return;
+  // a shelf, a till, a kiosk, a seat: whatever the store the player is in offers
+  if (world.stores?.use({ car: game.car, onFoot: !game.car && !player.inCar })) return;
   let jetNear = null;              // set by the fighter branch's own test
   if (trains?.riding) {
     // only with the doors open — stepping off at 140 km/h is not a feature
@@ -1579,6 +1592,10 @@ input.onKey('KeyV', () => {
 // through traffic's own sink so the reaction path is byte-identical to an AI
 // honk — one door, one behaviour, no second copy to drift.
 let _hornCd = 0;
+input.onKey('KeyI', () => {
+  if (game.mode !== 'play' || journey || arrest) return;
+  world?.stores?.openBag();
+});
 input.onKey('KeyH', () => {
   if (game.mode !== 'play' || !game.car || _hornCd > 0) return;
   _hornCd = 0.45;                  // hold the key down, get one beep, not forty
@@ -2684,6 +2701,9 @@ function updateHud(dt) {
         else hint.classList.add('hidden');
       }
       career.footHint(hint, inside ? null : car);   // E at a food counter, B at a car
+      // a chain store has the last word on what E does at its shelves and tills
+      const shopHint = world?.stores?.hint();
+      if (shopHint) { hint.innerHTML = shopHint; hint.classList.remove('hidden'); }
       // a handle you have already tried says so instead of offering it again
       if (car && !inside && car._lockTried && isLocked(car) && parked.includes(car))
         hint.innerHTML = hint.innerHTML.replace('<kbd>E</kbd> nastoupit', '🔒 zamčeno');
@@ -2997,8 +3017,19 @@ async function boot() {
       if (label0) label0.textContent = arriveText(sp.place);
     }
   }
+  // (?devmode&stores=off: every chain store is the generic building it was, for a before and after)
+  if (/(^|[?&])devmode(=|&|$)/.test(location.search) && /[?&]stores=off(&|$)/.test(location.search)) STORES.on = false;
+  // (?devmode&signs=plain: the chains' names in type instead of their drawn marks, to compare)
+  if (/(^|[?&])devmode(=|&|$)/.test(location.search) && /[?&]signs=plain(&|$)/.test(location.search)) SIGN_STYLE.logos = 'plain';
+  setStoreCity(city);
   world = new CityWorld(scene, city);
   world.stationPassages = new StationPassages(scene,world);
+  // the chain stores: glass, doors, fittings, people and shopping near the player
+  world.stores = new StoreWorld(scene, world, {
+    wallet, vitals, wanted, toast: policeToast, storage: globalThis.localStorage ?? null,
+    hour: () => tod() * 24, time: () => worldT(), makeCitizen,
+    onAte: (hp, kcal, what) => policeToast(what, { icon: '🍴', kind: 'good', sub: '+' + hp + ' zdraví · +' + kcal + ' sytost' }),
+  });
   grass = new Grass(scene, world, city);
   // A region tile landing changes what the ground under us is MADE of — a car
   // park arriving where the mask said field has to stop the grass growing
@@ -3655,7 +3686,13 @@ function stepGame(dt) {
     carDrive(dt, game.car, engineLoad(game.car, gas), gas, input.keys.has('Space'), world.city);
     if (shouldEject(game.car)) ejectDriver(game.car);
   } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt) && !heist?.posePlayer(dt)) {
-    player.update(dt, { input, camYaw, world });
+    if (!world.stores?.posePlayer(dt, player)) player.update(dt, { input, camYaw, world });
+  }
+  {
+    // after the player has moved: a trolley follows the hands that push it
+    const f = game.car ?? player.pos;
+    world.stores?.update(dt, { x: f.x, z: f.z, player, car: game.car, nightK: sky?.nightK ?? 0,
+      onFoot: !game.car && !game.heli && !game.jet && !player.inCar && !trains?.riding });
   }
   staminaHud(player, !game.car && !player.inCar);
   if (_ejCar) {
@@ -4105,7 +4142,6 @@ window.addEventListener('atc:look', async () => {
   if (!code || !player.canReskin()) return;
   wearLook(code);
   player.reskin();
-  career.save();
 });
 
 async function start() {
@@ -4172,6 +4208,7 @@ async function start() {
   // co-op: the saved hour was dropped (and overwritten with none) and an owned
   // fleet car came back as a second car on top of the original.
   career.choose({ ...choice, mode: net ? 'server' : 'single' });
+  if (net) shareWorld();     // co-op: traffic, crowd and police are everybody's (js/worldsettings.js)
   const chapter = career.activeStory();
   const opening = chapter && chapter !== 'done';
   const openingHour = opening ? storyHours.street / 24 : 6 / 24;

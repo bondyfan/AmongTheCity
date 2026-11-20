@@ -3,7 +3,7 @@
 //   and comes back from a reload without a twin on the same spot;
 //   a tile that streams in brings its POIs (fuel pumps on the map);
 //   a dry tank still has a foot brake;
-//   the wanted level and the hospital bill survive closing the tab.
+//   the wanted level survives closing the tab once an autosave point kept it.
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
@@ -280,7 +280,7 @@ async function reload() {
   return { c, h };
 }
 
-test('the wanted level and the hospital bill outlive the tab', async () => {
+test('the wanted level outlives the tab at an autosave point, and going down writes nothing', async () => {
   disk.clear();
   let { c, h } = await reload();
   wallet.setMoney(5000);
@@ -288,9 +288,11 @@ test('the wanted level and the hospital bill outlive the tab', async () => {
   const stars = wanted.stars(), heat = wanted.heat();
   assert.ok(stars >= 3, 'the test did not get itself wanted');
   c.update(1 / 60);
-  assert.equal(c.save(), true);
+  assert.equal(disk.has(SAVE_KEY), false, 'the game was written before any autosave point');
+  assert.equal(c.autosave('mission'), true);
   assert.ok(Math.abs(onDisk().wanted.heat - heat) < 0.1);
   assert.equal(onDisk().owed, null);
+  const written = disk.get(SAVE_KEY);
 
   // F5 with the stars up: still wanted, nothing paid, same wallet
   ({ c, h } = await reload());
@@ -299,43 +301,33 @@ test('the wanted level and the hospital bill outlive the tab', async () => {
   assert.equal(wallet.money(), 5000);
   assert.ok(said.some((t) => t.includes('Vítej zpět')));
 
-  // sejmut, and the tab is closed on the death card (before main.js's 4 s are up)
+  // sejmut, and the tab is closed on the death card: the save is untouched,
+  // so the reload is the last autosave point again (the checkpoint model)
   h.player.pos.x = 900; h.player.pos.z = -400;
   c.update(1 / 60);
   vitals.damage(9999, 'test');
   assert.equal(vitals.down(), true);
-  assert.equal(c.save(), false, 'still no ordinary save while down');
-  const s = onDisk();
-  assert.deepEqual(s.owed, { stars });
-  assert.equal(s.money, 5000, 'the bill is charged on load, through the wallet, not baked into the number');
-  assert.deepEqual([s.pos.x, s.pos.z], [2291, 295], 'you wake at the hospital, not where you fell');
-  assert.equal(s.jobs.active, null);
-  assert.equal(s.wanted.heat, 0);
-
+  assert.equal(c.autosave('mission'), false, 'an autosave on the death card');
+  assert.equal(disk.get(SAVE_KEY), written, 'going down wrote the save');
   ({ c, h } = await reload());
-  const bill = PRICE.hospital.fee + stars * PRICE.fine.perStar;
-  assert.equal(wallet.money(), 5000 - bill, 'closing the tab on the death card dodged the bill');
   assert.equal(vitals.down(), false, 'reloaded onto the death card');
-  assert.equal(vitals.hp(), vitals.hpMax());
-  assert.equal(wanted.stars(), 0);
-  assert.deepEqual([h.player.pos.x, h.player.pos.z], [2291, 295]);
-  assert.ok(said.some((t) => t.includes('Probouzíš se v nemocnici')), 'nothing told the player where the money went');
-  assert.ok(!said.some((t) => t.includes('Vítej zpět')));
-  // the settled game replaces the open bill within a second, so it is paid once
-  for (let i = 0; i < 60; i++) c.update(1 / 60);
-  assert.equal(onDisk().owed, null);
-  assert.equal(onDisk().money, 5000 - bill);
-  ({ c, h } = await reload());
-  assert.equal(wallet.money(), 5000 - bill, 'the bill was charged twice');
+  assert.equal(wallet.money(), 5000);
+  assert.equal(wanted.stars(), stars);
 
-  // broke: the bed is all-or-nothing (as in main.js), the fine takes what there is
-  wallet.setMoney(PRICE.hospital.fee + 150);
-  for (let i = 0; i < 4; i++) { wanted.update(1, {}); wanted.add('zabiti'); }
-  c.update(1 / 60);
-  vitals.damage(9999, 'test');
-  ({ c, h } = await reload());
-  assert.equal(wallet.money(), 0);
-  assert.equal(wanted.stars(), 0);
+  // A save an older build wrote ON the death card (v2, `owed`): loading it
+  // still pays the bill and wakes you at that hospital. Nothing is written
+  // afterwards, so every reload pays it from the same stored money: once.
+  disk.set(SAVE_KEY, JSON.stringify({ ...onDisk(), v: 2, point: undefined,
+    pos: { x: 2291, z: 295, h: 0 }, owed: { stars }, wanted: { heat: 0, crime: '' } }));
+  const bill = PRICE.hospital.fee + stars * PRICE.fine.perStar;
+  for (let i = 0; i < 2; i++) {
+    ({ c, h } = await reload());
+    assert.equal(wallet.money(), 5000 - bill, i ? 'the bill was charged twice' : 'the open bill was dodged');
+    assert.equal(wanted.stars(), 0);
+    assert.deepEqual([h.player.pos.x, h.player.pos.z], [2291, 295]);
+    assert.ok(said.some((t) => t.includes('Probouzíš se v nemocnici')), 'nothing told the player where the money went');
+    assert.ok(!said.some((t) => t.includes('Vítej zpět')));
+  }
 });
 
 test('a browser that keeps nothing is said out loud, once', async () => {
@@ -347,11 +339,12 @@ test('a browser that keeps nothing is said out loud, once', async () => {
     assert.equal(said.filter((t) => t.includes('Hra se neukládá')).length, 1, 'the player was never told nothing is saved');
     assert.ok(said.some((t) => t.includes('Prohlížeč nepovolil úložiště. Postup po zavření zmizí.')));
     assert.ok(!said.join(' ').includes(String.fromCharCode(0x2014)), 'an em dash in UI text');
-    assert.equal(c.save(), false);
     said.length = 0;
-    for (let i = 0; i < 25 * 60; i++) c.update(1 / 60);          // an autosave comes due and fails
+    assert.equal(c.autosave('mission'), false);                 // an autosave point, and it fails
+    for (let i = 0; i < 25 * 60; i++) c.update(1 / 60);
     flushToasts();
     assert.equal(said.filter((t) => t.includes('Hra se neukládá')).length, 0, 'said twice');
+    assert.ok(!said.some((t) => t === 'Uloženo'), 'said "Uloženo" for a save that never landed');
   } finally { Object.defineProperty(globalThis, 'localStorage', ls); }
   // and with working storage nothing of the kind is said
   await reload();

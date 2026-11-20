@@ -34,6 +34,7 @@ import { buildMlyny, buildSilo, buildMost, mlynySolids } from './landmarks-mlyny
 import { buildDivadlo, divadloSolids } from './landmarks-divadlo.js';
 import { LANDMARKS_OLD, EXTRAS_OLD, ZONES_OLD, CLEAR_OLD, isOldBridgeWay } from './landmarks-praha.js';
 import { LANDMARKS_WIDE, CLEAR_WIDE, PROP_WIDE, EXTRAS_WIDE, isWideBarrier } from './landmarks-hrad.js';
+import { STORE_LANDMARKS, storeLandmark } from './stores/landmark.js';
 
 /**
  * id: stable key. name: OSM name it must agree with when the feature has one.
@@ -98,6 +99,9 @@ export const EXTRAS = [...EXTRAS_OLD, ...EXTRAS_WIDE];
 export const SWITCH = { on: true };
 
 const BY_ID = new Map(LANDMARKS.map((l) => [l.id, l]));
+// a chain store is a landmark made by a generator instead of by hand
+// (js/stores/): recognised by its name and its shape, wherever in the world it is
+for (const l of STORE_LANDMARKS) BY_ID.set(l.id, l);
 // One box per region that every landmark of it lies in, so the nine thousand
 // houses of a town (and the whole corridor between two towns) are refused in
 // a compare or two. A single box round Pardubice AND Prague would be 99 km wide.
@@ -156,6 +160,7 @@ export function landmarkOf(f) {
   const p = f.o?.[0];
   const box = p ? regionAt(p[0], p[1]) : null;
   if (box) for (const l of box.list) if (matches(l, f)) { hit = l; break; }
+  if (!hit && f.n) hit = storeLandmark(f);
   f._lm = hit ? hit.id : '';
   return hit;
 }
@@ -171,10 +176,11 @@ export class LandmarkBatch {
    * @param ways the chunk cell's roads, when the caller has them: paving is
    *   laid over the ground as it is DRAWN near them (landmarks-passage floorAt)
    */
-  add(l, f, ground, terrain = null, ways = null) {
+  add(l, f, ground, terrain = null, ways = null, ctx = null) {
     if (l.hide) return;                  // a duplicate footprint: nothing at all
     const kit = new Kit(this.sink, ground, terrain, ways);
-    l.build(kit, f, l);
+    // `ctx` is for a generated store: the chunk cell and its wordmark stream
+    l.build(kit, f, l, ctx);
     if (terrain && l.grounds) l.grounds(kit, f, l);
   }
   /** The pieces of a footprint-less landmark (EXTRAS) chunk (cx, cz) owns. */
