@@ -24,7 +24,7 @@ import * as THREE from 'three';
 
 /** Surface kinds. Append only: the shader switches on the numbers. */
 export const K = { plaster: 0, tile: 1, brick: 2, stone: 3, copper: 4, glass: 5,
-  slate: 6, wood: 7, metal: 8, clad: 9, glassDark: 10 };
+  slate: 6, wood: 7, metal: 8, clad: 9, glassDark: 10, panel: 11, slats: 12, paving: 13 };
 
 const _c = new THREE.Color();
 /** sRGB hex to the linear triple vertex colours are stored in. */

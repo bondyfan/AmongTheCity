@@ -17,6 +17,7 @@
 import { CAR_COLORS, CHUNK } from './config.js';
 import { strHash } from './identity.js';
 import { siteNear } from './d11services.js';
+import { storeChain } from './stores/chains.js';
 
 const KINDS = ['sedan', 'hatch', 'kombi', 'suv', 'van'];
 const SCAN_DT = 2.5;          // s between lot sweeps
@@ -82,6 +83,32 @@ function curveAt(table, t01) {
 }
 export const lorryOccAt = (t01) => curveAt(LORRY_HOURS, t01);
 export const serviceOccAt = (t01) => curveAt(SERVICE_HOURS, t01);
+// A supermarket's car park is the opposite of a housing estate's: empty all
+// night, filling from opening time, fullest after work (js/stores/). A lot is a
+// shop's when a standalone chain store stands within SHOP_R of its middle.
+const SHOP_HOURS = [
+  [0, 0.03], [6, 0.04], [7, 0.2], [9, 0.45], [12, 0.55], [15, 0.6],
+  [17.5, 0.85], [19, 0.6], [21, 0.15], [22, 0.05], [24, 0.03],
+];
+const SHOP_R = 75;
+export const shopOccAt = (t01) => curveAt(SHOP_HOURS, t01);
+/** Is there a chain store within SHOP_R of the middle of this ring? */
+export function shopLot(city, ring) {
+  const idx = city?.chunkIndex;
+  if (!idx || !ring?.length) return false;
+  let cx = 0, cz = 0;
+  for (const q of ring) { cx += q[0]; cz += q[1]; }
+  cx /= ring.length; cz /= ring.length;
+  const c0 = Math.floor((cx - SHOP_R) / CHUNK), c1 = Math.floor((cx + SHOP_R) / CHUNK);
+  const d0 = Math.floor((cz - SHOP_R) / CHUNK), d1 = Math.floor((cz + SHOP_R) / CHUNK);
+  for (let x = c0; x <= c1; x++) for (let z = d0; z <= d1; z++) {
+    for (const f of idx.get(x + ',' + z)?.buildings ?? []) {
+      if (!f.n || !f.o?.length || !storeChain(f)) continue;
+      for (const p of f.o) if (Math.hypot(p[0] - cx, p[1] - cz) < SHOP_R) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * What a lot is: 'lorry' (a services lorry park), 'service' (a services car
@@ -142,6 +169,10 @@ function inPoly(x, z, ring) {
 // the session drove past. A fixture lot without an id is its own key.
 const _stallsOf = new Map();
 const lotKey = (lot) => lot._id ?? lot;
+/** The stalls of a lot, as the cars are parked in them: [{ x, z, h }] (js/stores/lotpaint.js draws their lines). */
+export const lotStalls = (lot) => stallsFor(lot);
+/** How far apart two stalls of a row stand, and how deep a stall is. */
+export const STALL = { across: PITCH_ACROSS, deep: 4.9 };
 function stallsFor(lot) {
   const have = _stallsOf.get(lotKey(lot));
   if (have) return have;
@@ -247,6 +278,7 @@ export class ParkingLots {
     this.vehicles = vehicles;
     this.world = world;
     this.parked = parked;      // main's enterable-car array (shared reference)
+    this._shop = new Map();    // lot key -> is it a chain store's car park
     this._t = 0;
     this._count = 0;
     this._virgin = true;      // first sweep fills freely — it runs under the
@@ -261,7 +293,7 @@ export class ParkingLots {
     this._t -= dt;
     if (this._t > 0) return;
     this._t = SCAN_DT;
-    const occTown = occAt(t01), occLorry = lorryOccAt(t01), occSvc = serviceOccAt(t01);
+    const occTown = occAt(t01), occLorry = lorryOccAt(t01), occSvc = serviceOccAt(t01), occShop = shopOccAt(t01);
     const virgin = this._virgin;
     this._virgin = false;
     const owned = ownedIn(this.parked);
@@ -279,7 +311,14 @@ export class ParkingLots {
       if (d > REACH) continue;
       this._live.add(lot);
       const cls = classOf(lot), lorry = cls === 'lorry';
-      const occ = lorry ? occLorry : cls === 'service' ? occSvc : occTown;
+      let occ = lorry ? occLorry : cls === 'service' ? occSvc : occTown;
+      if (cls === 'town') {
+        // a supermarket's own car park: full by day, empty by night
+        const k = lotKey(lot);
+        let shop = this._shop.get(k);
+        if (shop === undefined) this._shop.set(k, shop = shopLot(this.city, lot.o));
+        if (shop) occ = occShop;
+      }
       for (const st of stallsFor(lot)) {
         if (st.burned) continue;
         // a stall car somebody drove away never comes back this session, and

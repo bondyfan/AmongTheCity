@@ -434,8 +434,12 @@ function buyFood(plate) {
 /** E on foot with no car in reach: the food counter, if this is one. */
 export function use() {
   if (!playable() || !h.player) return false;
+  // a chain store with shelves and tills of its own sells its own way (js/stores/)
+  if (h.world?.stores?.near(h.player.pos.x, h.player.pos.z)) return false;
   const v = foodPlaceAt(h.world?.city, h.player.pos.x, h.player.pos.z);
   if (!v) return false;
+  // a chain that is a tenant of a bigger building sells its own goods at its own prices
+  if (h.world?.stores?.tenant(v.name)) return true;
   foodPanel.show(v);
   return true;
 }
@@ -571,7 +575,7 @@ export function update(dt) {
 // Everything that does not need to run every frame.
 function slow(x, z, onFoot, car) {
   discover(progress, h.placeFinder?.town ?? null);
-  foodScan(h.world?.city, x, z, onFoot);
+  foodScan(h.world?.city, x, z, onFoot && !h.world?.stores?.near(x, z));
   // the introduction's targets come from the world, so they are found here
   if (onb.needsTarget && !jobs.runner.active) {
     if (onb.name === 'car') {

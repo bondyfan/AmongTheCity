@@ -38,6 +38,7 @@
 // its edge until the sign is under some 60 pixels across.
 
 import * as THREE from 'three';
+import { paintStoreSign } from './stores/signpaint.js';
 
 const PW = 2048, PH = 1024, SW = 512, SH = 128, COLS = PW / SW, SLOTS = COLS * (PH / SH);
 const PAD = 8;            // texels of background round the label inside its slot
@@ -61,6 +62,8 @@ const css = (hex) => '#' + hex.toString(16).padStart(6, '0');
  * is fine: the quad stretches the slot back to the panel's own aspect).
  */
 export function paintMark(g, brand, label, ox = 0, oy = 0, w = 1024, h = 256) {
+  // a chain store's own sign ('@lidl/sq', js/stores/signs.js) is drawn, not typeset
+  if (label[0] === '@' && paintStoreSign(g, brand, label, ox, oy, w, h)) return;
   g.save();
   g.setTransform(w / 1024, 0, 0, h / 256, ox, oy);
   g.fillStyle = css(brand.sign);

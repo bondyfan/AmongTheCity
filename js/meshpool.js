@@ -21,6 +21,7 @@
 // that comes back as an error.
 
 import { chunkSpec } from './chunkspec.js';
+import { pinStores } from './stores/landmark.js';
 import { decode } from './geomcodec.js';
 import { facadeMaterial, brandMarkMat } from './meshes.js';
 import { mergeMarks } from './wordmarkatlas.js';
@@ -175,6 +176,8 @@ export function makeMeshPool(opts = {}) {
     if (!h) return null;
     let got;
     try {
+      // a store's front wall and drive-through are decided here, before the copy
+      pinStores(world.city.chunkIndex.get(cx + ',' + cz));
       got = chunkSpec(world, cx, cz, lod, h.have);
     } catch (err) {
       // A cache that is not plain data. Loud, once — the chunk still gets built.

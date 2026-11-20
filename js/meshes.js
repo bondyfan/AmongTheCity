@@ -4424,7 +4424,8 @@ export function buildBuildingsMesh(city, cx, cz, mats) {
     // every tier: never hidden behind a shell, never dropped as small.
     const lm = landmarkOf(f);
     if (lm) {
-      (lmBatch ??= new LandmarkBatch()).add(lm, f, mats.terrain ? groundFor(f, mats.terrain) : 0, mats.terrain ?? null, cell.roads);
+      (lmBatch ??= new LandmarkBatch()).add(lm, f, mats.terrain ? groundFor(f, mats.terrain) : 0, mats.terrain ?? null, cell.roads,
+        lm.store ? { cell, marks } : null);
       continue;
     }
     if (hidden && hidden.has(f._id)) continue;   // now made of boxes instead
