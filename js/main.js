@@ -2896,6 +2896,8 @@ let orthoMgr = null;
 function applySettings(s, key) {
   // cheap, always-safe knobs first
   setVolume(s.volume ?? 0.8);
+  const music = $id('loading-music');
+  if (music) music.volume = s.volume ?? 0.8;
   renderer.setPixelRatio(s.resScale === 2 ? Math.min(window.devicePixelRatio, 2) : s.resScale);
   if (world) world.viewChunks = s.viewChunks;
   // the ground's street-level detail is one shared uniform: no rebuild, no recompile
@@ -3405,7 +3407,17 @@ async function boot() {
   $id('hud').classList.remove('hidden');
   const ov = $id('enter-overlay');
   ov.classList.add('fade');
-  setTimeout(() => ov.remove(), 700);
+  const music = $id('loading-music');
+  const level = music.volume;
+  const fadeStart = performance.now();
+  function fadeMusic(now) {
+    if (music.paused) return;
+    const remaining = Math.max(0, 1 - Math.max(0, now - fadeStart) / 500);
+    music.volume = level * remaining;
+    if (remaining > 0) requestAnimationFrame(fadeMusic);
+  }
+  requestAnimationFrame(fadeMusic);
+  setTimeout(() => { music.pause(); ov.remove(); }, 700);
 }
 
 // ---------- main loop ----------
@@ -4160,7 +4172,12 @@ async function start() {
   const devPeople = /(^|[?&])devmode(=|&|$)/.test(location.search) ? /[?&]people=(dummy|off)(&|$)/.exec(location.search)?.[1] : null;
   if (devPeople === 'dummy') (await import('./characters/dummy.js')).installDummies({ many: true });
   else if (devPeople !== 'off') loadPeople();
-  const choice = await showMenu();
+  const music = $id('loading-music');
+  const playLoadingMusic = () => {
+    music.volume = getSettings().volume ?? 0.8;
+    music.play().catch(() => {}); // Audio availability never blocks entering the city.
+  };
+  const choice = await showMenu(playLoadingMusic);
   ui.setSelf({ name: choice.name || getPlayerName(), uid: localUid() });
   if (choice.mode === 'server') {
     try {
@@ -4229,7 +4246,11 @@ async function start() {
   if (label && was != null) label.textContent = was;
   if (people) {
     // (a code this bank cannot show, from an older build, counts as none)
-    if (opening && !validLook(loadMyLook())) await showCreator();
+    if (opening && !validLook(loadMyLook())) {
+      music.pause();
+      await showCreator();
+      playLoadingMusic();
+    }
     wearLook(myLook());
   }
   await boot();
@@ -4270,6 +4291,7 @@ window.addEventListener('pagehide', () => {
 });
 
 start().catch(err => {
+  $id('loading-music')?.pause();
   journey?.dispose(); journey = null;
   $id('enter-overlay').style.visibility = '';
   $id('enter-label').textContent = 'Chyba při načítání města: ' + err.message;
