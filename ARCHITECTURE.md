@@ -1659,6 +1659,19 @@ and merged; these are the rules they agreed on.
   `TRAM_CLEAR` (1.5 m) of a tram track's centreline (`lampSpots` `inTram`):
   kerb offsets and surveyed nodes fell on the rails in the middle of
   Seifertova and Sokolovská. Pinned by tests/prop-beside-path.test.mjs.
+  The corner band of a junction is asked of the NINE pad buckets round the
+  chunk (`padsAround`): a pad is bucketed by its centre and drawn whole by
+  that chunk, so a crossing a few metres over the border has its corner in
+  this one, and a lamp on it stood on the ground under the band. The same
+  nine `lampGround` reads and `chunkspec.padKeys` ships, so the worker
+  agrees (tests/fix-street.test.mjs builds it on both threads).
+  And the band's height is ONE function, `streets.cornerLevel`, read by the
+  feet (`city._padLevels`) and the props: the deck at the two ends of the
+  stretch of KERB LINE, carried out across the band as
+  `meshes.ringKerbInto` draws it. Both used to ask the pad's deck under
+  themselves, out on the band, where its terrain guard reads the ground
+  beside the street: by a crossing under a hillside that was up to 3 m over
+  the paving drawn (tests/corner-band.test.mjs, against the built mesh).
 * **Trams** (`js/trams.js`, `js/tramlines.js`). A tram's position is a pure
   function of route id, trip number and the shared clock: no state that two
   co-op clients could disagree on, no Math.random. A tram yields to a car on its
