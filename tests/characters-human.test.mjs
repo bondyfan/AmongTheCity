@@ -230,3 +230,98 @@ test('a head from one person on the body of another', async () => {
   assert.ok(body.attributes.position === man.geometry.attributes.position, 'no copy of the vertices');
   assert.ok(partGeometry(fake, 'body') === body, 'made once');
 });
+
+// ---- the mouth ---------------------------------------------------------------
+const M = await import('../js/characters/mouth.js');
+
+test('a made-up syllable train stays between shut and open, and is not flat', () => {
+  let lo = 1, hi = 0;
+  for (let t = 0; t < 12; t += 0.013) { const v = M.syllables(t, 3); lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  assert.ok(lo >= 0 && hi <= 1, `range ${lo}..${hi}`);
+  assert.ok(lo < 0.05 && hi > 0.8, `opens and shuts: ${lo}..${hi}`);
+});
+
+test('a measured voice opens the mouth most of the way, silence shuts it', () => {
+  assert.equal(M.voiceToMouth(0), 0);
+  assert.equal(M.voiceToMouth(0.01), 0);
+  assert.ok(M.voiceToMouth(0.3) > 0.6 && M.voiceToMouth(0.3) < 0.8);
+  assert.equal(M.voiceToMouth(0.9), 1);
+});
+
+test('a told level eases in, stands a fifth of a second, then the mouth shuts', () => {
+  const st = { seed: 5 };
+  M.setMouth(st, 1, 10);
+  const a = M.mouthLevel(st, 10.016, 0.016);
+  assert.ok(a > 0.2 && a < 0.6, 'one frame opens it part of the way: ' + a);
+  let now = 10.016;
+  for (let i = 0; i < 8; i++) { now += 0.016; M.setMouth(st, 1, now); M.mouthLevel(st, now, 0.016); }
+  assert.ok(st.mouth > 0.95, 'held, it is open: ' + st.mouth);
+  // nobody refreshes it any more
+  for (let i = 0; i < 40; i++) { now += 0.016; M.mouthLevel(st, now, 0.016); }
+  assert.equal(st.mouth, 0);
+  // a line of two seconds: the jaw works for two seconds and no longer
+  M.startTalk(st, 2, now);
+  assert.ok(M.talking(st, now + 1.9) && !M.talking(st, now + 2.1));
+  let peak = 0;
+  for (let i = 0; i < 120; i++) { now += 0.016; peak = Math.max(peak, M.mouthLevel(st, now, 0.016)); }
+  assert.ok(peak > 0.5, 'it opened while talking: ' + peak);
+  for (let i = 0; i < 60; i++) { now += 0.016; M.mouthLevel(st, now, 0.016); }
+  assert.equal(st.mouth, 0);
+  // knocked down mid-sentence: the line is cut off
+  M.startTalk(st, 4, now); M.startTalk(st, 0, now);
+  assert.ok(!M.talking(st, now + 0.1));
+});
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('a speaking body drops its chin and nothing else', async () => {
+  assert.ok(man.jaw >= 0 && man.jawAxis, 'the avatar knows its jaw');
+  assert.ok(man.rig.boneSlot[man.jaw] < 0, 'the jaw is no joint of the driver');
+  const h = makeHuman(man, {}, { seed: 0.3, near: true, calm: true });
+  const n = man.rig.n, chin = man.rig.names.indexOf('Bip01 MJawNub'), head = man.rig.slotBone[SLOT.head];
+  // the body breathes in its idle clip, so the chin is measured in the head's own frame
+  const mats = () => {
+    const fig = figureMatrices(man.rig, h.pose(), null, man.root, new Float32Array(n * 16));
+    const hm = new THREE.Matrix4().fromArray(fig, head * 16);
+    const c = new THREE.Vector3(fig[chin * 16 + 12], fig[chin * 16 + 13], fig[chin * 16 + 14]);
+    return { hm, local: c.applyMatrix4(hm.clone().invert()) };
+  };
+  const shut = mats();
+  // the jaw eases open over a few frames of real time
+  for (let i = 0; i < 5; i++) { h.mouth(1); h.pose(); await wait(30); }
+  h.mouth(1);
+  const open = mats();
+  // where the chin went, in figure space, the head held still
+  const d = open.local.clone().applyMatrix4(open.hm).sub(shut.local.clone().applyMatrix4(open.hm));
+  assert.ok(d.y < -0.008, `the chin goes down: ${d.y}`);
+  assert.ok(d.z > -1e-4, 'and a little back towards the throat (the figure faces -z): ' + d.z);
+  near(d.x, 0, 1.5e-3, 'not sideways');
+  // the jaw is the only bone the mouth touches
+  const posed = Float32Array.from(h.pose());
+  h.state.mouth = 0; h.state.mouthAt = -9;
+  const plain = h.pose();
+  let other = 0;
+  for (let i = 0; i < n; i++) {
+    if (i === man.jaw) continue;
+    for (let c = 0; c < 4; c++) other = Math.max(other, Math.abs(posed[i * 4 + c] - plain[i * 4 + c]));
+  }
+  assert.ok(other < 2e-3, 'every other bone is where the clip put it: ' + other);
+  h.dispose();
+});
+
+test('somebody saying a line gestures while standing, and stops when the line is over', () => {
+  AV.motionSet(man);
+  const h = makeHuman(man, {}, { seed: 0.3, near: true });
+  h.pose();
+  assert.equal(h.clipKey, 'idle');
+  const real = man.talks;
+  man.talks = man.idles;                 // the dummy recorded no gesture: its idle stands in for one
+  h.talk(5);
+  h.walk(0, 0, 0, 0); h.pose();
+  assert.equal(h.clipKey, 'talk');
+  h.state.talkUntil = 0;
+  h.walk(0, 0, 0, 0); h.pose();
+  assert.equal(h.clipKey, 'idle');
+  man.talks = real;
+  h.dispose();
+});

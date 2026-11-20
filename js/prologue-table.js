@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { voiceToMouth } from './characters/mouth.js';
 import { tableTalk, hospitalMessage } from './prologue-dialogue.js';
 import { storyRecording, storyDuck } from './audio.js';
 import { actor } from './prologue-actor.js';
@@ -170,6 +171,7 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
       friend.sitPose(k, 0);
       const fj = friend.parts;
       fj.head.rotation.x += speaker === 'friend' ? -0.1 * speech : 0;
+      friend.mouth?.(speaker === 'friend' ? voiceToMouth(speech) : 0);
       fj.torso.rotation.x += -0.14 * k;
       fj.armL.rotation.x += 0.35 * k;
       if (beat === 'talk' && line === 6) fj.armR.rotation.x += 0.75 * Math.sin(Math.min(1, age / 1.4) * Math.PI);

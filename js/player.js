@@ -98,7 +98,7 @@ import { seatAnchor as jetSeatAnchor } from './aircraft.js';
 import { SIT_DROP, seatX } from './seating.js';
 import { launchBody, stepBody, feetFor } from './ejection.js';
 import { entryDoor, entryStep, entryCancel, exitStep, doorStep } from './carentry.js';
-import { setDoor, setDriver } from './cardoor.js';
+import { setDoor, setDriver, setPassenger } from './cardoor.js';
 import { leap, vaultStep, airStep } from './leap.js';
 import { getUpPose, snapshot, surrenderPose } from './bodymoves.js';
 
@@ -592,7 +592,8 @@ export class Player {
     this.heading = veh.heading;
     this.speed = 0; this.vy = 0;
     // the glass shows who is at the wheel (js/carglass.js): us, in our jacket
-    if (b.seat === 0 && b.door) setDriver(veh, { jacket: this._cit.look.jacket });
+    if (b.seat === 0 && b.door) setDriver(veh, { jacket: this._cit.look.jacket, cit: this._cit });
+    else if (b.seat === 1) setPassenger(veh, this._cit);
     b.onSeated?.(b.seat);                // ONLY now may game.car/heli be set
   }
 
@@ -615,6 +616,7 @@ export class Player {
     const door = entryDoor(veh, this.seat);
     if (this.doorAnim?.veh === veh) this.doorAnim = null;   // stepping out again before it shut
     if (this.seat === 0 && door) setDriver(veh, null);      // the seat is empty from here on
+    else if (this.seat === 1) setPassenger(veh, null);
     const ox = Math.sign(a.x || -1) * ((veh.wid ?? 1.62) / 2 + (door ? 0.78 : 0.9));
     const t = { x: veh.x + ox * ch + a.z * sh, z: veh.z - ox * sh + a.z * ch };
     const world = this._world;
@@ -690,6 +692,7 @@ export class Player {
     this.aimLock = false;
     this._dropDoor();
     if (seat === 0 && typeof veh.kind === 'string') setDriver(veh, null);
+    else if (seat === 1) setPassenger(veh, null);
     this._scene.add(this.mesh);          // world space again
     const st = launchBody(veh, a, 0.92 * PLAYER_SCALE);
     st.onHit = cbs?.onHit ?? null;
@@ -797,7 +800,7 @@ export class Player {
       if (!car.seats[0]) car.seats[0] = this;
       this.inCar = car;
       this.seat = 0;
-      if (typeof car.kind === 'string') setDriver(car, { jacket: this._cit.look.jacket });
+      if (typeof car.kind === 'string') setDriver(car, { jacket: this._cit.look.jacket, cit: this._cit });
       const a = bodySeat(car, 0);
       const carrier = car.mesh?.userData?.body ?? car._body ?? car.mesh;
       if (carrier) {
@@ -813,6 +816,7 @@ export class Player {
     if (c) {
       if (c.seats?.[this.seat] === this) c.seats[this.seat] = null;
       if (this.seat === 0 && typeof c.kind === 'string') setDriver(c, null);
+      else if (this.seat === 1) setPassenger(c, null);
       this._dropDoor();
       this._scene.add(this.mesh);        // world space again
       // step out 1.4 m to the vehicle's RIGHT — right of dir(h) is

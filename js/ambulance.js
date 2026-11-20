@@ -323,6 +323,7 @@ import { worldT } from './worldclock.js';
 // roster does. traffic.js does exactly this dance for pickCarColor.
 import * as TRF from './traffic.js';
 import * as VEH from './vehicles.js';
+import { setCrewRole } from './cardoor.js';
 import { sameLevel } from './levelsep.js';
 
 // ---- where the hospital is ------------------------------------------------
@@ -1279,6 +1280,7 @@ export class Ambulance {
     }
     if (!car) return null;
     car.rescue = true;
+    setCrewRole(car, 'medic');           // the glass shows a paramedic at the wheel
     // A záchranář does not lean out of the window and shout at the traffic.
     // js/chatter.js picks its driver-shout candidates by `car._shoutAt` being in
     // the past (a deadline, not a countdown), so a deadline that never arrives

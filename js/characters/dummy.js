@@ -68,6 +68,10 @@ export function dummyScene({ twirl = 1.3, cm = true, female = false, bare = fals
     const toe = add(`Bip01 ${sd} Toe0`, ft, sx * 0.09, 0.02, 0.15);
     seg(ul, ll, 0.07, bottom); seg(ll, ft, 0.05, bottom); seg(ft, toe, 0.045, COL.shoe, 0.035);
   }
+  // a jaw hinged under the ear with a chin ahead of it, so a mouth can be seen to open
+  const jaw = add('Bip01 MJaw', head, 0, 1.61, 0.02);
+  const chin = add('Bip01 MJawNub', jaw, 0, 1.585, 0.10);
+  seg(jaw, chin, 0.05, skin, 0.02);
   scene.updateMatrixWorld(true);
   if (bare) return { scene, bones, mesh: null };
   // one box per segment, skinned rigidly to the segment's first bone. Built in

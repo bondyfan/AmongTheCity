@@ -9,8 +9,9 @@
 // second draw for an interior. So the interior is not geometry. A fragment of
 // glass follows its own view ray into the car's frame and finds what the ray
 // meets there: the seats, the headrests, the dashboard, the steering wheel,
-// the far door and the far windows, and a driver when the car is being
-// driven. Every one is a box, a ball or a ring whose place is read from the
+// the far door and the far windows, and whoever sits in the front seats: a
+// picture of the modelled person, taken from sixteen sides and shown from the
+// side the eye is on (js/characters/seatrows.js, seated.js). Every one is a box, a ball or a ring whose place is read from the
 // same numbers the real cabin is built to (vehicles.js cabinSpec), so the
 // seats seen through the screen are the seats the door opens onto. It costs a
 // dozen slab tests on the pixels that are glass and no draw call at all.
@@ -25,6 +26,9 @@
 // door opening compiles nothing.
 
 import * as THREE from 'three';
+import { seatAtlas, VIEWS, ROWS, TILE_W, TILE_H, FRAME_W, FRAME_H, AHEAD, BACK } from './characters/seatrows.js';
+
+const F = (x) => (Number.isInteger(x) ? x + '.0' : String(x));
 
 /** vertex: declarations, and the two varyings every fragment test reads */
 export const GLASS_VERT_DECL = /* glsl */`
@@ -37,7 +41,8 @@ export const GLASS_VERT = /* glsl */`
 export const GLASS_FRAG_DECL = /* glsl */`
   varying vec3 vObj; varying vec3 vCamO;
   uniform vec4 uDoorA, uDoorB, uDoorC;
-  uniform vec4 uCabA, uCabB, uCabC, uCabW, uCabS, uCabD;
+  uniform vec4 uCabA, uCabB, uCabC, uCabW, uCabS, uCabD, uCabP;
+  uniform sampler2D uCabPeople;
 
   // 1 inside the door's outline, drawn in side view
   float doorIn(vec3 p) {
@@ -69,6 +74,26 @@ export const GLASS_FRAG_DECL = /* glsl */`
   #define CAB_BALL(c, r, col) { vec3 nn; float tt = cabBall(ro, rd, c, r, nn); if (tt >= 0.0 && tt < t) { t = tt; n = nn; alb = col; } }
 
   #define CAB_TRY(c, h, col) { vec3 nn; float tt = cabBox(ro, rd, c, h, nn); if (tt >= 0.0 && tt < t) { t = tt; n = nn; alb = col; } }
+
+  // Somebody in a seat: a picture of the modelled body out of the seated atlas,
+  // stood up in the cabin facing whoever looks in. c is the seat (x, the
+  // cushion top, the line the pictures turn about), row is whose picture.
+  void cabPerson(vec3 ro, vec3 rd, vec3 c, float row, inout float t, inout vec3 n, inout vec3 alb) {
+    vec2 e = vCamO.xz - c.xz;
+    vec2 d = e / max(length(e), 1e-3);                     // from the seat to the eye, flat
+    float den = rd.x * d.x + rd.z * d.y;
+    den = abs(den) < 1e-4 ? 1e-4 : den;
+    float tt = ((c.x - ro.x) * d.x + (c.z - ro.z) * d.y) / den;
+    vec3 p = ro + rd * tt;
+    vec2 q = vec2(((p.x - c.x) * d.y - (p.z - c.z) * d.x) / ${F(FRAME_W)} + 0.5, (p.y - c.y) / ${F(FRAME_H)});
+    float view = mod(floor(atan(d.x, d.y) / 6.2831853 * ${F(VIEWS)} + 0.5), ${F(VIEWS)});
+    // half a texel in from the picture's edge, so a neighbour never bleeds in
+    vec2 in0 = vec2(${F(0.5 / TILE_W)}, ${F(0.5 / TILE_H)});
+    vec4 px = texture2D(uCabPeople, (vec2(view, row) + clamp(q, in0, 1.0 - in0)) / vec2(${F(VIEWS)}, ${F(ROWS)}));
+    if (tt > 0.0 && tt < t && q.x > 0.0 && q.x < 1.0 && q.y > 0.0 && q.y < 1.0 && px.a > 0.5) {
+      t = tt; alb = px.rgb / px.a; n = vec3(0.196, 0.853, -0.441);    // lit already: straight at the cabin's light
+    }
+  }
 
   // what a ray entering through the glass sees: linear albedo, already shaded
   vec3 cabinSeen(vec3 ro, vec3 rd, float driver, float night) {
@@ -122,7 +147,8 @@ export const GLASS_FRAG_DECL = /* glsl */`
           CAB_BALL(vec3(x, cy + 0.61, sz + 1.14), vec3(0.13, 0.095, 0.055), seat * 0.92)
         }
       }
-      if (driver > 0.5) {
+      // the plain figure, for a driver nobody has a picture of
+      if (driver > 0.5 && uCabP.x < -0.5) {
         float bx = -sx;
         CAB_TRY(vec3(bx, cy + 0.30, sz + 0.20), vec3(min(0.19, hw * 0.85), 0.27, 0.10), uCabD.rgb)
         // the head: skin where it faces the screen, hair behind
@@ -133,6 +159,9 @@ export const GLASS_FRAG_DECL = /* glsl */`
       }
       ro = keepO; rd = keepD;
     }
+    // ---- the people: the driver while the car is driven, a passenger whenever there is one
+    if (driver > 0.5 && uCabP.x > -0.5) cabPerson(ro, rd, vec3(-sx, cy, sz + ${F(BACK - AHEAD)}), uCabP.x, t, n, alb);
+    if (uCabP.y > -0.5) cabPerson(ro, rd, vec3(sx, cy, sz + ${F(BACK - AHEAD)}), uCabP.y, t, n, alb);
     // ---- the steering wheel: a ring, a boss and three spokes in a raked plane
     if (uCabW.w > 0.0) {
       vec3 wc = uCabW.xyz, wn = vec3(0.0, sin(RAKE), cos(RAKE));
@@ -166,7 +195,8 @@ export const glassFrag = (LIT) => /* glsl */`
   }
   // glass is the one part whose environment gain is above 2 (carmerge.js PART)
   if (vPbr.z > 2.0 && uCabC.w > 0.5 && uDoorC.z < 1.5)
-    diffuseColor.rgb = cabinSeen(vObj, normalize(vObj - vCamO), ${LIT} * uCabD.w, uCarNight) * 0.8;`;
+    // uCabD.w: 0 nobody at the wheel, 1 the stock driver (there while the lamps burn), 2 somebody named (there, lamps or no lamps)
+    diffuseColor.rgb = cabinSeen(vObj, normalize(vObj - vCamO), max(${LIT}, uCabD.w - 1.0) * uCabD.w, uCarNight) * 0.8;`;
 
 // ---- the numbers --------------------------------------------------------------
 // vehicles.js owns the cabin's dimensions and registers the reader here (it
@@ -181,13 +211,14 @@ export function setCabinLookup(fn) { _cabin = fn; }
 
 const V4 = (a) => ({ value: new THREE.Vector4(a[0], a[1], a[2], a[3]) });
 const ZERO = [0, 0, 0, 0];
+const NO_PICTURE = new THREE.Vector4(-1, -1, 0, 0);
 
 /**
  * The uniforms of one body material. key is 'kind|hex'; door is null or the
  * js/cardoor.js region { A, B, C } (C carries the mode: 1 hole, 2 leaf).
  */
-// Who is at the wheel, as the glass draws them: a jacket colour, and whether
-// anybody is there at all. By default a car that burns its lamps has a driver
+// Who is at the wheel, as the glass draws them when it has no picture of them
+// (js/carcrew.js): a jacket colour, and whether anybody is there at all. By default a car that burns its lamps has a driver
 // (that is what its lamps mean, vehicles.js); `tint` (js/cardoor.js setDriver)
 // overrides it for a car the player has been in: their own jacket while they
 // sit in it, nobody once they have left, lamps or no lamps.
@@ -201,5 +232,7 @@ export function glassUniforms(key, hex, door = null, tint = null) {
     uDoorA: V4(door?.A ?? ZERO), uDoorB: V4(door?.B ?? ZERO), uDoorC: V4(door?.C ?? ZERO),
     uCabA: V4(cab?.A ?? ZERO), uCabB: V4(cab?.B ?? ZERO), uCabC: V4(cab?.C ?? ZERO),
     uCabW: V4(cab?.W ?? ZERO), uCabS: V4(cab?.S ?? ZERO), uCabD: V4(tint?.D ?? DRIVER),
+    // whose pictures (js/carcrew.js): the vector is the crew's own, kept right as rows are drawn
+    uCabP: { value: tint?.P ?? NO_PICTURE }, uCabPeople: seatAtlas,
   };
 }

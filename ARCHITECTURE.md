@@ -2274,6 +2274,35 @@ caller knows which it holds.
   angle, added to the clip while the difference is small and replacing it by
   0.35 rad. No recording for a state (a car seat, a ragdoll, a bicycle) means
   the game's pose for the whole body. A change of clip cross-fades.
+* **A mouth that opens** (`mouth.js`). The one face bone a person keeps is the
+  jaw, and `human.js` turns it after the pose is resolved, about the figure's
+  left-to-right axis taken into the jaw's own frame at load. Two callers: the
+  campaign calls `mouth(level)` every frame with the measured loudness of the
+  line being played (`voiceToMouth` of `storyRecording().intensity()`), the
+  street (`chatter.js` `_utter`) and the unmetered story lines call
+  `talk(seconds)`, which makes the syllables up. Somebody talking while
+  standing also plays a recorded gesture loop (role `talk`). A far body has no
+  jaw to move, which nobody can see at sixty metres.
+* **People behind car glass** (`seatrows.js`, `seated.js`, `js/carcrew.js`,
+  `js/carglass.js`). A car is one mesh with opaque glass and its cabin is
+  drawn by the body shader following the view ray, so nobody can sit in it as
+  geometry. The people in the front seats are PICTURES of the modelled
+  bodies: a person is sat in the car pose and photographed once from sixteen
+  sides into a row of one render target (96 x 128 a picture, sixteen rows,
+  made from the bank at boot and when somebody new sits down; nothing is
+  downloaded). The glass intersects its ray with an upright plane through the
+  seat that faces the eye and reads the picture taken from nearest that side.
+  `seatrows.js` (pure) keeps whose picture is in which row: stock drivers
+  (`@civ0..7`, `@police`, `@medic`) are never given up, named people
+  (`body+head:d|p`) go by least recent use. `carcrew.js` says who a car
+  shows: every car is born with a stock driver, shown while its lamps burn;
+  `cardoor.js` `setDriver(car, { jacket, cit })` and `setPassenger(car, cit)`
+  name the player, a co-op rider or Vasek, who are shown lamps or no lamps.
+  The crew is part of the body material's key and its four-vector is shared by
+  reference, so rows can be drawn or lost after a material exists. Without
+  the bank the glass falls back to the box and ball it always drew. Whoever
+  is thrown out of a jacked car is the person the glass showed
+  (`carjack.js`).
 * **A skeleton as flat arrays** (`skinpose.js`, `human.js`). Bones are not
   scene objects. A body's pose is resolved in `onBeforeRender`, so a person
   behind the camera costs nothing, and the skinning matrices are written
@@ -2326,8 +2355,9 @@ part of a build. By hand:
 * `convert-rocketbox.py` (Blender): one FBX to `avatars/<id>.glb` with no
   images. The mesh is split into `near_body`, `near_head`, `near_hair` (so the
   game can draw one person's head on another's body), a `far` copy at 1 300
-  triangles, the 28 face bones folded into the head (52 bones remain), and the
-  UVs moved into the atlas layout.
+  triangles, the face bones folded into the head except the jaw (53 bones
+  remain; the jaw takes the lower lip and the tongue with it), and the UVs
+  moved into the atlas layout.
 * `build-atlas.py`: body, head and the alpha-cut hair cards in ONE texture per
   person (`atlas/<id>.webp`, 1792 x 1280), so a person is one draw call; every
   atlas again at 224 x 160 in `far.webp`; and `manifest.json`.

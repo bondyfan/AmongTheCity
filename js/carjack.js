@@ -19,6 +19,8 @@
 // own ragdolls: nothing here is on the wire.
 
 import { makeCitizen } from './citizen.js';
+import { stockDriverOf } from './cardoor.js';
+import { whoIs } from './characters/seated.js';
 import { PLAYER_SCALE, CHUNK, WALK, INTERIOR } from './config.js';
 import { launchBody, stepBody, feetFor } from './ejection.js';
 import { SIT_DROP, seatX } from './seating.js';
@@ -41,7 +43,9 @@ export class Carjack {
     this.scene = opts.scene ?? null;
     this.world = opts.world ?? null;
     // anybody who drives: not the ninety-year-old on a stick
-    this.makeBody = opts.makeBody ?? (() => makeCitizen({ archetype: DRIVERS[(Math.random() * DRIVERS.length) | 0] }));
+    // whoever the glass showed at the wheel is who comes out of the door (js/carcrew.js)
+    this.makeBody = opts.makeBody ?? ((car) => makeCitizen({ archetype: DRIVERS[(Math.random() * DRIVERS.length) | 0],
+      avatar: whoIs(stockDriverOf(car))?.body }));
     this.out = [];
   }
 
@@ -51,7 +55,7 @@ export class Carjack {
    */
   throwOut(car, side, seat) {
     while (this.out.length >= MAX) this._drop(0);
-    const body = car._victim ?? this.makeBody();
+    const body = car._victim ?? this.makeBody(car);
     car._victim = null;
     body.group.scale.setScalar(PLAYER_SCALE);
     body.group.rotation.set(0, 0, 0);
@@ -80,7 +84,7 @@ export class Carjack {
    */
   seat(car, seat) {
     if (car._victim || !car.mesh) return;
-    const body = this.makeBody();
+    const body = this.makeBody(car);
     body.group.scale.setScalar(PLAYER_SCALE);
     (car.mesh.userData?.body ?? car.mesh).add(body.group);
     body.group.position.set(seatX(seat.x), seat.y - SIT_DROP, seat.z);

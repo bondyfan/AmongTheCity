@@ -39,9 +39,11 @@ import { motionSet, retainHi, releaseHi, partGeometry } from './avatars.js';
 import { makeFarBody, farRow } from './farbody.js';
 import { makeResolver } from './resolve.js';
 import { addHandProp } from './props.js';
+import { JAW_OPEN, setMouth, startTalk, mouthLevel } from './mouth.js';
 
 const TAU = Math.PI * 2;
 const _pg = {};
+const _jq = new THREE.Quaternion(), _ja = new THREE.Quaternion(), _jv = new THREE.Vector3();
 let _dummy = null;      // bones and inverses three's Skeleton wants to hold; never read
 
 function skeletonFor(av) {
@@ -64,7 +66,7 @@ function skeletonFor(av) {
  *        { head: avatar } wears another person's head (and hair) on this
  *        body: the character creator's choice. Such a body is always near.
  */
-export function makeHuman(av, look = {}, { near = false, seed = Math.random(), unit = 1.4, head = null, calm = false } = {}) {
+export function makeHuman(av, look = {}, { near = false, seed = Math.random(), unit = 1.4, head = null, calm = false, sharp: wantSharp = true } = {}) {
   motionSet(av);
   const H = look.height ?? av.height;
   const s = H / av.height;                       // this body against the modelled one
@@ -120,7 +122,7 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
     group.add(headMesh);
     // their bones by name on ours (one family: the names are the same)
     headMap = head.rig.names.map((nm) => av.rig.names.indexOf(nm));
-    retainHi(head);
+    if (wantSharp) retainHi(head);
   }
 
   const st = { calm, kind: 'idle', phase: seed, lastT: NaN, v: 0, sitK: 1, moveK: 0, far: false, frame: -1, t: 0, seed: (seed * 1e6) | 0 };
@@ -128,10 +130,21 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
   const fig = new Float32Array(n * 16);
   let farB = null;
 
+  let lastNow = 0;
   const resolve = (frame) => {
     if (st.frame === frame) return;
     st.frame = frame;
     const hip = R.resolve(s);
+    // the jaw, over whatever the body is doing: open as far as the voice is loud
+    if (av.jaw >= 0) {
+      const now = performance.now() * 0.001, dt = Math.min(0.1, Math.max(0, now - lastNow));
+      lastNow = now;
+      const open = mouthLevel(st, now, dt);
+      if (open > 0) {
+        _jq.fromArray(R.cur, av.jaw * 4).multiply(_ja.setFromAxisAngle(_jv.fromArray(av.jawAxis), -JAW_OPEN * open));
+        _jq.toArray(R.cur, av.jaw * 4);
+      }
+    }
     figureMatrices(av.rig, R.cur, hip, av.root, fig);
     skinMatrices(fig, av.inv, n, skeleton.boneMatrices);
     if (skeleton.boneTexture) skeleton.boneTexture.needsUpdate = true;
@@ -144,7 +157,7 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
 
   // this body's claim on the person's sharp texture, held while it is drawn near
   let sharp = false;
-  const claim = (on) => { if (on === sharp) return; sharp = on; if (on) retainHi(av); else releaseHi(av); };
+  const claim = (on) => { if (!wantSharp || on === sharp) return; sharp = on; if (on) retainHi(av); else releaseHi(av); };
   const setFar = (far) => {
     if (far === st.far) return;
     st.far = far;
@@ -227,7 +240,7 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
     untrackBody(mesh);
     removeBlob(shade);
     claim(false);
-    if (headSk) { headSk.dispose(); releaseHi(head); }
+    if (headSk) { headSk.dispose(); if (wantSharp) releaseHi(head); }
     skeleton.dispose();
     farB?.dispose();
     body.clear(); group.clear();
@@ -240,7 +253,7 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
     look: { jacket: look.jacket ?? m.top ?? 0x4a5560, pants: look.pants ?? m.bottom ?? 0x2f3540, skin: m.skin ?? 0xd9a066, hair: m.hair ?? 0x3a2a1a },
     outfit: { arch: look.archetype ?? null, role: look.role ?? null, prop, propTint: look.propTint ?? null, avatar: av.id, fem: av.sex === 'f' },
     prop, hold, arch: { key: look.archetype ?? (av.sex === 'f' ? 'f30' : 'm30'), sex: av.sex, h: H },
-    headTop: H, avatar: av, human: true,
+    headTop: H, avatar: av, headAvatar: head && head !== av ? head : av, human: true,
     // where the eyes and the lips are, in the head joint's own frame: the
     // campaign aims a camera at them (js/prologue-actor.js). The face itself
     // is the model's texture; nothing is drawn from these.
@@ -248,6 +261,12 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
       z: -0.088 * s * kHead, lipY: (av.height - 0.185 * kHead) * s - J.head.position.y - J.chest.position.y - J.torso.position.y,
       surface: () => -0.088 * s * kHead },
     setLod(v) { mesh.userData.force = v === 'far' ? true : v === 'near' ? false : null; if (v) setFar(v === 'far'); },
+    /** How open the mouth is, 0..1, for the next fifth of a second (the campaign calls it every frame). */
+    mouth(level) { setMouth(st, level, performance.now() * 0.001); },
+    /** Says something for this many seconds: the jaw works, and a body standing still gestures. */
+    talk(seconds) { startTalk(st, seconds, performance.now() * 0.001); },
+    /** What the body is playing right now: 'idle', 'move', 'sit', 'talk', a fidget's name, or 'proc'. */
+    get clipKey() { return R.key; },
     /** Resolve now (tests, a still frame taken outside the render loop). */
     pose(frame = st.frame + 1) { resolve(frame); return R.cur; },
     state: st, tris: av.tris,

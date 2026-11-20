@@ -21,6 +21,7 @@ import { deltasFromJoints, deltasOf, solve, worldOf } from './retarget.js';
 import { sampleClip, mixLocals } from './clipbank.js';
 import { pickGait, idleAt } from './animset.js';
 import { roleClip } from './avatars.js';
+import { talking } from './mouth.js';
 
 // standing: a fidget may start in about four windows of ten; a recorded one runs up to twelve seconds
 const IDLE = { period: 24, chance: 0.4 };
@@ -92,6 +93,12 @@ export function makeResolver(av, J, st, hold) {
       }
     }
     if (k === 'idle' || k === 'move') {
+      // somebody standing and speaking talks with their hands: a recorded gesture loop
+      if (!st.calm && talking(st, now) && av.talks?.length) {
+        const c = av.talks[st.seed % av.talks.length];
+        sampleClip(c, now + (st.seed % 13), S.A, _hA);
+        return 'talk';
+      }
       const r = idleAt(st.seed, now, av.idles, st.calm ? NONE : av.fidgets, IDLE, _ia);
       if (r.clip) { sampleClip(r.clip, r.t, S.A, _hA); return r.fidget ? r.clip.name : 'idle'; }
     }

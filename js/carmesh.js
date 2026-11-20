@@ -24,6 +24,7 @@
 // canvas atlas comes in from vehicles.js.
 
 import * as THREE from 'three';
+import { bornCrew } from './carcrew.js';
 import { mergedBodies, ATLAS } from './carmerge.js';
 import { bodyMatFor, instancedBodyMat, paintInstance } from './carbodymat.js';
 import { makeMember, bindMembers } from './carinstances.js';
@@ -67,7 +68,9 @@ export function dressCar(o) {
 function merged(g, K, kind, hex, decal, near, far, wheels) {
   const M = mergedBodies(g);
   const key = kind + '|' + hex;
-  const mat = bodyMatFor(key, hex, decal, true, false);
+  // who the glass shows at the wheel while the lamps burn (js/carcrew.js)
+  const born = bornCrew();
+  const mat = bodyMatFor(key, hex, decal, true, false, null, born);
   // the whole near body casts: the truck's cargo box lives in the trim, and a
   // plate's shadow costs nothing now that it is part of the same draw
   const body = fixed(new THREE.Mesh(M.near, mat), true, true);
@@ -86,7 +89,7 @@ function merged(g, K, kind, hex, decal, near, far, wheels) {
       { key: 'wheel|' + kind + '|' + side, geo: g.wheel[side], mat: detailMat, cast: true },
       K.wheelR + PAD));
   }
-  const state = { body, far: farMesh, key, hex, decal, paint, lit: true, brake: false };
+  const state = { body, far: farMesh, key, hex, decal, paint, lit: true, brake: false, born, tintShown: born };
   return { hulls: [body], brake: { visible: false }, members, state };
 }
 
@@ -148,7 +151,7 @@ export function setCarState(group, lit, brake) {
   lit = !!lit; brake = !!brake && lit;
   // s.door: the region an open door has cut out of this car (js/cardoor.js)
   // s.tint: who the glass shows at the wheel (js/cardoor.js setDriver)
-  const door = s.door ?? null, tint = s.tint ?? null;
+  const door = s.door ?? null, tint = s.tint ?? s.born ?? null;
   if (s.lit === lit && s.brake === brake && s.doorShown === door && s.tintShown === tint) return;
   const mat = bodyMatFor(s.key, s.hex, s.decal, lit, brake, door, tint);
   s.body.material = mat;
@@ -156,7 +159,7 @@ export function setCarState(group, lit, brake) {
   if (s.leaf) s.leaf.material = bodyMatFor(s.key, s.hex, s.decal, lit, false, s.leafDoor);
   if (s.lit !== lit) {
     // the distance dress has no brake element; only the lamps reach it
-    s.far.material = bodyMatFor(s.key, s.hex, s.decal, lit, false);
+    s.far.material = bodyMatFor(s.key, s.hex, s.decal, lit, false, null, s.born ?? null);
     paintInstance(s.hex, lit, s.paint);
   }
   s.lit = lit; s.brake = brake;

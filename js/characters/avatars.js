@@ -165,14 +165,19 @@ export function prepareAvatar({ id, sex = 'm', kind = 'adult', family = '', meta
   if (geos.length > 1) for (const g of geos) g.dispose();
   const top = rig.bones[0].parent;
   const root = new Float32Array(top.matrixWorld.elements);
+  // the one face bone a person keeps, and the axis it swings about in its own
+  // frame: the figure's left-to-right, which is where a jaw's hinge lies
+  const jaw = rig.names.findIndex((nm) => /jaw/i.test(nm));
+  const jawAxis = jaw < 0 ? null
+    : new THREE.Vector3(1, 0, 0).applyQuaternion(new THREE.Quaternion().fromArray(rig.worldQ, jaw * 4).conjugate()).toArray();
   const rest = figureMatrices(rig, rig.restQ, null, root, new Float32Array(rig.n * 16));
   const inv = invertRigid(rest, rig.n, new Float32Array(rig.n * 16));
   const a = {
-    id, sex, kind, family, meta, rig, root, rest, inv, geometry, ranges, material,
+    id, sex, kind, family, meta, rig, root, rest, inv, geometry, ranges, material, jaw, jawAxis,
     farGeometry: farMesh ? bindGeometry(farMesh, rig) : null, farMaterial: farMaterial ?? material,
     height: geometry.boundingBox.max.y,
     tris: (geometry.index ? geometry.index.count : geometry.attributes.position.count) / 3,
-    clips: new Map(), cls: null, kin: false, gaits: null, idles: null, fidgets: null, farTex: null, farRows: null,
+    clips: new Map(), cls: null, kin: false, gaits: null, idles: null, fidgets: null, talks: null, farTex: null, farRows: null,
     tile: null, hi: null, hiUrl: null, hiUsers: 0,
   };
   // the same skeleton as somebody already here: they share one set of clips
@@ -337,6 +342,7 @@ export function motionSet(av) {
     av.gaits = gaitTable(ROLES, av.sex, (n) => clipFor(av, n));
     av.idles = roleClips(av, 'idle');
     av.fidgets = roleClips(av, 'fidget').map((c) => { c.loop = false; return c; });
+    av.talks = roleClips(av, 'talk');
   }
   return av;
 }

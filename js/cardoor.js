@@ -23,6 +23,7 @@
 // door here: setDoor() returns false for them and the caller falls back.
 
 import * as THREE from 'three';
+import { crewOf, roleCrew } from './carcrew.js';
 import { carShape, attachCabin, cabinTrimMat } from './vehicles.js';
 import { bodyMatFor } from './carbodymat.js';
 import { setCarState } from './carmesh.js';
@@ -174,28 +175,42 @@ export function setDoor(car, seat, k) {
   return true;
 }
 
-// ---- who the glass shows at the wheel ----------------------------------------------
-const _tints = new Map();
-const NOBODY = { id: 'x', D: [0, 0, 0, 0] };
-const _col = new THREE.Color();
-/**
- * who: { jacket: hex } for somebody the player can name (themselves), null for
- * an empty seat whatever the lamps say, undefined to go back to the rule every
- * other car follows (a car with its lamps on has a driver).
- */
-export function setDriver(car, who) {
+// ---- who the glass shows in the front seats ----------------------------------------
+// js/carcrew.js keeps the records; these three say it of one car.
+function crewChanged(car) {
   const group = car?.mesh, st = group?.userData?.carState;
   if (!st) return;
-  let t = null;
-  if (who === null) t = NOBODY;
-  else if (who) {
-    const hex = who.jacket ?? 0x22262c;
-    t = _tints.get(hex);
-    if (!t) { _col.set(hex); _tints.set(hex, t = { id: 'j' + hex.toString(16), D: [_col.r, _col.g, _col.b, 1] }); }
-  }
-  st.tint = t;
+  st.tint = st.driver === undefined && !st.passenger ? null : crewOf(st.born, st.driver, st.passenger ?? null);
   setCarState(group, st.lit, st.brake);
 }
+/**
+ * who: { jacket: hex, cit } for somebody the player can name (themselves: cit
+ * is their citizen, whose picture the glass then shows), null for an empty
+ * seat whatever the lamps say, undefined to go back to the rule every other
+ * car follows (a car with its lamps on has its stock driver).
+ */
+export function setDriver(car, who) {
+  const st = car?.mesh?.userData?.carState;
+  if (!st) return;
+  st.driver = who;
+  crewChanged(car);
+}
+/** cit: the citizen in the other front seat, or null when they have got out. */
+export function setPassenger(car, cit) {
+  const st = car?.mesh?.userData?.carState;
+  if (!st) return;
+  st.passenger = cit ?? null;
+  crewChanged(car);
+}
+/** The car has a job and its stock driver wears the uniform: 'police' or 'medic'. */
+export function setCrewRole(car, role) {
+  const st = car?.mesh?.userData?.carState;
+  if (!st) return;
+  st.born = roleCrew(role);
+  crewChanged(car);
+}
+/** The key of whoever the glass shows at the wheel when nobody was named (js/characters/seated.js whoIs). */
+export const stockDriverOf = (car) => car?.mesh?.userData?.carState?.born?.dKey ?? null;
 
 /** How far this car's door stands open, 0..1. */
 export const doorOpen = (car) => car?._door?.k ?? 0;

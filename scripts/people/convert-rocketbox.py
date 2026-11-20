@@ -12,7 +12,8 @@
 #                                     UVs already moved into the atlas layout
 #                                     of scripts/people/build-atlas.py
 #   far                               the same person at about 1 300 triangles
-# on a skeleton of 52 bones: the 28 face bones are folded into the head.
+# on a skeleton of 53 bones: the jaw keeps its own (a mouth that opens), the
+# other face bones are folded into the head.
 #
 # ANIM. One clip, the skeleton only, sampled every other frame, with the
 # Biped's root (the armature object itself, which carries the travel and the
@@ -27,6 +28,7 @@ ATLAS = {"w": 1792, "h": 1280, "body": (0, 0, 1024, 1024), "head": (1024, 0, 768
          "ex1": (1536, 768, 256, 256), "ex2": (1536, 1024, 256, 256)}
 FAR_TRIS = 1300
 KEEP_FACE = False
+JAW = "Bip01 MJaw"
 
 argv = sys.argv[sys.argv.index("--") + 1:]
 mode, src, dst = argv[0], argv[1], argv[2]
@@ -90,18 +92,25 @@ if mode == "avatar":
     mesh = next(o for o in bpy.data.objects if o.type == "MESH")
     # the pose the file was saved in is the bind pose; an avatar needs no clip
     arm.animation_data_clear()
-    # ---- fold the face bones into the head ----
+    # ---- fold the face bones into the head, all but the jaw ----
+    # The jaw keeps its bone (and takes the lower lip, the tongue and whatever
+    # else hangs off it), so a mouth can open when its owner speaks. The other
+    # two dozen face bones become part of the head.
     if not KEEP_FACE:
         head_vg = mesh.vertex_groups.get("Bip01 Head") or mesh.vertex_groups.new(name="Bip01 Head")
-        face = [b.name for b in arm.data.bones if is_face(b.name)]
+        jaw = arm.data.bones.get(JAW)
+        jaw_vg = (mesh.vertex_groups.get(JAW) or mesh.vertex_groups.new(name=JAW)) if jaw else None
+        face = [b.name for b in arm.data.bones if is_face(b.name) and b.name != JAW]
         for name in face:
             vg = mesh.vertex_groups.get(name)
             if vg is None:
                 continue
+            under_jaw = jaw is not None and jaw in arm.data.bones[name].parent_recursive
+            into = jaw_vg if under_jaw else head_vg
             for v in mesh.data.vertices:
                 for g in v.groups:
                     if g.group == vg.index and g.weight > 0:
-                        head_vg.add([v.index], g.weight, "ADD")
+                        into.add([v.index], g.weight, "ADD")
             mesh.vertex_groups.remove(vg)
         select_only(arm)
         bpy.ops.object.mode_set(mode="EDIT")

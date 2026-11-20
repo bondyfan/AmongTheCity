@@ -72,6 +72,7 @@ import { SpeedStreaks } from './speedfx.js';
 import { SkidMarks } from './skidmarks.js';
 import { MISSILE } from './config.js';
 import { showMenu } from './menu.js';
+import { initSeated } from './characters/seated.js';
 import { loadPeople, whenPeople } from './characters/peopleload.js';   // modelled people, fetched while the menu is up
 import { showCreator, myLook } from './characters/creator.js';
 import { loadMyLook, setLookFor, validLook } from './characters/appearance.js';
@@ -4144,6 +4145,8 @@ async function start() {
   const people = devPeople !== 'off' && await whenPeople(180000, tell);
   if (label && was != null) label.textContent = was;
   if (people) {
+    // the people seen through car glass are pictures of these same bodies (js/characters/seated.js)
+    initSeated(renderer);
     // (a code this bank cannot show, from an older build, counts as none)
     if (opening && !validLook(loadMyLook())) await showCreator();
     wearLook(myLook());

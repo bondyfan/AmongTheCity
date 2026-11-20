@@ -703,3 +703,23 @@ test('re-casting by body did not orphan a single clip', () => {
     }
   }
 });
+
+// A modelled body (js/characters/human.js) has a jaw. Whoever says a line is
+// told so, for as long as the line stands, and is cut off if knocked down.
+test('whoever speaks moves their mouth for the length of the line, and stops when knocked down', () => {
+  const p = fakePed(9191, 3, 0);
+  const told = [];
+  p.talk = (s) => told.push(s);
+  const ch = new Chatter(stubBubbles(), { peds: fakePeds([p]) });
+  ch.update(0.016, { ears: { x: 0, z: 0 } });
+  ch.honk(3, 0);
+  assert.equal(ch._live.length, 1, 'the honk went unanswered');
+  assert.equal(told.length, 1, 'the speaker was not told to talk');
+  const u = ch._live[0];
+  assert.ok(told[0] >= u.hold && told[0] < u.hold + 0.5, `talks for the line's hold: ${told[0]} vs ${u.hold}`);
+  // run over mid-sentence: the bubble goes and the mouth is shut
+  p.state = 'rag';
+  ch.update(0.05, { ears: { x: 0, z: 0 } });
+  assert.equal(ch._live.length, 0);
+  assert.equal(told[told.length - 1], 0, 'the line was not cut off');
+});

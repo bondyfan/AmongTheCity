@@ -23,6 +23,8 @@ const P = {
   // &prop=bag,phone,pram,dog (or all): what the people carry, in turn; they then
   // really walk (the camera follows) so a dog has ground to cover
   prop: q.get('prop') ? (q.get('prop') === 'all' ? ['bag', 'phone', 'pram', 'dog'] : q.get('prop').split(',')) : null,
+  talk: q.get('talk') === '1',        // everybody speaks: jaws work, standing bodies gesture
+  mouth: q.get('mouth') != null ? parseFloat(q.get('mouth')) : null,   // a jaw held open this far, 0..1
   birds: q.get('birds') === '1',      // a row of each bird: seated, pecking, flying
 };
 // &rig=dummy: the crash-test humans of js/characters/dummy.js stand in for every citizen
@@ -152,6 +154,7 @@ for (const c of people) {
 
 function pose(time, dt) {
   for (const c of people) {
+    if (P.mouth != null) c.mouth?.(P.mouth); else if (P.talk) c.talk?.(1);
     if (P.pose === 'walk' || P.pose === 'run' || P.pose === 'punch' || P.pose === 'kick' || P.pose === 'aim' || P.pose === 'hands') {
       const moving = P.pose === 'walk' || P.pose === 'run';
       const v = moving ? speed : 0;

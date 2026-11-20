@@ -2308,6 +2308,7 @@ export class Pedestrians {
     const hipY = (c.parts?.legL?.position?.y ?? 0.9) * PLAYER_SCALE;
     const p = {
       mesh: c.group, animate: c.walk, sitPose: c.sitPose,
+      talk: c.talk ?? null,                // a modelled body moves its mouth for a line (js/chatter.js)
       ragdollPose: c.ragdollPose, standPose: c.standPose, dispose: c.dispose,
       sch: s, free: 0, look: c.look,
       // The PERSON, as opposed to the slot. s.seed is already the shared

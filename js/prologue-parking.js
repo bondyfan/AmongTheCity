@@ -2,6 +2,7 @@ import { parkingLines } from './prologue-dialogue.js';
 import { storyRecording } from './audio.js';
 import { makeCitizen } from './citizen.js';
 import { seatAnchor } from './vehicles.js';
+import { setPassenger } from './cardoor.js';
 import { SIT_DROP, seatX } from './seating.js';
 import { storyHud } from './prologue-hud.js';
 import { storyLights } from './prologue-lights.js';
@@ -46,6 +47,7 @@ export function meetVasek(car, scene, world, map, complete, player) {
     friend.sitPose(1, 1);
     car.seats ??= [];
     car.seats[1] = friend;
+    setPassenger(car, friend);           // the glass shows him in the other seat
     const p = seatAnchor(car, 1);
     car.mesh.add(friend.group);
     friend.group.position.set(seatX(p.x), p.y - SIT_DROP, p.z);
@@ -58,8 +60,11 @@ export function meetVasek(car, scene, world, map, complete, player) {
       hud.say();
       return;
     }
-    const [id, who, text] = parkingLines[line];
+    const [id, who, text, role] = parkingLines[line];
     hud.say(who, text);
+    // whoever says it moves their mouth for about as long as the line takes to say
+    const talker = role === 'friend' ? friend : player._cit;
+    talker?.talk?.(0.3 + text.length * 0.062);
     const at = line;
     const on = () => {
       if (line === at && !over) speak();
@@ -67,7 +72,7 @@ export function meetVasek(car, scene, world, map, complete, player) {
     let timer = 0;
     voice = storyRecording(id, {
       level: 1.7,
-      end: () => setTimeout(on, 450),
+      end: () => { talker?.talk?.(0); setTimeout(on, 450); },
       // no recording yet: leave the caption up for as long as it reads
       missing: () => {
         timer = setTimeout(on, 1300 + text.length * 62);
@@ -83,6 +88,7 @@ export function meetVasek(car, scene, world, map, complete, player) {
   function toDoor() {
     stage = 'walk';
     if (car.seats?.[1] === friend) car.seats[1] = null;
+    setPassenger(car, null);
     scene.add(friend.group);
     const p = doorAt(0.9, -0.9);
     friend.standPose();
@@ -214,6 +220,7 @@ export function meetVasek(car, scene, world, map, complete, player) {
       voice?.stop();
       film?.dispose();
       if (car.seats?.[1] === friend) car.seats[1] = null;
+      setPassenger(car, null);
       friend.dispose();
       set?.dispose();
       mark.dispose();

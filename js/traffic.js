@@ -364,6 +364,7 @@ import { LAYER_Y } from './config.js';
 // import of something a stale vehicles.js doesn't have is a hard link error —
 // the typeof check below degrades to CAR_COLORS instead
 import * as VEH from './vehicles.js';
+import { setCrewRole } from './cardoor.js';
 import { CAR as CAR_CFG } from './config.js';
 import { AI, cornerR, stanley, pedal, pedalFor, kinStep, ramImpulse } from './aidriver.js';
 import { laneAt, laneFoot, lanePt, projectArc, curveCap } from './ailane.js';
@@ -3515,6 +3516,7 @@ export class Traffic {
     const kind = VEH.CAR_KINDS.includes(PATROL_KIND) ? PATROL_KIND : VEH.CAR_KINDS[0];
     const car = this.vehicles.add(kind, x, z, heading, PATROL_PAINT);
     car.police = true;
+    setCrewRole(car, 'police');          // the glass shows an officer at the wheel
     // A policista does not lean out of the window and shout at the traffic.
     // js/chatter.js picks its driver-shout candidates by `car._shoutAt` being
     // in the past (it is a deadline, not a countdown — see chatter's _cool),

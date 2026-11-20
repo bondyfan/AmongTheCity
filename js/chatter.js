@@ -307,7 +307,7 @@ export class Chatter {
       const m = u.ped ? u.ped.mesh : u.car?.mesh;
       const gone = !m || !m.parent
         || (u.ped && (u.ped.state === 'rag' || u.ped.state === 'dead'));
-      if (gone) { this._live.splice(i, 1); this.bubbles?.remove(u.key); continue; }
+      if (gone) { u.ped?.talk?.(0); this._live.splice(i, 1); this.bubbles?.remove(u.key); continue; }
 
       if (u.ped) {
         u.x = u.ped.x; u.z = u.ped.z;
@@ -758,6 +758,8 @@ export class Chatter {
       t: 0, a: 0, hold,
     };
     this._live.push(u);
+    // whoever says it moves their mouth for as long as the line stands
+    ped?.talk?.(FADE_IN + hold);
     if (this.voiceOn) {
       speakAt('v/' + clipId(audioId, v.cast), x, z,
         { vol: this.volume, rate: v.pitch });

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { voiceToMouth } from './characters/mouth.js';
 
 // Follow the same skull surface that the character builder used for the eyes.
 export function expression(cit) {
@@ -53,6 +54,8 @@ export function expression(cit) {
   const spark = dot(glint, 0, 0, 0, 0.00046, 0.0009, 0.00022);
   return {
     update(age, emotion, speech) {
+      // a modelled body has a jaw of its own: it opens with the voice
+      cit.mouth?.(voiceToMouth(speech));
       group.visible = true;
       mouth.visible = speech > 0.03;
       mouth.scale.y = 0.0018 + speech * 0.0065;
