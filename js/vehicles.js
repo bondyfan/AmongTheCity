@@ -43,13 +43,15 @@ import { detailMat, headMat, tailMat, brakeMat, carNight, makeContactShadows } f
 import { buildCar } from './cardetail.js';
 import { ATLAS, mergedBodies } from './carmerge.js';
 import { BODY_U } from './carbodymat.js';
-import { dressCar, bindCar, setCarState, carMergeOn } from './carmesh.js';
+import { dressCar, bindCar, setCarState, carMergeOn, sweepCarMats } from './carmesh.js';
+import { mix32, pickColor, lookFromSeed, seedAt } from './carlook.js';
 import { seatParts, benchParts, wheelParts, cabinVariant, SEATS } from './cabinkit.js';
 import { setCabinLookup } from './carglass.js';
 import { hookScene, setCarInstancing, carInstancingOn, carInstanceStats } from './carinstances.js';
 import { attachTrailer, updateTrailer, updateBlink } from './semitrailer.js';   // round 8: the articulated lorry, indicators
 import { pitchOf } from './roadpose.js';
 import { sameLevel, inBand } from './levelsep.js';
+import { discOffsets } from './carhull.js';
 import { crash, sfxAt, skidChirp, skidBark } from './audio.js';   // no-ops headless — safe for node --check/tests
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
@@ -199,13 +201,18 @@ function drawBadge(brand) {
       x.closePath(); x.fill();
     }
     disc(8, '#d7dde4');
-  } else if (brand === 'tesla') {
-    // the T on transparent ground: curved top bar + tapering blade
-    x.fillStyle = '#d8dde3';
-    x.beginPath(); x.moveTo(18, 36); x.quadraticCurveTo(64, 20, 110, 36);
-    x.lineTo(102, 50); x.quadraticCurveTo(64, 36, 26, 50); x.closePath(); x.fill();
-    x.beginPath(); x.moveTo(52, 40); x.quadraticCurveTo(64, 46, 76, 40);
-    x.lineTo(68, 112); x.lineTo(60, 112); x.closePath(); x.fill();
+  } else if (brand === 'tesla' || brand === 'teslaTi') {
+    // the T on transparent ground: curved top bar + tapering blade.
+    // teslaTi is the Roadster's: dark titanium with a bright edge, because most
+    // Roadsters are white and a silver T on white paint cannot be seen.
+    const ti = brand === 'teslaTi';
+    const bar = () => { x.beginPath(); x.moveTo(18, 36); x.quadraticCurveTo(64, 20, 110, 36);
+      x.lineTo(102, 50); x.quadraticCurveTo(64, 36, 26, 50); x.closePath(); };
+    const blade = () => { x.beginPath(); x.moveTo(52, 40); x.quadraticCurveTo(64, 46, 76, 40);
+      x.lineTo(68, 112); x.lineTo(60, 112); x.closePath(); };
+    if (ti) { x.strokeStyle = '#d8dde3'; x.lineWidth = 5; x.lineJoin = 'round'; bar(); x.stroke(); blade(); x.stroke(); }
+    x.fillStyle = ti ? '#33373d' : '#d8dde3';
+    bar(); x.fill(); blade(); x.fill();
   } else {
     // 'plain': the fleet-van roundel — VW-ish monogram, deliberately generic
     disc(60, '#2b2f34'); ring(52, 6, '#c9cfd6');
@@ -233,7 +240,7 @@ function badgeMatFor(brand) {
 // The registration hashes off kind+paint so it is DETERMINISTIC — the same
 // blue Octavia always wears the same number, front and rear, without storing
 // anything per car. The cache is bounded by |kinds| × |color pools|.
-function drawPlate(kind, hex) {
+function drawPlate(kind, hex) {      // (hex: any number the text is hashed from)
   let h = hex >>> 0;
   for (let i = 0; i < kind.length; i++) h = Math.imul(h ^ kind.charCodeAt(i), 0x01000193) >>> 0;
   h = Math.imul(h ^ (h >>> 15), 0x85ebca6b) >>> 0;
@@ -252,12 +259,16 @@ function drawPlate(kind, hex) {
   return cv;
 }
 
-// ---- the decal atlas: plate and badge on one canvas per kind and colour -----
+// ---- the decal atlas: plate and badge on one canvas per kind and plate ------
 // The body is one draw (carmerge.js), so its two decals share one texture: the
 // badge in the top 128 rows, the plate in the bottom 56 (carmerge.js ATLAS has
-// the layout). Bounded like the plates always were, by kinds x colour pools.
+// the layout). The badge is clear where the paint shows, so an atlas does not
+// depend on the colour: a kind has PLATES of them, and a car takes the one its
+// colour and look hash to. Bounded by kinds x PLATES, whatever the palette.
+const PLATES = 6;
 const _decals = new Map();
-function decalTexFor(kind, hex) {
+function decalTexFor(kind, colorHex, look = 0) {
+  const hex = mix32((colorHex >>> 0) ^ Math.imul((look | 0) + 1, 0x9e3779b1)) % PLATES;
   const key = kind + '|' + hex;
   let t = _decals.get(key);
   if (t) return t;
@@ -300,22 +311,24 @@ function decalTexFor(kind, hex) {
 // model starts from; mass is tonnes-ish and only its RATIOS matter. Physics
 // reads len/wid off the car, so a bus really is a wall on wheels.
 const KIND = {
-  // Škoda Octavia IV liftback — the Czech default car: slim high grille slit,
-  // long bonnet, and the one long roofline that rakes shallow (~22°) all the
-  // way into the tail deck. C-pillar is a paint sail panel, like the real one.
+  // Škoda Octavia IV liftback, to the real car's drawing (4.69 x 1.83 x 1.47 m,
+  // wheelbase 2.686): long overhangs at both ends, so the axles sit well inside
+  // the body (the stations run from -2.24 to +2.44 round wheels at +-1.343),
+  // an upright nose with the bonnet edge 74 cm up, the belt near a metre and a
+  // shallow glasshouse over it, and a fastback that ends in a HIGH boot lid.
   octavia: {
-    len: 4.7, wid: 1.81, wheelR: 0.32, axle: 1.45,
+    len: 4.69, wid: 1.83, wheelR: 0.32, axle: 1.343,
     accel: 7.0, vmax: 64, grip: 7.6, mass: 1.45,
     brand: 'skoda',
-    badgeF: { size: 0.13, y: 0.50, dz: -0.02 }, badgeR: { size: 0.11, y: 0.64, dz: 0.02 },
-    plateF: 0.40, plateR: 0.44,
+    badgeF: { size: 0.11, y: 0.752, dz: 0.06, rx: -0.9 }, badgeR: { size: 0.11, y: 0.93, dz: 0.02 },
+    plateF: 0.40, plateR: 0.74,
     hull: { sh: 0.84, bw: 0.90, yA: 0.34, yB: 0.80, sts: [
-      [-2.35, 0.30, 0.52, 0.66], [-2.24, 0.22, 0.66, 0.84], [-1.95, 0.18, 0.74, 0.93],
-      [-1.10, 0.16, 0.84, 0.99], [-0.65, 0.16, 0.88, 1.00], [0.60, 0.16, 0.90, 1.00],
-      [1.55, 0.16, 0.93, 0.97], [2.10, 0.20, 0.90, 0.89], [2.35, 0.26, 0.82, 0.78]] },
-    green: { baseW: 0.88, topW: 0.68, sts: [
-      [-0.72, 0.87, 0.90], [-0.02, 0.88, 1.44], [0.30, 0.885, 1.44],
-      [0.44, 0.885, 1.435], [1.30, 0.90, 1.40], [2.06, 0.90, 0.94]],
+      [-2.243, 0.30, 0.62, 0.66], [-2.15, 0.22, 0.76, 0.85], [-1.85, 0.18, 0.825, 0.94],
+      [-1.05, 0.16, 0.925, 0.99], [-0.60, 0.16, 0.965, 1.00], [0.60, 0.16, 0.995, 1.00],
+      [1.45, 0.16, 1.03, 0.985], [2.10, 0.20, 1.085, 0.92], [2.443, 0.27, 1.05, 0.82]] },
+    green: { baseW: 0.86, topW: 0.65, sts: [
+      [-0.86, 0.955, 0.985], [-0.08, 0.98, 1.395], [0.26, 0.99, 1.44],
+      [0.40, 0.99, 1.44], [1.28, 1.025, 1.345], [2.08, 1.08, 1.11]],
       segs: ['gp', 'pg', 'pp', 'pg', 'gp'] },
   },
   // Škoda Fabia IV hatchback — 60 cm shorter, belt lower, and the greenhouse
@@ -373,23 +386,52 @@ const KIND = {
       [0.56, 0.875, 1.425], [1.42, 0.88, 1.40], [2.08, 0.87, 0.92]],
       segs: ['gp', 'pg', 'pp', 'pg', 'gp'] },
   },
-  // Tesla Model 3 — smooth body-color nose (NO grille anywhere), windscreen
-  // base far forward, and every greenhouse TOP face glass: one unbroken
-  // canopy from cowl to bootlid, ending in the full-width tail light bar
+  // Tesla Model 3 Performance, the current (Highland) car: 4.72 x 1.85 x 1.43 m
+  // on a 2.875 m wheelbase. No grille anywhere and a low nose, but the BODY is
+  // tall: the belt climbs from 0.93 to over a metre, the glasshouse is a
+  // shallow arc over it (peak above the front seats, every top face glass), and
+  // the fastback runs out into a short boot lid 1.08 m up with a lip on it.
   tesla: {
-    len: 4.7, wid: 1.85, wheelR: 0.33, axle: 1.44,
+    len: 4.72, wid: 1.85, wheelR: 0.336, axle: 1.4375,
     accel: 12.0, vmax: 72, grip: 9.6, mass: 1.9,
     brand: 'tesla',
-    badgeF: { size: 0.13, y: 0.52, dz: 0.065, rx: -0.83 }, badgeR: { size: 0.11, y: 0.56, dz: 0.02 },
-    plateF: 0.37, plateR: 0.42,
+    badgeF: { size: 0.11, y: 0.662, dz: 0.075, rx: -1.0 }, badgeR: { size: 0.11, y: 0.93, dz: 0.02 },
+    plateF: 0.37, plateR: 0.70,
     hull: { sh: 0.84, bw: 0.90, yA: 0.34, yB: 0.80, sts: [
-      [-2.35, 0.30, 0.46, 0.62], [-2.22, 0.20, 0.58, 0.84], [-1.90, 0.16, 0.68, 0.94],
-      [-1.15, 0.15, 0.78, 0.99], [-0.70, 0.15, 0.83, 1.00], [0.60, 0.15, 0.86, 1.00],
-      [1.55, 0.15, 0.88, 0.97], [2.10, 0.19, 0.85, 0.90], [2.35, 0.25, 0.78, 0.80]] },
-    green: { baseW: 0.90, topW: 0.72, sts: [
-      [-0.95, 0.80, 0.83], [-0.10, 0.83, 1.41], [0.42, 0.835, 1.435],
-      [0.56, 0.835, 1.43], [1.30, 0.84, 1.36], [2.02, 0.85, 0.90]],
+      [-2.305, 0.30, 0.50, 0.60], [-2.20, 0.20, 0.64, 0.82], [-1.86, 0.16, 0.735, 0.94],
+      [-1.10, 0.15, 0.885, 0.985], [-0.66, 0.15, 0.935, 0.99], [0.60, 0.15, 0.975, 0.99],
+      [1.50, 0.15, 1.02, 1.00], [2.08, 0.19, 1.075, 0.93], [2.415, 0.27, 1.05, 0.82]] },
+    green: { baseW: 0.84, topW: 0.62, sts: [
+      [-0.94, 0.925, 0.955], [-0.02, 0.955, 1.375], [0.30, 0.965, 1.40],
+      [0.44, 0.965, 1.398], [1.36, 1.01, 1.265], [2.03, 1.07, 1.10]],
       segs: ['gp', 'gg', 'gp', 'gg', 'gp'] },
+  },
+  // The new Tesla Roadster (shown 15 October 2026): a wedge two metres wide and
+  // 1.14 high on a 2.825 m wheelbase, a low canopy set forward on a body that
+  // rises all the way to a square tail, pop-down lamps, one light bar across
+  // the back and four cold-gas nozzles under it. 0 to 100 km/h in about a
+  // second: `thrust` is the share of the push that comes out of those nozzles
+  // and never loads a tyre, which (with the low centre of gravity, cgH) is what
+  // leaves the fronts enough rubber to steer with while it is happening.
+  // Not in CAR_KINDS: nobody meets one by accident (js/rarecars.js).
+  roadster: {
+    len: 4.56, wid: 2.0, wheelR: 0.345, wheelW: 0.30, axle: 1.4125,
+    accel: 33.5, vmax: 111, grip: 12.5, mass: 1.7,
+    thrust: 0.6, cgH: 0.30, brakeK: 1.5,
+    // the T on the nose and on the tail (Frank, 20 Nov 2026: "Přidej logo")
+    // (the rear one sits on the painted tail above the light bar: a badge shows
+    // the PAINT through its clear part, so on the black fascia it was a white square)
+    brand: 'teslaTi',
+    badgeF: { size: 0.10, y: 0.43 }, badgeR: { size: 0.085, y: 0.85 },
+    plateF: 0.30, plateR: 0.39,
+    hull: { sh: 0.84, bw: 0.90, yA: 0.34, yB: 0.80, sts: [
+      [-2.342, 0.17, 0.33, 0.66], [-2.20, 0.12, 0.44, 0.85], [-1.80, 0.10, 0.56, 0.95],
+      [-1.05, 0.10, 0.68, 0.99], [-0.60, 0.10, 0.73, 0.97], [0.50, 0.10, 0.80, 0.97],
+      [1.40, 0.11, 0.90, 1.00], [1.95, 0.15, 0.93, 0.96], [2.212, 0.26, 0.90, 0.90]] },
+    green: { baseW: 0.84, topW: 0.60, sts: [
+      [-0.85, 0.70, 0.72], [0.10, 0.76, 1.085], [0.36, 0.78, 1.11],
+      [0.48, 0.78, 1.105], [1.05, 0.86, 1.00], [1.70, 0.92, 0.945]],
+      segs: ['gp', 'gg', 'gp', 'pg', 'gp'] },
   },
   // panel van — a blunt tall single volume: short bonnet stub, cab glass over
   // the front doors only, then blind panel to the upright rear doors
@@ -461,17 +503,23 @@ const KIND = {
       [5.20, 0.22, 2.98, 1.00], [5.90, 0.24, 2.94, 0.98], [6.10, 0.30, 2.78, 0.92]] },
   },
 };
-// Vašek's estate keeps the Octavia running gear and front cabin. The
-// longer roof and nearly upright tailgate also shape the view from inside.
+// The Octavia Combi: the liftback's body to the rear doors, then the long roof
+// carried level to a raked tailgate over a 1.1 m rear overhang, with a third
+// side window and a D-pillar behind it. (Vašek's car in the story, and the
+// commonest car on a Czech street.)
 KIND.octaviaCombi = {
   ...KIND.octavia,
+  badgeR: { size: 0.11, y: 0.94, dz: 0.02 },
+  plateR: 0.76,
+  hull: { ...KIND.octavia.hull, sts: [
+    ...KIND.octavia.hull.sts.slice(0, 7), [2.15, 0.20, 1.06, 0.93], [2.443, 0.28, 1.03, 0.85]] },
   green: { ...KIND.octavia.green, sts: [
-    ...KIND.octavia.green.sts.slice(0, 4), [1.82, 0.91, 1.45], [2.20, 0.91, 1.03],
+    ...KIND.octavia.green.sts.slice(0, 4), [2.08, 1.045, 1.405], [2.40, 1.05, 1.08],
   ] },
 };
 // spawn code rolls from this — traffic.js picks BY NAME from its own pools
 // (indexing broke the day the roster was renamed, so never rely on order)
-export const CAR_KINDS = ['octavia', 'fabia', 'bmw', 'mercedes', 'tesla', 'van', 'truck', 'bus'];
+export const CAR_KINDS = ['octavia', 'fabia', 'bmw', 'mercedes', 'tesla', 'van', 'truck', 'bus', 'octaviaCombi'];
 // Legacy kind names — main.js's spawn list and pre-v4 saves still say sedan/
 // hatch/kombi/suv. They resolve to the closest modern silhouette at every
 // door into this module, so an old save gets an Octavia, not a crash.
@@ -509,6 +557,7 @@ const CAR_LABELS = {
   bmw:      ['BMW řady 3', 'sedan G20 · zadokolka'],
   mercedes: ['Mercedes-Benz třídy E', 'sedan W214 · zadokolka'],
   tesla:    ['Tesla Model 3 Performance', 'elektro · pohon všech kol'],
+  roadster: ['Tesla Roadster', 'elektro · trysky na stlačený plyn'],
   van:      ['Dodávka', 'skříňová · do 3,5 t'],
   truck:    ['Nákladní vůz', 'trambus · skříňová nástavba'],
   semi:     ['Kamion', 'tahač s návěsem · 40 t'],
@@ -526,23 +575,18 @@ const _labelPair = (k) => {
 export const carLabel = (kind) => _labelPair(kind)?.[0] ?? 'Vozidlo';
 export const carSubtitle = (kind) => _labelPair(kind)?.[1] ?? '';
 
-// Per-kind paint bias, weighted by repetition — teslas ship white/black/red
-// (the colors the order page makes cheap), German metal wears dark metallics,
-// škodas take anything from the config pool, vans and trucks run fleet white,
-// the bus wears DPMP red. Math.random is fine: paint is a runtime-only choice.
-const KIND_COLORS = {
-  bmw: [0x15171b, 0x22262c, 0x2c3138, 0x1f3048, 0x36393f, 0x101214, 0x43464c, 0x8a9096],
-  mercedes: [0x191b1f, 0x24272c, 0x2e3238, 0x23304a, 0x3a3d43, 0x0f1113, 0xb9bec6],
-  tesla: [0xe9eae5, 0xe9eae5, 0xe9eae5, 0x17191d, 0x17191d, 0xa61c26, 0xa61c26, 0x8a9096, 0x2f4f72],
-  van: [0xd8d5ce, 0xd8d5ce, 0xd8d5ce, 0xc4c9cf, 0xbcbfba, 0x3a63a8],
-  truck: [0xd8d5ce, 0xbcbfba, 0x8a9096, 0x476b46, 0x3a63a8],
-  semi: [0xd8d5ce, 0xd8d5ce, 0xb5271f, 0x3a63a8, 0x2c3138, 0x476b46, 0xc9a227, 0x8a9096],
-  bus: [0xb5271f, 0xb5271f, 0xb5271f, 0xd8d5ce, 0x9a2822],
-  trolleybus: [0xb5271f, 0xb5271f, 0x9a2822],
-};
-export function pickCarColor(kind) {
-  const pool = KIND_COLORS[ALIAS[kind] ?? kind] ?? CAR_COLORS;
-  return pool[(Math.random() * pool.length) | 0];
+// The paint: js/carlook.js has the palette (the Czech fleet, with a bias per
+// kind: German metal wears dark metallics, vans and trucks fleet white, the bus
+// DPMP red) and the look (polished, used, worn or matte; clean or dirty).
+// `r` is one 0..1 draw: whoever has a seed (traffic slots, parking spaces)
+// passes it so every client paints the car the same; without it the choice is
+// Math.random's, which is right for a car only this client will ever see.
+export function pickCarColor(kind, r = Math.random()) {
+  return pickColor(ALIAS[kind] ?? kind, r);
+}
+/** The look byte (js/carlook.js) for a kind from a 32-bit seed. */
+export function pickCarLook(kind, seed) {
+  return lookFromSeed(ALIAS[kind] ?? kind, seed >>> 0);
 }
 export { CAR_COLORS };   // re-export so callers can grab the fallback pool here too
 
@@ -688,12 +732,13 @@ function tyreStep(car, K, gas, hb, dt) {
   // a = accel·(1 − v/vmax)^1.3 off the throttle curve, CAR.brake on the pedal,
   // and drag + rolling resistance ONLY while coasting — that last rule is what
   // makes vmax really be vmax at full throttle, so it survives verbatim.
-  let ax = 0, coast = 0;
+  let ax = 0, coast = 0, thr = 0;
+  const brk = CAR.brake * (K.brakeK ?? 1);
   if (gas > 0.01) {
-    if (vx < -0.05) ax = CAR.brake * gas;              // still rolling back: this is the brake
-    else ax = K.accel * Math.pow(Math.max(0, 1 - vx / K.vmax), 1.3) * gas;
+    if (vx < -0.05) ax = brk * gas;                    // still rolling back: this is the brake
+    else { ax = K.accel * Math.pow(Math.max(0, 1 - vx / K.vmax), 1.3) * gas; thr = K.thrust ?? 0; }
   } else if (gas < -0.01) {
-    ax = vx > 0.05 ? CAR.brake * gas : K.accel * 0.7 * gas;
+    ax = vx > 0.05 ? brk * gas : Math.min(K.accel, 12) * 0.7 * gas;
   } else {
     coast = (CAR.drag * Math.abs(vx) + CAR.roll) * (vx >= 0 ? -1 : 1);
   }
@@ -704,7 +749,10 @@ function tyreStep(car, K, gas, hb, dt) {
     * (1 - MU_OFF * (car.offroad ?? 0));
   // Load transfer: accelerating tips weight onto the rear, braking onto the
   // nose. nf + nr = 1 by construction, so this only ever MOVES grip.
-  let nf = (b / L) - (CG_H / L) * (ax / G);
+  // (axT: what the TYRES carry. A thruster pushes on the body, not on the road,
+  // so its share neither spends the friction circles nor tips the car back.)
+  const axT = ax * (1 - thr);
+  let nf = (b / L) - ((K.cgH ?? CG_H) / L) * (axT / G);
   nf = nf < 0.12 ? 0.12 : nf > 0.88 ? 0.88 : nf;
   let capF = mu * G * nf, capR = mu * G * (1 - nf) * REAR_BIAS;
 
@@ -729,13 +777,13 @@ function tyreStep(car, K, gas, hb, dt) {
   // is how everybody drives on a keyboard) went round 190°: the rear passed
   // the Pacejka peak and the falling tail did the rest. Capped, the tail steps
   // out a few degrees, smokes, and comes back when the wheel straightens.
-  let uR = Math.min(0.98, Math.abs(ax) * rearShare / Math.max(0.5, capR));
+  let uR = Math.min(0.98, Math.abs(axT) * rearShare / Math.max(0.5, capR));
   if (ax > 0 && K.driveRear) {
     const uSpin = uR * (1 + SPIN_LOW * Math.max(0, 1 - vx / SPIN_V));
     uR = Math.max(uR, Math.min(SPIN_CAP, uSpin));
   }
   let latR = Math.sqrt(1 - uR * uR);
-  const uF = Math.min(0.98, Math.abs(ax) * (1 - rearShare) / Math.max(0.5, capF));
+  const uF = Math.min(0.98, Math.abs(axT) * (1 - rearShare) / Math.max(0.5, capF));
   const latF = Math.sqrt(1 - uF * uF);
   if (hb) {
     // The rear axle stops being a tyre and becomes a skid. Both terms, not one:
@@ -914,7 +962,7 @@ function geomFor(kind) {
   if (g) return g;
   const key = KIND[kind] ? kind : 'octavia';
   const K = KIND[key];
-  const car = buildCar(key === 'octaviaCombi' ? 'octavia' : key, K, cabinCut(K));
+  const car = buildCar(key, K, cabinCut(K));
   const S = car.shape;
   _geo.set(kind, g = {
     K, zN: S.z0, zT: S.z1, shape: S, near: car.near, far: car.far, wheel: car.wheel, wx: car.wx,
@@ -1012,9 +1060,10 @@ function badgeGeo(K, S, style) {
 // builds nothing until somebody asks for a mesh.
 if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
   let i = 0;
+  const all = [...CAR_KINDS, 'roadster'];
   const next = () => {
-    if (i >= CAR_KINDS.length) return;
-    const g = geomFor(CAR_KINDS[i++]);
+    if (i >= all.length) return;
+    const g = geomFor(all[i++]);
     if (carMergeOn()) mergedBodies(g);   // the one-draw bodies too (js/carmerge.js)
     window.setTimeout(next, 40);
   };
@@ -1035,8 +1084,9 @@ if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
 // instanced pools of js/carinstances.js: one draw per kind and side for every
 // wheel on the street, one per kind for every distant car in the city. The
 // old eleven-part car is still here behind ?carmerge=0, for an A/B.
-export function makeCarMesh(colorHex, kind = 'octavia') {
+export function makeCarMesh(colorHex, kind = 'octavia', look = 0) {
   kind = ALIAS[kind] ?? kind;
+  look = (look | 0) & 255;
   const g = geomFor(kind), K = g.K;
   const group = new THREE.Group();
   const body = new THREE.Group();
@@ -1060,7 +1110,7 @@ export function makeCarMesh(colorHex, kind = 'octavia') {
     group.add(w);
     wheels.push(w);
   }
-  const dress = dressCar({ g, K, kind, hex: colorHex, decal: decalTexFor(kind, colorHex), near, far, wheels });
+  const dress = dressCar({ g, K, kind, hex: colorHex, look, decal: decalTexFor(kind, colorHex, look), near, far, wheels });
   // dentCar crumples these: the merged body is one mesh, every draped layer
   // in it, so a pushed-in nose takes its grille and headlamps with it
   group.userData.hulls = dress.hulls;
@@ -1145,11 +1195,15 @@ export class Vehicles {
   // shape (y and the _underscored ones) are internal: y is the bridge-deck
   // height, _rammedT is the "just got hit" timer traffic.js watches, the
   // rest is suspension/drift state.
-  add(kind, x, z, heading, color) {
+  // look: the js/carlook.js byte. Left out, it is hashed off where the car is
+  // born, which is the same on every client for a car standing in a mapped
+  // space; whoever spawns a MOVING car passes its own seeded look (traffic.js).
+  add(kind, x, z, heading, color, look) {
     kind = ALIAS[kind] ?? kind;
+    if (look === undefined) look = lookFromSeed(kind, seedAt(x, z));
     if (color === undefined) color = pickCarColor(kind);
     const K = KIND[kind] ?? KIND.octavia;
-    const { group, wheels } = makeCarMesh(color, kind);
+    const { group, wheels } = makeCarMesh(color, kind, look);
     // A car is born ON THE ROAD, not at sea level. Only cars the traffic AI
     // owns get a pose written every frame; a PARKED car and one dropped in by
     // the dev spawner are placed once and then simply sit there — so if they
@@ -1166,7 +1220,7 @@ export class Vehicles {
       this.scene.add(this._blobs = makeContactShadows(256));
     }
     const car = { mesh: group, wheels, x, z, heading, speed: 0, steer: 0,
-      kind, color, len: K.len, wid: K.wid, ai: null,
+      kind, color, look, len: K.len, wid: K.wid, ai: null,
       y: y0, _lat: 0, _pv: 0, _acc: 0, _roll: 0, _pitch: 0, _rammedT: 0,
       offroad: 0, _bumpT: 0 };
     if (K.trailer) attachTrailer(car);   // (a semi: 16.5 m with its trailer, js/semitrailer.js)
@@ -1195,6 +1249,8 @@ export class Vehicles {
   // speed delta, so braking AI cars dip their nose too.
   update(dt) {
     if (dt <= 0) return;
+    // (the body materials nobody wears any more: js/carmesh.js)
+    if ((this._sweepN = ((this._sweepN | 0) + 1) % 1200) === 0) sweepCarMats();
     const k = Math.min(1, 8 * dt);
     // contact shadows: grow the instance buffer if the city outgrew it
     let blobs = this._blobs, nb = 0;
@@ -1585,11 +1641,15 @@ function noteImpact(car, vn, nx, nz, vwx, vwz, what) {
 // the cheapest shape that lets glancing hits slide off and T-bones connect
 // at the door instead of a phantom bbox corner. Runs BEFORE the wall pass
 // so a shoved player still ends the frame outside the architecture.
+const _dA = [], _dB = [];
 function carCarPass(car, others, world) {
   const h = car.heading;
   const fx = -Math.sin(h), fz = -Math.cos(h);
   const rx = Math.cos(h), rz = -Math.sin(h);
-  const rA = car.wid * 0.62, dA = Math.max(0, car.len / 2 - rA);
+  // The hull as discs down its axis: two for anything up to a van, more for a
+  // lorry or a bus, so there is no slot between them to drive through
+  // (js/carhull.js discOffsets; a 5 m car keeps exactly its two discs).
+  const rA = car.wid * 0.62, nA = discOffsets(car.len, car.wid, _dA);
   const mA = kindOf(car.kind).mass;
   const I = yawInertia(car);
   for (const o of others) {
@@ -1601,12 +1661,12 @@ function carCarPass(car, others, world) {
     // stand-in is tall, and anything under its roof line is at its level.
     if (!(o.tallY ? inBand(car.y, o.y, o.tallY) : sameLevel(car.y, o.y))) continue;
     const ofx = -Math.sin(o.heading), ofz = -Math.cos(o.heading);
-    const rB = o.wid * 0.62, dB = Math.max(0, o.len / 2 - rB);
+    const rB = o.wid * 0.62, nB = discOffsets(o.len, o.wid, _dB);
     const mB = kindOf(o.kind).mass;
     const wA = mB / (mA + mB), wB = mA / (mA + mB);     // light party moves more
-    for (let ci = -1; ci <= 1; ci += 2) for (let cj = -1; cj <= 1; cj += 2) {
-      const aox = fx * dA * ci, aoz = fz * dA * ci;     // our disc, their disc
-      const box = ofx * dB * cj, boz = ofz * dB * cj;
+    for (let ci = 0; ci < nA; ci++) for (let cj = 0; cj < nB; cj++) {
+      const aox = fx * _dA[ci], aoz = fz * _dA[ci];     // our disc, their disc
+      const box = ofx * _dB[cj], boz = ofz * _dB[cj];
       let nx = (car.x + aox) - (o.x + box), nz = (car.z + aoz) - (o.z + boz);
       const d2 = nx * nx + nz * nz, rr = rA + rB;
       if (d2 >= rr * rr) continue;

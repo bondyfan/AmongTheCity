@@ -28,7 +28,8 @@ export function renderScene(scene, sr = SR) {
     for (const k of s.hits) voices.hit(k);
     voices.frame(s.dt, s.player, s.cabin, s.traffic, s.ears);
     const p = voices.player;
-    trace.push({ t: s.t, v: s.player?.speed ?? 0, rpm: p?.rpm ?? 0, gear: p?.gear ?? 0, load: p?.load ?? 0 });
+    trace.push({ t: s.t, v: s.player?.speed ?? 0, rpm: p?.rpm ?? 0, gear: p?.gear ?? 0, load: p?.load ?? 0,
+      thrust: p?.thrust, tank: p?.tank });   // (a thruster kind: js/thrustdrive.js)
     const until = Math.min(n, Math.round((s.t + s.dt) * sr));
     while (done < until) {
       const m = Math.min(128, until - done);

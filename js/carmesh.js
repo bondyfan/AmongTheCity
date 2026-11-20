@@ -25,7 +25,8 @@
 
 import * as THREE from 'three';
 import { mergedBodies, ATLAS } from './carmerge.js';
-import { bodyMatFor, instancedBodyMat, paintInstance } from './carbodymat.js';
+import { bodyMatFor, instancedBodyMat, paintInstance, lookInstance, setBodyLeaf, sweepBodyMats } from './carbodymat.js';
+import { leafSpot } from './carlook.js';
 import { makeMember, bindMembers } from './carinstances.js';
 import { paintMatFor, glassMat, detailMat, headMat, tailMat, brakeMat } from './carpaint.js';
 
@@ -49,7 +50,8 @@ function fixed(m, cast, receive) {
 const PAD = 4;
 
 /**
- * Dress a car skeleton. o = { g, K, kind, hex, decal, near, far, wheels }:
+ * Dress a car skeleton. o = { g, K, kind, hex, look, decal, near, far, wheels }:
+ * look the js/carlook.js byte (finish, dirt, leaf; 0 is the polished car),
  * g the vehicles.js geomFor() set, decal the per (kind, colour) atlas texture,
  * near / far the two LOD groups, wheels the four wheel meshes (already placed,
  * drawn with detailMat). Returns { hulls, brake, members, state }:
@@ -61,12 +63,15 @@ const PAD = 4;
  */
 export function dressCar(o) {
   const { g, K, kind, hex, decal, near, far, wheels } = o;
-  return MERGE ? merged(g, K, kind, hex, decal, near, far, wheels) : legacy(g, K, kind, hex, decal, near, far);
+  return MERGE ? merged(g, K, kind, hex, o.look | 0, decal, near, far, wheels) : legacy(g, K, kind, hex, decal, near, far);
 }
 
-function merged(g, K, kind, hex, decal, near, far, wheels) {
+function merged(g, K, kind, hex, look, decal, near, far, wheels) {
   const M = mergedBodies(g);
-  const key = kind + '|' + hex;
+  // the key is the car's whole paint: every material of it (lit, braking, a
+  // door open) is found under it, and the look is read back out of it
+  const key = kind + '|' + hex + (look ? '|' + look : '');
+  setBodyLeaf(key, leafSpot(K, look, hex));
   const mat = bodyMatFor(key, hex, decal, true, false);
   // the whole near body casts: the truck's cargo box lives in the trim, and a
   // plate's shadow costs nothing now that it is part of the same draw
@@ -76,17 +81,17 @@ function merged(g, K, kind, hex, decal, near, far, wheels) {
   // (instancing off); pooled, the fleet material reads paint from iPaint
   const farMesh = fixed(new THREE.Mesh(M.far, mat), true, true);
   far.add(farMesh);
-  const paint = paintInstance(hex, true, new Float32Array(4));
+  const paint = paintInstance(hex, true, new Float32Array(4), look);
   const members = [makeMember(farMesh,
     { key: 'far|' + kind, geo: M.far, mat: instancedBodyMat(), cast: true, paint: true },
-    K.len * 0.6 + PAD, paint)];
+    K.len * 0.6 + PAD, paint, lookInstance(look, new Float32Array(4)))];
   for (let i = 0; i < wheels.length; i++) {
     const side = i & 1;
     members.push(makeMember(wheels[i],
       { key: 'wheel|' + kind + '|' + side, geo: g.wheel[side], mat: detailMat, cast: true },
       K.wheelR + PAD));
   }
-  const state = { body, far: farMesh, key, hex, decal, paint, lit: true, brake: false };
+  const state = { body, far: farMesh, key, hex, look, decal, paint, lit: true, brake: false };
   return { hulls: [body], brake: { visible: false }, members, state };
 }
 
@@ -131,9 +136,32 @@ function legacy(g, K, kind, hex, decal, near, far) {
   return { hulls: [pm, gm, dm, hm, tm, bm].filter(Boolean), brake: bm, members: [], state: null };
 }
 
+// the dressed cars that exist, for the material sweep below
+const _liveStates = new Set();
+
 /** Wire a dressed car's pool members to its group (no-op for the legacy dress). */
 export function bindCar(group, dress) {
   if (dress.members.length) bindMembers(group, dress.members);
+  const st = dress.state;
+  if (st) {
+    group.addEventListener('added', () => _liveStates.add(st));
+    group.addEventListener('removed', () => _liveStates.delete(st));
+  }
+}
+
+/**
+ * Drop the body materials no living car wears (a material is a few uniforms on
+ * the shared program, one per kind, colour and look, so they add up over a long
+ * drive). Cheap when there is nothing to do; vehicles.js calls it now and then.
+ */
+const _inUse = new Set();
+export function sweepCarMats() {
+  _inUse.clear();
+  for (const s of _liveStates) {
+    _inUse.add(s.body.material); _inUse.add(s.far.material);
+    if (s.leaf) _inUse.add(s.leaf.material);
+  }
+  return sweepBodyMats(_inUse);
 }
 
 /**
@@ -157,7 +185,7 @@ export function setCarState(group, lit, brake) {
   if (s.lit !== lit) {
     // the distance dress has no brake element; only the lamps reach it
     s.far.material = bodyMatFor(s.key, s.hex, s.decal, lit, false);
-    paintInstance(s.hex, lit, s.paint);
+    paintInstance(s.hex, lit, s.paint, s.look);
   }
   s.lit = lit; s.brake = brake;
 }

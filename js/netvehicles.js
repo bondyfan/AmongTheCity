@@ -125,6 +125,7 @@ function readState(v) {
     // hostile client feels like inventing
     kind: k === 'car' ? normalizeKind(v.kd) : 'heli',
     color: (fin(v.cl, 0x8a9096) >>> 0) & 0xffffff,
+    look: ((fin(v.cl, 0) >>> 0) >>> 24) & 255,       // the paint's look byte rides above the colour
     x: v.x, z: v.z,
     y: Number.isFinite(v.y) ? v.y : null,    // cars derive it; a heli must send it
     h: fin(v.h, 0),
@@ -175,7 +176,7 @@ export function makeGhostCars(vehicles) {
     // after, so a headless fleet (no scene) left r.k/r.kind/r.color holding the
     // PREVIOUS vehicle's values and the `changed` test below then compared the
     // new packet against a description of a car that no longer exists.
-    r.kind = st.kind; r.color = st.color; r.k = st.k;
+    r.kind = st.kind; r.color = st.color; r.look = st.look; r.k = st.k;
     if (st.k === 'heli') {
       // The Helicopter class is used as a MESH HOLDER only — we never call its
       // update(), so no physics of ours ever runs. Its geometry is a module
@@ -187,7 +188,7 @@ export function makeGhostCars(vehicles) {
       h.mesh.userData.ghost = true;
       r.heli = h; r.mesh = h.mesh; r.wheels = null;
     } else {
-      const m = makeCarMesh(budgetColor(st.kind, st.color), st.kind);
+      const m = makeCarMesh(budgetColor(st.kind, st.color), st.kind, st.look);
       m.group.userData.ghost = true;   // a marker any pool filter can look for
       r.mesh = m.group; r.wheels = m.wheels; r.heli = null;
       scene?.add(m.group);
@@ -284,7 +285,7 @@ export function makeGhostCars(vehicles) {
 
     let r = recs.get(uid);
     if (!r) {
-      r = { uid, k: st.k, kind: st.kind, color: st.color, seat: st.seat,
+      r = { uid, k: st.k, kind: st.kind, color: st.color, look: st.look, seat: st.seat,
         mesh: null, wheels: null, heli: null, bind: null, disposed: false,
         rx: st.x, rz: st.z, ry: fin(st.y, 0), rh: st.h,
         tx: st.x, tz: st.z, ty: fin(st.y, 0), th: st.h, sp: st.sp,
@@ -309,7 +310,7 @@ export function makeGhostCars(vehicles) {
     // the first build — only as often as SKIN_CD / SKIN_MAX allow. A ghost that
     // has spent its budget keeps the paint it is wearing; being one colour
     // wrong is a cosmetic bug, being a texture faucet is everyone's bug.
-    const changed = r.k !== st.k || r.kind !== st.kind || r.color !== st.color;
+    const changed = r.k !== st.k || r.kind !== st.kind || r.color !== st.color || (r.look ?? 0) !== (st.look ?? 0);
     if (!r.mesh || (changed && r.skinT <= 0 && r.skins < SKIN_MAX)) {
       buildMesh(r, st);
       // a fresh mesh has no history worth smoothing from

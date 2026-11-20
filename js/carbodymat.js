@@ -32,6 +32,12 @@
 // decal atlas) and instanced (the distance dress of carinstances.js, paint
 // and lamp state from the per-instance attribute iPaint, no decals).
 //
+// THE LOOK (js/carlook.js). A car's paint is polished, used, worn or matte and
+// clean or dirty, one byte hashed off the car's identity. Per car it is the
+// material's own clearcoat, roughness and metalness plus the uLook uniforms;
+// in the distance dress it is the per-instance attribute iLook. The dirt and
+// the leaf are drawn by js/cardirt.js in this same program: no draw is added.
+//
 // Every preset takes the same path. With scene.environment (medium, high) the
 // IBL is the reflection and carSky stays out; without it (low) carSky stands
 // in, exactly as carpaint.js does for the old materials. lampDirectPatch
@@ -43,6 +49,8 @@ import * as THREE from 'three';
 import { U, SKY_GLSL, headMat, tailMat, brakeMat } from './carpaint.js';
 import { lampDirectPatch } from './lampmap.js';
 import { GLASS_VERT_DECL, GLASS_VERT, GLASS_FRAG_DECL, glassFrag, glassUniforms } from './carglass.js';
+import { lookParams, fadeRgb, ROUGH_K, METAL_LO } from './carlook.js';
+import { DIRT_GLSL, dirtFrag, leafFrag, leafUniforms } from './cardirt.js';
 
 // Shared by every body program. The lamp values are GETTERS onto the lamp
 // materials main.js and lightpools.js already drive, so nothing outside this
@@ -97,18 +105,31 @@ const CITY_GLSL = /* glsl */`
     return mix(dots, 0.07, smoothstep(0.2, 0.55, max(fw.x, fw.y)));
   }`;
 
+/** the look byte a body key carries ('kind|hex|look'; none is 0, the polished car) */
+export const lookOfKey = (key) => (+String(key).split('|')[2] || 0);
+
+// where the leaf of a key lies (js/carmesh.js knows the kind's shape and says so
+// before the first material of that key is built)
+const _leaf = new Map();
+export function setBodyLeaf(key, leaf) { if (leaf) _leaf.set(key, leaf); }
+
 function build(opt) {
   const inst = !!opt.instanced;
   const fin = inst ? { metalness: 0.4, roughness: 0.45 } : paintFinish(opt.hex);
+  const L = lookParams(inst ? 0 : lookOfKey(opt.key));
   const m = new THREE.MeshPhysicalMaterial({
     color: inst ? 0xffffff : opt.hex,
-    metalness: fin.metalness, roughness: fin.roughness,
-    clearcoat: 1.0,
+    metalness: fin.metalness * (METAL_LO + (1 - METAL_LO) * L.gloss), roughness: Math.min(0.95, fin.roughness + L.rough),
+    // never exactly 0: without USE_CLEARCOAT a matte car would be a second program
+    clearcoat: Math.max(L.gloss, 1e-3),
     // 0.10, not mirror-sharp: at 0.06 the sun's glint in the lacquer peaked so
     // far above white that the bloom pass turned every roof into a flare
-    clearcoatRoughness: 0.10,
+    clearcoatRoughness: L.ccRough,
     vertexColors: true,
   });
+  if (!inst && L.fade > 0) m.color.setRGB(...fadeRgb(m.color.r, m.color.g, m.color.b, L.fade));
+  const uLook = { value: new THREE.Vector4(L.gloss, L.ccRough, L.dirt, L.seed) };
+  const leafU = inst ? null : leafUniforms(_leaf.get(opt.key) ?? null);
   m.name = inst ? 'carbody-inst' : 'carbody';
   const uLit = { value: opt.lit === false ? 0 : 1 };
   const uBrake = { value: opt.brake ? 1 : 0 };
@@ -129,15 +150,17 @@ function build(opt) {
     sh.uniforms.uPull = uPull;
     if (decal) sh.uniforms.uDecal = { value: decal };
     if (glassU) Object.assign(sh.uniforms, glassU);
+    if (leafU) Object.assign(sh.uniforms, leafU);
+    if (!inst) sh.uniforms.uLook = uLook;
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
         attribute vec4 cpbr; attribute vec4 cfx; attribute vec3 duv;
-        varying vec4 vPbr; varying vec4 vFx; varying vec3 vDuv;
+        varying vec4 vPbr; varying vec4 vFx; varying vec3 vDuv; varying float vUp;
         uniform float uPull;
-        ${inst ? 'attribute vec4 iPaint; varying vec4 vPaint;' : GLASS_VERT_DECL}`)
+        ${inst ? 'attribute vec4 iPaint; varying vec4 vPaint; attribute vec4 iLook; varying vec4 vLook; varying vec3 vObj;' : GLASS_VERT_DECL}`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
-        vPbr = cpbr; vFx = cfx; vDuv = duv;
-        ${inst ? 'vPaint = iPaint;' : GLASS_VERT}`)
+        vPbr = cpbr; vFx = cfx; vDuv = duv; vUp = normal.y;
+        ${inst ? 'vPaint = iPaint; vLook = iLook; vObj = position;' : GLASS_VERT}`)
       .replace('#include <project_vertex>', `#include <project_vertex>
         // the depth rung: slide the vertex toward the eye along its own view
         // ray, so it lands on the same pixel a hair nearer (mvPosition itself,
@@ -147,14 +170,17 @@ function build(opt) {
     // instanced: w packs metallic (1) and lit (2)
     const LIT = inst ? 'step(1.5, vPaint.w)' : 'uLit';
     const METAL = inst ? 'mod(vPaint.w, 2.0)' : '0.0';
+    // the look: gloss, lacquer roughness, dirt, seed (js/carlook.js lookParams)
+    const LOOK = inst ? 'vLook' : 'uLook';
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-        varying vec4 vPbr; varying vec4 vFx; varying vec3 vDuv;
+        varying vec4 vPbr; varying vec4 vFx; varying vec3 vDuv; varying float vUp;
         uniform vec3 uHeadC, uTailC, uBrakeC; uniform float uHeadE, uTailE, uLit, uBrake, uCarNight;
-        ${inst ? 'varying vec4 vPaint;' : GLASS_FRAG_DECL}
+        ${inst ? 'varying vec4 vPaint; varying vec4 vLook; varying vec3 vObj;' : GLASS_FRAG_DECL + 'uniform vec4 uLook; uniform vec4 uLeaf; uniform vec3 uLeafC;'}
         ${decal ? 'uniform sampler2D uDecal;' : ''}
         ${SKY_GLSL}
-        ${CITY_GLSL}`)
+        ${CITY_GLSL}
+        ${DIRT_GLSL}`)
       // cPaint: how much of this fragment is lacquered paint. 1 on the paint,
       // 0 on trim, glass and lamps, and on a decal the clear part of its texel.
       // The atlas is sampled unconditionally: a texture read inside a branch
@@ -170,16 +196,23 @@ function build(opt) {
         }` : ''}
         diffuseColor.rgb = cBase;
         ${inst ? '' : glassFrag(LIT)}
-        float cTail = vFx.z * (2.0 - vFx.z), cBrake = vFx.z * (vFx.z - 1.0) * 0.5;`)
+        float cTail = vFx.z * (2.0 - vFx.z), cBrake = vFx.z * (vFx.z - 1.0) * 0.5;
+        // the road on the body, then (per car only) the leaf lying on it
+        ${dirtFrag(LOOK)}
+        ${inst ? 'float cLeaf = 0.0;' : leafFrag()}
+        float cMatt = max(cDirt, cLeaf);`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-        ${inst ? `roughnessFactor = mix(vPbr.x, mix(0.5, 0.38, ${METAL}), cPaint);`
-          : 'roughnessFactor = mix(vPbr.x, roughnessFactor, cPaint);'}`)
+        ${inst ? `roughnessFactor = mix(vPbr.x, min(0.95, mix(0.5, 0.38, ${METAL}) + (1.0 - vLook.x) * ${ROUGH_K.toFixed(3)}), cPaint);`
+          : 'roughnessFactor = mix(vPbr.x, roughnessFactor, cPaint);'}
+        roughnessFactor = mix(roughnessFactor, 0.94, cMatt);`)
       .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
-        ${inst ? `metalnessFactor = mix(vPbr.y, 0.5 * ${METAL}, cPaint);`
-          : 'metalnessFactor = mix(vPbr.y, metalnessFactor, cPaint);'}`)
+        ${inst ? `metalnessFactor = mix(vPbr.y, 0.5 * ${METAL} * (${METAL_LO.toFixed(3)} + ${(1 - METAL_LO).toFixed(3)} * vLook.x), cPaint);`
+          : 'metalnessFactor = mix(vPbr.y, metalnessFactor, cPaint);'}
+        metalnessFactor *= 1.0 - cMatt;`)
       .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>
         #ifdef USE_CLEARCOAT
-          material.clearcoat *= cPaint;
+          material.clearcoat *= cPaint * (1.0 - cMatt)${inst ? ' * max(vLook.x, 0.001)' : ''};
+          ${inst ? 'material.clearcoatRoughness = max(material.clearcoatRoughness, vLook.y);' : ''}
         #endif`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         totalEmissiveRadiance += ((vFx.y * uHeadC * uHeadE + cTail * uTailC * uTailE) * mix(1.0, uCarNight, vFx.w)
@@ -192,7 +225,8 @@ function build(opt) {
           #endif
           float city = carCity(rd, 0.012 + material.roughness * 0.2);
           float nightW = uCarNight * carWindows(rd) * city;
-          radiance = radiance * vPbr.z * (1.0 - 0.72 * city) + vec3(1.0, 0.72, 0.42) * nightW * 0.16 * vPbr.z;
+          float envK = mix(vPbr.z, 0.7, cMatt);          // dirty glass mirrors no sky
+          radiance = radiance * envK * (1.0 - 0.72 * city) + vec3(1.0, 0.72, 0.42) * nightW * 0.16 * envK;
           #ifdef USE_CLEARCOAT
             vec3 cd = inverseTransformDirection(reflect(-geometryViewDir, geometryClearcoatNormal), viewMatrix);
             #ifndef USE_ENVMAP
@@ -211,7 +245,7 @@ function build(opt) {
         #endif`);
     lampDirectPatch(sh);
   };
-  m.customProgramCacheKey = () => 'carbody3|' + (inst ? 'i' : 'c') + (decal ? 'd' : '');
+  m.customProgramCacheKey = () => 'carbody4|' + (inst ? 'i' : 'c') + (decal ? 'd' : '');
   return m;
 }
 
@@ -222,6 +256,21 @@ function build(opt) {
 // brakes, just swaps between them (carmesh.js setCarState). Four materials a
 // colour at most, each a few uniforms.
 const _mats = new Map();
+/**
+ * Forget the materials no car wears any more. A material here is a bag of
+ * uniforms on the one shared program, keyed by kind, colour and look, so a long
+ * drive mints many; js/carmesh.js calls this now and then with the set in use.
+ */
+export function sweepBodyMats(inUse, cap = 360) {
+  if (_mats.size <= cap) return 0;
+  let n = 0;
+  for (const [k, m] of _mats) {
+    if (inUse.has(m) || k.startsWith('trailer')) continue;
+    m.dispose(); _mats.delete(k); n++;
+  }
+  return n;
+}
+export const bodyMatCount = () => _mats.size;
 // `door` (js/cardoor.js: { id, A, B, C }) is a fifth key: the same car with a
 // door's region cut out, or with nothing BUT that region. Uniforms again, so
 // these too are materials on the one program.
@@ -237,10 +286,17 @@ export function bodyMatFor(key, hex, decal, lit = true, brake = false, door = nu
 let _inst = null;
 export function instancedBodyMat() { return _inst ??= build({ instanced: true }); }
 
-/** iPaint for a colour: linear rgb, w = metallic + 2 * lit. */
-export function paintInstance(hex, lit, out) {
+/** iPaint for a colour: linear rgb (faded as the look says), w = metallic + 2 * lit. */
+export function paintInstance(hex, lit, out, look = 0) {
   _c.set(hex);
-  const f = paintFinish(hex);
-  out[0] = _c.r; out[1] = _c.g; out[2] = _c.b; out[3] = (f.solid ? 0 : 1) + (lit ? 2 : 0);
+  const f = paintFinish(hex), L = lookParams(look);
+  const c = fadeRgb(_c.r, _c.g, _c.b, L.fade);
+  out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = (f.solid ? 0 : 1) + (lit ? 2 : 0);
+  return out;
+}
+/** iLook for a look byte: gloss, lacquer roughness, dirt, seed. */
+export function lookInstance(look, out) {
+  const L = lookParams(look);
+  out[0] = L.gloss; out[1] = L.ccRough; out[2] = L.dirt; out[3] = L.seed;
   return out;
 }

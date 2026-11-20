@@ -63,7 +63,8 @@ export const DEV_PLACES = [
 // up — it just shows up under its own id until it is named here.
 const KIND_LABEL = {
   octavia: 'Škoda Octavia', fabia: 'Škoda Fabia', bmw: 'BMW',
-  mercedes: 'Mercedes', tesla: 'Tesla', van: 'Dodávka',
+  mercedes: 'Mercedes', tesla: 'Tesla Model 3', van: 'Dodávka',
+  octaviaCombi: 'Škoda Octavia Combi', roadster: 'Tesla Roadster',
   truck: 'Náklaďák', bus: 'Autobus',
   sedan: 'Sedan', hatch: 'Hatchback', kombi: 'Kombi', suv: 'SUV',
   heli: '🚁 Vrtulník', gripen: '✈️ Gripen (stíhačka)',
@@ -131,7 +132,8 @@ function mountPose(actions, host) {
   btn.type = 'button';
   btn.id = 'atc-dev-copy';
   btn.textContent = '⧉ Kopírovat pozici a pohled';
-  host.append(txt, btn);
+  // first on the tab, above the traffic and crowd rows settings.js put there
+  host.prepend(txt, btn);
 
   // A timer, not requestAnimationFrame: rAF does not fire in a background tab,
   // and a readout that goes blank the moment you alt-tab is exactly the readout
@@ -216,7 +218,7 @@ export function initDevMode(actions) {
     // The flying machines ride the same dropdown: they are vehicles you walk up
     // to and press E on, exactly like a car, so a separate control would be a
     // second way to say one thing.
-    for (const k of [...CAR_KINDS, 'heli', 'gripen']) {
+    for (const k of [...CAR_KINDS, 'roadster', 'heli', 'gripen']) {
       const o = document.createElement('option');
       o.value = k;
       o.textContent = KIND_LABEL[k] ?? k;

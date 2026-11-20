@@ -9,7 +9,9 @@
 //       through glass, while the worklet gives the player's engine more boom
 //
 // Three things keep the old voices of audio.js alive. The electric kinds
-// (tesla, trolleybus) have no combustion cycle and keep their motor whine. A
+// (tesla, trolleybus) have no combustion cycle and keep their motor whine;
+// the Roadster is the exception, with motors and thrusters synthesised in the
+// worklet (js/enginekinds.js THRUST_KINDS). A
 // browser without AudioWorklet, or a worklet that fails to load, falls back to
 // the old piston synth so the game is never silent. And the offline renderer
 // (dev/audiorender.html) can ask for the old engine to compare against.
@@ -22,7 +24,7 @@ import {
   engineVoices, engineVoicesStop, tireSet, roadWindSet, skidSet, carAudioStop, sfx,
 } from './audio.js';
 import { CarVoices } from './carvoices.js';
-import { engineKey } from './enginekinds.js';
+import { voiceKey } from './enginekinds.js';
 import { cobbleAt } from './roadsurface.js';
 
 const OUT_GAIN = 0.55;           // the worklet against the rest of the mix
@@ -60,16 +62,18 @@ function boot() {
 }
 
 function startVoice() {
-  const piston = !!engineKey(kind);
+  // does the worklet synthesise this kind's power unit (a piston engine, or
+  // the Roadster's motors and thrusters), or does it only roll there?
+  const synth = !!voiceKey(kind);
   if (stage === 2 && !forceOld) {
     voices.playerStart(kind);        // an EV still gets its road layer here
     onNew = true;
-    if (!piston) { engineStart(kind); onOld = true; }
-  } else if (stage === -1 || forceOld || !piston) {
+    if (!synth) { engineStart(kind); onOld = true; }
+  } else if (stage === -1 || forceOld || !synth) {
     engineStart(kind); onOld = true;
   }
-  // stage 1 with a piston engine: wait for the worklet rather than start the
-  // old voice and swap a second later. engine_start.mp3 covers the gap.
+  // stage 1 with a synthesised voice: wait for the worklet rather than start
+  // the old voice and swap a second later. engine_start.mp3 covers the gap.
 }
 
 /** The player took the wheel. kind is the car's runtime kind. */
@@ -139,7 +143,7 @@ export function carAudioFrame(dt, traffic, ex, ez, dirX, dirZ, cabin, city) {
 
 // Your own horn used to be a different car's horn on every press, now and then
 // a lorry's. A car has one horn: the same sample each time, at this kind's pitch.
-const HORN_PITCH = { octavia: 1, fabia: 1.06, bmw: 0.95, mercedes: 0.92, tesla: 1.03, van: 0.9 };
+const HORN_PITCH = { octavia: 1, fabia: 1.06, bmw: 0.95, mercedes: 0.92, tesla: 1.03, roadster: 1.1, van: 0.9 };
 const HEAVY_HORN = new Set(['truck', 'semi', 'bus', 'trolleybus']);
 export function carHorn() {
   if (HEAVY_HORN.has(kind)) sfx('truck_horn', 0.8, 1);

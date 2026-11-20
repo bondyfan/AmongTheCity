@@ -247,6 +247,8 @@ const CARS = Object.freeze({
   truck:    Object.freeze({ fuel: 'nafta',   tank: 300, per100: 32.0 }),
   bus:      Object.freeze({ fuel: 'nafta',   tank: 250, per100: 35.0 }),
   tesla:    Object.freeze({ fuel: 'elektro', tank: 80,  per100: 21.0 }),
+  octaviaCombi: Object.freeze({ fuel: 'benzin', tank: 55, per100: 7.9 }),
+  roadster: Object.freeze({ fuel: 'elektro', tank: 150, per100: 30.0 }),
 });
 
 // Exactly ENG_ALIAS in js/audio.js and ALIAS in js/vehicles.js. Pre-v4 saves

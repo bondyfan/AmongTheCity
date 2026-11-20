@@ -9,6 +9,7 @@
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
 import { inBand, LEVEL_GAP } from './levelsep.js';
+import { hullPushOut, hullReach } from './carhull.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
   roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull,
   clustersIn, clusterHull, clusterDeckY, streetOf } from './geo.js';
@@ -2107,6 +2108,9 @@ export class CityWorld {
     let best = this.heightAt(x, z, maxY);
     const roof = this.roofY(x, z, maxY);
     if (roof > best) best = roof;
+    // the floor of a chain store (js/stores/world.js): a slab over its own ground
+    const shop = this.stores?.floor(x, z, maxY);
+    if (shop > best) best = shop;
     if (coach > best) best = coach;
     const inside = this.interiors.supportY(x, z, maxY);
     return inside > best ? inside : best;
@@ -2222,8 +2226,24 @@ export class CityWorld {
     // (js/levelsep.js). Asked without a level, everything is, as it always was.
     const lv = opts?.y ?? opts?.yLo ?? opts?.aboveY;
     if (hulls) {
+      // A DRIVEN car's own corner probes (vehicles.js wallPass: it asks with
+      // `y`, its wheels' level) keep the two discs they have always met here.
+      // Car against car is carCarPass's business, which trades momentum, and
+      // an exact hull under these probes would stop a car dead a hand's width
+      // before its bumper ever reached the other one. Everybody else (on foot,
+      // thrown out, a helicopter's skids) gets the body itself, js/carhull.js:
+      // the two discs do not meet in the middle of a car, and a walker went
+      // through the front seats of every one of them (20 Nov 2026).
+      const exact = !(opts && opts.y !== undefined && !opts.interior);
       for (const c of hulls) {
         const dx = pos.x - c.x, dz = pos.z - c.z;
+        if (exact) {
+          const g = hullReach(c) + radius;
+          if (dx * dx + dz * dz > g * g) continue;
+          if (lv !== undefined && !inBand(lv, c.y, c.tallY ?? LEVEL_GAP)) continue;
+          pushed = hullPushOut(pos, radius, c) || pushed;
+          continue;
+        }
         if (dx * dx + dz * dz > 64) continue;                 // 8 m gate
         if (lv !== undefined && !inBand(lv, c.y, c.tallY ?? LEVEL_GAP)) continue;
         // the hull as two discs down its axis, like driveStep's own model
@@ -2251,6 +2271,8 @@ export class CityWorld {
     pushed = mwCollide(pos, radius, opts?.aboveY, this) || pushed;
     // …and a flight of steps down to a Prague lower quay is a wall to a car
     pushed = quayStairsCollide(pos, radius, opts) || pushed;
+    // the shelves, tills and shut doors of a chain store (js/stores/world.js)
+    pushed = this.stores?.collide(pos, radius, opts) || pushed;
     const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
     if (!cell) return pushed;
     const walker = !!opts?.interior;
