@@ -28,7 +28,7 @@ import { initAudio, sfx, sfxOr, sfxAt, setListener, setVolume,
   windStart, windStop, windSet, windLoad,
   ambientStart, nearbyTrafficHum } from './audio.js';
 import { carStart, carStop, carDrive, carAudioFrame, carHorn } from './caraudio.js';
-import { initSettings, getSettings } from './settings.js';
+import { initSettings, getSettings, shareWorld } from './settings.js';
 import { initOrtho } from './ortho.js';
 import { GROUND_DETAIL } from './groundglsl.js';
 import { Pedestrians } from './pedestrians.js';
@@ -4058,7 +4058,6 @@ window.addEventListener('atc:look', async () => {
   if (!code || !player.canReskin()) return;
   wearLook(code);
   player.reskin();
-  career.save();
 });
 
 async function start() {
@@ -4125,6 +4124,7 @@ async function start() {
   // co-op: the saved hour was dropped (and overwritten with none) and an owned
   // fleet car came back as a second car on top of the original.
   career.choose({ ...choice, mode: net ? 'server' : 'single' });
+  if (net) shareWorld();     // co-op: traffic, crowd and police are everybody's (js/worldsettings.js)
   const chapter = career.activeStory();
   const opening = chapter && chapter !== 'done';
   const openingHour = opening ? storyHours.street / 24 : 6 / 24;

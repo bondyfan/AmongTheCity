@@ -116,7 +116,9 @@ test('old versions migrate up the chain one step at a time', () => {
   assert.equal(v0.migrated, true);
   assert.equal(v0.state.v, SAVE_VERSION);
   assert.equal(v0.state.money, 900);
-  assert.deepEqual(v0.state.pos, { x: 12, z: -34, h: 1 });
+  // the spot was where the tab was closed (saves before v3 were taken all the
+  // time): not kept, the game starts on the square (js/autosave.js)
+  assert.equal(v0.state.pos, null);
   assert.equal(v0.state.vitals.hp, 40);
   assert.equal(v0.state.vitals.energy, 100, 'hunger did not exist: it starts full');
   // v1: versioned, single job counter

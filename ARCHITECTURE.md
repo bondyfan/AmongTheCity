@@ -2004,6 +2004,35 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
   Shift, and a sprint on a double tap of Shift that spends `stamina`
   (js/stamina.js draws the bar).
 
+## Saving only at autosave points; the world's numbers fixed (Nov 2026)
+
+Frank, 20 Nov 2026: "To se musí ukládat jenom jako na autosavy", later also
+"i když budeme spát, když budeme mít svůj byt"; and of traffic, the crowd and
+the police: "nesmí to tam být vůbec jako v možnostech nastavení".
+
+* **One writer** (js/career.js `autosave(point)`): no timer, no `pagehide` or
+  `visibilitychange` save, none on the death card, none after a purchase or a
+  look change. A point is a key of js/autosave.js `POINTS`: `mission` (part
+  one calls it from `checkpointStory('done')`, later missions call it at their
+  end) and `sleep` (for the flat that does not exist yet: its bed calls
+  `career.autosave('sleep')`). Anything else is refused. The save records the
+  point (`point`) and a card says "Uloženo".
+* **A reload is the last point**: quitting, dying, closing the tab lose what
+  happened since; an arrest steps back to it too (`reloadLast`). The campaign,
+  the free roam after it, `?devmode` Freeroam and co-op follow the same rule.
+* **Older saves** (v2, written every 20 s and on quit) migrate to v3 without
+  the quit spot and hour: a finished part one stands you at its end
+  (`PART_ONE_END`, Vašek's door), anyone else on the square; money, car and
+  stats stay. A v2 death-card save keeps its hospital and pays its bill.
+* **Traffic, crowd, police** (js/worldsettings.js `WORLD`: 120 cars, 60
+  walkers, patrols 0.70; "Běžná", "Rušno", "Běžně"): fixed outside `?devmode`
+  whatever storage holds, and not in the panel. With `?devmode` they are on
+  the dev tab ("Provoz a lidé"); co-op locks them again (`shareWorld`), since
+  every client builds the same fleet from them. The classic game neither reads
+  a developer's stored choice nor writes over it (`forStorage`). The presets no
+  longer carry `traffic` or `peds`. The panel's CSS is js/settingsstyle.js.
+* Tests: tests/autosave.test.mjs, tests/world-settings.test.mjs.
+
 ## Doors, locks, jumps and arrests: the step before part two (Nov 2026)
 
 Stealing a car and moving a body, so that part two (the theft at Kunětická
