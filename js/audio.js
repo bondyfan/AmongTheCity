@@ -741,6 +741,10 @@ const ENG_KINDS = {
   // a trolleybus is an electric traction motor on one reduction too: the same
   // whine and hum, never the Octavia four the unknown kind fell back to
   trolleybus: { ev: 1, vmax: 19.4 },
+  // the Roadster's own voice is synthesised in the worklet (js/enginekinds.js
+  // THRUST_KINDS, public/worklets/thrusterdsp.js). This is what it falls back
+  // to in a browser with no AudioWorklet: the motor whine, without thrusters
+  roadster: { ev: 1, vmax: 111 },
 };
 // pre-v4 saves and main.js's spawn list still say sedan/hatch/kombi/suv
 const ENG_ALIAS = { sedan: 'octavia', hatch: 'fabia', kombi: 'octavia', suv: 'bmw' };
@@ -2746,6 +2750,10 @@ export function storyRecording(id, {level = 1, phone = false, loop = false, mete
     let energy=0;
     for(const v of samples) energy+=((v-128)/128)**2;
     return Math.min(1,Math.sqrt(energy/samples.length)*4.6);
+  }, set(next, glide = 0.12) {
+    // a looping bed (the van's radio, the forest) follows the distance to it
+    level = next;
+    if (gain && !stopped) gain.gain.setTargetAtTime(next, ctx.currentTime, glide);
   }, stop(fade = 0.035) {
     if (stopped) return;
     stopped = true;

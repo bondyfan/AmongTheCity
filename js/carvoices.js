@@ -10,7 +10,8 @@
 // what lets the tests and the offline renders run the very code the game runs.
 
 import { makeDrivetrain, drivetrainStep, throttleFromMotion } from './drivetrain.js';
-import { vehicleVoice, engineKey } from './enginekinds.js';
+import { makeThrustDrive, thrustStep } from './thrustdrive.js';
+import { vehicleVoice, voiceKey, voiceClass } from './enginekinds.js';
 import { assignVoices } from './voicebudget.js';
 
 // Mirrors of the layout constants in public/worklets/carmixer.js. That file is
@@ -36,11 +37,15 @@ export class CarVoices {
   }
 
   _voice(slot, kind, seed) {
-    const K = vehicleVoice(kind), key = engineKey(kind);
-    if (key && !this.sent.has(key)) { this.sent.add(key); this.post({ t: 'spec', key, eng: K.eng }); }
+    const K = vehicleVoice(kind), key = voiceKey(kind);
+    if (key && !this.sent.has(key)) {
+      this.sent.add(key);
+      // a thruster kind sends `thr` where a piston kind sends `eng`, and says so
+      this.post(K.thr ? { t: 'spec', key, eng: K.thr, cls: voiceClass(kind) } : { t: 'spec', key, eng: K.eng });
+    }
     this.post({ t: 'voice', slot, key, seed, heavy: K.heavy ?? (K.air ? 1 : 0), rail: K.rail ?? 0, loud: K.loud });
     return this.state[slot] = {
-      K, dt: K.box ? makeDrivetrain(K.box) : null, kind,
+      K, dt: K.box ? makeDrivetrain(K.box) : null, td: K.thr ? makeThrustDrive(K.drive) : null, kind,
       v: -1, acc: 0, d: -1, vr: 0, moved: 0, stopped: 0,
       x: 0, z: 0, cob: 0, cobT: 0,     // cobT is set by whoever can see the map
     };
@@ -53,8 +58,9 @@ export class CarVoices {
     this.playerOn = 0; this.state[0] = null; this.post({ t: 'free', slot: 0 });
   }
 
-  /** The player's revs and gear, for the HUD or a test. Null on foot. */
-  get player() { return this.state[0]?.dt ?? null; }
+  /** The player's revs and gear, for the HUD or a test. Null on foot. For a
+   *  thruster kind it is the thrust drive: rpm, load, thrust, tank. */
+  get player() { return this.state[0]?.dt ?? this.state[0]?.td ?? null; }
 
   /**
    * One frame.
@@ -78,6 +84,9 @@ export class CarVoices {
       if (p.dt) {
         drivetrainStep(p.dt, Math.abs(player.speed), player.throttle, dt, player.slip ?? 0);
         f[b + F_RPM] = p.dt.rpm; f[b + F_LOAD] = p.dt.load; f[b + F_CUT] = p.dt.cut;
+      } else if (p.td) {
+        thrustStep(p.td, Math.abs(player.speed), player.throttle, dt, player.slip ?? 0);
+        f[b + F_RPM] = p.td.rpm; f[b + F_LOAD] = p.td.load; f[b + F_CUT] = p.td.thrust;
       }
       this._air(0, p, Math.abs(player.speed), player.brake ?? 0);
     }
@@ -126,6 +135,9 @@ export class CarVoices {
         const th = throttleFromMotion(v, st.acc, st.K.vmax, st.K.accel * 0.6);
         drivetrainStep(st.dt, v, th, dt, 0);
         f[b + F_RPM] = st.dt.rpm; f[b + F_LOAD] = st.dt.load; f[b + F_CUT] = st.dt.cut;
+      } else if (st.td) {
+        thrustStep(st.td, v, throttleFromMotion(v, st.acc, st.K.vmax, st.K.accel * 0.6), dt, 0);
+        f[b + F_RPM] = st.td.rpm; f[b + F_LOAD] = st.td.load; f[b + F_CUT] = st.td.thrust;
       }
       this._air(s + 1, st, v, brake);
     }

@@ -25,6 +25,8 @@ const P = {
   n: q.get('n') ? parseInt(q.get('n'), 10) : 0,
   steer: q.get('steer') ? parseFloat(q.get('steer')) : 0,
   fov: q.get('fov') ? parseFloat(q.get('fov')) : 0,
+  // the paint's look byte (js/carlook.js): a number, or `mix` for the street's own odds
+  look: q.get('look') === 'mix' ? undefined : (parseInt(q.get('look') || '0', 10) || 0),
 };
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -109,6 +111,7 @@ const vehicles = new VEH.Vehicles(scene);
 const SHOW_COLORS = {
   octavia: 0x2f4f72, fabia: 0xb8433a, bmw: 0x22262c, mercedes: 0xb9bec6,
   tesla: 0xe9eae5, van: 0xd8d5ce, truck: 0x3a63a8, bus: 0xb5271f,
+  octaviaCombi: 0x54695d, roadster: 0xeceee9,
 };
 const kinds = P.kind === 'all' ? VEH.CAR_KINDS : P.kind.split(',');
 const cars = [];
@@ -117,15 +120,18 @@ if (P.n > 0) {
   const cols = Math.ceil(Math.sqrt(P.n));
   for (let i = 0; i < P.n; i++) {
     const kind = P.kind === 'all' ? pool[i % pool.length] : kinds[i % kinds.length];
+    // look=mix: colour and look seeded per car, the way the traffic draws them
+    const mix = P.look === undefined && VEH.pickCarLook;
     const car = vehicles.add(kind, (i % cols - cols / 2) * 4.2, (Math.floor(i / cols) - cols / 2) * 12.5, 0,
-      P.color ?? undefined);
+      P.color ?? (mix ? VEH.pickCarColor(kind, (i * 0.6180339887) % 1) : undefined),
+      mix ? VEH.pickCarLook(kind, Math.imul(i + 1, 2654435761) >>> 0) : (P.look ?? 0));
     cars.push(car);
   }
 } else {
   let x = 0;
   const gap = 0.9;
   for (const kind of kinds) {
-    const probe = vehicles.add(kind, 0, 0, 0, P.color ?? SHOW_COLORS[kind] ?? 0x8a9096);
+    const probe = vehicles.add(kind, 0, 0, 0, P.color ?? SHOW_COLORS[kind] ?? 0x8a9096, P.look ?? 0);
     x += probe.wid / 2;
     probe.x = x; x += probe.wid / 2 + gap;
     cars.push(probe);

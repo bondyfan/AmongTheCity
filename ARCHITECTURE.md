@@ -2004,6 +2004,71 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
   Shift, and a sprint on a double tap of Shift that spends `stamina`
   (js/stamina.js draws the bar).
 
+## Saving only at autosave points; the world's numbers fixed (Nov 2026)
+
+Frank, 20 Nov 2026: "To se musí ukládat jenom jako na autosavy", later also
+"i když budeme spát, když budeme mít svůj byt"; and of traffic, the crowd and
+the police: "nesmí to tam být vůbec jako v možnostech nastavení".
+
+* **One writer** (js/career.js `autosave(point)`): no timer, no `pagehide` or
+  `visibilitychange` save, none on the death card, none after a purchase or a
+  look change. A point is a key of js/autosave.js `POINTS`: `mission` (part
+  one calls it from `checkpointStory('done')`, part two from `completeHeist`,
+  later missions at their end) and `sleep` (for the flat that does not exist yet: its bed calls
+  `career.autosave('sleep')`). Anything else is refused. The save records the
+  point (`point`) and a card says "Uloženo".
+* **A reload is the last point**: quitting, dying, closing the tab lose what
+  happened since; an arrest steps back to it too (`reloadLast`). The campaign,
+  the free roam after it, `?devmode` Freeroam and co-op follow the same rule.
+* **Older saves** (v2, written every 20 s and on quit) migrate to v3 without
+  the quit spot and hour: a finished part one stands you at its end
+  (`PART_ONE_END`, Vašek's door), anyone else on the square; money, car and
+  stats stay. A v2 death-card save keeps its hospital and pays its bill.
+* **Traffic, crowd, police** (js/worldsettings.js `WORLD`: 120 cars, 60
+  walkers, patrols 0.70; "Běžná", "Rušno", "Běžně"): fixed outside `?devmode`
+  whatever storage holds, and not in the panel. With `?devmode` they are on
+  the dev tab ("Provoz a lidé"); co-op locks them again (`shareWorld`), since
+  every client builds the same fleet from them. The classic game neither reads
+  a developer's stored choice nor writes over it (`forStorage`). The presets no
+  longer carry `traffic` or `peds`. The panel's CSS is js/settingsstyle.js.
+* Tests: tests/autosave.test.mjs, tests/world-settings.test.mjs.
+
+## Part two of the Last Train: the car under Kunětická hora (js/heist*.js, Nov 2026)
+
+Part one ends saved at Vašek's table. Part two is a third owner beside
+`journey` and `meeting` in main.js (`heist`, same four hooks: `use`, `update`,
+`frameCamera`, `posePlayer`), created whenever `career.heistPending()` says the
+save has part one and not part two. Like part one it is played in one sitting:
+`career.storyRunning()` is true while it runs, nothing is written, and
+`completeHeist()` writes `heist: 'done'`.
+
+* **Stages** (`js/heist.js`): wake (02:30, Dražkovická) → tofarm (the estate to
+  Brozany) → farm (Jarda) → ride (his van, the player in the passenger seat) →
+  drop → walk (Vašek on the phone) → theft (the villa where the map has
+  "Perníková chaloupka") → run (home at daybreak) → end (the lock-up in Na Staré
+  poště, `js/heist-garage.js`). Places are in `js/heist-route.js`, all read off
+  the map tiles; lines in `js/heist-dialogue.js`; `js/heist-talk.js` plays them
+  one after another with nothing to press.
+* **The van** (`js/heist-farmer.js`) is a real car with Jarda in `seats[0]`, so
+  E gives the player seat 1 by the game's own rule. Nobody simulates it: the
+  file writes `x, z, heading, speed, steer, y` along a smoothed polyline
+  (`track`). It stays locked until he is behind the wheel.
+* **The Mercedes** (`js/heist-car.js`): leaves found by dropping rays on the
+  body, two plates (a dark holder goes over the plate the body draws), a window
+  that unlocks it, and `car.hotwire`, which main.js reads in two places (no
+  `carStart` in `onSeated`, no gas in the drive step) until the wires meet.
+* **The police** (`js/heist-police.js`): plates left on are read on the way in
+  and the heat never cools (`host.fail('plate')` after a while); a bare car
+  draws a patrol that gets a close look; two `traffic.spawnPatrol` cars stand
+  across the end of 17. listopadu. Arrests are the game's own.
+* **Failing** goes through main.js `failStory`: with a heist it shows
+  `heist.failText(why)`, stands the player where `heist.rewind()` says (the
+  villa's gate once reached, else Vašek's street) and plays on.
+* **The balaclava** (`js/heist-mask.js`) hangs on `parts.headS`, a head socket
+  added to the modelled human beside the two hand sockets.
+* **Sound**: `scripts/gen-heist-audio.mjs` (ElevenLabs, run only when asked).
+  `storyRecording()` gained `set(level)` for looping beds (the van's radio).
+
 ## Doors, locks, jumps and arrests: the step before part two (Nov 2026)
 
 Stealing a car and moving a body, so that part two (the theft at Kunětická
@@ -2483,3 +2548,58 @@ wall accounted for with one door on the front, the door open and every other
 run solid, sound geometry on fifty real footprints, worker parity, the
 drive-through on the mapped lane, layouts inside their walls, visits that are
 deterministic and never teleport, the cart, the bag and the order.
+
+## Cars: true shapes, paint with a history, a solid hull, the Roadster (Nov 2026)
+
+**Shapes.** The Octavia (liftback and Combi) and the Model 3 were redrawn against the
+real cars' numbers, and the fault was not in the details: the bodies were low and the
+glasshouses tall (belt at 0.84 m under a 1.44 m roof), with the wheels pushed out to
+the corners. `KIND.octavia`, `KIND.octaviaCombi` and `KIND.tesla` now carry the real
+length, width, wheelbase and overhangs (the stations run past the axles by the real
+overhang at each end, so a body is no longer centred on its wheels), a belt near a
+metre and a high tail. The drawings of these kinds, and of the new `KIND.roadster`,
+live in `js/cardress.js` (`STYLE_NEW`, `DRESS_NEW`); `js/cardetail.js` keeps the tools
+and the older kinds and hands the tools over as an argument, so there is no import
+cycle. `greenhouse()` learned `cPillar` and `sideMax` for an estate's third window.
+The police livery and light bar in `traffic.js` are transcribed from the Octavia's
+stations and were re-transcribed with it. `dev/carprofile.mjs` rasterises a kind
+without a browser (side, front, rear, top, three-quarter) for checking proportions.
+
+**Paint.** `js/carlook.js` (pure) decides a car's colour and its LOOK from a 32-bit
+seed: finish (polished 30 %, used 51 %, worn 13 %, matte 6 % for ordinary cars, other
+odds per class), dirt (clean, sills, film, caked) and the odd leaf. The look is one
+byte, `car.look`: bits 0-1 finish, 2-3 dirt, 4-6 variant, 7 leaf; 0 is the polished
+clean car every caller got before. Seeds: a traffic slot's own (`hash32(p.seed, 8)`
+and `9`), a parking space's position (`seedAt`), so every client paints a car the
+same. It travels in the top byte of the co-op `cl` field and in the garage save.
+Drawing costs no draw and no program: per car the look is the body material's own
+clearcoat, roughness and metalness plus `uLook` (the material is a bag of uniforms on
+the one shared program, keyed `kind|hex|look`, swept when no car wears it); the
+distance dress reads the per-instance `iLook` beside `iPaint`. Dirt and the leaf are
+`js/cardirt.js`: value noise in the car's own frame (film from the sills up, spray on
+the tail, rain runs, dust on what faces the sky) and a lens-shaped leaf laid in plan.
+The plate atlas no longer depends on the colour (six per kind).
+
+**A solid hull.** `js/carhull.js` (pure): a car is a rounded oriented rectangle.
+`city.js collide()` used two discs, which do not meet in the middle of a car (a
+walker went through the front seats, and through metres of a bus). Everyone on foot
+now gets the exact hull; a driven car's own wall probes keep the discs, because car
+against car is `carCarPass`, which got more discs for long vehicles (`discOffsets`).
+Boarding plans a way round the body to the door (`planRound`, the shorter end, 0.5 m
+clear) and the car stays solid during the walk; the crowd steps round a standing car
+(`pedestrians.js _skirt`).
+
+**The Roadster.** `KIND.roadster` (not in `CAR_KINDS`): 0 to 100 km/h in 1.00 s.
+`thrust` is the share of the push that comes from the cold-gas nozzles and therefore
+neither spends the friction circles nor tips the car back (`tyreStep`: `axT`), `cgH`
+its low centre of gravity, `brakeK` its brakes. With the pedal down and the wheel hard
+over it grips like the other cars (tests/carshapes.test.mjs). Its voice is a third
+class beside piston and rolling: `enginekinds.js THRUST_KINDS`, `js/thrustdrive.js`
+(motor revs, signed load, valve, tank) and `public/worklets/thrusterdsp.js`. It is met
+as one town car in 450, in one kerb stall in 500 (left open), and in the dev spawner.
+
+Measured on the M1 Pro, medium, 1024 x 768, noon, before and after in the same hour:
+Pardubice, třída Míru 7.0 and 7.0 ms a frame before, 6.8 and 7.9 after; by the castle
+7.9 before, 6.7 and 6.5 after; Prague, Václavské náměstí 5.4 and 5.6 before, 5.7 and
+6.9 after; a Prague street 6.9 and 6.6 before, 7.5 and 6.8 after. The differences are
+inside the noise of a machine other sessions were using.

@@ -70,10 +70,11 @@ test('a custom profile from before the change gets the new defaults once', async
 });
 
 test('…and once stamped, the switches are the user\'s again', async () => {
-  const S = await loadWith({ preset: 'custom', v: 2, ao: false, ortho: false, grass: false, peds: 0 });
+  const S = await loadWith({ preset: 'custom', v: 2, ao: false, ortho: false, grass: false });
   assert.equal(S.ao, false, 'the migration re-ran and overrode a deliberate choice');
   assert.equal(S.ortho, false);
-  assert.equal(S.peds, 0);
+  assert.equal(S.grass, false);
+  // (the crowd is no longer the player's: tests/world-settings.test.mjs)
 });
 
 test('someone who deliberately chose "low" keeps low', async () => {

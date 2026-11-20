@@ -10,7 +10,11 @@
 // The car here is a few lines of longitudinal physics, not vehicles.js: enough
 // to give a believable speed trace, with nothing to load.
 
-import { ENGINE_KINDS } from '../js/enginekinds.js';
+import { ENGINE_KINDS, THRUST_KINDS } from '../js/enginekinds.js';
+
+// the kinds with no piston engine still need a top speed and a shove to drive
+// a scene with (vehicles.js KIND has the real ones; these are its numbers)
+const PHYS = { ...THRUST_KINDS, tesla: { accel: 12, vmax: 72 } };
 
 const KMH = 1 / 3.6;
 const seg = (t, steps) => {          // piecewise constant: [[untilT, value], ...]
@@ -97,6 +101,38 @@ export const SCENES = {
   },
 };
 
+// ---- the Roadster (Frank, 20 Nov 2026) ---------------------------------------
+// The same four drives for any kind, so the Roadster can be heard against the
+// Model 3 on the same pedal: roadsterScenes('tesla') is the "before".
+export const roadsterScenes = (kind = 'roadster') => ({
+  roadster_start: {
+    title: 'Stání, start naplno přes 200 km/h, ubrání a brzdy', kind, dur: 11,
+    gas: (t) => seg(t, [[2, 0], [5.2, 1], [8.4, 0], [10.4, -0.7], [11, 0]]),
+  },
+  roadster_mesto: {
+    title: 'Město: klidná jízda a krátká šlápnutí', kind, dur: 12,
+    gas: (t) => seg(t, [[0.8, 0], [1.4, 1], [3.2, 0.14], [3.9, 1], [5.2, 0], [6.3, -0.6], [7.2, 0.25],
+      [7.9, 1], [9.6, 0.12], [10.8, -0.5], [12, 0]]),
+  },
+  roadster_kabina: {
+    title: 'Stejná šlápnutí zvenku a potom zevnitř auta', kind, dur: 12, v0: 50 * KMH,
+    gas: (t) => seg(t % 6, [[1, 0.15], [2.6, 1], [3.6, 0], [5, -0.5], [6, 0.15]]),
+    cabin: (t) => (t < 6 ? 0 : 1),
+  },
+  roadster_prujezd: {
+    title: 'Stojíš u silnice: auto se rozjede naplno a proletí kolem', dur: 8,
+    ears: { x: 0, z: 0, dx: 0, dz: 1 },
+    // waits 60 m up the road, then goes: 14 m/s^2 for the Roadster, what the
+    // Model 3 has for the Model 3
+    traffic: [(t) => {
+      const a = Math.min(14, (PHYS[kind]?.accel ?? 7) * 0.9), u = Math.max(0, t - 1);
+      const v = Math.min(a * u, 70), x = -60 + (v < 70 ? 0.5 * a * u * u : 70 * 70 / (2 * a) + 70 * (u - 70 / a));
+      return x > 125 ? null : { id: 'r1', kind, x, z: 5, speed: v };
+    }],
+  },
+});
+Object.assign(SCENES, roadsterScenes('roadster'));
+
 /**
  * Plays a scene and calls onFrame(state) once per simulated frame.
  * state: { t, dt, kind, kindChanged, player: {speed, throttle, gas, slip, brake, hb, cobble} | null,
@@ -112,7 +148,7 @@ export function playScene(scene, onFrame, fps = 60) {
     if (scene.resetEvery && i && Math.abs((t % scene.resetEvery)) < dt * 0.5) v = 0;
     let player = null;
     if (kind) {
-      const K = ENGINE_KINDS[kind] ?? { accel: 7, vmax: 64 };
+      const K = ENGINE_KINDS[kind] ?? PHYS[kind] ?? { accel: 7, vmax: 64 };
       const gas = scene.gas ? scene.gas(t) : 0;
       const hb = scene.hb ? !!scene.hb(t) : false;
       let a = -(0.3 + 0.0011 * v * v) * (v > 0.05 ? 1 : 0);

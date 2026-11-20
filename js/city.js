@@ -9,6 +9,7 @@
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
 import { inBand, LEVEL_GAP } from './levelsep.js';
+import { hullPushOut, hullReach } from './carhull.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
   roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull,
   clustersIn, clusterHull, clusterDeckY, streetOf } from './geo.js';
@@ -2260,8 +2261,24 @@ export class CityWorld {
     // (js/levelsep.js). Asked without a level, everything is, as it always was.
     const lv = opts?.y ?? opts?.yLo ?? opts?.aboveY;
     if (hulls) {
+      // A DRIVEN car's own corner probes (vehicles.js wallPass: it asks with
+      // `y`, its wheels' level) keep the two discs they have always met here.
+      // Car against car is carCarPass's business, which trades momentum, and
+      // an exact hull under these probes would stop a car dead a hand's width
+      // before its bumper ever reached the other one. Everybody else (on foot,
+      // thrown out, a helicopter's skids) gets the body itself, js/carhull.js:
+      // the two discs do not meet in the middle of a car, and a walker went
+      // through the front seats of every one of them (20 Nov 2026).
+      const exact = !(opts && opts.y !== undefined && !opts.interior);
       for (const c of hulls) {
         const dx = pos.x - c.x, dz = pos.z - c.z;
+        if (exact) {
+          const g = hullReach(c) + radius;
+          if (dx * dx + dz * dz > g * g) continue;
+          if (lv !== undefined && !inBand(lv, c.y, c.tallY ?? LEVEL_GAP)) continue;
+          pushed = hullPushOut(pos, radius, c) || pushed;
+          continue;
+        }
         if (dx * dx + dz * dz > 64) continue;                 // 8 m gate
         if (lv !== undefined && !inBand(lv, c.y, c.tallY ?? LEVEL_GAP)) continue;
         // the hull as two discs down its axis, like driveStep's own model

@@ -14,12 +14,13 @@
 // Cars materialise and vanish only OUTSIDE noticeR of the player, so the lot
 // never performs its magic on camera.
 
-import { CAR_COLORS, CHUNK } from './config.js';
+import { CHUNK } from './config.js';
+import { pickCarColor } from './vehicles.js';
 import { strHash } from './identity.js';
 import { siteNear } from './d11services.js';
 import { storeChain } from './stores/chains.js';
 
-const KINDS = ['sedan', 'hatch', 'kombi', 'suv', 'van'];
+const KINDS = ['sedan', 'hatch', 'octaviaCombi', 'suv', 'van'];
 const SCAN_DT = 2.5;          // s between lot sweeps
 const REACH = 420;            // m — lots considered around the player
 const NOTICE_R = 170;         // m — no stall changes closer than this
@@ -340,7 +341,7 @@ export class ParkingLots {
           if (owned && standsIn(owned.x, owned.z, st.x, st.z, st.h, owned.heading)) { st.burned = true; continue; }
           const kind = lorry ? LORRY_KIND : KINDS[(rnd(st.x, st.z, 'k') * KINDS.length) | 0];
           const color = lorry ? LORRY_COLORS[(rnd(st.x, st.z, 'c') * LORRY_COLORS.length) | 0]
-            : CAR_COLORS[(rnd(st.x, st.z, 'c') * CAR_COLORS.length) | 0];
+            : pickCarColor(kind, rnd(st.x, st.z, 'c'));
           st.car = this.vehicles.add(kind, st.x, st.z, st.h, color);
           st.car._lot = true;
           if (lorry) { st.car._lorry = true; this._lorries++; }
