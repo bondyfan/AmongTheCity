@@ -18,7 +18,7 @@ import { Carjack, witnessed } from './carjack.js';
 import { setDriver } from './cardoor.js';
 import { isLocked, unlock } from './carlocks.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
-  attachCabin, detachCabin, setVehicleEventSink } from './vehicles.js';
+  attachCabin, detachCabin, setVehicleEventSink, pickCarColor } from './vehicles.js';
 import { Traffic } from './traffic.js';
 import { RoadWorks } from './mwworksmesh.js';
 import { makeSky, updateSky, todClock, EXPOSURE_DAY } from './sky.js';
@@ -1338,7 +1338,8 @@ input.onKey('KeyE', () => {
         // diesel for the bus, motor whine for the Tesla. Without the kind it
         // would fall back to the Octavia four for everything.
         setTimeout(() => {
-          if (game.car === car) { sfx('engine_start', 0.7); carStart(car.kind); }
+          // (no starter motor on an electric car: it just wakes up)
+          if (game.car === car) { if (car.kind !== 'roadster' && car.kind !== 'tesla') sfx('engine_start', 0.7); carStart(car.kind); }
         }, 350);
       },
       // walked-up-and-it-vanished: a stolen car must stay enterable
@@ -1803,7 +1804,7 @@ function hideCarName() {
 // property of how the download happened to interleave, and `n >= 8` would then
 // take a different eight on a slow connection than on a fast one. Sorting the
 // candidates by position before the cap makes the cut-off a fact about the map.
-const PARK_KINDS = ['sedan', 'hatch', 'kombi', 'suv', 'van'];
+const PARK_KINDS = ['sedan', 'hatch', 'octaviaCombi', 'suv', 'van'];
 // deterministic 0..1 from a world position plus a salt. 0.1 m quantisation so
 // two clients that computed a centroid with a last-bit difference still agree.
 function spotRnd(x, z, salt) {
@@ -1845,7 +1846,7 @@ function placeParkedCars(city, spawn = SPAWN, base = 0) {
     // building tile has not streamed in yet would clear it differently and
     // repaint the car.
     const kind = spots[i] === meetSpot ? 'octaviaCombi' : PARK_KINDS[(spotRnd(x, z, 'k') * PARK_KINDS.length) | 0];
-    const color = spots[i] === meetSpot ? 0x54695d : CAR_COLORS[(spotRnd(x, z, 'c') * CAR_COLORS.length) | 0];
+    const color = spots[i] === meetSpot ? 0x54695d : pickCarColor(kind, spotRnd(x, z, 'c'));
     const k = base + i;
     // A fleet parked late (the second city) may meet the player's OWN copy of
     // one of its cars: js/garage.js restored it from the save at boot, before
@@ -2249,8 +2250,7 @@ async function initDev() {
         const h = game.car?.heading ?? player.heading;
         const pos = { x: player.pos.x - Math.sin(h) * 7, z: player.pos.z - Math.cos(h) * 7 };
         world.collide(pos, 2.4);
-        const color = CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0];
-        const car = vehicles.add(kind, pos.x, pos.z, h + Math.PI, color);
+        const car = vehicles.add(kind, pos.x, pos.z, h + Math.PI);   // (colour and look: the kind's own odds)
         unlock(car);                     // a dev spawn is for driving
         parked.push(car);
         ui_hint?.('🚗 ' + kind);
@@ -3681,6 +3681,7 @@ function stepGame(dt) {
   // pedestrians.js has no business knowing traffic.js has two kinds of car.
   peds.cars = sharedCars();
   peds.playerCar = game.car;
+  peds.hulls = world.carHulls?.() ?? null;   // what stands near us: the crowd steps round it (pedestrians.js _skirt)
   peds.update(dt, focus);
   streetLife?.update(dt, focus, view, game.car, peds.cars);   // after the crowd: dogs and prams follow their people
   if (cyclists) { cyclists.setViewer(view); cyclists.update(dt, focus); }   // after the crowd: its crossers list is theirs too

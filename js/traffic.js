@@ -364,6 +364,7 @@ import { LAYER_Y } from './config.js';
 // import of something a stale vehicles.js doesn't have is a hard link error —
 // the typeof check below degrades to CAR_COLORS instead
 import * as VEH from './vehicles.js';
+import { LOOK_FLEET } from './carlook.js';
 import { CAR as CAR_CFG } from './config.js';
 import { AI, cornerR, stanley, pedal, pedalFor, kinStep, ramImpulse } from './aidriver.js';
 import { laneAt, laneFoot, lanePt, projectArc, curveCap } from './ailane.js';
@@ -480,13 +481,16 @@ const END_ROLL = 15;          // m from the end of its trip a watched car is let
 // everyday pool is mostly octavia/fabia with the odd German sedan and a tesla;
 // commercial metal exists but ONLY rolls on fast edges — a bus threading a
 // 30 km/h residential loop looks wrong and corners terribly
-const COMMON = ['octavia', 'octavia', 'fabia', 'fabia', 'octavia', 'bmw', 'mercedes', 'tesla'];
+const COMMON = ['octaviaCombi', 'octavia', 'fabia', 'fabia', 'octaviaCombi', 'bmw', 'mercedes', 'tesla'];
 // No 'bus' in the random draw any more: buses run on lines to a timetable now
 // (js/buses.js, addFixed below), and a second kind that wandered the town like
 // a private car would make the first kind look like an accident. The slot it
 // held goes to a van, so every other pick in the city comes out as it did.
 const BIG = ['van', 'van', 'truck', 'van'];
 const BIG_CHANCE = 0.22;      // roughly every 5th spawn on a main road is commercial
+// The new Tesla Roadster is not in any pool: one town car in 450 is one, hashed
+// off the slot like everything else about it, so the whole room sees it pass.
+const ROADSTER_SHARE = 1 / 450;
 
 // per-driver speed factor: desire = edge limit × vK. 0.72 is the pensioner in
 // the fabia, 1.18 the sales rep late for Hradec — on a 50 street that spread
@@ -808,7 +812,8 @@ const PATROL_PAINT = 0xe9eae5;
 // a light bar is traffic's idea, not the roster's.
 // (1.466 since the v6 body: the roof is crowned now and stands 2.6 cm higher on
 // the centreline than the 1.44 plateau the stations describe.)
-const BAR_Y = 1.466, BAR_Z = 0.14, BAR_W = 1.04;
+// (1.461 since the Octavia was redrawn to the real car, 20 Nov 2026: bodySurface('octavia').topAt(0.14, 0))
+const BAR_Y = 1.461, BAR_Z = 0.14, BAR_W = 1.04;
 const BAR_H = 0.055;                   // the dark plinth the lamps ride on
 // THE LAMPS ARE THE BAR NOW. They used to be two 0.34 × 0.105 nubs at ±0.30,
 // which left 36 cm of the 1.04 m bar unlit in the middle and another 10 cm at
@@ -840,15 +845,16 @@ const SIREN_T = 0.22;                  // s per lamp — ~4.5 flashes/s across t
 // The run stops at the bumper corners (−1.95 / 2.10) rather than the hull ends
 // (−2.35 / 2.35): past those the loft is folding into the nose and tail caps,
 // where a band would wrap round the corner and read as a painted bumper.
+// (re-transcribed 20 Nov 2026, when the Octavia was redrawn to the real car)
 const LIVERY_STS = [
-  [-1.95, 0.18, 0.74, 0.93],
-  [-1.10, 0.16, 0.84, 0.99],
-  [-0.65, 0.16, 0.88, 1.00],
-  [0.60, 0.16, 0.90, 1.00],
-  [1.55, 0.16, 0.93, 0.97],
-  [2.10, 0.20, 0.90, 0.89],
+  [-1.85, 0.18, 0.825, 0.94],
+  [-1.05, 0.16, 0.925, 0.99],
+  [-0.60, 0.16, 0.965, 1.00],
+  [0.60, 0.16, 0.995, 1.00],
+  [1.45, 0.16, 1.03, 0.985],
+  [2.10, 0.20, 1.085, 0.92],
 ];
-const LIVERY_HALF = 1.81 / 2;          // KIND.octavia.wid / 2
+const LIVERY_HALF = 1.83 / 2;          // KIND.octavia.wid / 2
 // WHERE THE BAND SITS, in the hull ring's own parameter space rather than in
 // metres. bodyHull() builds each station ring with the doorline at
 // yLo + (yHi−yLo)·yB (0.80) and the arch line at ·yA (0.34), and BETWEEN those
@@ -3198,6 +3204,8 @@ export class Traffic {
     // the kind _attach always drew, with its very hashes, so a town car is
     // the car it was; known now because its desire on a motorway needs it
     if (police) p.kind = PATROL_KIND;
+    // once in a long while, the Roadster (not on the motorway's own schedules)
+    else if (rnd01(hash32(seed, 22)) < ROADSTER_SHARE) p.kind = 'roadster';
     else {
       const big = e.speed >= FAST_EDGE && rnd01(hash32(seed, 5)) < BIG_CHANCE;
       const pool = big ? BIG : COMMON;
@@ -3429,13 +3437,9 @@ export class Traffic {
   }
 
   _attach(p, wt, pose) {
-    // paint must be the same on both screens. vehicles.pickCarColor() reaches
-    // for Math.random and does not take a seed; rather than reimplement its
-    // per-kind bias table (which lives in vehicles.js and is not ours to fork)
-    // we lend it a deterministic draw for exactly one synchronous call.
-    // REQUEST to the owner of vehicles.js: `pickCarColor(kind, r)` taking an
-    // optional 0..1, and this hack disappears.
-    let kind = null, color = 0;
+    // paint must be the same on both screens: colour and look are drawn from
+    // the slot's own seed (vehicles.js pickCarColor(kind, r), pickCarLook)
+    let kind = null, color = 0, look = LOOK_FLEET;   // lines and patrols: washed on a rota
     if (p.fixed) {
       // (a trolleybus is a body vehicles.js can build but nobody can buy, so it
       // is not in CAR_KINDS: normalizeKind knows every kind there is)
@@ -3452,14 +3456,9 @@ export class Traffic {
         const n = VEH.normalizeKind?.(kind);
         kind = n === kind ? kind : kind === 'semi' ? 'truck' : VEH.CAR_KINDS[0];
       }
-      const u = rnd01(hash32(p.seed, 8));
-      if (typeof VEH.pickCarColor === 'function') {
-        const real = Math.random;
-        try { Math.random = () => u; color = VEH.pickCarColor(kind); }
-        finally { Math.random = real; }
-      } else {
-        color = CAR_COLORS[(u * CAR_COLORS.length) | 0];
-      }
+      // (seeded: every client paints this slot's car the same, js/carlook.js)
+      color = VEH.pickCarColor(kind, rnd01(hash32(p.seed, 8)));
+      look = VEH.pickCarLook(kind, hash32(p.seed, 9));
     }
     this._setRendered(p, this._nomArc(p, wt));
     const e = p.edge;
@@ -3484,7 +3483,7 @@ export class Traffic {
     // the grade it lies along, off the same road (js/roadpose.js)
     p.sg = e.offSign * deckSlope(e.road, e.off0 + e.offSign * p.s, this.world?.terrain);
     const car = p.police ? this._buildPatrol(p.sx, p.sz, heading)
-      : this.vehicles.add(kind, p.sx, p.sz, heading, color);
+      : this.vehicles.add(kind, p.sx, p.sz, heading, color, look);
     if (p.stops) {
       // the next stop this CAR has yet to call at, from where it took its mesh
       p.stand = 0; p.standT = 0; p.atStop = -1;
@@ -3513,7 +3512,7 @@ export class Traffic {
   // this is an octavia and not a roster entry of its own.
   _buildPatrol(x, z, heading) {
     const kind = VEH.CAR_KINDS.includes(PATROL_KIND) ? PATROL_KIND : VEH.CAR_KINDS[0];
-    const car = this.vehicles.add(kind, x, z, heading, PATROL_PAINT);
+    const car = this.vehicles.add(kind, x, z, heading, PATROL_PAINT, LOOK_FLEET);
     car.police = true;
     // A policista does not lean out of the window and shout at the traffic.
     // js/chatter.js picks its driver-shout candidates by `car._shoutAt` being
