@@ -130,7 +130,7 @@ export class Garage {
     // and the bent clone is freed. The group itself is untouched: whoever is
     // sitting in it, and every list that holds the car, never notices.
     const hulls = car.mesh?.userData?.hulls ?? [];
-    const fresh = makeCarMesh(car.color, car.kind).group.userData?.hulls ?? [];
+    const fresh = makeCarMesh(car.color, car.kind, car.look).group.userData?.hulls ?? [];
     for (let i = 0; i < hulls.length && i < fresh.length; i++) {
       const hull = hulls[i];
       if (!hull.userData.owned) continue;
@@ -145,7 +145,7 @@ export class Garage {
   snapshot() {
     const c = this.car;
     if (!c) return null;
-    return { kind: c.kind, color: c.color, x: c.x, z: c.z, h: c.heading, y: c.y,
+    return { kind: c.kind, color: c.color, look: c.look ?? 0, x: c.x, z: c.z, h: c.heading, y: c.y,
       fuel: fuel.levelOf(c), damage: c.damage ?? 0, seed: this.seedOf(c),
       parkIdx: Number.isInteger(c.parkIdx) ? c.parkIdx : null };
   }
@@ -180,7 +180,7 @@ export class Garage {
       // frame the terrain under it is known; clearing the flag asks for that
       car._grounded = false;
     } else {
-      car = h.vehicles.add(s.kind, s.x, s.z, s.h, s.color);
+      car = h.vehicles.add(s.kind, s.x, s.z, s.h, s.color, Number.isInteger(s.look) ? s.look & 255 : undefined);
       h.parked.push(car);
     }
     // The saved LEVEL: vehicles.js settles an un-grounded car onto the surface

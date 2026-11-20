@@ -152,7 +152,8 @@ test('nothing in the game can write to a price', () => {
 // — prices.js imports nothing, so a typo here is a car nobody can buy and a
 // lookup that comes back undefined. truck and bus are absent deliberately.
 test('every car you can buy is a car the game can build', () => {
-  assert.equal(CAR_KINDS.length, 8, `parsed ${CAR_KINDS.length} kinds out of vehicles.js, wanted 8`);
+  // (9 since 20 Nov 2026: the Octavia Combi is a kind of its own and is for sale)
+  assert.equal(CAR_KINDS.length, 9, `parsed ${CAR_KINDS.length} kinds out of vehicles.js, wanted 9`);
   const kinds = PRICE.cars.map((c) => c.kind);
   assert.equal(new Set(kinds).size, kinds.length, 'the ladder lists a kind twice');
   for (const k of kinds) assert.ok(CAR_KINDS.includes(k), `PRICE.cars sells "${k}", which vehicles.js cannot build`);
@@ -1011,10 +1012,11 @@ test('revive() voids every sample, so the teleport home is not a second crash', 
 // possible: a kind that fell down the unknown-kind fallback would come back
 // with the Octavia's 50 litres and collide with the Octavia. Eight distinct
 // tanks proves eight distinct rows.
-test('all eight car kinds have a tank of their own', () => {
-  assert.equal(CAR_KINDS.length, 8, `parsed ${CAR_KINDS.length} kinds out of vehicles.js`);
+// (nine since 20 Nov 2026: the Octavia Combi is a kind of its own)
+test('all nine car kinds have a tank of their own', () => {
+  assert.equal(CAR_KINDS.length, 9, `parsed ${CAR_KINDS.length} kinds out of vehicles.js`);
   const tanks = CAR_KINDS.map((k) => F.tankOf(k));
-  assert.equal(new Set(tanks).size, 8, 'two kinds share a tank size — one of them fell down the fallback');
+  assert.equal(new Set(tanks).size, 9, 'two kinds share a tank size: one of them fell down the fallback');
   for (const t of tanks) assert.ok(Number.isFinite(t) && t > 0, `a tank of ${t}`);
 });
 
@@ -1025,7 +1027,7 @@ test('all eight car kinds have a tank of their own', () => {
 test('every kind takes what it sounds like', () => {
   const WANT = {
     octavia: 'benzin', fabia: 'benzin', bmw: 'benzin', mercedes: 'benzin',
-    van: 'nafta', truck: 'nafta', bus: 'nafta', tesla: 'elektro',
+    van: 'nafta', truck: 'nafta', bus: 'nafta', tesla: 'elektro', octaviaCombi: 'benzin',
   };
   for (const k of CAR_KINDS) {
     assert.ok(WANT[k], `vehicles.js has a kind "${k}" this test has never heard of`);
@@ -1366,6 +1368,7 @@ test('dry() and frac() agree with the tank, and a corrupt tank cannot bend a nee
 const RANGE_KM = {
   //          low   high    design figure (tank ÷ per100 × 100)
   octavia:  [600,  720],    // 658 — 50 L at 7.6
+  octaviaCombi: [630, 765], // 696: 55 L at 7.9
   fabia:    [590,  700],    // 643 — 45 L at 7.0
   bmw:      [550,  660],    // 600 — 60 L at 10.0
   mercedes: [590,  710],    // 647 — 66 L at 10.2, the heavier and thriftier six

@@ -171,6 +171,7 @@ import { SEAT_H } from './furniture.js';
 import { doorsOf } from './transitbody.js';
 import { landmarkWalks } from './landmarks-walks.js';
 import { sameLevel } from './levelsep.js';
+import { skirtOffset } from './carhull.js';
 
 // The height a walker stands at, from the feet they last asked for (_feet):
 // NaN until they have, which separates nothing (js/levelsep.js).
@@ -335,6 +336,11 @@ const MIN_PATH = 12;                   // driveway stubs aren't worth a walker
 const HIT_MIN_SPEED = 1.5; // m/s — a car crawling slower than this can't hit
 const KILL_SPEED = 7;      // m/s (~25 km/h) — impact above this is lethal
 const PED_R = 0.35;        // standing collision circle
+// stepping round a standing car (_skirt)
+const SKIRT_V = 0.8;       // m/s: slower than this a car is standing
+const SKIRT_MAX = 2.8;     // m: the widest step aside anybody takes
+const SKIRT_K = 5;         // 1/s: how fast the body takes up (and gives back) the step
+const _K = { dx: 0, dz: 1 };
 const LIE_R = 0.4;         // lying capsule: circles of this radius…
 const LIE_HALF = 0.55;     // …sampled at ± this along the lying body axis
 const GRAV = 18;           // slightly heavy gravity reads punchier than 9.8
@@ -551,6 +557,7 @@ export class Pedestrians {
     this.clock = null;             // test seam: () => shared seconds. null = worldT()
     this.cars = null;              // main.js refreshes both every frame before update()
     this.playerCar = null;
+    this.hulls = null;             // standing hulls near the player (main.js: world.carHulls()), for _skirt
     this.onPedHit = null;          // (ped, impactSpeed) — audio/main subscribe here
     this.onPedKilled = null;       // (ped)
     this._blood = [];              // pooled decals, grown lazily to BLOOD_MAX
@@ -1674,7 +1681,7 @@ export class Pedestrians {
     const dirS = still ? sign : (vArc < 0 ? -1 : 1);
     this._walkPose(s.steps, arc, dirS, s.lat * this._latK(s.tight, arc, dirS), s.span, _P, s.bay);
     let x = _P.x, z = _P.z, dx = _P.dx, dz = _P.dz;
-    let moving = !still, sit = 0;
+    let moving = !still, sit = 0, skirt = still ? 1 : 2;
     this._noteCrossing(s.cross, arc, dirS, still, x, z, levelOf(p));
 
     // ---- doing something there (js/dwell.js) ----
@@ -1682,9 +1689,12 @@ export class Pedestrians {
       const d = this._dwellPose(p, s, kind, ref, tIn, tOut, visit);
       x = d.x; z = d.z; dx = d.dx; dz = d.dz; moving = d.moving; sit = d.sit;
       if (moving) p.stepT += STEP_SPEED * dt;
+      skirt = 0;
     }
     p.x = x;
     p.z = z;
+    // round a standing car, not through it (see _skirt)
+    if (skirt === 2 || p.kx || p.kz) { this._skirt(p, dx, dz, dt, skirt, Math.abs(vArc)); dx = _K.dx; dz = _K.dz; }
     // fresh off the ground after a stun (or off a bus): ease from where they
     // were back onto the walk position instead of snapping
     if (p.blend > 0) {
@@ -2110,8 +2120,10 @@ export class Pedestrians {
     this._walkPose(p.steps, p.fArc, p.fDir, p.side * this._latK(p.tight, p.fArc, p.fDir), p.fSpan, _P, p.bay);
     p.x = _P.x;
     p.z = _P.z;
-    const dx = _P.dx, dz = _P.dz;
+    let dx = _P.dx, dz = _P.dz;
     this._noteCrossing(p.cross, p.fArc, p.fDir, false, p.x, p.z, levelOf(p));
+    this._skirt(p, dx, dz, dt, hold ? 1 : 2, p.speed);
+    dx = _K.dx; dz = _K.dz;
     if (p.blend > 0) {
       p.blend = Math.max(0, p.blend - dt * p.blendK);
       p.x += (p.bx - p.x) * p.blend;
@@ -2128,6 +2140,57 @@ export class Pedestrians {
     if (p.pose) { p.pose = 0; p.standPose(); }
     p.walkT += p.speed * dt * 1.6;
     p.animate(p.walkT, Math.max(0.3, Math.min(1.3, p.speed / 1.4)), 0, p.speed);
+  }
+
+  // A STANDING CAR IS SOLID TO THE CROWD TOO. A walker's place is a function
+  // of the shared clock (the header says why), so nothing may push one off
+  // the timetable; what a car parked across a path, or a queue stood on a
+  // zebra, got was a citizen walking through its doors. So the BODY steps
+  // aside and the schedule never hears of it: p.kx, p.kz is a sideways carry
+  // of at most SKIRT_MAX, worked out from the cars standing near the player
+  // (this.hulls) and whatever the player has stopped in (js/carhull.js
+  // skirtOffset: just enough to pass, on the side that needs less, eased in
+  // over the last strides before the car and out again behind it).
+  // mode: 2 walking, 1 standing where they are (the carry is kept), 0 doing
+  // something at a place (it fades). Leaves the way they now face in _K.
+  _skirt(p, dx, dz, dt, mode, v) {
+    _K.dx = dx; _K.dz = dz;
+    const ox = p.kx || 0, oz = p.kz || 0;
+    if (mode === 1) { p.x += ox; p.z += oz; return; }
+    let best = 0;
+    if (mode === 2) {
+      const hulls = this.hulls, pc = this.playerCar, y = levelOf(p);
+      if (hulls) for (let i = 0; i < hulls.length; i++) {
+        const o = this._skirtOne(hulls[i], p, dx, dz, y);
+        if (Math.abs(o) > Math.abs(best)) best = o;
+      }
+      if (pc) {
+        const o = this._skirtOne(pc, p, dx, dz, y);
+        if (Math.abs(o) > Math.abs(best)) best = o;
+      }
+    }
+    if (best === 0 && ox === 0 && oz === 0) return;
+    const k = Math.min(1, dt * SKIRT_K);
+    let nx = ox + (dz * best - ox) * k, nz = oz + (-dx * best - oz) * k;
+    if (best === 0 && nx * nx + nz * nz < 1e-4) nx = nz = 0;
+    p.kx = nx; p.kz = nz;
+    p.x += nx; p.z += nz;
+    // face the way the feet really go while the line bends out and back
+    if (dt > 0 && mode === 2) {
+      const f = v > 0.6 ? v : 0.6;
+      let fx = dx * f + (nx - ox) / dt, fz = dz * f + (nz - oz) / dt;
+      const m = dist(fx, fz);
+      if (m > 1e-6) { _K.dx = fx / m; _K.dz = fz / m; }
+    }
+  }
+
+  _skirtOne(c, p, dx, dz, y) {
+    if (c.tram || Math.abs(c.speed) > SKIRT_V) return 0;      // a moving car is _carHit's and the kerb look's
+    const g = c.len / 2 + 4;
+    if (Math.abs(c.x - p.x) > g || Math.abs(c.z - p.z) > g) return 0;
+    if (!sameLevel(c.y, y)) return 0;
+    const o = skirtOffset(c, p.x, p.z, dx, dz, PED_R);
+    return Math.abs(o) > SKIRT_MAX ? 0 : o;                   // a bus broadside: not a step aside any more
   }
 
   // heading faces the walk direction: dir = (−sin h, −cos h) ⇒ h = atan2(−dx, −dz)

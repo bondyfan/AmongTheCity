@@ -741,6 +741,10 @@ const ENG_KINDS = {
   // a trolleybus is an electric traction motor on one reduction too: the same
   // whine and hum, never the Octavia four the unknown kind fell back to
   trolleybus: { ev: 1, vmax: 19.4 },
+  // the Roadster's own voice is synthesised in the worklet (js/enginekinds.js
+  // THRUST_KINDS, public/worklets/thrusterdsp.js). This is what it falls back
+  // to in a browser with no AudioWorklet: the motor whine, without thrusters
+  roadster: { ev: 1, vmax: 111 },
 };
 // pre-v4 saves and main.js's spawn list still say sedan/hatch/kombi/suv
 const ENG_ALIAS = { sedan: 'octavia', hatch: 'fabia', kombi: 'octavia', suv: 'bmw' };

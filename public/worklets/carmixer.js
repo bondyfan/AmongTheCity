@@ -17,7 +17,14 @@
 //   pan      equal power, from the bearing
 
 import { EngineVoice } from './enginedsp.js';
+import { ThrusterVoice } from './thrusterdsp.js';
 import { RoadLayer, Impacts } from './roaddsp.js';
+
+// The synthesis behind a spec: 'thrust' is the electric car with cold gas
+// thrusters (js/enginekinds.js THRUST_KINDS), anything else a piston engine.
+// Both answer set(), render(), calibrate() and carry a norm.
+const makeVoice = (cls, sr, spec, seed) => (cls === 'thrust'
+  ? new ThrusterVoice(sr, spec, seed) : new EngineVoice(sr, spec, seed));
 
 export const MAX_VOICES = 9;          // the player and eight others
 export const HEAD = 2, STRIDE = 10;   // layout of the per-frame Float32Array
@@ -57,11 +64,11 @@ export class CarMixer {
     if (m.t === 'spec') {
       // levelled once per kind per session; the cost is a third of a second of
       // one engine, paid here and never while the car is being heard
-      const probe = new EngineVoice(this.sr, m.eng, 1);
-      this.specs.set(m.key, { eng: m.eng, norm: probe.calibrate() });
+      const probe = makeVoice(m.cls, this.sr, m.eng, 1);
+      this.specs.set(m.key, { eng: m.eng, cls: m.cls, norm: probe.calibrate() });
     } else if (m.t === 'voice' && v) {
       const s = m.key ? this.specs.get(m.key) : null;
-      v.eng = s ? new EngineVoice(this.sr, s.eng, m.seed ?? v.slot + 1) : null;
+      v.eng = s ? makeVoice(s.cls, this.sr, s.eng, m.seed ?? v.slot + 1) : null;
       if (v.eng) v.eng.norm = s.norm;
       // the player's tyres are recordings in audio.js; traffic gets the band
       v.road = new RoadLayer(this.sr, (m.seed ?? 1) + 77, m.heavy ?? 0, v.slot ? 1 : 0, m.rail ?? 0);
@@ -81,7 +88,9 @@ export class CarMixer {
       v.on = f[b + F_ON] > 0.5 && (v.eng || v.road) ? 1 : 0;
       if (!v.on) continue;
       v.speed = f[b + F_SPEED];
-      if (v.eng) v.eng.set(f[b + F_RPM], f[b + F_LOAD], f[b + F_CUT] > 0.5, v.slot ? 0 : this.cabin);
+      // F_CUT is the fuel cut of a piston engine, and for a thruster voice
+      // (eng.raw) how hard the thrusters blow, 0..1
+      if (v.eng) v.eng.set(f[b + F_RPM], f[b + F_LOAD], v.eng.raw ? f[b + F_CUT] : f[b + F_CUT] > 0.5, v.slot ? 0 : this.cabin);
       v.road.set(v.speed, f[b + F_BRAKE], f[b + F_COBBLE]);
       v.distT = Math.max(1, f[b + F_DIST]); v.vr = f[b + F_VR]; v.pan = f[b + F_PAN];
       if (v.fresh) { v.fresh = 0; v.dist = v.distT; v.D = v.dist / C_AIR * this.sr; }

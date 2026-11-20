@@ -629,7 +629,8 @@ class NetGame {
     return {
       k,
       kd: v.kind ?? k,
-      cl: v.color ?? 0,
+      // colour in the low 24 bits, the paint's look byte above it (js/carlook.js)
+      cl: (((v.color ?? 0) & 0xffffff) | (((v.look ?? 0) & 255) << 24)) >>> 0,
       x: +num(v.x, p.pos.x).toFixed(2),
       z: +num(v.z, p.pos.z).toFixed(2),
       // ALTITUDE. A car derives y from the road under it, so it does not send

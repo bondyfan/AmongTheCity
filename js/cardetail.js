@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import { Soup, makeShape, buildHull, drape, rect, rrect, ellipse } from './carbody.js';
 import { wheelGeo } from './carwheels.js';
 import { TRANSIT_BODY } from './transitbody.js';
+import { STYLE_NEW, DRESS_NEW } from './cardress.js';
 
 const lin = (hex) => { const c = new THREE.Color(hex); return [c.r, c.g, c.b]; };
 // fixed-colour finishes: linear rgb, roughness, metalness
@@ -40,12 +41,7 @@ const M = {
 // stations in vehicles.js stay as they are: the cabin is cut from them), and
 // only ever OUTWARD of the originals so the interior still fits inside.
 export const STYLE = {
-  octavia: {
-    wheel: 'five', sweepF: 0.15, sweepR: 0.08,
-    sts: [[-2.35, 0.27, 0.60, 0.70], [-2.27, 0.21, 0.69, 0.86], [-1.95, 0.18, 0.76, 0.94],
-      [-1.10, 0.16, 0.84, 0.99], [-0.65, 0.16, 0.88, 1.00], [0.60, 0.16, 0.90, 1.00],
-      [1.55, 0.16, 0.93, 0.975], [2.12, 0.20, 0.93, 0.91], [2.30, 0.24, 0.90, 0.84], [2.35, 0.30, 0.84, 0.78]],
-  },
+  ...STYLE_NEW,          // octavia, octaviaCombi, tesla, roadster: js/cardress.js
   fabia: {
     wheel: 'five', sweepF: 0.14, sweepR: 0.07,
     sts: [[-2.05, 0.27, 0.60, 0.72], [-1.97, 0.21, 0.68, 0.87], [-1.70, 0.18, 0.74, 0.94],
@@ -63,12 +59,6 @@ export const STYLE = {
     sts: [[-2.45, 0.26, 0.60, 0.71], [-2.37, 0.20, 0.69, 0.86], [-2.00, 0.17, 0.75, 0.945],
       [-1.10, 0.16, 0.82, 0.99], [-0.55, 0.16, 0.87, 1.00], [0.65, 0.16, 0.89, 1.00],
       [1.60, 0.16, 0.91, 0.975], [2.20, 0.20, 0.90, 0.92], [2.40, 0.24, 0.86, 0.85], [2.45, 0.30, 0.80, 0.80]],
-  },
-  tesla: {
-    wheel: 'aero', sweepF: 0.17, sweepR: 0.09, fender: 0.075,
-    sts: [[-2.35, 0.26, 0.54, 0.68], [-2.27, 0.19, 0.62, 0.85], [-1.90, 0.16, 0.69, 0.945],
-      [-1.15, 0.15, 0.78, 0.99], [-0.70, 0.15, 0.83, 1.00], [0.60, 0.15, 0.86, 1.00],
-      [1.55, 0.15, 0.88, 0.975], [2.10, 0.19, 0.88, 0.92], [2.30, 0.23, 0.86, 0.85], [2.35, 0.28, 0.80, 0.80]],
   },
   van: {
     wheel: 'steel', sweepF: 0.10, sweepR: 0.04, crown: 0.03, beltIn: 0.985, gbK: 1.045, gtK: 1.08, badgeFy: 0.715, slab: true,
@@ -176,22 +166,29 @@ function greenhouse(c, p = {}) {
   // where the daylight opening ends: the roof has come down to `sideEnd` above the belt
   let zE = zB1;
   if (n > 4) {
-    const zMax = G.cZ + (G.z1 - G.cZ) * (p.sideBack ?? 0.42);
+    // (sideMax: an estate's glass stops a D-pillar short of the tailgate)
+    const zMax = p.sideMax ?? (G.cZ + (G.z1 - G.cZ) * (p.sideBack ?? 0.42));
     for (let k = 0; k <= 60; k++) {
       const z = zB1 + (zMax - zB1) * k / 60;
       if (hR(z) - drop < (p.sideEnd ?? 0.10)) break;
       zE = z;
     }
   } else zE = zB0;
-  const pane = (za, zb, inset, lift) => {
+  // rake: how far the top of the pane's rear edge leans forward (a D-pillar)
+  const pane = (za, zb, inset, lift, rake = 0) => {
     const pts = [[za, belt(za) + lift], [zb, belt(zb) + lift]];
     const m = 10;
-    for (let k = 0; k <= m; k++) { const z = zb + (za - zb) * k / m; pts.push([z, belt(z) + hR(z) - drop - inset]); }
+    for (let k = 0; k <= m; k++) { const z = zb - rake + (za - zb + rake) * k / m; pts.push([z, belt(z) + hR(z) - drop - inset]); }
     return pts;
   };
-  c.frame('side', pane(zs0 - 0.03, zE + 0.025, -0.022, 0.0), p.frame ?? M.gloss, { mirror: true, eps: 0.003, h: 0.16, hu: 0.3 });
+  const rk = p.cPillar ? 0.16 : 0;
+  c.frame('side', pane(zs0 - 0.03, zE + 0.025, -0.022, 0.0, rk), p.frame ?? M.gloss, { mirror: true, eps: 0.003, h: 0.16, hu: 0.3 });
   c.g('side', pane(zs0, zB0, 0, 0.022), { mirror: true, h: 0.16, hu: 0.24 });
-  if (n > 4 && zE > zB1 + 0.1) c.g('side', pane(zB1, zE, 0, 0.022), { mirror: true, h: 0.16, hu: 0.24 });
+  if (p.cPillar && zE > p.cPillar + 0.15) {
+    // rear door glass, a slim C-pillar, then the third window up to the D-pillar
+    c.g('side', pane(zB1, p.cPillar - 0.035, 0, 0.022), { mirror: true, h: 0.16, hu: 0.24 });
+    c.g('side', pane(p.cPillar + 0.035, zE, 0, 0.022, rk), { mirror: true, h: 0.16, hu: 0.24 });
+  } else if (n > 4 && zE > zB1 + 0.1) c.g('side', pane(zB1, zE, 0, 0.022), { mirror: true, h: 0.16, hu: 0.24 });
   if (p.beltChrome) c.near(() => c.d('side', [[zs0 - 0.03, belt(zs0 - 0.03) - 0.004], [zE + 0.025, belt(zE + 0.025) - 0.004],
     [zE + 0.025, belt(zE + 0.025) + 0.012], [zs0 - 0.03, belt(zs0 - 0.03) + 0.012]], M.chrome, { mirror: true, eps: 0.0075, h: 0.3, hu: 0.25 }));
   return { zs0, zB0, zB1, zE, belt, hR, edge };
@@ -312,28 +309,6 @@ function plinth(c, rear, y, w = 0.56, h = 0.15) {
 
 // ---- the kinds -------------------------------------------------------------
 const DRESS = {
-  // Škoda Octavia IV: wide hexagonal grille pulled up to the bonnet edge, slim
-  // lamps that touch it, a crystalline C-shaped tail lamp, liftback glass
-  octavia(c) {
-    const gh = greenhouse(c, { sideBack: 0.5 });
-    flanks(c, gh, {});
-    fin(c, 1.15); wipers(c, gh);
-    headlamp(c, 0.44, 0.83, 0.585, 0.665, 0.60, 0.685, { drl: 'top' });
-    const gy0 = 0.43, gy1 = 0.655;
-    c.d('front', [[-0.36, gy0], [0.36, gy0], [0.43, gy0 + 0.11], [0.40, gy1], [-0.40, gy1], [-0.43, gy0 + 0.11]], M.chrome, { eps: 0.003, h: 0.05, hu: 0.1 });
-    c.d('front', [[-0.345, gy0 + 0.014], [0.345, gy0 + 0.014], [0.412, gy0 + 0.11], [0.385, gy1 - 0.014], [-0.385, gy1 - 0.014], [-0.412, gy0 + 0.11]], M.gloss, { eps: 0.0055, h: 0.05, hu: 0.1 });
-    c.near(() => { for (let k = -6; k <= 6; k++) if (k) c.d('front', rect(k * 0.055 - 0.005, gy0 + 0.03, k * 0.055 + 0.005, gy1 - 0.028), M.satin, { eps: 0.0075, h: 0.08 }); });
-    c.d('front', [[-0.50, 0.245], [0.50, 0.245], [0.58, 0.36], [-0.58, 0.36]], M.dark, { eps: 0.004, h: 0.05, hu: 0.12 });
-    c.near(() => c.d('front', [[0.60, 0.275], [0.73, 0.29], [0.73, 0.345], [0.60, 0.335]], M.gloss, { mirror: true, eps: 0.004, h: 0.05, hu: 0.07 }));
-    plinth(c, false, c.K.plateF, 0.56, 0.14);
-    taillamp(c, 0.36, 0.80, 0.69, 0.80, 0.71, 0.835);
-    plinth(c, true, c.K.plateR);
-    c.d('rear', [[-0.62, 0.30], [0.62, 0.30], [0.56, 0.40], [-0.56, 0.40]], M.dark, { eps: 0.004, h: 0.05, hu: 0.14 });
-    c.near(() => {
-      c.d('rear', rect(-0.80, 0.655, 0.80, 0.664), M.gloss, { eps: 0.0025, h: 0.05, hu: 0.1 });
-      c.d('rear', rect(0.64, 0.42, 0.78, 0.45), M.ruby, { mirror: true, eps: 0.004, h: 0.05 });
-    });
-  },
   fabia(c) {
     const gh = greenhouse(c, { sideBack: 0.55, sideEnd: 0.16, backTop: 0.14 });
     flanks(c, gh, { sill: 0.07 });
@@ -393,24 +368,6 @@ const DRESS = {
       c.d('rear', rect(-0.60, 0.385, 0.60, 0.398), M.chrome, { eps: 0.0055, h: 0.05, hu: 0.14 });
       for (const sg of [1, -1]) c.d('rear', rrect(sg * 0.50 - 0.10, 0.285, sg * 0.50 + 0.10, 0.345, 0.02, 2), M.chrome, { eps: 0.0065, h: 0.05, hu: 0.07 });
     });
-  },
-  // Tesla Model 3: no grille at all, a small lower intake, teardrop lamps, one
-  // glass canopy from the header to the boot, flush chrome handles
-  tesla(c) {
-    const gh = greenhouse(c, { sideBack: 0.5, sideEnd: 0.12, frame: M.gloss });
-    flanks(c, gh, { flushHandles: true });
-    wipers(c, gh);
-    // the glass roof: header to the backlight in one piece
-    const G = c.S.green, r0 = G.hdrZ + 0.10, r1 = G.cZ + (G.z1 - G.cZ) * 0.12;
-    const rx = (z) => gh.edge(z) - 0.06;
-    c.g('top', [[-rx(r0), r0], [rx(r0), r0], [rx(r1), r1], [-rx(r1), r1]], { h: 0.2, hu: 0.25 });
-    headlamp(c, 0.50, 0.84, 0.56, 0.60, 0.55, 0.655, { drl: 'top', proj: 1 });
-    c.d('front', [[-0.40, 0.235], [0.40, 0.235], [0.47, 0.31], [-0.47, 0.31]], M.dark, { eps: 0.004, h: 0.05, hu: 0.12 });
-    c.near(() => c.d('front', [[0.56, 0.255], [0.73, 0.28], [0.73, 0.345], [0.56, 0.325]], M.gloss, { mirror: true, eps: 0.004, h: 0.05, hu: 0.07 }));
-    plinth(c, false, c.K.plateF, 0.54, 0.13);
-    taillamp(c, 0.34, 0.83, 0.70, 0.765, 0.69, 0.80, { t: 0.02 });
-    plinth(c, true, c.K.plateR);
-    c.d('rear', [[-0.62, 0.25], [0.62, 0.25], [0.56, 0.35], [-0.56, 0.35]], M.dark, { eps: 0.004, h: 0.05, hu: 0.14 });
   },
   // panel van: tall upright lamps, a grey bumper that wraps the corners, rub
   // strips down the flank, blind panels behind the cab, two rear door windows
@@ -723,6 +680,9 @@ DRESS.trolleybus = (c) => {
   }
 };
 
+// what js/cardress.js draws with
+const TOOLS = { M, greenhouse, headlamp, taillamp, flanks, fin, wipers, plinth, box, cylZ };
+
 // ---- buildCar(kind, K) -----------------------------------------------------
 function assemble(kind, K, lod, cut) {
   const st = STYLE[kind] ?? {};
@@ -731,7 +691,8 @@ function assemble(kind, K, lod, cut) {
   const S = makeShape(K, style);
   const c = context(K, S, lod);
   c.zs = buildHull(S, { paint: c.paint, dark: c.detail, lod, linerMat: M.liner }).zs;
-  (DRESS[kind] ?? DRESS.octavia)(c);
+  const dress = DRESS_NEW[kind] ?? (DRESS[kind] ? null : DRESS_NEW.octavia);
+  if (dress) dress(c, TOOLS); else DRESS[kind](c);
   // Door-top ledges, for the one car the player sits in. From the driver's
   // seat the door skin is a backface, so between the top of the door card and
   // the foot of the glass there would be a slot straight down to the road.

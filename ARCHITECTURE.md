@@ -2431,3 +2431,58 @@ Not done: the driver drawn behind a car's glass is still the shader's own
 Universal Animation Library (CC0, downloaded with the sources) is not wired
 in, so jumping, punching, aiming and getting up are still the game's own poses
 carried onto the new bodies.
+
+## Cars: true shapes, paint with a history, a solid hull, the Roadster (Nov 2026)
+
+**Shapes.** The Octavia (liftback and Combi) and the Model 3 were redrawn against the
+real cars' numbers, and the fault was not in the details: the bodies were low and the
+glasshouses tall (belt at 0.84 m under a 1.44 m roof), with the wheels pushed out to
+the corners. `KIND.octavia`, `KIND.octaviaCombi` and `KIND.tesla` now carry the real
+length, width, wheelbase and overhangs (the stations run past the axles by the real
+overhang at each end, so a body is no longer centred on its wheels), a belt near a
+metre and a high tail. The drawings of these kinds, and of the new `KIND.roadster`,
+live in `js/cardress.js` (`STYLE_NEW`, `DRESS_NEW`); `js/cardetail.js` keeps the tools
+and the older kinds and hands the tools over as an argument, so there is no import
+cycle. `greenhouse()` learned `cPillar` and `sideMax` for an estate's third window.
+The police livery and light bar in `traffic.js` are transcribed from the Octavia's
+stations and were re-transcribed with it. `dev/carprofile.mjs` rasterises a kind
+without a browser (side, front, rear, top, three-quarter) for checking proportions.
+
+**Paint.** `js/carlook.js` (pure) decides a car's colour and its LOOK from a 32-bit
+seed: finish (polished 30 %, used 51 %, worn 13 %, matte 6 % for ordinary cars, other
+odds per class), dirt (clean, sills, film, caked) and the odd leaf. The look is one
+byte, `car.look`: bits 0-1 finish, 2-3 dirt, 4-6 variant, 7 leaf; 0 is the polished
+clean car every caller got before. Seeds: a traffic slot's own (`hash32(p.seed, 8)`
+and `9`), a parking space's position (`seedAt`), so every client paints a car the
+same. It travels in the top byte of the co-op `cl` field and in the garage save.
+Drawing costs no draw and no program: per car the look is the body material's own
+clearcoat, roughness and metalness plus `uLook` (the material is a bag of uniforms on
+the one shared program, keyed `kind|hex|look`, swept when no car wears it); the
+distance dress reads the per-instance `iLook` beside `iPaint`. Dirt and the leaf are
+`js/cardirt.js`: value noise in the car's own frame (film from the sills up, spray on
+the tail, rain runs, dust on what faces the sky) and a lens-shaped leaf laid in plan.
+The plate atlas no longer depends on the colour (six per kind).
+
+**A solid hull.** `js/carhull.js` (pure): a car is a rounded oriented rectangle.
+`city.js collide()` used two discs, which do not meet in the middle of a car (a
+walker went through the front seats, and through metres of a bus). Everyone on foot
+now gets the exact hull; a driven car's own wall probes keep the discs, because car
+against car is `carCarPass`, which got more discs for long vehicles (`discOffsets`).
+Boarding plans a way round the body to the door (`planRound`, the shorter end, 0.5 m
+clear) and the car stays solid during the walk; the crowd steps round a standing car
+(`pedestrians.js _skirt`).
+
+**The Roadster.** `KIND.roadster` (not in `CAR_KINDS`): 0 to 100 km/h in 1.00 s.
+`thrust` is the share of the push that comes from the cold-gas nozzles and therefore
+neither spends the friction circles nor tips the car back (`tyreStep`: `axT`), `cgH`
+its low centre of gravity, `brakeK` its brakes. With the pedal down and the wheel hard
+over it grips like the other cars (tests/carshapes.test.mjs). Its voice is a third
+class beside piston and rolling: `enginekinds.js THRUST_KINDS`, `js/thrustdrive.js`
+(motor revs, signed load, valve, tank) and `public/worklets/thrusterdsp.js`. It is met
+as one town car in 450, in one kerb stall in 500 (left open), and in the dev spawner.
+
+Measured on the M1 Pro, medium, 1024 x 768, noon, before and after in the same hour:
+Pardubice, třída Míru 7.0 and 7.0 ms a frame before, 6.8 and 7.9 after; by the castle
+7.9 before, 6.7 and 6.5 after; Prague, Václavské náměstí 5.4 and 5.6 before, 5.7 and
+6.9 after; a Prague street 6.9 and 6.6 before, 7.5 and 6.8 after. The differences are
+inside the noise of a machine other sessions were using.

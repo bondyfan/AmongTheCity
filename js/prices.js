@@ -221,6 +221,7 @@ export const PRICE = deepFreeze({
   cars: [
     { kind: 'fabia', name: 'Škoda Fabia', price: 18000, note: '15 let, STK do jara' },
     { kind: 'octavia', name: 'Škoda Octavia', price: 46000, note: 'nájezd 240 tis.' },
+    { kind: 'octaviaCombi', name: 'Škoda Octavia Combi', price: 52000, note: 'kombi po rodině, tažné' },
     { kind: 'van', name: 'Dodávka', price: 62000, note: 'ex-firemní, bez oken' },
     { kind: 'bmw', name: 'BMW řady 3', price: 88000, note: 'zadokolka, zimní jinde' },
     { kind: 'mercedes', name: 'Mercedes-Benz třídy E', price: 105000, note: 'servisní knížka' },
