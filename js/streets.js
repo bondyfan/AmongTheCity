@@ -850,9 +850,41 @@ export function cornerLift(o, x, z) {
       // line" stood nobody on most of it: feet sank a hand deep into the band.
       const cx = bx + p[i * 8 + 10] * w1, cz = bz + p[i * 8 + 11] * w1;
       const dx = ax + p[i * 8 + 2] * w0, dz = az + p[i * 8 + 3] * w0;
-      if (!inTri(x, z, ax, az, bx, bz, cx, cz) && !inTri(x, z, ax, az, cx, cz, dx, dz)) continue;
+      const one = inTri(x, z, ax, az, bx, bz, cx, cz);
+      if (!one && !inTri(x, z, ax, az, cx, cz, dx, dz)) continue;
+      // (how much of the far end's deck is in the height drawn here: each end's
+      // deck is carried out along its own normal, so over the triangle with two
+      // corners at the far end it is all but the near corner's share, and over
+      // the other the far corner's share alone)
+      const den = one ? (bz - cz) * (ax - cx) + (cx - bx) * (az - cz) : (dz - az) * (cx - ax) + (ax - dx) * (cz - az);
+      const far = Math.abs(den) < 1e-9 ? t
+        : one ? 1 - ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / den
+          : ((dz - az) * (x - ax) + (ax - dx) * (z - az)) / den;
+      _hit.ax = ax; _hit.az = az; _hit.bx = bx; _hit.bz = bz; _hit.t = far < 0 ? 0 : far > 1 ? 1 : far;
       return vergeLift(w, pc.d[i] + (pc.d[i + 1] - pc.d[i]) * t, Math.max(0, out));
     }
   }
   return -1;
+}
+// the stretch of kerb line cornerLift last answered for: its two ends, and the far end's share of the deck drawn
+const _hit = { ax: 0, az: 0, bx: 0, bz: 0, t: 0 };
+
+/**
+ * The height of the kerb band round a junction at (x, z) AS IT IS DRAWN, over
+ * the pad's own level (add LAYER_Y.road), or NaN off the band. `deckOf` is the
+ * pad's deck function (geo.junctionDeckY / clusterDeckY).
+ *
+ * meshes.ringKerbInto asks the deck at the two ends of each stretch of KERB
+ * LINE and carries those heights straight out across the band. Feet and props
+ * asked the deck under themselves instead, out on the band, and the deck
+ * function there answers for another place: its terrain guard reads the
+ * ground beside the street, so by a crossing in a cutting or on a hillside it
+ * said up to 3 m more than the paving drawn (the corner of K Drahani and Pod
+ * Zámečkem: band drawn at 251, answered 254.3).
+ */
+export function cornerLevel(o, x, z, terrain, deckOf) {
+  const up = cornerLift(o, x, z);
+  if (up < 0) return NaN;
+  const ya = deckOf(o, _hit.ax, _hit.az, terrain), yb = deckOf(o, _hit.bx, _hit.bz, terrain);
+  return ya + (yb - ya) * _hit.t + up;
 }

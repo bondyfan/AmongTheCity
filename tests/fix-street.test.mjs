@@ -25,6 +25,7 @@ const { Terrain } = await import('../js/terrain.js');
 const { chunkSpec, applySpec, withJunctions } = await import('../js/chunkspec.js');
 const { plannedSigns } = await import('../js/streetsigns.js');
 const { Poles } = await import('../js/poles.js');
+const { LAYER_Y } = await import('../js/config.js');
 
 const G = 221;
 const way = (id, t, w, p, extra) => ({ t, w, d: 1, v: 50, p, _id: id, _len: geo.polylineLength(p), ...extra });
@@ -76,14 +77,14 @@ const lampsMain = (w, cx, cz) => planOf(buildChunkMeshes(w.city, cx, cz, w.mats,
  * ONLY the pad buckets the spec shipped and no city to derive a kerb from; this
  * process has all of them, so they are taken away for the length of the build.
  */
-function lampsWorker(w, cx, cz) {
+function lampsWorker(w, cx, cz, read = planOf) {
   const got = chunkSpec(w, cx, cz, 'full', null);
   const posted = structuredClone(got.spec);
   const J = new Map(geo.JUNCTIONS), C = new Map(geo.CLUSTERS);
   geo.JUNCTIONS.clear(); geo.CLUSTERS.clear(); geo.setStreetCity(null);
   try {
     const a = applySpec(posted, { terrain: null, canopy: null });
-    return planOf(withJunctions(a.junctions, a.clusters,
+    return read(withJunctions(a.junctions, a.clusters,
       () => buildChunkMeshes(a.city, cx, cz, a.mats, 'full')));
   } finally {
     for (const [k, v] of J) geo.JUNCTIONS.set(k, v);
@@ -167,6 +168,58 @@ test('the worker is sent the pads of all nine cells and plans the same lamps', (
   const here = lampsMain(w, 0, 1), there = lampsWorker(w, 0, 1);
   assert.ok(here.lampPosts.length, 'no lamps at all');
   assert.deepEqual(there, here, 'the worker planned different lamps from the main thread');
+});
+
+// ---- the corner of the neighbour's junction ----------------------------------
+// A pad is bucketed by its centre and drawn whole by that chunk, kerb band and
+// all, so the corner of a crossing a few metres over the border is paving in
+// THIS chunk. What a prop stands on (meshes.standingOn) asked its own bucket
+// only: the lamp on that corner stood on the ground under the band, 32 cm
+// under the paving here and over a metre under an embanked crossing.
+/** Every street lamp of a built chunk with the height it stands at: [x, z, y]. */
+function basesOf(group) {
+  const out = [];
+  group?.traverse((o) => {
+    if (o.name !== 'lampPosts') return;
+    const f = o.userData.spots ?? [], ys = o.userData.ys ?? [];
+    for (let i = 0; i * 3 + 2 < f.length; i++) out.push([f[i * 3], f[i * 3 + 1], ys[i]]);
+  });
+  group?.traverse((o) => o.geometry?.dispose?.());
+  return out;
+}
+/** A kerbed crossing 6 m inside cell 0,2, its street coming up through cell 0,1. */
+function cornerWorld() {
+  // (the ids of padWorld: where along a way its lamps fall is seeded by its id,
+  // and with this one a mast comes at z = 237, 5.2 m off, on the rounded corner)
+  const C = way(103, 'residential', 8, [[60, 103], [60, 246]]);
+  const C2 = way(104, 'residential', 8, [[60, 246], [60, 356]]);
+  const B1 = way(105, 'residential', 8, [[2, 246], [60, 246]]);
+  const B2 = way(106, 'residential', 8, [[60, 246], [118, 246]]);
+  // houses along the street: what makes it a kerbed one (js/streets.js)
+  const hs = [];
+  for (let z = 126, id = 500; z < 232; z += 20) {
+    hs.push(house(++id, square(70, z, 80, z + 10), { _home: '0,1' }), house(++id, square(40, z, 50, z + 10), { _home: '0,1' }));
+  }
+  return world({ '0,0': { roads: [C] }, '0,1': { roads: [C], buildings: hs }, '0,2': { roads: [C, C2, B1, B2] } });
+}
+
+test('a lamp on the corner of the next cell\'s crossing stands on its paving, on both threads', () => {
+  const w = cornerWorld();
+  assert.equal(geo.junctionsIn('0,1'), null, 'the fixture put a pad in the built cell');
+  const j = geo.junctionsIn('0,2')[0];
+  const here = basesOf(buildChunkMeshes(w.city, 0, 1, w.mats, 'full'));
+  const on = here.filter(([x, z]) => cornerLift(j, x, z) >= 0);
+  assert.ok(on.length, 'the fixture is wrong: no lamp of cell 0,1 is on the corner band of the crossing');
+  for (const [x, z, y] of on) {
+    const band = geo.junctionDeckY(j, x, z, w.terrain) + LAYER_Y.road + cornerLift(j, x, z);
+    assert.ok(Math.abs(y - band) < 0.01, `the lamp at ${x.toFixed(1)}, ${z.toFixed(1)} stands at ${y.toFixed(2)}: `
+      + `the corner it is planted in is drawn at ${band.toFixed(2)}`);
+  }
+  // ...and a lamp along the street, off the corner, stands on the pavement it always did
+  const off = here.filter(([x, z]) => cornerLift(j, x, z) < 0);
+  assert.ok(off.length >= 2);
+  for (const [, , y] of off) assert.ok(Math.abs(y - (G + LAYER_Y.road + 0.12)) < 0.01, `a lamp along the street at ${y.toFixed(2)}`);
+  assert.deepEqual(lampsWorker(w, 0, 1, basesOf), here, 'the worker stood the lamps at other heights');
 });
 
 // ---- houses ------------------------------------------------------------------

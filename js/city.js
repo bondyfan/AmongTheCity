@@ -14,7 +14,7 @@ import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
   roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull,
   clustersIn, clusterHull, clusterDeckY, streetOf } from './geo.js';
 import { holdVerges } from './geo.js';
-import { vergeAt, vergeLift, inZone, bayAt, cornerLift, FOOT_LIFT, BAY_W } from './streets.js';
+import { vergeAt, vergeLift, inZone, bayAt, cornerLevel, FOOT_LIFT, BAY_W } from './streets.js';
 import { makeMaterials, buildChunkMeshes, buildChunkMeshesGen, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
 import { streetPull } from './footslab.js';
 import { railGradeY } from './geo.js';
@@ -1722,8 +1722,9 @@ export class CityWorld {
           const ring = junctionHull(j);
           if (!ring) continue;
           if (pointInPolygon(x, z, ring)) { levels.add(junctionDeckY(j, x, z, this.terrain) + LAYER_Y.road + 0.012); continue; }
-          const up = cornerLift(j, x, z);
-          if (up >= 0) levels.add(junctionDeckY(j, x, z, this.terrain) + LAYER_Y.road + up);
+          // (the band at the height it is DRAWN, not the deck asked out here: js/streets.js)
+          const lv = cornerLevel(j, x, z, this.terrain, junctionDeckY);
+          if (lv === lv) levels.add(lv + LAYER_Y.road);
         }
         const cls = clustersIn(key2);
         if (cls) for (const cl of cls) {
@@ -1732,8 +1733,8 @@ export class CityWorld {
           const ring = clusterHull(cl);
           if (!ring) continue;
           if (pointInPolygon(x, z, ring)) { levels.add(clusterDeckY(cl, x, z, this.terrain) + LAYER_Y.road + 0.012); continue; }
-          const up = cornerLift(cl, x, z);
-          if (up >= 0) levels.add(clusterDeckY(cl, x, z, this.terrain) + LAYER_Y.road + up);
+          const lv = cornerLevel(cl, x, z, this.terrain, clusterDeckY);
+          if (lv === lv) levels.add(lv + LAYER_Y.road);
         }
       }
     }

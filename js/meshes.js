@@ -36,7 +36,7 @@ import { bridgeDeckHeight, bridgeElevation, polygonArea, pointInPolygon, chunkKe
   GRADE_CUT } from './geo.js';
 import { JUNCTIONS, CLUSTERS, railGradeY } from './geo.js';
 import { WIRE_H } from './trambody.js';
-import { KERB_H, KERB_W, FOOT_LIFT, vergeAt, vergeLift, inZone, bayAt, roadRank, cornerLift } from './streets.js';
+import { KERB_H, KERB_W, FOOT_LIFT, vergeAt, vergeLift, inZone, bayAt, roadRank, cornerLift, cornerLevel } from './streets.js';
 import { groundFor, fallFor } from './terrain.js';
 import { SURF, surfaceMaterial } from './surfaces.js';
 import { furnitureInto } from './furniture.js';
@@ -1883,9 +1883,26 @@ function downQuad(sink, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b)
 // junction. The same numbers city.js heightAt gives the player's feet.
 const FOOT_ON = 0.12;      // m past a path's edge that is still its slab
 const FOOT_STEP = 0.5;     // m: a slab further over the drawn ground than this is carried, not laid
-function standingOn(cell, key, terrain, drawn = terrain) {
+// The pads whose corner band can lie in chunk `key`: a pad is bucketed by its
+// centre and drawn whole by that chunk, so the corner of a crossing a few
+// metres over the border is paving in THIS chunk, and a lamp planted on it
+// asked only its own bucket and stood on the ground under the band (12 cm
+// under a flat corner, over a metre under an embanked one). The nine buckets
+// lampGround reads and js/chunkspec.js ships (padKeys), so the worker agrees;
+// the feet look as far (city._padLevels).
+function padsAround(key) {
+  const out = [];
+  const c = key.indexOf(','), cx = +key.slice(0, c), cz = +key.slice(c + 1);
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const k = (cx + dx) + ',' + (cz + dz);
+    for (const j of junctionsIn(k) ?? []) out.push(j);
+    for (const j of clustersIn(k) ?? []) out.push(j);
+  }
+  return out;
+}
+export function standingOn(cell, key, terrain, drawn = terrain) {
   if (!terrain || !cell) return terrain;
-  const pads = [...(junctionsIn(key) ?? []), ...(clustersIn(key) ?? [])];
+  const pads = padsAround(key);
   return {
     heightAt(x, z) {
       // (the DRAWN ground, js/drawnground.js: in a cutting the grid is metres
@@ -1943,8 +1960,9 @@ function standingOn(cell, key, terrain, drawn = terrain) {
       for (const o of pads) {
         if (o._cluster || (!o.members && o._ring) || !o._edge) continue;
         if ((x - o.x) ** 2 + (z - o.z) ** 2 > ((o.padR ?? 6) + 7) ** 2) continue;
-        const up = cornerLift(o, x, z);
-        if (up >= 0) best = Math.max(best, (o.members ? clusterDeckY(o, x, z, terrain) : junctionDeckY(o, x, z, terrain)) + LAYER_Y.road + up);
+        // (the band as it is DRAWN, from the deck at its kerb line: js/streets.js)
+        const lv = cornerLevel(o, x, z, terrain, o.members ? clusterDeckY : junctionDeckY);
+        if (lv === lv) best = Math.max(best, lv + LAYER_Y.road);
       }
       return best;
     },
