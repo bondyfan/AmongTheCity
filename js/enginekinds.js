@@ -6,7 +6,9 @@
 // ratios are km/h per 1000 rpm, the way a gearbox is described on paper.
 //
 // The electric kinds (tesla, trolleybus) are not here on purpose. They have no
-// cycle to synthesise and keep the motor voice in js/audio.js (buildEV).
+// cycle to synthesise and keep the motor voice in js/audio.js (buildEV). The
+// Roadster is electric too but has a voice of its own in the worklet: see
+// THRUST_KINDS below.
 //
 // `air` marks the vehicles that brake with compressed air and sigh when they
 // stop; `loud` is how far the voice carries when the budget ranks traffic.
@@ -94,20 +96,43 @@ export const ROLLING_KINDS = {
   tram: { loud: 1.5, heavy: 1, rail: 1 },       // steel on steel, and a traction whine
 };
 
+// A third class of voice: electric motors with cold gas thrusters behind them.
+// No cycle and no gearbox, so neither `eng` nor `box`: `thr` is the sound
+// (public/worklets/thrusterdsp.js, THRUSTER_DEFAULTS) and `drive` is how the
+// motor and the valves answer the pedal (js/thrustdrive.js, THRUST_DEFAULTS).
+export const THRUST_KINDS = {
+  // the Roadster: three motors, one reduction, and a tank of compressed air
+  roadster: {
+    thr: { vol: 1.3 },
+    drive: {},
+    vmax: 111, accel: 27.8, loud: 0.8,
+  },
+};
+
 // pre-v4 saves and a few spawn lists still say sedan/hatch/kombi/suv
 const ALIAS = { sedan: 'octavia', hatch: 'fabia', kombi: 'octavia', suv: 'bmw' };
 
 /** The piston engine for a vehicle kind, or null for the electric ones. */
 export function engineKind(kind) {
-  if (ROLLING_KINDS[kind]) return null;
+  if (ROLLING_KINDS[kind] || THRUST_KINDS[kind]) return null;
   return ENGINE_KINDS[kind] ?? ENGINE_KINDS[ALIAS[kind]] ?? ENGINE_KINDS.octavia;
 }
 
-/** The key engineKind() resolved to: specs are cached and sent by this name. */
+/** The key engineKind() resolved to, or null for a kind with no piston engine. */
 export function engineKey(kind) {
-  if (ROLLING_KINDS[kind]) return null;
+  if (ROLLING_KINDS[kind] || THRUST_KINDS[kind]) return null;
   return ENGINE_KINDS[kind] ? kind : (ALIAS[kind] ?? 'octavia');
 }
 
+/** Which synthesis in the worklet voices this kind: 'piston', 'thrust', or
+ *  null for the kinds that only roll there (their motor is in js/audio.js). */
+export function voiceClass(kind) {
+  if (THRUST_KINDS[kind]) return 'thrust';
+  return ROLLING_KINDS[kind] ? null : 'piston';
+}
+
+/** The name a kind's voice is cached and sent to the mixer under, or null. */
+export function voiceKey(kind) { return THRUST_KINDS[kind] ? kind : engineKey(kind); }
+
 /** Whatever the mixer needs to know about a kind, piston or not. */
-export function vehicleVoice(kind) { return ROLLING_KINDS[kind] ?? engineKind(kind); }
+export function vehicleVoice(kind) { return THRUST_KINDS[kind] ?? ROLLING_KINDS[kind] ?? engineKind(kind); }

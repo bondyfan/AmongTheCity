@@ -47,6 +47,21 @@
 // those materials are told to add nothing, the composite does it.
 
 import * as THREE from 'three';
+import { BEAM_T1, BEAM_T2 } from './poolspot.js';
+
+// A fan follows its road (js/poolspot.js beamLie): `b` is how far the road
+// stands over the fan's chord at its two inner nodes, and the strip runs
+// straight from node to node. z is the strip's own coordinate along the fan,
+// +1 at the bumper and -1 at the far end. Shared by the map pass here and the
+// strip in lightpools.js, so the two paths lay the same fan.
+const _f = (v) => v.toFixed(6);
+export const BEND_GLSL = /* glsl */`
+  float beamBend(vec2 b, float z) {
+    float t = 0.5 - 0.5 * z;
+    if (t < ${_f(BEAM_T1)}) return b.x * t / ${_f(BEAM_T1)};
+    if (t < ${_f(BEAM_T2)}) return mix(b.x, b.y, (t - ${_f(BEAM_T1)}) / ${_f(BEAM_T2 - BEAM_T1)});
+    return b.y * (1.0 - t) / ${_f(1 - BEAM_T2)};
+  }`;
 
 // The two footprints, shared by the map pass here and the quads in
 // lightpools.js so the two paths light the same ground. `p` is the quad's own
@@ -76,10 +91,17 @@ const MAP_VERT = /* glsl */`
   varying vec3 vCol;
   varying float vFade;
   varying float vH;
+  #ifdef ATC_BEAM
+    attribute vec2 aBend;    // the fan's bend (js/lightpools.js: the direct path's shader has the same)
+    ${BEND_GLSL}
+  #endif
   void main() {
     vP = position.xz;
     vCol = instanceColor;
     vec4 world = instanceMatrix * vec4(position, 1.0);
+    #ifdef ATC_BEAM
+      world.y += beamBend(aBend, position.z);
+    #endif
     vec3 centre = (instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vFade = 1.0 - smoothstep(uRange * 0.76, uRange, distance(centre.xz, uEye.xz));
     // the height of the lit plane rides in alpha, relative to the ground under

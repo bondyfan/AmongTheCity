@@ -1,0 +1,157 @@
+/* The boot routine owns the cover's visibility, status and removal. */
+#enter-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  overflow: hidden;
+  isolation: isolate;
+  color: #fff5df;
+  background: radial-gradient(ellipse at 65% 30%, #43565b, #1e3039 54%, #10191f);
+  transition: opacity .5s ease;
+}
+
+#enter-overlay.fade {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.loading-art, .loading-scene, .loading-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.loading-art { z-index: 0; pointer-events: none; }
+.loading-scene { overflow: hidden; isolation: isolate; }
+.loading-backdrop {
+  object-fit: cover;
+  animation: loading-pan 14s ease-in-out infinite alternate;
+}
+
+.loading-subject {
+  position: absolute;
+  object-fit: contain;
+  object-position: bottom;
+  animation: loading-drift 14s ease-in-out infinite alternate;
+}
+.loading-platform .loading-subject {
+  height: 104%;
+  width: 56%;
+  bottom: -10%;
+  right: 2%;
+  transform-origin: bottom center;
+}
+
+/* Kolín stays underneath. Each incoming scene fades over a fully opaque
+   predecessor. The last fades directly back to Kolín at the 40-second mark. */
+.loading-tramstop, .loading-forecourt, .loading-riverside {
+  opacity: 0;
+  background: #303539;
+  animation: loading-slide 40s linear infinite;
+}
+.loading-forecourt { animation-delay: 10s; }
+.loading-riverside { animation-name: loading-return; }
+
+.loading-tramstop .loading-subject {
+  width: 64%;
+  height: 81%;
+  right: 0;
+  bottom: 2%;
+}
+.loading-riverside .loading-subject {
+  width: 54%;
+  height: 101%;
+  right: 0;
+  bottom: -5%;
+  transform-origin: bottom center;
+}
+.loading-forecourt .loading-backdrop { animation-direction: alternate-reverse; }
+.loading-forecourt .loading-subject {
+  width: 64%;
+  height: 65%;
+  right: 1%;
+  bottom: 5%;
+  animation-direction: alternate-reverse;
+}
+
+@keyframes loading-pan {
+  from { transform: scale(1.075) translateX(-1.5%); }
+  to { transform: scale(1.025) translateX(.7%); }
+}
+@keyframes loading-drift {
+  from { transform: translateX(2%) scale(1.015); }
+  to { transform: translateX(-4%) scale(1.065); }
+}
+@keyframes loading-slide {
+  0%, 22%, 52%, 100% { opacity: 0; }
+  25%, 50% { opacity: 1; }
+}
+@keyframes loading-return {
+  0%, 72%, 100% { opacity: 0; }
+  75%, 97% { opacity: 1; }
+}
+
+/* Dropping the art from layout under these panels also restarts it when play begins. */
+body:has(#atc-menu:not(.atc-menu-out), #atc-creator) .loading-art { display: none; }
+
+.loading-footer {
+  position: absolute;
+  inset: auto 0 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 18px;
+  padding: 11vh max(4vw, env(safe-area-inset-right)) max(5vh, env(safe-area-inset-bottom)) max(4vw, env(safe-area-inset-left));
+  background: linear-gradient(transparent, rgba(10,18,24,.76));
+  text-shadow: 0 1px 6px #101619;
+}
+.loading-wordmark {
+  font: 900 clamp(19px, 2.6vw, 43px)/1 "Trebuchet MS", system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: -.04em;
+  white-space: nowrap;
+}
+.loading-wordmark::before {
+  content: "";
+  display: block;
+  width: 1.1em;
+  height: 3px;
+  margin-bottom: .36em;
+  background: #e6aa61;
+}
+.loading-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: clamp(13px, 1.15vw, 18px);
+  font-variant-numeric: tabular-nums;
+}
+.loading-status::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid #fff4;
+  border-top-color: #ffc781;
+  border-radius: 50%;
+  animation: loading-turn 1.1s linear infinite;
+}
+@keyframes loading-turn { to { transform: rotate(1turn); } }
+
+@media (max-aspect-ratio: 1/1) {
+  .loading-backdrop { object-position: 30% 50%; }
+  .loading-platform .loading-backdrop { object-position: 16% 50%; }
+  .loading-platform .loading-subject { width: 85%; height: 78%; right: -7%; bottom: -2%; }
+  .loading-tramstop .loading-backdrop { object-position: 23% 50%; }
+  .loading-tramstop .loading-subject { width: 98%; height: 55%; right: -2%; bottom: 10%; }
+  .loading-riverside .loading-backdrop { object-position: 23% 50%; }
+  .loading-riverside .loading-subject { width: 87%; height: 76%; right: -5%; bottom: -1%; }
+  .loading-forecourt .loading-subject { width: 94%; height: 49%; right: 1%; bottom: 12%; }
+  .loading-footer { align-items: flex-start; flex-direction: column; gap: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #enter-overlay { transition: none; }
+  .loading-scene, .loading-backdrop, .loading-subject, .loading-status::before { animation: none; }
+}

@@ -9,13 +9,14 @@
 import * as THREE from 'three';
 import { CHUNK, VIEW_CHUNKS, CHUNKS_PER_FRAME, LAYER_Y, MISSILE } from './config.js';
 import { inBand, LEVEL_GAP } from './levelsep.js';
+import { hullPushOut, hullReach } from './carhull.js';
 import { chunkKey, pointInPolygon, distPointToSegment, bridgeDeckHeight,
   roadGradeY, roadProfile, junctionsIn, junctionDeckY, junctionHull,
   clustersIn, clusterHull, clusterDeckY, streetOf } from './geo.js';
 import { holdVerges } from './geo.js';
 import { vergeAt, vergeLift, inZone, bayAt, cornerLift, FOOT_LIFT, BAY_W } from './streets.js';
 import { makeMaterials, buildChunkMeshes, buildChunkMeshesGen, buildBuildingsMesh, rebase, chunkBase } from './meshes.js';
-import { footPullW } from './meshes.js';
+import { streetPull } from './footslab.js';
 import { railGradeY } from './geo.js';
 import { takeMeshPool, prewarmMeshPool } from './meshpool.js';
 import { Poles } from './poles.js';
@@ -2011,44 +2012,9 @@ export class CityWorld {
   get _shapedAt() { return (this.__shaped ??= (x, z) => stampShaped(this.terrain, x, z)); }
 
   // The strongest pull of a carriageway on a footway whose centreline passes
-  // (x, z), into _pull: the pavement level of a kerbed street out to 6 m and
-  // fading over the next 4, a touch under the asphalt of any other within
-  // 3.5 m. The same numbers, asked at the same place, as meshes.roadRibbon
-  // blends each footway station with, and capped by the same function
-  // (meshes.footPullW) against `own`, the footway's own level there: a street
-  // up on an embankment does not lift the path at the foot of it.
-  _footPull(cell, x, z, own) {
-    let upW = 0, upT = 0;
-    // (a stair or ramp down to a Prague lower quay stands where its stamp
-    // built it: pulled toward the street over the wall it floated 1.6 m over
-    // its own foot. meshes.roadRibbon draws it the same way.)
-    if (stampShaped(this.terrain, x, z)) { _pull.w = 0; _pull.t = own; return; }
-    for (const r of cell.roads) {
-      if (!r.d || r.br || !r.p) continue;
-      const vg = streetOf(r), half = r.w / 2;
-      const reach = half + (vg ? VERGE_REACH + (r._bays ? BAY_W : 0) : 5);
-      const bb = lineBB(r);
-      if (x < bb[0] - reach || x > bb[2] + reach || z < bb[1] - reach || z > bb[3] + reach) continue;
-      const bs = nearestSeg(r, x, z, reach, _near);
-      const bd = _near.d, be = _near.e;
-      if (bd >= reach) continue;
-      const gy = roadGradeY(r, bs, this.terrain);
-      if (gy === null || gy === undefined) continue;
-      const bay = r._bays ? bayAt(r, bs, be) : 0;
-      const xo = bd - half - bay;
-      const v = vg ? vergeAt(r, bs, be > 0 ? 1 : 0) : null;
-      if (v && v.u) {
-        const t = gy + LAYER_Y.road + vergeLift(v.w, v.drop, xo) + FOOT_LIFT;
-        const w = footPullW(xo <= 6 ? 1 : xo >= 10 ? 0 : 1 - (xo - 6) / 4, t - own, xo, v.w);
-        if (w > upW) { upW = w; upT = t; }
-      } else {
-        const t = gy + LAYER_Y.road - 0.04;
-        const w = footPullW(xo + bay <= 0 ? 1 : 1 - (xo + bay) / 3.5, t - own, xo + bay);
-        if (w > upW) { upW = w; upT = t; }
-      }
-    }
-    _pull.w = upW; _pull.t = upT;
-  }
+  // (x, z), into _pull: js/footslab.js streetPull, the one function the
+  // props (meshes.standingOn) ask as well.
+  _footPull(cell, x, z, own) { streetPull(cell, x, z, own, this.terrain, _pull); }
 
   // Where a WALKER's feet are at (x, z), for callers that only have a position
   // and no height of their own to hint with (the crowd): the highest surface
@@ -2142,6 +2108,9 @@ export class CityWorld {
     let best = this.heightAt(x, z, maxY);
     const roof = this.roofY(x, z, maxY);
     if (roof > best) best = roof;
+    // the floor of a chain store (js/stores/world.js): a slab over its own ground
+    const shop = this.stores?.floor(x, z, maxY);
+    if (shop > best) best = shop;
     if (coach > best) best = coach;
     const inside = this.interiors.supportY(x, z, maxY);
     return inside > best ? inside : best;
@@ -2257,8 +2226,24 @@ export class CityWorld {
     // (js/levelsep.js). Asked without a level, everything is, as it always was.
     const lv = opts?.y ?? opts?.yLo ?? opts?.aboveY;
     if (hulls) {
+      // A DRIVEN car's own corner probes (vehicles.js wallPass: it asks with
+      // `y`, its wheels' level) keep the two discs they have always met here.
+      // Car against car is carCarPass's business, which trades momentum, and
+      // an exact hull under these probes would stop a car dead a hand's width
+      // before its bumper ever reached the other one. Everybody else (on foot,
+      // thrown out, a helicopter's skids) gets the body itself, js/carhull.js:
+      // the two discs do not meet in the middle of a car, and a walker went
+      // through the front seats of every one of them (20 Nov 2026).
+      const exact = !(opts && opts.y !== undefined && !opts.interior);
       for (const c of hulls) {
         const dx = pos.x - c.x, dz = pos.z - c.z;
+        if (exact) {
+          const g = hullReach(c) + radius;
+          if (dx * dx + dz * dz > g * g) continue;
+          if (lv !== undefined && !inBand(lv, c.y, c.tallY ?? LEVEL_GAP)) continue;
+          pushed = hullPushOut(pos, radius, c) || pushed;
+          continue;
+        }
         if (dx * dx + dz * dz > 64) continue;                 // 8 m gate
         if (lv !== undefined && !inBand(lv, c.y, c.tallY ?? LEVEL_GAP)) continue;
         // the hull as two discs down its axis, like driveStep's own model
@@ -2286,6 +2271,8 @@ export class CityWorld {
     pushed = mwCollide(pos, radius, opts?.aboveY, this) || pushed;
     // …and a flight of steps down to a Prague lower quay is a wall to a car
     pushed = quayStairsCollide(pos, radius, opts) || pushed;
+    // the shelves, tills and shut doors of a chain store (js/stores/world.js)
+    pushed = this.stores?.collide(pos, radius, opts) || pushed;
     const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
     if (!cell) return pushed;
     const walker = !!opts?.interior;

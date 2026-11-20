@@ -1274,7 +1274,7 @@ export class Ambulance {
     const kind = Array.isArray(kinds) && kinds.includes('van') ? 'van'
       : (Array.isArray(kinds) && kinds.length ? kinds[0] : 'van');
     let car = null;
-    try { car = this.vehicles.add(kind, x, z, heading, RZP_PAINT); } catch (err) {
+    try { car = this.vehicles.add(kind, x, z, heading, RZP_PAINT, 1 /* js/carlook.js LOOK_FLEET: used lacquer, clean */); } catch (err) {
       console.warn('[ambulance] vehicles.add failed:', err);
       return null;
     }

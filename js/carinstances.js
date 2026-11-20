@@ -37,6 +37,7 @@ const _pools = new WeakMap();      // scene -> Map(key -> pool)
 const _members = new Set();
 const _frustum = new THREE.Frustum(), _pm = new THREE.Matrix4(), _sph = new THREE.Sphere();
 const _live = [], _want = new Map();
+const POLISHED = new Float32Array([1, 0.10, 0, 0]);   // iLook of a car with no look: gloss, lacquer roughness
 let _enabled = true;
 try {
   // ?carinst=0 starts a session with the pools off (for a cold A/B)
@@ -56,11 +57,12 @@ export const carInstancingOn = () => _enabled;
  * A member: `node` is the mesh whose world matrix places the instance and
  * which draws on its own while instancing is off. `spec` names the pool
  * ({ key, geo, mat, cast, paint: bool }); `radius` is the bounding radius
- * around the node's origin for the frustum test. `paint` (optional) is a
- * Float32Array(4) the owner keeps current, for pools that carry iPaint.
+ * around the node's origin for the frustum test. `paint` and `look` (optional)
+ * are Float32Array(4)s the owner keeps current, for pools that carry iPaint
+ * and iLook (js/carbodymat.js paintInstance, lookInstance).
  */
-export function makeMember(node, spec, radius, paint = null) {
-  const m = { node, spec, radius, paint };
+export function makeMember(node, spec, radius, paint = null, look = null) {
+  const m = { node, spec, radius, paint, look };
   applyLayer(m);
   return m;
 }
@@ -108,11 +110,16 @@ function poolFor(scene, spec, need) {
   for (const k in spec.geo.attributes) geo.setAttribute(k, spec.geo.attributes[k]);
   geo.setIndex(spec.geo.index);
   geo.boundingSphere = spec.geo.boundingSphere;
-  let paint = null;
+  let paint = null, look = null;
   if (spec.paint) {
     paint = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
     paint.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('iPaint', paint);
+    // the look rides beside the paint; zeroes are a clean polished car only
+    // with gloss 1, so a member that brings none is written as that below
+    look = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
+    look.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('iLook', look);
   }
   const mesh = new THREE.InstancedMesh(geo, spec.mat, cap);
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -125,7 +132,7 @@ function poolFor(scene, spec, need) {
   mesh.matrixAutoUpdate = false;
   mesh.name = 'carpool:' + spec.key;  // dev/gfxprobe.js lists it under this name
   scene.add(mesh);
-  p = { mesh, cap, paint, n: 0 };
+  p = { mesh, cap, paint, look, n: 0 };
   pools.set(spec.key, p);
   return p;
 }
@@ -166,6 +173,7 @@ function fill(scene, camera) {
       const j = p.n++;
       p.mesh.instanceMatrix.array.set(m.node.matrixWorld.elements, j * 16);
       if (p.paint && m.paint) p.paint.array.set(m.paint, j * 4);
+      if (p.look) p.look.array.set(m.look ?? POLISHED, j * 4);
     }
     _live.length = 0;
   }
@@ -177,6 +185,7 @@ function fill(scene, camera) {
     if (p.n) {
       p.mesh.instanceMatrix.needsUpdate = true;
       if (p.paint) p.paint.needsUpdate = true;
+      if (p.look) p.look.needsUpdate = true;
     }
   }
 }

@@ -1614,6 +1614,51 @@ and merged; these are the rules they agreed on.
   (`underpass.deckNodes(…, rail)`): left to the ground under it, the bridge
   over Jana Palacha dived 8.8 m into the street. Pinned by
   tests/levels.test.mjs.
+* **Light lies on the road that is drawn** (`js/poolspot.js`, numbers only,
+  20 Nov 2026). Where a lamp's pool and a car's headlight fan LIE is worked
+  out there; `js/lightpools.js` only draws them (quads, the fans' strip, the
+  two light maps of `js/lampmap.js`). Two rules. (1) A pool lies `LIFT` over
+  what is DRAWN at its centre, asked at the level of the mast's foot:
+  `world.heightAt` (carriageway, pavement, a path's slab, the ground under
+  every corridor's ceiling), or surfaceY's own sheet where that is a thin
+  layer or a deck's asphalt within half a metre of it. It used to take the
+  higher of the road and the height GRID plus a layer ladder, and in a cutting
+  the grid arches over the carriageway: on the ramp down to the Jana Palacha
+  underpass the pools hung 1.1 to 1.3 m in the air (2.75 m at the worst on
+  that tile). (2) A fan FOLLOWS its road. It was one plane at the pitch read
+  13 m ahead, which over the top of a ramp left its far end a metre and more
+  in the air and in a dip put its middle in the tarmac. `beamLie` now looks
+  three times along the nose (13 m, half way on, the far end), the two
+  further looks asked where the ones before say the surface will be. A look
+  takes the carriageway, and where the nose has left it (a bend, a junction)
+  what is DRAWN there (`world.heightAt`: pavement, path, ground), so the fan
+  lies on the verge of a bend and follows a hillside falling away where a road
+  ends; it is refused when what it finds is out of reach of the line (a deck
+  overhead that surfaceY offers for want of anything lower, a street under the
+  end of a deck, a terrace more than a metre up). A rise steeper than one in
+  five counts as road only on a carriageway whose point half way lies on the
+  same line (a street of up to 40 %, not a step). The chord goes into the
+  instance matrix as before and the two inner nodes' heights over it into the
+  instanced attribute `aBend`, which both vertex shaders add through ONE
+  shared `BEND_GLSL` (`beamBend`). The fans' geometry is a 12-span strip of
+  its own for that; a pool is still a quad. A look that fails leaves the plane
+  it was. Pinned by tests/poolspot.test.mjs.
+* **A prop stands on the paving that is drawn** (`js/footslab.js`, 20 Nov
+  2026). The level of a footway's slab (its own profile blended toward the
+  street it runs beside: `footPullW`, `streetPull`, `slabLevel`) is ONE pure
+  function now, read by the feet (`city._footPull`) and by the props
+  (`meshes.standingOn`). standingOn had a copy that knew only kerbed streets,
+  asked the pull under the prop instead of at the path's centreline and
+  picked the strongest pull before the cap: a lamp on the riverside path
+  under Povltavská stood 1.8 m under its paving, one at the foot of Bubenské
+  nábřeží 2.2 m over the ground. A path counts for a prop ON its slab (12 cm
+  past the edge, as for feet) or beside a slab lying on the ground (within
+  0.5 m of the drawn ground): a path carried on a wall does not lift the
+  column 30 cm off its edge. Like the feet, a prop is not offered a street's
+  pavement out over a stamped Prague quay. And no lamp is planted within
+  `TRAM_CLEAR` (1.5 m) of a tram track's centreline (`lampSpots` `inTram`):
+  kerb offsets and surveyed nodes fell on the rails in the middle of
+  Seifertova and Sokolovská. Pinned by tests/prop-beside-path.test.mjs.
 * **Trams** (`js/trams.js`, `js/tramlines.js`). A tram's position is a pure
   function of route id, trip number and the shared clock: no state that two
   co-op clients could disagree on, no Math.random. A tram yields to a car on its
@@ -2003,6 +2048,71 @@ the table). Both offer `use()` (E), `update(dt)`, `frameCamera()` and
 * **Three paces** (js/player.js `_pace`, config `WALK`): a walk, the run on
   Shift, and a sprint on a double tap of Shift that spends `stamina`
   (js/stamina.js draws the bar).
+
+## Saving only at autosave points; the world's numbers fixed (Nov 2026)
+
+Frank, 20 Nov 2026: "To se musí ukládat jenom jako na autosavy", later also
+"i když budeme spát, když budeme mít svůj byt"; and of traffic, the crowd and
+the police: "nesmí to tam být vůbec jako v možnostech nastavení".
+
+* **One writer** (js/career.js `autosave(point)`): no timer, no `pagehide` or
+  `visibilitychange` save, none on the death card, none after a purchase or a
+  look change. A point is a key of js/autosave.js `POINTS`: `mission` (part
+  one calls it from `checkpointStory('done')`, part two from `completeHeist`,
+  later missions at their end) and `sleep` (for the flat that does not exist yet: its bed calls
+  `career.autosave('sleep')`). Anything else is refused. The save records the
+  point (`point`) and a card says "Uloženo".
+* **A reload is the last point**: quitting, dying, closing the tab lose what
+  happened since; an arrest steps back to it too (`reloadLast`). The campaign,
+  the free roam after it, `?devmode` Freeroam and co-op follow the same rule.
+* **Older saves** (v2, written every 20 s and on quit) migrate to v3 without
+  the quit spot and hour: a finished part one stands you at its end
+  (`PART_ONE_END`, Vašek's door), anyone else on the square; money, car and
+  stats stay. A v2 death-card save keeps its hospital and pays its bill.
+* **Traffic, crowd, police** (js/worldsettings.js `WORLD`: 120 cars, 60
+  walkers, patrols 0.70; "Běžná", "Rušno", "Běžně"): fixed outside `?devmode`
+  whatever storage holds, and not in the panel. With `?devmode` they are on
+  the dev tab ("Provoz a lidé"); co-op locks them again (`shareWorld`), since
+  every client builds the same fleet from them. The classic game neither reads
+  a developer's stored choice nor writes over it (`forStorage`). The presets no
+  longer carry `traffic` or `peds`. The panel's CSS is js/settingsstyle.js.
+* Tests: tests/autosave.test.mjs, tests/world-settings.test.mjs.
+
+## Part two of the Last Train: the car under Kunětická hora (js/heist*.js, Nov 2026)
+
+Part one ends saved at Vašek's table. Part two is a third owner beside
+`journey` and `meeting` in main.js (`heist`, same four hooks: `use`, `update`,
+`frameCamera`, `posePlayer`), created whenever `career.heistPending()` says the
+save has part one and not part two. Like part one it is played in one sitting:
+`career.storyRunning()` is true while it runs, nothing is written, and
+`completeHeist()` writes `heist: 'done'`.
+
+* **Stages** (`js/heist.js`): wake (02:30, Dražkovická) → tofarm (the estate to
+  Brozany) → farm (Jarda) → ride (his van, the player in the passenger seat) →
+  drop → walk (Vašek on the phone) → theft (the villa where the map has
+  "Perníková chaloupka") → run (home at daybreak) → end (the lock-up in Na Staré
+  poště, `js/heist-garage.js`). Places are in `js/heist-route.js`, all read off
+  the map tiles; lines in `js/heist-dialogue.js`; `js/heist-talk.js` plays them
+  one after another with nothing to press.
+* **The van** (`js/heist-farmer.js`) is a real car with Jarda in `seats[0]`, so
+  E gives the player seat 1 by the game's own rule. Nobody simulates it: the
+  file writes `x, z, heading, speed, steer, y` along a smoothed polyline
+  (`track`). It stays locked until he is behind the wheel.
+* **The Mercedes** (`js/heist-car.js`): leaves found by dropping rays on the
+  body, two plates (a dark holder goes over the plate the body draws), a window
+  that unlocks it, and `car.hotwire`, which main.js reads in two places (no
+  `carStart` in `onSeated`, no gas in the drive step) until the wires meet.
+* **The police** (`js/heist-police.js`): plates left on are read on the way in
+  and the heat never cools (`host.fail('plate')` after a while); a bare car
+  draws a patrol that gets a close look; two `traffic.spawnPatrol` cars stand
+  across the end of 17. listopadu. Arrests are the game's own.
+* **Failing** goes through main.js `failStory`: with a heist it shows
+  `heist.failText(why)`, stands the player where `heist.rewind()` says (the
+  villa's gate once reached, else Vašek's street) and plays on.
+* **The balaclava** (`js/heist-mask.js`) hangs on `parts.headS`, a head socket
+  added to the modelled human beside the two hand sockets.
+* **Sound**: `scripts/gen-heist-audio.mjs` (ElevenLabs, run only when asked).
+  `storyRecording()` gained `set(level)` for looping beds (the van's radio).
 
 ## Doors, locks, jumps and arrests: the step before part two (Nov 2026)
 
@@ -2396,3 +2506,175 @@ Not done: the driver drawn behind a car's glass is still the shader's own
 Universal Animation Library (CC0, downloaded with the sources) is not wired
 in, so jumping, punching, aiming and getting up are still the game's own poses
 carried onto the new bodies.
+
+## Chain stores and fast food as they stand in Czechia (js/stores/, Nov 2026)
+
+Frank, 20 Nov 2026: every Lidl, Albert, Billa, Kaufland, Penny, McDonald's and
+KFC should look as it does in reality, inside as well, and you should be able
+to do there what you do in reality. The Billa in Pardubice "looks nothing like
+a Billa"; a Lidl "is one of those big glazed buildings".
+
+The tiles already name them (`n`, `u`, js/interiors.js had a BRANDS table for
+the fascia): 143 buildings called Lidl, 167 Penny, 138 Albert, 109 Billa, 59
+Kaufland, 45 McDonald's, 32 KFC. Nine in ten stand on their own. What they
+lacked was everything else: a Lidl was a grey shed with strip windows and
+grey boxes for shelves.
+
+* **A store is a generated landmark** (`landmark.js`, `chains.js`).
+  `landmarkOf()` asks `storeLandmark(f)` after the hand-made list: a building
+  whose name is a chain's and which stands alone (not housing, not over 11 m,
+  no courtyard, the right trade, a plausible size) answers with an entry shaped
+  like the hand-made ones. The far mesh then skips it, the destructible
+  interiors skip it, and its own generator draws it in every tier. A Lidl under
+  six storeys of offices on Wenceslas Square stays the office block it is.
+  `?devmode&stores=off` makes every store generic again (a before and after).
+* **Fitted, not placed** (`site.js`). One answer per building for the mesh, the
+  collision, the interior and the people: its own axes, which wall is the
+  front, where the door is, which runs of wall are glass. THE FRONT IS THE WALL
+  THAT LOOKS AT THE CAR PARK (the mapped parking polygons, weighed by size and
+  by how squarely the wall faces them), not the wall nearest a pavement: the
+  Lidl by Pardubice station has a service lane three metres off its gable and
+  its car park along the whole north side. The choice is a plain memo on the
+  feature (`_sf`), made on the main thread before a chunk's inputs are copied
+  (`pinStores` in js/meshpool.js), so the mesh worker reads it and both builds
+  agree. The drive-through (`drive.js`, `_sd`) travels the same way.
+* **The shell** (`build.js`, `dress.js`, `dressfast.js`), by js/landmarkskit.js:
+  walls on the footprint's own edges in three courses (plinth, sandwich panel,
+  the chain's band), the glazing as REAL HOLES with their frames, a mono-pitch
+  or a flat roof with its plant, and the inside of the same box (floor,
+  ceiling, inner wall faces, lit after dark). In front: the canopy on its
+  columns, the trolley bay, the hours board, the sign on the front and the
+  flanks, the pylon. A restaurant gets the brand fin, a terrace with parasols,
+  a playground (McDonald's) and, where OpenStreetMap maps the lane (the two ways
+  round the Pardubice McDonald's are named "McDrive"), the order post, the
+  hatch and the height bar. Three new surface kinds in the landmark material
+  (`K.panel`, `K.slats`, `K.paving`, appended).
+* **Signs** (`signs.js`, `signpaint.js`, `logodraw.js`) ride the chunk's
+  wordmark stream, so they batch with every other fascia. Only
+  `{ label, sign, trim }` of a brand crosses from the worker, so the label says
+  what to paint: `@lidl/sq`, `@kfc/band`, `@albert/hours`. What a sign shows is
+  one switch (`SIGN_STYLE.logos`): `'drawn'`, each mark rebuilt from plain
+  shapes in code (no logo file is ever loaded), which is what ships since the
+  owner chose it on 20 Nov 2026; `'plain'`, the chain's colours and its name
+  in type, which is what the fascias always showed (`?devmode&signs=plain` to
+  compare).
+* **A store on a slope** (`site.js floorRel`, `apronOf`). The floor is laid
+  over the highest ground under the footprint (up to 1.6 m over the founding
+  height), so no turf comes up through the tiles, and the paved apron before
+  the doors is a ramp from the floor down to the ground as it lies: the mesh
+  draws it and `world.stores.floor` lets feet walk it.
+* **Near the player** (`world.js`, one `StoreWorld` on `world.stores`). Within
+  380 m: the glass in the holes, the sliding door, the lit room
+  (`shellfx.js`), three draw calls a store. Within 130 m: the fittings
+  (`layout.js`, `eatlayout.js`, `fixtures.js`, `fixgeo.js`), one InstancedMesh
+  per kind of fitting, every instance showing its own cell of ONE procedural
+  sheet of stocked shelves (`goodstex.js`, 8 x 8 cells, nothing copied from a
+  photograph, no pack carries a name). A 2 600 m2 Lidl is some 400 modules in a
+  dozen draw calls. `world.stores` answers `floor` (city.supportY), `collide`
+  (city.collide: fittings and a shut door), `covered` and `lid` (the camera),
+  `use` (E), `hint`, `posePlayer` (seated).
+* **Shopping** (`shopping.js`, `cart.js`, `panels.js`, `catalog.js`). A basket
+  inside the door or a trolley from the bay; E at a shelf opens the department
+  with Czech shelf prices of late 2025 (ČSÚ averages where there is one, a
+  discounter a few per cent under the list); a till with a cashier or a
+  self-checkout scans the cart item by item; `wallet.pay` settles it and the
+  food goes into the BAG (key I), from which it is eaten through
+  `vitals.heal` and `vitals.eat` like any meal. Walking out with unpaid goods
+  sets off the alarm at the door and is a crime (`wanted.add`).
+* **Eating** (`eating.js`). Order and pay at a kiosk or the counter, wait for
+  the number, collect the tray, sit on a free chair: the meal heals and fills
+  bite by bite while seated. From the driver's seat the same order is placed at
+  the order post and handed out at the window.
+* **People** (`schedule.js`, `crowd.js`). Nobody is simulated. Where slot 4 of
+  a store is at a given second of the SHARED clock is a function of the store's
+  key, the slot and the clock: a visit is a plan of nodes along the free
+  corridors (door, gate, two to four shelves, a till, out; or kiosk, counter,
+  table, out), so two co-op players see the same woman at the same shelf with
+  nothing on the wire. The bodies are the game's own people with their recorded
+  walk, stand and sit; a reaching hand, a scanning arm and a bite are added
+  joint by joint. Cashiers sit at as many tills as the hour needs.
+* **Car parks** (js/parkinglots.js `shopLot`, `lotStalls`; `lotpaint.js`): a
+  lot within 75 m of a chain store fills by day and empties at night, where a
+  housing estate's does the opposite, and its bays are painted: the lines are
+  the very stalls the parked cars stand in.
+* **A chain as a tenant** (`world.stores.tenant`, called from js/career.js): a
+  Lidl under an office block has no shop floor to walk, so E opens one screen
+  with the chain's own goods at its own prices (into the bag), or its own menu
+  (eaten at the counter), instead of the generic food counter.
+
+Over the whole world 669 buildings are rebuilt this way (Penny 152, Lidl 131,
+Albert 102, Billa 92, Kaufland 52, Tesco 46, McDonald's 37, KFC 25, Norma 14,
+Burger King 10, Makro 5, Globus 3), about 1 500 triangles each, 60 of the
+restaurants with a mapped drive-through. Measured on the M1 Pro (medium, noon,
+1024 x 768, the pane hidden, the machine under other load): standing 22 m from
+the front of a store with its whole interior in view costs about 1 to 2 ms a
+frame over the same spot with the stores switched off (Pardubice Lidl 5.3 to
+some 7 ms, Prague Kaufland 4.2 to 5.6 ms), of which the people are most; the
+simulation step pays 0.06 ms; away from a store nothing.
+
+Not done: a chain that is a tenant of a bigger building (a quarter of the
+Alberts) keeps the generic building, with the one-screen counter above; nobody
+drives through the drive-through but the player; the saddle-roofed stores of the
+1990s are built as flat-roofed boxes; a store has no back-of-house; the
+shelves cannot be blown up (a store is no longer a destructible building).
+
+Tests: `tests/stores.test.mjs` (17): recognition against the real tiles, every
+wall accounted for with one door on the front, the door open and every other
+run solid, sound geometry on fifty real footprints, worker parity, the
+drive-through on the mapped lane, layouts inside their walls, visits that are
+deterministic and never teleport, the cart, the bag and the order.
+
+## Cars: true shapes, paint with a history, a solid hull, the Roadster (Nov 2026)
+
+**Shapes.** The Octavia (liftback and Combi) and the Model 3 were redrawn against the
+real cars' numbers, and the fault was not in the details: the bodies were low and the
+glasshouses tall (belt at 0.84 m under a 1.44 m roof), with the wheels pushed out to
+the corners. `KIND.octavia`, `KIND.octaviaCombi` and `KIND.tesla` now carry the real
+length, width, wheelbase and overhangs (the stations run past the axles by the real
+overhang at each end, so a body is no longer centred on its wheels), a belt near a
+metre and a high tail. The drawings of these kinds, and of the new `KIND.roadster`,
+live in `js/cardress.js` (`STYLE_NEW`, `DRESS_NEW`); `js/cardetail.js` keeps the tools
+and the older kinds and hands the tools over as an argument, so there is no import
+cycle. `greenhouse()` learned `cPillar` and `sideMax` for an estate's third window.
+The police livery and light bar in `traffic.js` are transcribed from the Octavia's
+stations and were re-transcribed with it. `dev/carprofile.mjs` rasterises a kind
+without a browser (side, front, rear, top, three-quarter) for checking proportions.
+
+**Paint.** `js/carlook.js` (pure) decides a car's colour and its LOOK from a 32-bit
+seed: finish (polished 30 %, used 51 %, worn 13 %, matte 6 % for ordinary cars, other
+odds per class), dirt (clean, sills, film, caked) and the odd leaf. The look is one
+byte, `car.look`: bits 0-1 finish, 2-3 dirt, 4-6 variant, 7 leaf; 0 is the polished
+clean car every caller got before. Seeds: a traffic slot's own (`hash32(p.seed, 8)`
+and `9`), a parking space's position (`seedAt`), so every client paints a car the
+same. It travels in the top byte of the co-op `cl` field and in the garage save.
+Drawing costs no draw and no program: per car the look is the body material's own
+clearcoat, roughness and metalness plus `uLook` (the material is a bag of uniforms on
+the one shared program, keyed `kind|hex|look`, swept when no car wears it); the
+distance dress reads the per-instance `iLook` beside `iPaint`. Dirt and the leaf are
+`js/cardirt.js`: value noise in the car's own frame (film from the sills up, spray on
+the tail, rain runs, dust on what faces the sky) and a lens-shaped leaf laid in plan.
+The plate atlas no longer depends on the colour (six per kind).
+
+**A solid hull.** `js/carhull.js` (pure): a car is a rounded oriented rectangle.
+`city.js collide()` used two discs, which do not meet in the middle of a car (a
+walker went through the front seats, and through metres of a bus). Everyone on foot
+now gets the exact hull; a driven car's own wall probes keep the discs, because car
+against car is `carCarPass`, which got more discs for long vehicles (`discOffsets`).
+Boarding plans a way round the body to the door (`planRound`, the shorter end, 0.5 m
+clear) and the car stays solid during the walk; the crowd steps round a standing car
+(`pedestrians.js _skirt`).
+
+**The Roadster.** `KIND.roadster` (not in `CAR_KINDS`): 0 to 100 km/h in 1.00 s.
+`thrust` is the share of the push that comes from the cold-gas nozzles and therefore
+neither spends the friction circles nor tips the car back (`tyreStep`: `axT`), `cgH`
+its low centre of gravity, `brakeK` its brakes. With the pedal down and the wheel hard
+over it grips like the other cars (tests/carshapes.test.mjs). Its voice is a third
+class beside piston and rolling: `enginekinds.js THRUST_KINDS`, `js/thrustdrive.js`
+(motor revs, signed load, valve, tank) and `public/worklets/thrusterdsp.js`. It is met
+as one town car in 450, in one kerb stall in 500 (left open), and in the dev spawner.
+
+Measured on the M1 Pro, medium, 1024 x 768, noon, before and after in the same hour:
+Pardubice, třída Míru 7.0 and 7.0 ms a frame before, 6.8 and 7.9 after; by the castle
+7.9 before, 6.7 and 6.5 after; Prague, Václavské náměstí 5.4 and 5.6 before, 5.7 and
+6.9 after; a Prague street 6.9 and 6.6 before, 7.5 and 6.8 after. The differences are
+inside the noise of a machine other sessions were using.

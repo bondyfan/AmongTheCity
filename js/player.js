@@ -101,6 +101,8 @@ import { entryDoor, entryStep, entryCancel, exitStep, doorStep } from './carentr
 import { setDoor, setDriver, setPassenger } from './cardoor.js';
 import { leap, vaultStep, airStep } from './leap.js';
 import { getUpPose, snapshot, surrenderPose } from './bodymoves.js';
+import { planRound, makeRoute, hullPushOut, hullContains, hullReach } from './carhull.js';
+import { sameLevel } from './levelsep.js';
 
 const TWO_PI = Math.PI * 2;
 // v5: the player now has a y. Buildings have floors, so "the ground" stopped
@@ -122,10 +124,29 @@ const BOARD_T = 0.55;        // s — the door-to-seat slide
 const EXIT_T = 0.35;         // s — the seat-to-pavement step-out
 const DOOR_R = 0.32;         // m — "at the door" arrival radius
 const DOOR_OUT = 0.5;        // m — door point past the flank; exit lands wider
+// walking round a car to its door (js/carhull.js planRound)
+const ROUND_CLEAR = 0.5;     // m the way round keeps off the body (the walker is 0.38)
+const ROUND_V = 3.4;         // m/s round the body: a brisk walk, below the run gait
+const ROUND_NEAR = 9;        // m of way left under which it is a walk, not a jog
 // seat anchors give the CUSHION TOP; the citizen group's origin (its feet)
 // goes SIT_DROP below it, and in a car the body sits inboard of the anchor
 // so that all of it is inside the shell: js/seating.js has both numbers.
 const smooth = (k) => k * k * (3 - 2 * k);
+
+// is a body standing at (x, z), on the level y, inside some car's metal?
+// (0.2 m: the trunk of a person, not the 0.38 the walk keeps clear)
+function inAHull(world, x, z, y) {
+  const hulls = world.carHulls?.();
+  if (!hulls) return false;
+  for (const c of hulls) {
+    if (!sameLevel(y, c.y)) continue;
+    const dx = x - c.x, dz = z - c.z, g = hullReach(c) + 0.2;
+    if (dx * dx + dz * dz < g * g && hullContains(c, x, z, 0.2)) return true;
+  }
+  return false;
+}
+const EXIT_ALONG = [0.9, -0.9, 1.8, -1.8];   // m along our own flank, tried in this order
+const _alt = { x: 0, z: 0 };
 
 // ---- the gun walk --------------------------------------------------------
 // WALK.jog is 5.6 m/s and WALK.sprint is 14.0, and neither is a speed you move
@@ -509,21 +530,62 @@ export class Player {
       const doorZ = b.door ? b.door.stand.z : a.z;
       const dx = wX(side, doorZ) - this.pos.x, dz = wZ(side, doorZ) - this.pos.z;
       const dist = Math.hypot(dx, dz);
+      // ROUND THE CAR, NOT THROUGH IT. The door may be on the far side (you
+      // came up on the passenger's side and the wheel is on the left). The
+      // way there is planned in the car's own frame, every frame, round the
+      // nearer end of the body (js/carhull.js planRound), and the body is
+      // solid to us the whole walk: only from the handle on are we "in" it.
+      const car = typeof veh.kind === 'string' && veh.len > 0 && veh.wid > 0;
+      const hw = car ? veh.wid / 2 : 0, hl = car ? veh.len / 2 : 0;
+      let tx = dx, tz = dz, left = dist, round = false;
+      if (car) {
+        const px = this.pos.x - veh.x, pz = this.pos.z - veh.z;
+        const R = planRound(hw, hl, ROUND_CLEAR, px * ch - pz * sh, px * sh + pz * ch, side, doorZ,
+          b.route ??= makeRoute(), b.ban ?? 0);
+        left = R.len;
+        // (latched: past the last corner the way is straight again, and that
+        // is no reason to break into a run along the flank)
+        round = b.round = b.round || !R.direct;
+        tx = wX(R.x[0], R.z[0]) - this.pos.x; tz = wZ(R.x[0], R.z[0]) - this.pos.z;
+        // Blocked by something the plan cannot see (a wall along this end, a
+        // car parked nose to tail): no ground gained for a second, so try the
+        // other end, once. After that it is the patience below that decides.
+        if (left < (b.best ?? Infinity) - 0.05) { b.best = left; b.stall = 0; }
+        else if (!R.direct && !b.ban && R.corner >= 0 && (b.stall = (b.stall ?? 0) + dt) > 1.0) {
+          b.ban = 1 << R.corner; b.best = Infinity; b.stall = 0;
+        }
+      }
       // give up when it drove off, we ran out of patience (wedged on a wall),
-      // or the door floats a storey away (bridge deck, remote takeoff)
-      if (dist > 13 || b.t > 6 || Math.abs(vy - this.y) > 2.5) {
+      // or the door floats a storey away (bridge deck, remote takeoff). The
+      // patience is for the way actually asked of us: round a bus is 25 m.
+      b.limit ??= 6 + left / 2.2;
+      if (dist > 13 + hl || b.t > b.limit || Math.abs(vy - this.y) > 2.5) {
         this.cancelBoarding(); return;
       }
       if (dist >= DOOR_R) {
-        // ease the heading toward the door and jog there like the walker does
-        const want = Math.atan2(-dx, -dz);
+        // ease the heading toward the next point of the way and go there like
+        // the walker does: a jog while it is far, a brisk walk round the body
+        const tl = Math.hypot(tx, tz) || 1e-6;
+        const want = Math.atan2(-tx, -tz);
         let dh = want - this.heading;
         dh = ((dh + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI;
         const stepH = WALK.turn * dt;
         this.heading += Math.abs(dh) <= stepH ? dh : Math.sign(dh) * stepH;
-        const spd = Math.min(WALK.jog, 1.2 + dist * 2.0);  // slow into the door
-        const mv = Math.min(dist, spd * dt);
-        this.pos.x += (dx / dist) * mv; this.pos.z += (dz / dist) * mv;
+        const cap = round && left < ROUND_NEAR ? ROUND_V : WALK.jog;
+        const spd = Math.min(cap, 1.2 + left * 2.0);       // slow into the door
+        let mv = Math.min(tl, spd * dt);
+        this.pos.x += (tx / tl) * mv; this.pos.z += (tz / tl) * mv;
+        // a first leg shorter than the stride (stepping off the flank, the
+        // last of a corner): spend the rest of the stride on the next one
+        if (car && mv < spd * dt - 1e-6 && b.route.n > 1) {
+          const R = b.route, ax = wX(R.x[1], R.z[1]) - this.pos.x, az = wZ(R.x[1], R.z[1]) - this.pos.z;
+          const al = Math.hypot(ax, az), more = Math.min(al, spd * dt - mv);
+          if (al > 1e-6) { this.pos.x += (ax / al) * more; this.pos.z += (az / al) * more; mv += more; }
+        }
+        // its own hull first (main.js leaves the car being boarded out of
+        // world.carHulls, because from the handle on the body goes INTO it),
+        // with no more room than the place we stand to open the door leaves
+        if (car) hullPushOut(this.pos, Math.max(0.05, Math.min(WALK.radius, Math.abs(side) - hw - 0.04)), veh);
         const cOpts = this._c ??= { interior: true, yLo: 0, yHi: 0, aboveY: 0 };
         cOpts.yLo = this.y + INTERIOR.stepUp - 0.06;
         cOpts.yHi = this.y + INTERIOR.headroom;
@@ -625,6 +687,21 @@ export class Player {
       // a couple of passes settle corner cases (door opens into a wall AND
       // the river bank, say); collide() returns false once we sit clean
       for (let i = 0; i < 3 && world.collide(t, WALK.radius); i++);
+      // NEVER STAND UP INSIDE A CAR. Parked hard against another one, the
+      // place beside our door is the neighbour's wing, and two hulls a
+      // shoulder apart push a point back and forth without ever letting it
+      // go. Then the feet come down further along our own flank instead,
+      // the first place that is nobody's metal.
+      if (inAHull(world, t.x, t.z, vy)) {
+        const hl = veh.len > 0 ? veh.len / 2 : 0;
+        for (let k = 0; k < (hl ? 6 : 4); k++) {
+          // k 4, 5: boxed in on that whole side, so past the nose, then past the tail
+          const lx = k < 4 ? ox : Math.sign(ox) * 0.4, lz = k < 4 ? a.z + EXIT_ALONG[k] : (k === 4 ? -1 : 1) * (hl + 0.9);
+          _alt.x = veh.x + lx * ch + lz * sh; _alt.z = veh.z - lx * sh + lz * ch;
+          for (let i = 0; i < 3 && world.collide(_alt, WALK.radius); i++);
+          if (!inAHull(world, _alt.x, _alt.z, vy)) { t.x = _alt.x; t.z = _alt.z; break; }
+        }
+      }
       ty = world.supportY(t.x, t.z, vy + INTERIOR.stepUp);
     }
     this._scene.add(this.mesh);          // back into world space, still folded

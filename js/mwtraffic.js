@@ -27,7 +27,7 @@ import { DAY_LENGTH, START_TOD } from './config.js';
 // own mix. Cumulative thresholds over one hashed draw.
 export const MW_SEMI = 0.21, MW_TRUCK = 0.30, MW_VAN = 0.38, MW_BUS = 0.40;
 // the car share, in the same proportions traffic.js COMMON has (škodas first)
-const MW_CARS = ['octavia', 'octavia', 'fabia', 'fabia', 'octavia', 'bmw', 'mercedes', 'tesla'];
+const MW_CARS = ['octaviaCombi', 'octavia', 'fabia', 'fabia', 'octaviaCombi', 'bmw', 'mercedes', 'tesla'];
 
 /** The vehicle kind of a motorway-born schedule from one 0..1 draw. */
 export function mwKind(u) {

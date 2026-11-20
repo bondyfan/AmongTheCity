@@ -11,6 +11,9 @@
 // here: this panel is the only thing that moves that number, and two lists
 // that must match are one list that will not.
 import { NAME_RANGES } from './nametags.js';
+// traffic, the crowd and the police: fixed outside ?devmode (js/worldsettings.js)
+import { WORLD, WORLD_ROWS, worldValues, storedWorld, forStorage } from './worldsettings.js';
+import { SETTINGS_CSS } from './settingsstyle.js';
 
 const LS_KEY = 'atc-settings';
 
@@ -23,16 +26,16 @@ const LS_KEY = 'atc-settings';
 // SSAO is a full-screen pass and the photo is a texture fetch per cell, which
 // is exactly what the low preset exists to skip.
 const PRESETS = {
-  low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3, traffic: 60,
-            ortho: false, facades: false, trees: true, grass: false, peds: 12, bloom: false, rays: false,
+  low:    { shadows: false, shadowRes: 1024, resScale: 0.75, viewChunks: 3,
+            ortho: false, facades: false, trees: true, grass: false, bloom: false, rays: false,
             ao: false, interiors: false, buildingR: 80, mblur: false, flare: false,
             tramMasts: false, cloudDist: 'medium', facadeFx: false, groundDetail: false },
-  medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4, traffic: 240,
-            ortho: true,  facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
+  medium: { shadows: true,  shadowRes: 2048, resScale: 1,    viewChunks: 4,
+            ortho: true,  facades: true,  trees: true, grass: true, bloom: true,  rays: true,
             ao: true,  interiors: true, buildingR: 160, mblur: true, flare: true,
             tramMasts: true, cloudDist: 'medium', facadeFx: true, groundDetail: true },
-  high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6, traffic: 240,
-            ortho: true,  facades: true,  trees: true, grass: true, peds: 60, bloom: true,  rays: true,
+  high:   { shadows: true,  shadowRes: 4096, resScale: 2,    viewChunks: 6,
+            ortho: true,  facades: true,  trees: true, grass: true, bloom: true,  rays: true,
             ao: true,  interiors: true, buildingR: 280, mblur: true, flare: true,
             tramMasts: true, cloudDist: 'far', facadeFx: true, groundDetail: true },
 };
@@ -56,15 +59,29 @@ const NEW_ON = ['ao', 'ortho', 'grass'];
 // being scenery), the other two only say how a line is delivered.
 const DEFAULTS = { preset: 'medium', ...PRESETS.medium, mouseLook: true, volume: 0.8,
   showFps: false, showNames: true, nameDist: NAME_RANGES[1],
-  chatter: true, chatBubbles: true, chatVoice: true, police: 0.70 };
+  chatter: true, chatBubbles: true, chatVoice: true, ...WORLD };
 
 // The live settings object — handed out by reference so main can keep one pointer to it.
 let S = { ...DEFAULTS };
 export function getSettings() { return S; }
+// May this session run on a developer's own traffic, crowd and police? Only
+// behind ?devmode and never in co-op (shareWorld). `kept` is what storage held.
+const devmode = () => /(^|[?&])devmode(=|&|$)/.test(globalThis.location?.search ?? '');
+let free = false, kept = {}, resync = () => {};
+/** Co-op: those three numbers are everybody's, so a ?devmode choice is set
+ *  aside for the session (kept in storage for the next one). */
+export function shareWorld() {
+  if (free) kept = storedWorld(S);
+  free = false;
+  Object.assign(S, WORLD);
+  resync();
+  return S;
+}
 
 // Merge the saved blob over defaults, but only keys we know and only matching types — an
 // old or hand-edited localStorage entry must never punch a hole in the settings object.
 function load() {
+  free = devmode();
   try {
     const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
     for (const k of Object.keys(DEFAULTS))
@@ -85,7 +102,6 @@ function load() {
     // change afterwards.
     if (!(saved.v >= SCHEMA) && S.preset === 'custom') {
       for (const k of NEW_ON) S[k] = true;
-      if (!(S.peds > 0)) S.peds = PRESETS.medium.peds;   // a count, not a switch
     }
     S.v = SCHEMA;
     // A range that is not one of the offered steps (an old build, a hand-edited
@@ -94,10 +110,13 @@ function load() {
     if (!NAME_RANGES.includes(S.nameDist))
       S.nameDist = NAME_RANGES.reduce((a, b) =>
         Math.abs(b - S.nameDist) < Math.abs(a - S.nameDist) ? b : a, NAME_RANGES[1]);
+    // a stored traffic, crowd or police value never leaks into the classic game
+    kept = storedWorld(saved);
+    Object.assign(S, worldValues(saved, free));
   } catch { /* corrupt blob → keep defaults */ }
 }
 function save() {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch { /* private mode etc. */ }
+  try { localStorage.setItem(LS_KEY, JSON.stringify(forStorage(S, kept, free))); } catch { /* private mode etc. */ }
 }
 
 const el = (tag, cls, html) => {
@@ -107,103 +126,10 @@ const el = (tag, cls, html) => {
   return e;
 };
 
-// All styling namespaced atc- so nothing collides with the game's own stylesheet. Colors
-// follow the city HUD (slate blue) but the shapes — rounded opt rows, 2-col grid, ✕ in a
-// bordered square — mirror the Woods settings panel players are used to.
-const CSS = `
-/* ---- tabs ---- */
-.atc-set-tabs {
-  display: flex; gap: 4px; padding: 0 14px; border-bottom: 1px solid #2a3550;
-}
-.atc-set-tab {
-  appearance: none; cursor: pointer; background: none; border: 0;
-  border-bottom: 2px solid transparent; margin-bottom: -1px;
-  padding: 9px 12px; font: 600 13px system-ui, sans-serif; color: #8ea3c0;
-}
-.atc-set-tab:hover { color: #cfe0f5; }
-.atc-set-tab.on { color: #ffb454; border-bottom-color: #ffb454; }
-.atc-set-page { display: none; }
-.atc-set-page.on { display: block; }
-/* the dev page's live pose readout */
-#atc-dev-pose {
-  font: 500 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #cfe0f5; background: #0f1725; border: 1px solid #2a3550;
-  border-radius: 8px; padding: 9px 11px; white-space: pre; margin-bottom: 8px;
-}
-#atc-dev-copy {
-  width: 100%; cursor: pointer; margin-bottom: 12px;
-  font: 600 12.5px system-ui, sans-serif; color: #0b111b; background: #ffb454;
-  border: 0; border-radius: 7px; padding: 8px;
-}
-#atc-dev-copy:active { transform: translateY(1px); }
-#atc-dev-copy.ok { background: #7fd18a; }
-#atc-gear {
-  /* Below the top-right status stack, not beside it. The clock used to be the
-     only thing in that corner and 44px cleared it; #status-hud now runs clock →
-     money → health → armour from 12px down to about 80px, and the gear sat in
-     the middle of it. 96px clears the tallest the stack gets (armour visible)
-     with room to spare. css/style.css owns #status-hud; this button's CSS is
-     injected from here, which is why the two numbers live apart — if the stack
-     grows another row, this is the one that has to move. */
-  position: fixed; top: 96px; right: 12px; z-index: 20; pointer-events: auto;
-  width: 38px; height: 38px; font-size: 19px; line-height: 1; cursor: pointer;
-  background: rgba(12,16,24,0.72); color: #e8ecf4;
-  border: 1px solid rgba(140,170,220,0.3); border-radius: 10px;
-}
-#atc-gear:hover { background: rgba(38,48,74,0.85); }
-#atc-set {
-  position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
-  width: min(640px, 94vw); max-height: 84vh; z-index: 40; display: none;
-  flex-direction: column; color: #e8ecf4;
-  font-family: 'Trebuchet MS','Segoe UI',sans-serif;
-  background: linear-gradient(#1b2230, #131926);
-  border: 2px solid #3d4f74; border-radius: 16px;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
-}
-#atc-set.atc-open { display: flex; }
-.atc-set-head {
-  display: flex; align-items: center; padding: 14px 20px;
-  border-bottom: 1px solid rgba(255,255,255,0.12);
-}
-.atc-set-head h2 { font-size: 20px; letter-spacing: 1px; margin: 0; }
-.atc-set-close {
-  margin-left: auto; width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
-  background: none; border: 1px solid rgba(255,255,255,0.3); color: inherit; font-size: 16px;
-}
-.atc-set-close:hover { background: rgba(255,255,255,0.1); }
-.atc-set-body { padding: 12px 20px 18px; overflow-y: auto; }
-.atc-set-h3 {
-  font-size: 13px; letter-spacing: 2px; text-transform: uppercase; opacity: 0.7;
-  margin: 12px 0 8px;
-}
-.atc-set-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
-.atc-opt {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 10px 13px; border-radius: 10px; cursor: pointer;
-  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);
-}
-.atc-opt:hover { border-color: rgba(140,170,220,0.55); }
-.atc-opt-label { font-weight: bold; font-size: 13.5px; }
-.atc-opt-label output { opacity: 0.7; font-weight: normal; margin-left: 6px; }
-.atc-opt select {
-  background: rgba(0,0,0,0.35); color: inherit; border: 1px solid rgba(255,255,255,0.25);
-  border-radius: 7px; padding: 4px 8px; font-size: 13px; cursor: pointer;
-}
-.atc-set-act {
-  background: rgba(127,168,232,0.18); color: inherit; border: 1px solid rgba(140,170,220,0.55);
-  border-radius: 7px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer;
-}
-.atc-set-act:hover { background: rgba(127,168,232,0.3); }
-.atc-opt input[type="checkbox"] { width: 20px; height: 20px; margin: 0; cursor: pointer;
-  accent-color: #7fa8e8; }
-.atc-opt input[type="range"] { width: 120px; accent-color: #7fa8e8; cursor: pointer; }
-.atc-set-note { font-size: 12px; opacity: 0.6; margin: 14px 2px 0; line-height: 1.5; }
-@media (max-width: 560px) { .atc-set-grid { grid-template-columns: 1fr; } }
-`;
 
 export function initSettings(apply) {
   load();
-  document.head.appendChild(el('style', '', '')).textContent = CSS;
+  document.head.appendChild(el('style', '', '')).textContent = SETTINGS_CSS;
 
   // syncUI re-reads S into every control — one list of closures instead of a key→element
   // map, so preset picks (which rewrite eight keys at once) refresh everything in one call.
@@ -325,8 +251,6 @@ export function initSettings(apply) {
       ['far', 'Daleko'], ['furthest', 'Nejdál']]),
     selectRow('buildingR', 'Dohlednost budov (interiéry)', [[80, 'Krátká'],
       [160, 'Střední'], [280, 'Daleká'], [450, 'Extrémní']]),
-    selectRow('traffic', 'Hustota provozu', [[0, 'Žádná'], [60, 'Řídká'],
-      [120, 'Běžná'], [240, 'Hustá']]),
     toggleRow('ortho', 'Letecký podklad (ČÚZK)'),
     // street-level detail on the ground (js/groundglsl.js): shader arithmetic
     // and a few texture reads per ground pixel, no draw call; off on low
@@ -340,11 +264,6 @@ export function initSettings(apply) {
     toggleRow('rays', 'Sluneční paprsky'),
     toggleRow('mblur', 'Motion blur (rozmaz při rychlosti)'),
     toggleRow('flare', 'Lens flare (odlesky od slunce)'),
-    selectRow('peds', 'Chodci', [[0, 'Žádní'], [12, 'Málo'], [34, 'Běžně'], [60, 'Rušno']]),
-    // How many police cars are on the streets. A knob and not a constant: see
-    // Traffic.patrolP for why this ended up being the player's call.
-    selectRow('police', 'Policejní hlídky', [[0, 'Žádné'], [0.30, 'Málo'],
-      [0.70, 'Běžně'], [1.30, 'Hodně']]),
     // Interiors stream only around a walking player, so the cost is bounded —
     // but on a weak machine the plan+geometry build is the one hitch left, and
     // this is the switch that removes it. Wrecked buildings stay wrecked.
@@ -371,9 +290,18 @@ export function initSettings(apply) {
   hPage.appendChild(hGrid);
   gPage.appendChild(el('p', 'atc-set-note', 'Změna pokročilé volby přepne kvalitu na '
     + '„Vlastní“. Největší dopad na plynulost mají rozlišení obrazu, stíny a dohlednost.'));
-  // The dev page exists only behind ?devmode; devmode.js fills it, so this
-  // module needs to know nothing about teleports or spawners.
-  if (/(^|[?&])devmode(=|&|$)/.test(location.search)) page('dev', '🛠 Dev');
+  // The dev page exists only behind ?devmode; devmode.js fills it with the
+  // teleports and spawners. Traffic, the crowd and the police live here and
+  // nowhere else, and a co-op session greys them out (shareWorld).
+  if (devmode()) {
+    const w = el('div', 'atc-set-grid');
+    for (const [k, label, rungs] of WORLD_ROWS) {
+      const row = w.appendChild(selectRow(k, label, rungs)), sel = row.lastChild;
+      refreshers.push(() => { sel.disabled = !free; });
+    }
+    page('dev', '🛠 Dev').append(el('h3', 'atc-set-h3', 'Provoz a lidé'), w, el('p', 'atc-set-note',
+      'Mimo ?devmode a v co-opu platí pevně: hustota provozu běžná, chodci rušno, policejní hlídky běžně.'));
+  }
   panel.append(head, tabs, body);
   showTab('gfx');
 
@@ -399,6 +327,7 @@ export function initSettings(apply) {
     closePanel();
   }, true);
 
+  resync = syncUI;
   syncUI();   // paint the loaded values into the controls before the first open
   return S;
 }

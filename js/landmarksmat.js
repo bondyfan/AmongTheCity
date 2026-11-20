@@ -131,6 +131,24 @@ export function landmarkMaterial() {
             float h3 = lmHash(floor(q));
             float tone = h3 < 0.34 ? 0.84 : h3 < 0.67 ? 0.95 : 1.07;
             m = mix(0.95, mix(0.6, tone, e), fade);
+          } else if (kind == 11.0) {               // sandwich panels: a shed's skin, long and flat
+            vec2 q = sp / vec2(6.0, 1.0);
+            vec2 f = fract(q), w = fwidth(q);
+            float e = smoothstep(0.0, 0.004 + w.x, f.x) * smoothstep(0.0, 0.03 + w.y, f.y);
+            float fade = 1.0 - smoothstep(0.3, 0.9, max(w.x, w.y));
+            m = mix(0.97, mix(0.74, 0.97 + 0.05 * lmHash(floor(q)), e), fade);
+          } else if (kind == 12.0) {               // timber slats, upright
+            float q = sp.x / 0.14;
+            float f = fract(q), w = fwidth(q);
+            float e = smoothstep(0.0, 0.1 + w, f) * smoothstep(0.0, 0.1 + w, 1.0 - f);
+            float fade = 1.0 - smoothstep(0.3, 0.9, w);
+            m = mix(0.9, mix(0.5, 0.82 + 0.3 * lmHash(vec2(floor(q), 3.0)), e), fade);
+          } else if (kind == 13.0) {               // paving slabs and shop floor tiles
+            vec2 q = sp / vec2(0.6, 0.6);
+            vec2 f = fract(q), w = fwidth(q);
+            float e = smoothstep(0.0, 0.012 + w.x, f.x) * smoothstep(0.0, 0.012 + w.y, f.y);
+            float fade = 1.0 - smoothstep(0.3, 0.9, max(w.x, w.y));
+            m = mix(0.96, mix(0.8, 0.94 + 0.08 * lmHash(floor(q)), e), fade);
           } else if (kind == 0.0) {                // plaster: weather, no pattern
             m = 0.93 + 0.12 * lmNoise(sp * 0.55) + 0.04 * lmNoise(sp * 4.0);
           }
@@ -209,6 +227,6 @@ export function landmarkMaterial() {
         ` + tm.slice(at));
     }
   };
-  mat.customProgramCacheKey = () => 'atc-landmark-v5';
+  mat.customProgramCacheKey = () => 'atc-landmark-v6';
   return (_mat = mat);
 }

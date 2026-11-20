@@ -32,7 +32,7 @@
 // js/chunkspec.js copies features to the mesh workers and refuses anything
 // with a live object on it.
 
-import { CAR_COLORS } from './config.js';
+import { pickCarColor } from './vehicles.js';
 import { strHash } from './identity.js';
 import { streetOf } from './geo.js';
 import { vergeAt, inZone, KERB_H } from './streets.js';
@@ -42,7 +42,8 @@ import { kerbRows, rowPlace, rowNose, kerbPose, procSide, ROLL, ON_KERB, PARALLE
 
 export { KERB_INTRUDES } from './kerbrows.js';
 
-const KINDS = ['octavia', 'fabia', 'fabia', 'octavia', 'bmw', 'mercedes', 'tesla', 'octavia', 'van'];
+const ROADSTER_STALLS = 1 / 500;
+const KINDS = ['octaviaCombi', 'fabia', 'fabia', 'octavia', 'bmw', 'mercedes', 'tesla', 'octaviaCombi', 'van'];
 const CH = 120;                 // chunk size (config.CHUNK)
 const PITCH = 6.3;              // m between stall centres: a car and a gap to get out of
 const CAR_HALF = 2.4;           // m of kerb a stall needs either side of its centre
@@ -312,8 +313,10 @@ export class KerbParking {
     // the player's own car is standing in this space: nothing arrives on top of it
     const own = this._owned;
     if (own && standsIn(own.x, own.z, st.x, st.z, st.h, own.heading)) { st.burned = true; return; }
-    const kind = KINDS[(rnd(st.x, st.z, 'kk') * KINDS.length) | 0];
-    const color = CAR_COLORS[(rnd(st.x, st.z, 'kc') * CAR_COLORS.length) | 0];
+    // one stall in ROADSTER_STALLS holds the Roadster, and its owner left it open
+    const rare = rnd(st.x, st.z, 'krare') < ROADSTER_STALLS;
+    const kind = rare ? 'roadster' : KINDS[(rnd(st.x, st.z, 'kk') * KINDS.length) | 0];
+    const color = pickCarColor(kind, rnd(st.x, st.z, 'kc'));
     // (a stall the tags put across the verge, on a bank or in a ditch: never)
     if (st.tag) {
       const lv = this._level(st);
@@ -321,6 +324,7 @@ export class KerbParking {
       if (!lv) { st.burned = true; return; }
     }
     const car = this.vehicles.add(kind, st.x, st.z, st.h, color);
+    if (rare) car.unlocked = true;                       // (js/carlocks.js unlock)
     if (st.tag) {
       // placed by the tags: on the road, on the verge or across the kerb, and
       // the deck is asked where the carriageway certainly is

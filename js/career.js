@@ -3,7 +3,7 @@
 // knows nothing else about any of this:
 //
 //   career.choose(choice)            after the menu: read the save (or not)
-//   await career.spawn(player, city) in boot(): stand the player where they left
+//   await career.spawn(player, city) in boot(): stand the player at the save's spot
 //   career.attach(host)              in boot(): hand over the live game
 //   career.update(dt)                every step
 //   career.use()                     E pressed on foot with no car in reach
@@ -20,6 +20,12 @@
 // EVERYTHING HERE IS THE LOCAL PLAYER'S. Money, jobs, the owned car, the
 // stats and the save are never sent to the server and never read from a peer,
 // so co-op is the same game with other people in it.
+//
+// THE GAME IS WRITTEN ONLY AT AUTOSAVE POINTS (Frank, 20 Nov 2026: "To se musí
+// ukládat jenom jako na autosavy"; js/autosave.js lists them). No timer, no
+// save on the way out, none on the death card: autosave(point) is the one
+// writer, and a reload goes back to the last point that was reached. The
+// campaign, the free roam after it and co-op all follow the same rule.
 
 import * as wallet from './wallet.js';
 import * as vitals from './vitals.js';
@@ -28,6 +34,7 @@ import * as wanted from './wanted.js';
 import { PRICE, kc } from './prices.js';
 import { tod, setSoloTime } from './worldclock.js';
 import { browserStore, blank } from './savegame.js';
+import { isPoint, notice } from './autosave.js';
 import { loadMyLook, saveMyLook } from './characters/appearance.js';
 import { Progress } from './progress.js';
 import { Onboarding } from './onboarding.js';
@@ -41,14 +48,10 @@ import { setObjective } from './tracker.js';
 import { toast } from './toasts.js';
 import { fmtDist } from './jobmath.js';
 import { discover, contextTips, payAwards, food, foodScan } from './careertips.js';
-import { startPoint as pickStart, nearestHospital } from './startplace.js';
+import { startPoint as pickStart } from './startplace.js';
 import { standY, groundReady, motorwaySave } from './savespot.js';
-
-const SAVE_EVERY = 20;         // s between autosaves
-// Where main.js stands you up after the death card is the hospital nearest
-// to where you fell (config.js HOSPITALS, js/startplace.js nearestHospital,
-// the same call main.js makes). Only the save written as you go down needs it.
 import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
+import { start as heistStart } from './heist-route.js';
 
 const store = browserStore();
 
@@ -61,7 +64,7 @@ let freeroam = false;          // ?devmode: play with no story
 let progress = null, onb = null, jobs = null, garage = null;
 let statsPanel = null, foodPanel = null, carPanel = null;
 let applied = false;           // the save has been put into the live game
-let played = 0, saveT = SAVE_EVERY, slowT = 0, markT = 0, trackT = 0;
+let played = 0, slowT = 0, markT = 0, trackT = 0;
 let lastX = null, lastZ = null, lastSafe = null;
 // A save made at the wheel on the D11: where the owned car goes in the save
 // (its hard shoulder, js/savespot.js), valid while `ok`.
@@ -118,14 +121,29 @@ function beginStory() {
 }
 export function checkpointStory(stage) {
   state.prologue = stage;
-  if (stage === 'done' && applied) save();
+  // part one of the campaign is a mission completed: its end is a point, and
+  // the one write made while part two is still ahead (only part one holds it)
+  if (stage === 'done' && applied) write('mission', partOneRunning());
 }
 /** The campaign from its first frame again: a new platform, a full countdown. */
 export function restartStory() {
   beginStory();
   return state.storyTrip;
 }
-const storyRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && !freeroam && startPick !== 'praha';
+const partOneRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && !freeroam && startPick !== 'praha';
+const storyRunning = () => partOneRunning() || heistPending();
+
+// PART TWO (js/heist.js) follows the saved end of part one and is played in
+// one sitting like it: nothing is written while it runs, and the next write is
+// the one that says it is over. A save that ends at Vašek's table therefore
+// opens on his street at half past four in the morning.
+export function heistPending() {
+  return !!state && solo && !freeroam && startPick !== 'praha' && state.prologue === 'done' && state.heist !== 'done';
+}
+export function completeHeist() {
+  state.heist = 'done';
+  if (applied) autosave('mission');      // part two is a mission completed too
+}
 
 /** Where boot begins, before the world exists: the save's spot when it is in
  *  the city the menu shows, else that city's square (js/startplace.js).
@@ -138,6 +156,10 @@ export function startPoint() {
     const p = state.pos ?? fallback;
     const place = p.x < -38000 ? { name: 'Kolín', to: 'do Kolína' } : pickStart(null, p).place;
     return { x: p.x, z: p.z, heading: p.h, place, saved: !!state.pos };
+  }
+  if (heistPending()) {
+    const p = heistStart;
+    return { x: p.x, z: p.z, heading: p.h, place: pickStart(null, p).place, saved: true };
   }
   const sp = pickStart(startPick, state.pos);
   if (!sp.saved && state.pos) state = { ...state, pos: null };
@@ -198,7 +220,7 @@ export function attach(host) {
   Object.assign(tips, state.onb.tips);
   played = state.played;
   garage = new Garage(h);
-  jobs = new CareerJobs(h, progress, () => { saveT = 0.5; trackT = 0; });
+  jobs = new CareerJobs(h, progress, () => { trackT = 0; });
   jobs.load(state.jobs);
   statsPanel = new StatsPanel();
   foodPanel = new FoodPanel({ onBuy: buyFood, money: wallet.money });
@@ -206,22 +228,19 @@ export function attach(host) {
     onBuy: (car) => {
       if (!garage.buy(car)) return false;
       progress.bump('carsBought');
-      // (not "saved" when the storage has already turned out not to keep anything)
-      toast('Auto je tvoje', { icon: '🚗', kind: 'good', sub: unsavedTold ? 'Najdeš ho na mapě' : 'Je uložené a najdeš ho na mapě' });
-      saveT = 0.5;
+      // (kept by the next autosave point, not now: nothing is written in between)
+      toast('Auto je tvoje', { icon: '🚗', kind: 'good', sub: 'Najdeš ho na mapě' });
       return true;
     },
     onCanister: (car) => {
       if (!garage.canister(car)) return false;
       toast('Palivo doplněno', { icon: '⛽', kind: 'good' });
-      saveT = 0.5;
       return true;
     },
     onRepair: (car) => {
       if (!garage.repair(car)) return false;
       progress.bump('repairs');
       toast('Opraveno', { icon: '🔧', kind: 'good' });
-      saveT = 0.5;
       return true;
     } });
 
@@ -251,12 +270,9 @@ export function attach(host) {
   // broke must not be the way to keep the stars AND the money.
   vitals.onRevive(() => {
     const stars = wanted.stars();
-    // the save still holds the bill (see onDown below): replace it soon with
-    // one taken after the hospital, so a reload does not walk you back there
-    saveT = Math.min(saveT, 0.5);
     // main.js has stood the body up at the hospital before reviving it: that
-    // is where a reload belongs from now on, whether or not the feet have
-    // found the ground by the time the save is taken
+    // is where the next autosave point finds you, whether or not the feet have
+    // found the ground by then
     // (no height: the hospital is stood on its own floor, see js/savespot.js)
     if (lastSafe && h?.player) { lastSafe.x = h.player.pos.x; lastSafe.z = h.player.pos.z; lastSafe.y = NaN; }
     if (stars <= 0) return;
@@ -264,31 +280,13 @@ export function attach(host) {
     wanted.clear();
     toast('Pokuta ' + kc(fine), { icon: '🚓', kind: 'warn', sub: 'Hledanost smazána' });
   });
-  // Going down writes ONE save, on the spot. save() refuses for as long as the
-  // death card is up, so before this the newest save on disk was from before
-  // the death, and closing the tab on the card bought the life back for free:
-  // no fee, no fine, same street. This one is the game as it will be when you
-  // wake (at the hospital, on your feet, the job you fell on failed) with the
-  // bill still open, and loading it is what pays (apply, settleOwed).
-  vitals.onDown(() => {
-    if (!applied || !h || storyRunning()) return;
-    const snap = snapshot();
-    const px = h.player?.pos?.x ?? lastSafe?.x, pz = h.player?.pos?.z ?? lastSafe?.z;
-    const hosp = nearestHospital(px, pz);
-    snap.pos = { x: hosp.x, z: hosp.z, h: lastSafe?.h ?? 0 };
-    snap.vitals = { hp: vitals.hpMax(), armour: 0, energy: vitals.energy() };
-    snap.jobs = { ...snap.jobs, active: null };
-    snap.owed = { stars: wanted.stars() };
-    snap.wanted = { heat: 0, crime: '' };          // the fine settles it
-    if (!store.save(snap) && loadNote !== 'newer') tellUnsaved();
-  });
+  // Going down writes nothing, and neither does closing the tab (there is no
+  // pagehide or visibilitychange writer any more): both leave the save as the
+  // last autosave point wrote it. A save from an older build can still carry
+  // an unpaid hospital bill (`owed`), and loading that one pays it.
 
   // boot has warmed the spawn's neighbourhood by now: usually it can stand at once
   standSaved(0);
-
-  const flush = () => save();
-  window.addEventListener('pagehide', flush);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
 }
 
 // Keys only act in play, and never under somebody else's modal (the settings
@@ -316,7 +314,6 @@ function settleOwed(stars) {
   const fine = stars > 0 ? payFine(stars) : 0;
   toast('Probouzíš se v nemocnici', { icon: '🏥', kind: 'warn', ms: 8000,
     sub: 'Léčba ' + kc(fee) + (stars > 0 ? ' · pokuta ' + kc(fine) : '') });
-  saveT = 0.5;                   // and the settled game replaces the open bill
 }
 
 // Said once, when it turns out nothing is being kept: the browser blocks site
@@ -345,7 +342,7 @@ function apply() {
     // raises is what sends the police out again)
     if (s.wanted.heat > 0) wanted.add(s.wanted.heat, s.wanted.crime);
     if (s.owed) settleOwed(s.owed.stars);
-    else if (activeStory() !== 'forecourt' && !storyRunning()) toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ tam, kde jsi skončil', ms: 7000 });
+    else if (activeStory() !== 'forecourt' && !storyRunning()) toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ od posledního uložení', ms: 7000 });
   }
   if (loadNote === 'corrupt')
     toast('Uložená hra se nedala načíst', { icon: '⚠️', kind: 'warn', sub: 'Začínáš novou. Původní data jsou odložená.', ms: 9000 });
@@ -373,6 +370,7 @@ function snapshot() {
   return {
     money: wallet.money(),
     prologue: state.prologue,
+    heist: state.heist ?? null,
     storyTrip: state.storyTrip,
     pos: lastSafe,
     tod: solo ? tod() : null,
@@ -388,11 +386,30 @@ function snapshot() {
   };
 }
 
-/** Write the save now. Never while down (the body is mid-teleport) and never
- *  before the loaded save has been applied (that would overwrite it blank). */
-export function save() {
-  if (!applied || !h || vitals.down() || storyRunning()) return false;
-  return store.save(snapshot());
+/**
+ * An autosave point has been reached (js/autosave.js POINTS: 'mission' now,
+ * 'sleep' once there is a flat): write the game as it is this frame and say
+ * "Uloženo". The ONLY writer of the save. Refused (false, nothing written)
+ * for a point that is not one, while down (the body is mid-teleport), before
+ * the loaded save has been applied (that would overwrite it blank) and while
+ * a campaign part runs (its end is the point: checkpointStory, completeHeist).
+ */
+export function autosave(point) {
+  return write(point, storyRunning());
+}
+// `held`: a story still running holds the write back. The end of part one
+// passes only partOneRunning(), because part two is pending from that frame on.
+function write(point, held) {
+  if (!isPoint(point) || !applied || !h || vitals.down() || held) return false;
+  // where you stand NOW: a mission's end may have just put you somewhere
+  // (part one stands you at Vašek's door), and update() has not seen it yet
+  markSafe(true);
+  const ok = store.save({ ...snapshot(), point });
+  if (ok) {
+    const n = notice(point);
+    toast(n.text, { icon: n.icon, sub: n.sub, ms: n.ms });
+  } else if (loadNote !== 'newer') tellUnsaved();
+  return ok;
 }
 
 /**
@@ -416,7 +433,6 @@ export function reloadLast() {
   if (Number.isFinite(s.pos.y)) { p.y = s.pos.y; p.vy = 0; }
   lastSafe = { ...s.pos };
   lastX = lastZ = null;
-  saveT = SAVE_EVERY;
   return s.pos;
 }
 
@@ -433,9 +449,13 @@ function buyFood(plate) {
 
 /** E on foot with no car in reach: the food counter, if this is one. */
 export function use() {
-  if (!playable() || !h.player) return false;
+  if (!playable() || !h.player || heistPending()) return false;
+  // a chain store with shelves and tills of its own sells its own way (js/stores/)
+  if (h.world?.stores?.near(h.player.pos.x, h.player.pos.z)) return false;
   const v = foodPlaceAt(h.world?.city, h.player.pos.x, h.player.pos.z);
   if (!v) return false;
+  // a chain that is a tenant of a bigger building sells its own goods at its own prices
+  if (h.world?.stores?.tenant(v.name)) return true;
   foodPanel.show(v);
   return true;
 }
@@ -443,6 +463,7 @@ export function use() {
 function openCar() {
   const p = h.player;
   const car = garage.carAt(p.pos.x, p.pos.z);
+  if (car?.story) return;
   if (!car) { toast('Postav se k zaparkovanému autu', { icon: '🚗', sub: 'B: koupit auto nebo opravit svoje' }); return; }
   carPanel.show(garage.view(car));
 }
@@ -476,7 +497,7 @@ export function footHint(el, car) {
   if (car) {
     // B deals in PARKED cars (garage.carAt). A car stopped in traffic can be
     // boarded but not bought from the pavement, so it keeps main.js's own hint.
-    if (!h.parked.includes(car)) return;
+    if (!h.parked.includes(car) || car.story) return;   // (a car of the story is not for sale)
     el.innerHTML = car === garage.car
       ? '<kbd>E</kbd> nastoupit · <kbd>B</kbd> tvoje auto'
       : '<kbd>E</kbd> nastoupit · <kbd>B</kbd> koupit';
@@ -507,27 +528,7 @@ export function update(dt) {
     else if (onFoot && !h.storyTrain?.()) progress.addWalk(moved);
   }
   lastX = x; lastZ = z;
-  // Where a reload should put you: the last place you were on the ground, on
-  // foot or at the wheel. Never mid-air, on a train or on the death card.
-  if ((onFoot && p.grounded !== false || car) && !vitals.down()) {
-    (lastSafe ??= { x: 0, z: 0, h: 0, y: NaN });
-    // At the wheel, the spot is beside the driver's door: a reload starts on
-    // foot, and standing INSIDE the car you were driving is no way to wake up.
-    // Heading 0 faces -z here, so the driver's left is (-cos h, sin h).
-    const hd = car ? car.heading : p.heading;
-    const off = car ? (car.wid ?? 1.8) / 2 + 1.1 : 0;
-    lastSafe.x = x - Math.cos(hd) * off; lastSafe.z = z + Math.sin(hd) * off; lastSafe.h = hd;
-    // ...and the LEVEL it was on: a deck, or the road under one (savespot.js)
-    const y = car ? car.y : p.y;
-    lastSafe.y = Number.isFinite(y) ? y : NaN;
-    // On the D11 the door is the median or a running lane at 130: the driver
-    // is saved behind the guard rail and the car on its hard shoulder, when
-    // both spots are on the car's level (js/savespot.js motorwaySave).
-    carStop.ok = false;
-    if (car && motorwaySave(h.world, x, z, car.heading, y, carStop)) {
-      lastSafe.x = carStop.px; lastSafe.z = carStop.pz; lastSafe.h = carStop.h; lastSafe.y = carStop.py;
-    }
-  }
+  markSafe(false);
 
   jobs.update(dt);
 
@@ -547,7 +548,6 @@ export function update(dt) {
         }
       } else if (e.type === 'finished') {
         toast('Úvod máš za sebou', { icon: '🎓', kind: 'good', sub: 'P přehled a úspěchy · B koupit auto · M mapa' });
-        saveT = 0.5;
       }
     }
   }
@@ -562,16 +562,41 @@ export function update(dt) {
   trackT -= dt;
   if (trackT <= 0) { trackT = 0.15; setObjective(jobs.view() ?? introView(x, z)); }
 
-  saveT -= dt;
-  // A save that was due and did not land (the storage is blocked or full) is
-  // said out loud. Down and the newer-version refusal are not failures.
-  if (saveT <= 0) { saveT = SAVE_EVERY; if (!save() && !vitals.down() && !storyRunning() && loadNote !== 'newer') tellUnsaved(); }
+}
+
+// Where the next autosave point should put you: the last place you were on
+// the ground, on foot or at the wheel. Never mid-air, on a train or on the
+// death card. `now` is an autosave point taking the spot this very frame,
+// feet on the ground or not (a mission's end has just stood you there).
+function markSafe(now) {
+  const p = h.player, g = h.game, car = g.car;
+  const onFoot = !car && !g.heli && !g.jet && !p.inCar && !h.trains?.riding;
+  if (!((onFoot && (now || p.grounded !== false)) || car) || vitals.down()) return;
+  const x = car ? car.x : p.pos.x, z = car ? car.z : p.pos.z;
+  (lastSafe ??= { x: 0, z: 0, h: 0, y: NaN });
+  // At the wheel, the spot is beside the driver's door: a reload starts on
+  // foot, and standing INSIDE the car you were driving is no way to wake up.
+  // Heading 0 faces -z here, so the driver's left is (-cos h, sin h).
+  const hd = car ? car.heading : p.heading;
+  const off = car ? (car.wid ?? 1.8) / 2 + 1.1 : 0;
+  lastSafe.x = x - Math.cos(hd) * off; lastSafe.z = z + Math.sin(hd) * off; lastSafe.h = hd;
+  // ...and the LEVEL it was on: a deck, or the road under one (savespot.js)
+  const y = car ? car.y : p.y;
+  lastSafe.y = Number.isFinite(y) ? y : NaN;
+  // On the D11 the door is the median or a running lane at 130: the driver
+  // is saved behind the guard rail and the car on its hard shoulder, when
+  // both spots are on the car's level (js/savespot.js motorwaySave).
+  carStop.ok = false;
+  if (car && motorwaySave(h.world, x, z, car.heading, y, carStop)) {
+    lastSafe.x = carStop.px; lastSafe.z = carStop.pz; lastSafe.h = carStop.h; lastSafe.y = carStop.py;
+  }
 }
 
 // Everything that does not need to run every frame.
 function slow(x, z, onFoot, car) {
   discover(progress, h.placeFinder?.town ?? null);
-  foodScan(h.world?.city, x, z, onFoot);
+  // (part two's villa is a restaurant on the map; a chain store sells its own way, js/stores/)
+  foodScan(h.world?.city, x, z, onFoot && !heistPending() && !h.world?.stores?.near(x, z));
   // the introduction's targets come from the world, so they are found here
   if (onb.needsTarget && !jobs.runner.active) {
     if (onb.name === 'car') {
@@ -593,7 +618,7 @@ function slow(x, z, onFoot, car) {
   if (!onb.done && onb.target && !jobs.runner.active && !jobs.beacon.on)
     jobs.guide(onb.target, onb.name === 'drive');
   contextTips(tips, car);
-  if (payAwards(progress)) saveT = Math.min(saveT, 1);
+  payAwards(progress);
 }
 
 function introView(x, z) {
@@ -622,5 +647,5 @@ function rebuildMarks(x, z) {
 export const debug = {
   get progress() { return progress; }, get jobs() { return jobs; },
   get garage() { return garage; }, get onboarding() { return onb; },
-  get marks() { return marks; }, get state() { return state; }, store, snapshot, save,
+  get marks() { return marks; }, get state() { return state; }, store, snapshot, autosave,
 };

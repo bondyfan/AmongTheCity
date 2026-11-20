@@ -109,6 +109,7 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
   const socket = () => { const o = new THREE.Object3D(); o.matrixAutoUpdate = false; group.add(o); return o; };
   const handL = socket(), handR = socket();
   const carried = addHandProp(handR, prop, look.propTint, H / 1.78);
+  const headS = socket();                        // what is worn on the head follows the drawn skull (js/heist-mask.js)
 
   let headMesh = null, headSk = null, headMap = null;
   if (mixed) {
@@ -153,6 +154,7 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
       if (headSk.boneTexture) headSk.boneTexture.needsUpdate = true;
     }
     R.socket(fig, SLOT.handL, s, handL); R.socket(fig, SLOT.handR, s, handR);
+    R.socket(fig, SLOT.head, s, headS);
   };
 
   // this body's claim on the person's sharp texture, held while it is drawn near
@@ -272,7 +274,7 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
     state: st, tris: av.tris,
     parts: { body, torso: J.torso, chest: J.chest, head: J.head, pelvis: J.pelvis, cluster: mesh,
       armL: J.armL, armR: J.armR, legL: J.legL, legR: J.legR, elbowL: J.elbowL, elbowR: J.elbowR,
-      kneeL: J.kneeL, kneeR: J.kneeR, footL: J.footL, footR: J.footR, handL, handR },
+      kneeL: J.kneeL, kneeR: J.kneeR, footL: J.footL, footR: J.footR, handL, handR, headS },
   };
 }
 
