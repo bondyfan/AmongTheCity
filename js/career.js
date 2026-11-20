@@ -49,6 +49,7 @@ const SAVE_EVERY = 20;         // s between autosaves
 // to where you fell (config.js HOSPITALS, js/startplace.js nearestHospital,
 // the same call main.js makes). Only the save written as you go down needs it.
 import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
+import { start as heistStart } from './heist-route.js';
 
 const store = browserStore();
 
@@ -118,14 +119,28 @@ function beginStory() {
 }
 export function checkpointStory(stage) {
   state.prologue = stage;
-  if (stage === 'done' && applied) save();
+  // (the end of part one is the one write made while part two is still ahead)
+  if (stage === 'done' && applied) save(true);
 }
 /** The campaign from its first frame again: a new platform, a full countdown. */
 export function restartStory() {
   beginStory();
   return state.storyTrip;
 }
-const storyRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && !freeroam && startPick !== 'praha';
+const partOneRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && !freeroam && startPick !== 'praha';
+const storyRunning = () => partOneRunning() || heistPending();
+
+// PART TWO (js/heist.js) follows the saved end of part one and is played in
+// one sitting like it: nothing is written while it runs, and the next write is
+// the one that says it is over. A save that ends at Vašek's table therefore
+// opens on his street at half past four in the morning.
+export function heistPending() {
+  return !!state && solo && !freeroam && startPick !== 'praha' && state.prologue === 'done' && state.heist !== 'done';
+}
+export function completeHeist() {
+  state.heist = 'done';
+  if (applied) save();
+}
 
 /** Where boot begins, before the world exists: the save's spot when it is in
  *  the city the menu shows, else that city's square (js/startplace.js).
@@ -138,6 +153,10 @@ export function startPoint() {
     const p = state.pos ?? fallback;
     const place = p.x < -38000 ? { name: 'Kolín', to: 'do Kolína' } : pickStart(null, p).place;
     return { x: p.x, z: p.z, heading: p.h, place, saved: !!state.pos };
+  }
+  if (heistPending()) {
+    const p = heistStart;
+    return { x: p.x, z: p.z, heading: p.h, place: pickStart(null, p).place, saved: true };
   }
   const sp = pickStart(startPick, state.pos);
   if (!sp.saved && state.pos) state = { ...state, pos: null };
@@ -373,6 +392,7 @@ function snapshot() {
   return {
     money: wallet.money(),
     prologue: state.prologue,
+    heist: state.heist ?? null,
     storyTrip: state.storyTrip,
     pos: lastSafe,
     tod: solo ? tod() : null,
@@ -390,8 +410,8 @@ function snapshot() {
 
 /** Write the save now. Never while down (the body is mid-teleport) and never
  *  before the loaded save has been applied (that would overwrite it blank). */
-export function save() {
-  if (!applied || !h || vitals.down() || storyRunning()) return false;
+export function save(storyEnd = false) {
+  if (!applied || !h || vitals.down() || (storyEnd ? partOneRunning() : storyRunning())) return false;
   return store.save(snapshot());
 }
 
@@ -433,7 +453,7 @@ function buyFood(plate) {
 
 /** E on foot with no car in reach: the food counter, if this is one. */
 export function use() {
-  if (!playable() || !h.player) return false;
+  if (!playable() || !h.player || heistPending()) return false;
   const v = foodPlaceAt(h.world?.city, h.player.pos.x, h.player.pos.z);
   if (!v) return false;
   foodPanel.show(v);
@@ -443,6 +463,7 @@ export function use() {
 function openCar() {
   const p = h.player;
   const car = garage.carAt(p.pos.x, p.pos.z);
+  if (car?.story) return;
   if (!car) { toast('Postav se k zaparkovanému autu', { icon: '🚗', sub: 'B: koupit auto nebo opravit svoje' }); return; }
   carPanel.show(garage.view(car));
 }
@@ -476,7 +497,7 @@ export function footHint(el, car) {
   if (car) {
     // B deals in PARKED cars (garage.carAt). A car stopped in traffic can be
     // boarded but not bought from the pavement, so it keeps main.js's own hint.
-    if (!h.parked.includes(car)) return;
+    if (!h.parked.includes(car) || car.story) return;   // (a car of the story is not for sale)
     el.innerHTML = car === garage.car
       ? '<kbd>E</kbd> nastoupit · <kbd>B</kbd> tvoje auto'
       : '<kbd>E</kbd> nastoupit · <kbd>B</kbd> koupit';
@@ -571,7 +592,7 @@ export function update(dt) {
 // Everything that does not need to run every frame.
 function slow(x, z, onFoot, car) {
   discover(progress, h.placeFinder?.town ?? null);
-  foodScan(h.world?.city, x, z, onFoot);
+  foodScan(h.world?.city, x, z, onFoot && !heistPending());   // (part two's villa is a restaurant on the map)
   // the introduction's targets come from the world, so they are found here
   if (onb.needsTarget && !jobs.runner.active) {
     if (onb.name === 'car') {
