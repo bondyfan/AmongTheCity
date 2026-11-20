@@ -99,6 +99,7 @@ import { makeNetUI } from './netui.js';
 // module (js/career.js lists the hooks main.js calls, and why there are so few)
 import * as career from './career.js';
 import { meetVasek } from './prologue-parking.js';
+import { createHeist } from './heist.js';
 import { hours as storyHours } from './prologue-route.js';
 import { staminaHud } from './stamina.js';
 import { exitHudText, setExitLine } from './mwhud.js';
@@ -156,20 +157,58 @@ const game = {
 
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let journey = null, meeting = null, vasekCar = null;
+let heist = null;        // part two of the campaign (js/heist.js), after the saved end of part one
 let carjack = null;      // the drivers pulled out of their cars (js/carjack.js)
 let arrest = null;       // { veil, t, moved } while the ZATČEN card is up
 let startJourney = null, storyOver = null;
+// What part two (js/heist.js) may ask of the game: cars of its own that E can
+// find, the estate, who is at the wheel, and a way out of a seat with no door
+// animation for when the story moves him.
+const heistHost = {
+  addCar(kind, x, z, h, color) { const c = vehicles.add(kind, x, z, h, color); parked.push(c); return c; },
+  removeCar(c) {
+    if (game.car === c || player.inCar === c) this.exitCar();
+    const i = parked.indexOf(c);
+    if (i >= 0) parked.splice(i, 1);
+    vehicles.remove(c);
+  },
+  dropPatrol(c) { vehicles.remove(c); },
+  kombi: () => vasekCar,
+  driving: () => game.car,
+  exitCar() {
+    const c = game.car;
+    if (c) {
+      c.ctl = null; c.speed = 0;
+      game.car = null;
+      fpView = false;
+      parked.includes(c) || parked.push(c);
+      claimParked(c, false);
+      $id('speedo').classList.add('hidden');
+      hideCarName();
+      carStop();
+    }
+    player.boarding = player.exiting = null;
+    if (player.inCar) player.setInCar(null);
+  },
+  fail: (why) => failStory(why),
+};
 // THE CAMPAIGN HAS NO SECOND CHANCES (Frank, 18 Nov 2026): miss the last train
 // or die, and it starts again on the street in Kolín. Nothing was saved (see
 // career.js), so this is the same start a reload would give, without the menu.
 // The screen goes black with one line, the world streams in round the first
 // scene, and the film begins again with a new platform and a full clock.
 function failStory(why) {
-  if (storyOver || !startJourney) return;
+  if (storyOver || !(startJourney || heist)) return;
   const veil = document.createElement('div');
   veil.className = 'story-over';
   veil.innerHTML = '<div><strong></strong><span>Kampaň začíná znovu</span></div>';
   veil.querySelector('strong').textContent = why === 'train' ? 'Poslední vlak odjel' : why === 'busted' ? 'Zatkli tě' : 'Zemřel jsi';
+  // part two does not start the whole campaign again: it has its own way back
+  if (heist) {
+    const [head, line] = heist.failText(why);
+    veil.querySelector('strong').textContent = head;
+    veil.querySelector('span').textContent = line;
+  }
   document.body.append(veil);
   requestAnimationFrame(() => veil.classList.add('on'));
   storyOver = { veil, t: 0, moved: false };
@@ -180,16 +219,16 @@ function pumpStoryOver(dt) {
   o.t += dt;
   if (!o.moved && o.t > 1.4) {
     o.moved = true;
-    journey?.dispose(); journey = null;
-    meeting?.close?.(); meeting = null;
+    if (!heist) { journey?.dispose(); journey = null; meeting?.close?.(); meeting = null; }
     if (player.ragdoll) player.endRagdoll();
-    if (player.inCar) player.setInCar(null);
-    player.boarding = player.exiting = null;
+    heistHost.exitCar();
+    player.held = null;
     vitals.revive();
     statusbar.hideBanner();
     wanted.clear?.();
-    career.restartStory();
-    const at = career.startPoint();
+    let at;
+    if (heist) { at = heist.rewind(); if (Number.isFinite(at.h)) player.heading = at.h; }
+    else { career.restartStory(); at = career.startPoint(); }
     player.pos.x = at.x; player.pos.z = at.z;
     player.y = world.terrain.heightAt(at.x, at.z);
     world.city.ensureTiles?.(at.x, at.z)?.catch?.(() => {});
@@ -198,8 +237,8 @@ function pumpStoryOver(dt) {
   }
   // wait for the street to exist again (he may have died in Pardubice)
   const ready = o.moved && world.terrain.ready(player.pos.x, player.pos.z) && world.built.has(chunkKey(player.pos.x, player.pos.z));
-  if (o.moved && !journey && (ready && o.t > 3.4 || o.t > 30)) {
-    journey = startJourney('bridge');
+  if (o.moved && (heist || !journey) && (ready && o.t > 3.4 || o.t > 30)) {
+    if (!heist) journey = startJourney('bridge');
     o.veil.classList.remove('on');
     setTimeout(() => o.veil.remove(), 900);
     storyOver = null;
@@ -451,7 +490,7 @@ let _filmed = false;  // the story's film had the camera last frame
 function updateCamera(dt) {
   const drag = input.takeDrag();
   // the story's films: the opening and the train (journey), then Vašek's table (meeting)
-  if ((journey ?? meeting)?.frameCamera?.(camera, dt, drag)) {
+  if ((journey ?? meeting ?? heist)?.frameCamera?.(camera, dt, drag)) {
     fpHideSelf(false);
     camNear = camera.near;
     camInit = false;
@@ -1142,10 +1181,11 @@ input.onKey('KeyE', () => {
   if (game.mode !== 'play') return;
   if (player.ragdoll) return;      // flying through the air is not a door
   if (arrest) return;              // in handcuffs
-  if ((journey || meeting) && document.body.dataset.panelOpen) return;
+  if ((journey || meeting || heist) && document.body.dataset.panelOpen) return;
   // The story answers first: its opening is a film and E is the phone.
   if (journey?.use()) return;
   if (meeting?.use(player)) return;
+  if (heist?.use()) return;
   let jetNear = null;              // set by the fighter branch's own test
   if (trains?.riding) {
     // only with the doors open — stepping off at 140 km/h is not a feature
@@ -1338,7 +1378,8 @@ input.onKey('KeyE', () => {
         // diesel for the bus, motor whine for the Tesla. Without the kind it
         // would fall back to the Octavia four for everything.
         setTimeout(() => {
-          if (game.car === car) { sfx('engine_start', 0.7); carStart(car.kind); }
+          // (a car that has to be hot-wired first stays silent: js/heist.js starts it)
+          if (game.car === car && !car.hotwire) { sfx('engine_start', 0.7); carStart(car.kind); }
         }, 350);
       },
       // walked-up-and-it-vanished: a stolen car must stay enterable
@@ -1423,7 +1464,7 @@ function pumpArrest(dt) {
   if (!o.moved && o.t > 3.4) {
     o.moved = true;
     const story = career.activeStory();
-    if (story && story !== 'done') {
+    if ((story && story !== 'done') || heist) {
       // the campaign has no save to go back to: it starts again
       o.veil.remove(); arrest = null;
       if (player.ragdoll) player.endRagdoll();
@@ -3293,7 +3334,7 @@ async function boot() {
     $id('speedo').classList.add('hidden');
     hideCarName();
     // In the campaign there is no hospital to wake up in: it starts again.
-    if (startJourney && career.activeStory() && career.activeStory() !== 'done') {
+    if ((startJourney && career.activeStory() && career.activeStory() !== 'done') || heist) {
       setTimeout(() => { if (game.mode === 'play') failStory('death'); }, 2200);
       return;
     }
@@ -3600,7 +3641,7 @@ function stepGame(dt) {
     heliSet?.(Math.min(1, (game.heli.rotorSpeed ?? 0) / 60),
       Math.min(1, Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) / 62));
   } else if (game.car) {
-    const gas = career.throttle(game.car, -input.moveZ);   // a dry tank coasts
+    const gas = game.car.hotwire ? 0 : career.throttle(game.car, -input.moveZ);   // a dry tank coasts; no wires, no engine
     driveStep(game.car, {
       gas,                                     // W forward, S reverse/brake
       steer: input.moveX,
@@ -3613,7 +3654,7 @@ function stepGame(dt) {
     // car as it is, in metres per second; nothing here divides by a top speed.
     carDrive(dt, game.car, engineLoad(game.car, gas), gas, input.keys.has('Space'), world.city);
     if (shouldEject(game.car)) ejectDriver(game.car);
-  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt)) {
+  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt) && !heist?.posePlayer(dt)) {
     player.update(dt, { input, camYaw, world });
   }
   staminaHud(player, !game.car && !player.inCar);
@@ -3823,6 +3864,11 @@ function stepGame(dt) {
     meeting ??= meetVasek(vasekCar, scene, world, worldMap, career.checkpointStory, player);
     meeting.update(player, dt);
   }
+  // part two begins where part one was saved, and is saved again at its end
+  if (!heist && !meeting && !journey && !storyOver && career.heistPending())
+    heist = createHeist({ scene, world, player, map: worldMap, input, traffic, host: heistHost, complete: career.completeHeist });
+  heist?.update(dt);
+  if (heist?.finished) { heist.close(); heist = null; }
   statusbar.update(dt, _vitCtx);
 
   // ---- net: server co-op pump (menu → Multiplayer only; null in single) ----
@@ -4198,6 +4244,7 @@ tick();
 window.__atc = {
   build: 'v16-coop-shared-world',   // bump on risky changes — which code a tab runs
   get journey() { return journey; },
+  get heist() { return heist; },
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   // `cabin` is the graft's live truth, not a copy of fpView: a harness can

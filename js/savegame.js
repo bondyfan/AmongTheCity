@@ -44,6 +44,7 @@ export function blank() {
     v: SAVE_VERSION,
     savedAt: 0,
     prologue: null,
+    heist: null,               // 'done' once part two (js/heist.js) has been played through
     storyTrip: null,
     money: 2500,
     pos: null,                 // { x, z, h, y? } or null = the station forecourt
@@ -123,6 +124,7 @@ export function sanitize(raw) {
       ...(Number.isFinite(s.storyTrip.seatU) && Math.abs(s.storyTrip.seatU) < 40 ? {seatU: s.storyTrip.seatU} : {}),
     } : null,
     prologue: storyStops.includes(s.prologue) ? s.prologue : null,
+    heist: s.heist === 'done' ? 'done' : null,
     money: Math.round(clamp(fin(s.money, b.money), -MONEY_MAX, MONEY_MAX)),
     pos: sanePos(s.pos),
     tod: s.tod == null ? null : clamp(fin(s.tod, 0.25), 0, 1),
