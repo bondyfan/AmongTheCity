@@ -2627,6 +2627,14 @@ function* indexPayloadSteps(city, data, touched, slot = 0, heavyOnly = false, ke
     const [x,z] = b.o[0];
     if (Math.hypot(x+38850,z-739)<125 || Math.hypot(x-16,z+70)<130) b.y = Math.max(2.8,b.h-0.4);
   }
+  // The campaign's villa (js/heist.js) is the map's "Perníková chaloupka" under
+  // Kunětická hora, and nobody has been in it for half a year (Frank, 21 Nov
+  // 2026: "tam nesmí chodit lidi... musí to vypadat opuštěně"). So it is a
+  // shut, dark house, not a restaurant with its lights on: no trade, no name,
+  // and `sealed`, which means no inside of the city's making and no lit window
+  // (js/interiors.js hasInterior, js/typologylit.js litOf). The way in is the
+  // story's own (js/heist-villa.js).
+  for (const b of buildings) if (b.n === 'Perníková chaloupka') { b.t = 'house'; b.sealed = 1; delete b.u; delete b.n; }
   yield;
   // f._pw: shared walls, this tile only, a few thousand edges a step (partywalls.js)
   yield* stampPartyWallsSteps(buildings);

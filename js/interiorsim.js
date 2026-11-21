@@ -629,6 +629,9 @@ export class Interiors {
     if (f && bbDist(m.bb, f.x, f.z) > Math.max(this.drawR, I.activateR) + 40) return;
     m.populated = true;      // set even for the empty cases — never retried
     m._pop = null;
+    // the story may ask for empty houses: { x, z, r } (js/heist.js, round the villa)
+    const quiet = this.keepOut;
+    if (quiet && bbDist(m.bb, quiet.x, quiet.z) < quiet.r) return;
     const plan = m.plan;
     let n = Math.min(plan.occupants, MAX_OCCUPANTS - this.occupants.length);
     if (n <= 0 || plan.use === 'garage' || plan.use === 'parking') return;

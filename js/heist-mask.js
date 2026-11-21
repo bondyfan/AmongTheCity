@@ -20,7 +20,7 @@ export function balaclava(player) {
     group.removeFromParent();
     const human = !!cit.parts.headS,
       k = (cit.headTop ?? 1.78) / 1.78,
-      r = 0.138 * k,
+      r = 0.146 * k,
       up = human ? 0.088 * k : cit.eye.y - 0.012 * k; // the middle of the skull above the joint
     (cit.parts.headS ?? cit.parts.head).add(group);
     group.position.set(0, up, human ? -0.012 * k : 0);

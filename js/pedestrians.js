@@ -819,6 +819,10 @@ export class Pedestrians {
     // a few milliseconds apart on the clock still land on one number.
     const k = Math.round(this._densK * this._dayK(c) * 32) / 32;
     if (k <= 0) return 0;
+    // the story may ask for an empty place: { x, z, r } (js/heist.js, nobody
+    // walks round the villa). A cell that reaches into it sends nobody out.
+    const q = this.keepOut;
+    if (q && Math.hypot((c.ci + 0.5) * PCELL - q.x, (c.cj + 0.5) * PCELL - q.z) < q.r + PCELL * 0.71) return 0;
     const f = c.len * k / MPW;
     if (f >= SLOT_MAX) return SLOT_MAX;
     // Dither the fractional slot instead of truncating it: at the "Málo"
@@ -2282,6 +2286,9 @@ export class Pedestrians {
           alive--;
           continue;
         }
+        // a place the story emptied (keepOut): whoever walks into it is gone
+        const q = this.keepOut;
+        if (q && dist(b.x - q.x, b.z - q.z) < q.r) { this._detach(s); alive--; continue; }
         // Still this citizen's slot, so rule 1 applies in full: a body on
         // screen is not touched, and we ask again in 250 ms.
         if (!hidden) continue;

@@ -1210,6 +1210,7 @@ export function buildingPlan(f, roads, neighbours, ground = 0) {
 // no inside worth building.
 export function hasInterior(f) {
   if (!f.o || f.o.length < 3) return false;
+  if (f.sealed) return false;                          // shut for good: a solid, dark house (js/geo.js)
   if ((f.y ?? 0) > 0.5) return false;                 // skyways/arches
   const area = Math.abs(f._area ??= polygonArea(f.o));
   return area >= 14 && (f.h ?? 0) >= 2.3;

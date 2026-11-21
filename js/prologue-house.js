@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { scenery } from './prologue-kit.js';
+import { props } from './story-props.js';
 
 // Vašek's house: Dražkovická 119, the gabled house on the corner of Nemošická
 // in Pardubice. Outside it gets what makes a mapped box somebody's home (a
@@ -68,31 +69,11 @@ function interior(k) {
   k.box(0, 0.016, 0, 2.3, 0.02, 2.0, 0x9a5a48);
   k.box(0, 0.74, 0, 1.5, 0.05, 0.82, wood);
   for (const x of [-0.66, 0.66]) for (const z of [-0.33, 0.33]) k.box(x, 0.36, z, 0.07, 0.72, 0.07, 0x5f3f27);
-  for (const [x, z, back] of [
-    [0, -0.78, -1],
-    [0, 0.78, 1],
-    [-1.0, 0, 0],
-    [1.0, 0, 0],
-  ]) {
-    k.box(x, 0.45, z, 0.44, 0.045, 0.44, 0x6b4a2e);
-    for (const dx of [-0.19, 0.19]) for (const dz of [-0.19, 0.19]) k.box(x + dx, 0.225, z + dz, 0.04, 0.45, 0.04, 0x54381f);
-    if (back) {
-      k.box(x, 0.86, z + back * 0.21, 0.44, 0.34, 0.04, 0x6b4a2e);
-      for (const dx of [-0.19, 0.19]) k.box(x + dx, 0.68, z + back * 0.21, 0.04, 0.46, 0.04, 0x54381f);
-    } else {
-      const s = Math.sign(x);
-      k.box(x + s * 0.21, 0.86, z, 0.04, 0.34, 0.44, 0x6b4a2e);
-      for (const dz of [-0.19, 0.19]) k.box(x + s * 0.21, 0.68, z + dz, 0.04, 0.46, 0.04, 0x54381f);
-    }
-  }
+  // (the chairs, the bottles and the glasses are modelled: see furnish below)
   k.box(0, 2.3, 0, 0.02, 0.75, 0.02, 0x2a2a2a);
   k.box(0, 1.9, 0, 0.46, 0.2, 0.46, 0x9a3b2c, 0, false, 'round');
   k.box(0, 1.84, 0, 0.3, 0.1, 0.3, 0xffe1a8, 0, true, 'round');
-  // on the table: two bottles, an ashtray, his car keys, a newspaper
-  for (const [x, z] of [[0.42, 0.12], [0.3, 0.26]]) {
-    k.box(x, 0.86, z, 0.065, 0.2, 0.065, 0x4d3219);
-    k.box(x, 0.99, z, 0.03, 0.08, 0.03, 0x4d3219);
-  }
+  // on the table: an ashtray, his car keys, a newspaper (and the bottles: furnish)
   k.box(-0.4, 0.78, 0.2, 0.15, 0.03, 0.15, 0x8e969a, 0, false, 'round');
   k.box(-0.5, 0.775, -0.18, 0.09, 0.012, 0.05, 0x25282a);
   k.box(-0.42, 0.775, -0.16, 0.05, 0.01, 0.05, steel, 0, false, 'round');
@@ -147,6 +128,32 @@ function interior(k) {
   k.box(-2.92, 1.75, 0.2, 0.012, 0.34, 0.48, 0xb9a98a);
 }
 
+// What a box cannot be: four chairs round the table (backs outwards), two beer
+// bottles, one of them open and half drunk, and two small glasses.
+const TABLE = 0.765; // the table top
+function furnish(inside, kit) {
+  for (const [x, z, yaw] of [[0, -0.78, Math.PI], [0, 0.78, 0], [-1.0, 0, -Math.PI / 2], [1.0, 0, Math.PI / 2]]) {
+    const c = kit.chair();
+    c.position.set(x, 0, z);
+    c.rotation.y = yaw;
+    inside.add(c);
+  }
+  for (const [x, z, yaw, opts] of [
+    [0.42, 0.12, 0.4, { cap: false }],
+    [0.3, 0.27, 2.1, { glass: 0x2f4a1c, band: '#1d3d6b' }],
+  ]) {
+    const b = kit.bottle(opts);
+    b.position.set(x, TABLE, z);
+    b.rotation.y = yaw;
+    inside.add(b);
+  }
+  for (const [x, z] of [[0.2, 0.2], [0.34, -0.2]]) {
+    const s = kit.shot();
+    s.position.set(x, TABLE, z);
+    inside.add(s);
+  }
+}
+
 export function vasekHouse(scene, world) {
   const outside = new THREE.Group(),
     inside = new THREE.Group(),
@@ -164,9 +171,10 @@ export function vasekHouse(scene, world) {
   interior(ik);
   ik.finish();
   inside.visible = false;
+  const kit = props();
+  furnish(inside, kit);
   // the balaclava he pushes across the table
-  const mask = new THREE.Mesh(new THREE.SphereGeometry(0.5, 12, 8), new THREE.MeshLambertMaterial({ color: 0x141416 }));
-  mask.scale.set(0.24, 0.07, 0.2);
+  const mask = kit.balaclava();
   mask.visible = false;
   inside.add(mask);
   scene.add(outside, inside);
@@ -182,8 +190,7 @@ export function vasekHouse(scene, world) {
     },
     mask,
     dispose() {
-      mask.geometry.dispose();
-      mask.material.dispose();
+      kit.dispose();
       ok.dispose();
       ik.dispose();
     },

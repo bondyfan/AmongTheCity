@@ -32,6 +32,13 @@ export const villa = {
   car: { u: 46.5, v: 0.4 }, // under the lean-to behind the house, nose to the gate
   camera: { u: 30.2, v: 2.6, up: 3.3 }, // on the house's corner, over the drive
   cone: { u0: 9, u1: 31, half: 4.2 }, // the strip of drive the camera sees
+  // the house stands east of the drive: its main west wall is at v = 5.1 (u 12.3..31.4),
+  // the wing's north wall at u = 44.3 (v 2.5..24.5); the map's footprint, in this frame
+  ladder: { u: 24.5, v: 4.5 }, // the foot of the ladder against the west wall, under a window
+  scan: { cam: { u: 27.4, v: 5.04, up: 2.7 }, v: 4.3, u0: 21.3, u1: 27.7, period: 5 }, // the scanner over the ladder
+  back: { u: 44.36, v: 6.5 }, // the back door, in the wing's north wall beside the lean-to
+  under: { u: 20, v: 9, depth: 46 }, // where the rooms lie, far below the floor
+  quiet: 230, // metres round the gate in which nobody walks (Frank, 21 Nov 2026)
 };
 export function villaAt(u, v = 0) {
   const s = Math.sin(villa.h), c = Math.cos(villa.h);
