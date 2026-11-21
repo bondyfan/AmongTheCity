@@ -2709,6 +2709,45 @@ run solid, sound geometry on fifty real footprints, worker parity, the
 drive-through on the mapped lane, layouts inside their walls, visits that are
 deterministic and never teleport, the cart, the bag and the order.
 
+## The Tesla showroom at Průhonice (js/stores/showlayout.js, showroom.js, 21 Nov 2026)
+
+Tesla Centrum Praha is at V Oblouku 727, Průhonice (the retail zone it shares
+with Čestlice, by the D1). The map has it as the building "Tesla Prague"
+(`u: car`) in tile `-18_0`: a glazed strip 6.6 m deep wrapped round the south
+corner of its workshop hall, 306 m2. No tile was rebuilt for it.
+
+It is a fourth KIND of chain store, `showroom`, next to market, hyper and fast:
+`chains.js` has the record (only a footprint tagged `shop=car` of that name
+qualifies, so the service centre in Vysočany and every "Tesla" that is a
+pharmacy or a bowling alley stay what they were), `build.js` builds the same
+shell, and four things are its own.
+
+- **The front is the wall with room behind it** (`pickShowFront`, pinned by
+  `landmark.js pinStores` like every store's front). A grocer fronts its car
+  park; here a car has to stand nose to the gate and be driven straight out,
+  so each wall long enough for the gate's leaves is tried and the one with the
+  biggest floor directly behind its gate wins. `arch.glassAll` glazes every
+  wall that is not the back.
+- **The door is a gate 5.2 m wide.** It is the ordinary sliding door of
+  `shellfx.js`, and the ordinary doorway of `storeSolids` (a car's corner
+  probes pass under a solid whose `bot` is over 0.5). `world.js` opens it for
+  a car as well as for a walker.
+- **A car stands on the floor.** `city.surfaceY` asks `stores.deck(x, z)`: a
+  showroom's slab and the apron out of its gate, so the wheels are on the
+  floor the mesh draws and roll down the same ramp a walker climbs.
+- **The display cars are `parked` cars** (`showroom.js`), left open, with
+  `car._show = { o, id, gone }`. Which car is on which stand is a function of
+  the store's key and the slot; one that was driven away does not come back
+  this session, and like a kerb car that fact stays on the client that took it.
+
+**The theft rule** is `watchDisplay`, once a frame for the car the local player
+drives: a display car that is not `owned` and is more than `LOT_PAD` (9 m) from
+the footprint is charged once, `THEFT_HEAT` 46, which is two stars from a clean
+record (`wanted.js STAR_AT[2]` is 45). Sitting in it, and rolling it out onto
+the apron, cost nothing. Stars are local, so in co-op each player answers for
+the car they took. A car bought with B (`garage.js`) is the player's and is
+never charged; the Roadster has no price row, so it cannot be bought.
+
 ## Cars: true shapes, paint with a history, a solid hull, the Roadster (Nov 2026)
 
 **Shapes.** The Octavia (liftback and Combi) and the Model 3 were redrawn against the
@@ -2810,6 +2849,62 @@ teslu", every kind in fact). Now:
 - `traffic.claimSlot(key, gen)` on the peer drops his scheduled copy of that
   generation and his own ghost of it, and leaves a slot that holds another generation
   alone. Ghosts stay out of the crash list and the run-over list, as before.
+
+## Horns in space, the limit on the HUD, the law at a red light, no walking on the rails (Nov 2026)
+
+Frank, 21 Nov 2026: horns around him sounded close, all at one level and from one side;
+the HUD should show the speed limit and the car's model; police within 50 m give one star
+for driving more than 50 % over the limit or through a red; and nobody may walk across the
+tracks at Pardubice hl. n., or anywhere.
+
+**Positioned one-shots** (`js/spatialsfx.js`, pure math plus one small pool). `audio.js
+horn(x, z)` and every `sfxAt(...)` (traffic going past, sirens, crashes, screams, birds) now
+play through eight prebuilt voices: gain (1/r, a horn's close radius 5 m, the rest 10 m),
+a lowpass swept in log frequency with distance and a little darker behind you, a stereo
+panner from the bearing to the ears, and a send into the shared street reverb that grows
+with distance. A sound starts `d / 343` s late. `setListener` (main.js, every step: the car
+you drive or your feet, the camera's bearing) re-aims every sounding voice, so a horn swings
+round as you turn. When all eight sound, the quietest at the ear is stolen by anything
+louder; otherwise the new sound is dropped. `sfxAt` took a seventh parameter, `rate` (the
+ambulance's slower wail goes through it now). Your own horn (`horn()` with no position,
+`caraudio.carHorn`) stays in the middle of your head.
+
+**The limit and the model** (`js/roadlaw.js`, `js/lawhud.js`). The limit is the `speed` of
+the traffic edge under the wheels, exactly what the AI drivers obey (posted maxspeed from
+the tile, else the class default of `traffic.js defaultV`), found through
+`traffic.edgesNear` as the nearest carriageway you are inside, preferring the edge pointing
+your way (the two directions of a street are two edges; the crossing street at a junction
+points across you). A new limit has to last 0.25 s before the sign changes; off every road
+the sign lasts 3 s. `#limit-sign` is a Czech B 20a disc left of the number in `#speedo`
+(`.over` above the limit, `.way` more than 50 % above it), `#car-model` the model under
+`#fuel` (`vehicles.carLabel`). Only while you drive.
+
+**One star in front of the police.** "Víc než 50 %" is read as more than 50 % OVER the limit
+(over 75 in a 50). Held for 0.6 s with a patrol car, a pursuit unit or an officer on foot
+within 50 m: `wanted.add` of `rychlost`. A red light: the approach you drive is WATCHED from
+before its hold point (`traffic.js sigStop`, the point the AI stops at, a couple of metres
+short of the paint); 3 m past it at over 2 m/s while `traffic.lightOf(e)` is 2 (the AI's own
+phase on the shared clock), with police within 50 m: `cervena`. A traffic offence tops the
+heat up to 30, inside the first star (18 to 45), never past it, so it is one star however
+often, kept fresh, and nobody shoots below three (`policetune.js`). An 8 s cooldown per
+offence. Local state like the rest of the wanted level.
+
+**No walking on the rails** (`js/railbarrier.js`, called from `city.js collide()` for
+walkers, `opts.interior`: the player and anybody else moved that way, the thrown-out
+driver of a jacked car). Every heavy-rail way at grade (not a tram, a bridge or a tunnel)
+is a strip 2.25 m either side of its centreline, the foot of the ballast bed the mesher
+draws; a walker is pushed back out of it like out of a wall. That is also where a platform
+visibly ends: the bed is drawn over the mapped platform polygon, which at Pardubice reaches
+to 1.5 m of the rail, so the polygon gives no exception. Open: where any way (road, service
+road, footway, path) meets the track at grade, inside that way's width plus half a metre
+(the gates are indexed per chunk cell from its own rails and roads, endpoints included,
+because OSM draws a crossing as a shared node); anywhere more than `LEVEL_GAP` above or
+below the rail top (the station underpasses, the footbridge, road underpasses and bridges);
+the station's own rooms, stairs and deck ramps (`stationPassages.floor`); and the story
+coach's door step (`world.storyCoach.boarding`, prologue.js). The campaign's yard boxes
+(`prologue-tracks.js`) stay as they were. Pedestrians walk mapped footways, which cross the
+rails only where the map has a crossing. Pure in tile data and position, so co-op screens
+agree without a word.
 
 ## Riding along in a car another player drives (21 Nov 2026)
 

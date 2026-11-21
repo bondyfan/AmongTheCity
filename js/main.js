@@ -17,6 +17,7 @@ import { StoreWorld } from './stores/world.js';
 import { makeCitizen } from './citizen.js';
 import './stores/crowd.js';
 import './stores/eating.js';
+import './stores/showroom.js';
 import { worldT } from './worldclock.js';
 import { CityWorld } from './city.js';
 import { planRings, planCarRings } from './streamplan.js';
@@ -54,6 +55,8 @@ import { PRICE, pumpBrand, pumpPrice, kc2, kc } from './prices.js';
 import { Combat } from './combat.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
+import { RoadLaw } from './roadlaw.js';
+import { createLawHud } from './lawhud.js';
 import { toast as policeToast } from './toasts.js';
 import { Ambulance } from './ambulance.js';
 import { ChatBubbles } from './chatbubbles.js';
@@ -306,6 +309,8 @@ let _stationT = 0;
 let combat = null;       // fists, and what falls out of people — js/combat.js
 let police = null;       // the patrol that wants you — js/police.js
 let ambulance = null;    // and the one that comes for the body — js/ambulance.js
+let roadLaw = null;      // the limit of your road and the police who watch it: js/roadlaw.js
+let lawHud = null;       // the limit disc and the model line on the HUD: js/lawhud.js
 let chatter = null;      // who says what, and when — js/chatter.js
 let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
@@ -709,7 +714,8 @@ function updateCamera(dt) {
   // the one that crosses a block every fifth of a second.
   const flying = !!(game.heli || game.jet);
   const enclosed = !flying && !game.car && (journey?.aboard || world.stationPassages?.inside(tx, tz, player.y));
-  const inShop = !flying && !game.car && !!world.stores?.covered(tx, tz);
+  // (a car is only ever under a store's roof in a showroom, and is looked at from inside it too)
+  const inShop = !flying && !!world.stores?.covered(tx, tz);
   const indoors = enclosed || inShop || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
   if (indoors) dist = Math.min(dist, enclosed ? 0.85 : 3.4);
   const flat = Math.cos(pitch) * dist;
@@ -2682,6 +2688,8 @@ function updateHud(dt) {
     $id('speed-num').textContent = `${kmh}`;
     $id('speed-unit').textContent = `km/h · ${Math.round(game.heli.y)} m`;
   }
+  // the limit of this road beside the speed, the model under the fuel
+  lawHud?.(game.car, roadLaw?.limit ?? 0, game.car ? carLabel(game.car) : '');
   // vehicle name card: counted down per frame, not on the 0.2 s hint tick, so
   // three seconds is three seconds and not "three seconds rounded to a tick"
   if (_carNameHold > 0) {
@@ -3130,6 +3138,9 @@ async function boot() {
   world.stores = new StoreWorld(scene, world, {
     wallet, vitals, wanted, toast: policeToast, storage: globalThis.localStorage ?? null,
     hour: () => tod() * 24, time: () => worldT(), makeCitizen,
+    // a showroom's display cars are the game's own vehicles, in the same `parked` list as every other
+    cars: { add: (...a) => vehicles.add(...a), remove: (c) => vehicles.remove(c), parked,
+      driving: () => game.car, riding: () => player?.inCar ?? null },
     onAte: (hp, kcal, what) => policeToast(what, { icon: '🍴', kind: 'good', sub: '+' + hp + ' zdraví · +' + kcal + ' sytost' }),
   });
   grass = new Grass(scene, world, city);
@@ -3434,6 +3445,11 @@ async function boot() {
     },
     onArrest: () => busted(), onTackle: () => tackled() });
   ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL, hospitals: HOSPITALS });
+  // Speeding past the police and running a red under their noses: one star
+  // (Frank, 21 Nov 2026). It reads the traffic's edges and lights and writes
+  // only your own heat.
+  roadLaw = new RoadLaw({ traffic, police, wanted, toast: policeToast });
+  lawHud = createLawHud(document);
 
   // ---- the body, the wallet and the tank ----
   statusbar.init();
@@ -4010,6 +4026,7 @@ function stepGame(dt) {
   _polCtx.onFoot = _vitCtx.onFoot; _polCtx.y = game.car ? NaN : player.y;
   _polCtx.lying = !!player.ragdoll;
   police?.update(dt, _polCtx);
+  roadLaw?.update(dt, game.mode === 'play' ? game.car : null);
   ambulance?.update(dt, _polCtx);
   combatInput(dt);
   updateStars();
@@ -4477,6 +4494,7 @@ window.__atc = {
   get police() { return police; },
   get roadWorks() { return roadWorks; },
   get ambulance() { return ambulance; },
+  get roadLaw() { return roadLaw; },
   get traffic() { return traffic; },
   said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
   get interiors() { return world?.interiors; },
