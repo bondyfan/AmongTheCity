@@ -192,6 +192,7 @@ export class KerbParking {
     this.world = world;
     this.parked = parked;        // main's enterable-car array (shared reference)
     this.veto = veto;
+    this.roomTod = null;         // co-op: the one hour every client fills its kerbs by (js/roomview.js)
     this._stalls = new WeakMap(); // way -> stalls (NOT on the way: see the header)
     // A far tile gives its ways back (geo.js RELEASE_DATA) and brings new
     // objects with the same ids when it returns, so the stalls are worked out
@@ -227,6 +228,7 @@ export class KerbParking {
     this._t -= dt;
     if (this._t > 0) return;
     this._t = SCAN_DT;
+    if (this.roomTod != null) t01 = this.roomTod;   // co-op: one hour for everybody (js/roomview.js)
     const occ = occAt(t01) * FILL;
     const virgin = this._virgin;
     this._virgin = false;

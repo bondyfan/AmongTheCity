@@ -288,12 +288,14 @@ export class ParkingLots {
     this._live = new Set();   // lots that may have cars standing (to drain)
     this._near = [];          // scratch: the lots of this sweep
     this._seen = new Set();
+    this.roomTod = null;      // co-op: the one hour every client fills its lots by (js/roomview.js)
   }
 
   update(dt, pos, t01, reserved = null) {
     this._t -= dt;
     if (this._t > 0) return;
     this._t = SCAN_DT;
+    if (this.roomTod != null) t01 = this.roomTod;
     const occTown = occAt(t01), occLorry = lorryOccAt(t01), occSvc = serviceOccAt(t01), occShop = shopOccAt(t01);
     const virgin = this._virgin;
     this._virgin = false;

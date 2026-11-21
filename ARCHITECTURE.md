@@ -2866,3 +2866,59 @@ coach's door step (`world.storyCoach.boarding`, prologue.js). The campaign's yar
 (`prologue-tracks.js`) stay as they were. Pedestrians walk mapped footways, which cross the
 rails only where the map has a crossing. Pure in tile data and position, so co-op screens
 agree without a word.
+
+## One street for two players: the room (21 Nov 2026)
+
+Frank: "hraci v multiplayeru nevidi stejne auta stejny provoz atd.... proste kazdy hrac
+musi videt to stejne co ten druhy/jiny". The traffic SCHEDULE was shared already; what
+each client DREW was not. Measured with two clients on one corner of Palackého, back to
+back (`node dev/coopbench.mjs`, and once in the game with two tabs and `dev/coopprobe.js`):
+22 % of the cars around them stood in the same place on both screens. Three causes, all
+in `js/traffic.js`, none of them the schedule:
+
+- **The camera decided.** A mesh arrives, and a finished car drives on as a ghost, only
+  where the LOCAL camera cannot see the change (v9). Two players facing opposite ways
+  therefore attached and kept different cars. While `traffic.watchers` (the peers within
+  `ROOM_R` = 1200 m, `js/roomview.js peersNear`, set by `main.js` every frame) is not
+  empty, "watched" has no direction: inside the fog wall of any player. A mesh is refused
+  near anybody only to a car that was BORN near somebody (`_bornWatched`, from a `Trail`
+  of where each player stood), so a player who drives up later is handed every car his
+  friend already has. The far attach band is used all round.
+- **A ghost was nobody's but this screen's.** It drove off free of the schedule, by a
+  route chosen to leave THIS camera's view. In a room a ghost made by the end of a trip
+  or a generation keeps its schedule: every trip that ends by length ROLLS (`_rolls`, no
+  stop at the end), the hashed walk is laid `OT_LEG` further from the schedule's own end
+  (`p.ot`, overtime), and the body follows it under the usual lag clamp. A ghost made by a
+  blockage or one that falls `LAG_MAX` behind is still local (`p.ot = 0`), on the hashed
+  walk as well.
+- **The graph depended on the order the tiles arrived.** A way was cut into edges at the
+  junctions known when it arrived, so a way of a later tile joining it mid-polyline found
+  no node: 68 of 25 000 edges differed between two arrival orders of the four tiles whose
+  common corner is the centre of Pardubice, and two clients fetch those in parallel.
+  `_resplit` takes such an earlier way out (`releaseSteps`) and cuts it again with the
+  batch; `_recut` does the reverse when a tile leaves. Schedules routed over a re-cut way
+  are dropped and minted again by the next scan. This one applies in single player too.
+
+Ghosts are walls again in a session (`main.js isGhostCar`): they are on both screens now,
+and in a room about half the cars near the players are ghosts.
+
+Parked cars: `ROOM_PARK_TOD`. Car parks and kerbs fill by the hour and never change where
+the player could watch, so a street held whatever the hour was when THAT player arrived;
+in a session they all fill as at 19:00, for everybody.
+
+After (same bench, 5 min, share of cars within 2 m on both screens): side by side 1.00,
+back to back 1.00 (was 0.22), one of them blocking the junction 0.93 (0.17), 30 against
+60 fps 0.97, 150 m apart 0.65 (0.37), driving in convoy 0.87, a player driving up to the
+other 0.14 in the first minute and 0.92 from the fourth. In the game, back to back: 0.79
+(0.22), 3 % of the cars on one screen only. What is left is LAG, which is history: a
+client that met a car later holds it nearer its schedule than one whose copy has queued,
+and a ghost exists only where somebody had its car when the trip ended. The remedy for
+both is a small snapshot over the wire (slot key and arc of the cars near each player,
+the hooks `p.key` and `p.sR` the v8 header names), which is not built. Not touched and
+still decided by each camera: pedestrians (0.67 in the same game test) and cyclists
+(0.78), `_hidden()` in `js/pedestrians.js` and `js/cyclists.js`. Buses start a trip at
+whichever stop is in reach and agree from the first stop both clients share. Random
+trains, pursuits and the ambient ambulance are local.
+
+Fleet: a room holds about 45 % more cars than one camera (84 against 58 at noon), the
+ghosts all round instead of in the cone.

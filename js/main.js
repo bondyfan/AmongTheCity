@@ -107,6 +107,7 @@ import { parkSpots } from './parkspot.js';
 import { localUid, strHash, baseId } from './identity.js';
 import { hash32 } from './jobgen.js';
 import { makeGhostCars } from './netvehicles.js';
+import { peersNear, ROOM_PARK_TOD } from './roomview.js';
 import { makeNetUI } from './netui.js';
 // jobs, ownership, stats, the save: the whole gameplay layer hangs off this one
 // module (js/career.js lists the hooks main.js calls, and why there are so few)
@@ -957,7 +958,19 @@ function motionBlurAmount() {
 // In single player there is no other machine, and the exclusion turns into the
 // bug the user reported — a car appears in front of you that you cannot get
 // into and that your bumper passes straight through. So: no session, no ghosts.
-function isGhostCar(c) { return net && traffic ? traffic.slotKey(c) === null : false; }
+//
+// SINCE 21 NOV 2026 A SESSION HAS NONE EITHER. With a peer near, traffic keeps
+// a ghost by one test for everybody and drives it on the shared schedule
+// (js/traffic.js "the room"), so the car that is on this screen is on his:
+// measured in the game, two players back to back on one corner, 3 % of the
+// cars around them were on one screen only (it had been more than half). And
+// those same rules keep a ghost wherever ANYBODY could see it, not only in
+// this camera's cone, so about half the cars round a pair of players are
+// ghosts: a bumper that passed through every second car would be a far worse
+// lie than the odd car a peer does not draw. With no peer near there is
+// nobody to disagree with. So every car on the screen is a wall and can run
+// somebody over, in a session as out of one.
+function isGhostCar(c) { return false; }
 
 // The AI fleet minus the ghosts — every car both clients agree exists.
 // Rebuilt per call: traffic.cars churns every frame and callers hold the
@@ -1963,8 +1976,7 @@ function placeParkedCars(city, spawn = SPAWN, base = 0) {
 }
 
 // every car the player can hit — traffic + parked, self filtered in driveStep.
-// SHARED traffic only: see isGhostCar. A ghost is not a wall, because on the
-// peer's screen there is nothing there to bounce off.
+// (Ghosts included since 21 Nov 2026, in a session too: see isGhostCar.)
 function _crashList() {
   if (!traffic) return parked;
   const out = sharedCars();
@@ -2049,6 +2061,10 @@ function trafficTimeK(t01) {
 // twenty fresh little objects a frame is 1200 allocations a second for nothing.
 const _actors = [];
 const _actorPool = [];
+// …and everybody near enough to WATCH the same street (js/roomview.js): while
+// there is one, traffic stops deciding by this camera alone what may appear
+// and what may drive on, so two players on one corner hold one set of cars
+const _watchers = [];
 // (`y`: the height they stand at. The traffic of another level, the street
 // under the bridge you are on, does not brake for you: js/levelsep.js.)
 function pushActor(x, z, half, y) {
@@ -3802,11 +3818,15 @@ function stepGame(dt) {
   traffic.setViewer(view);
   peds.setViewer(view);
   traffic.actors = updateActors();
+  traffic.watchers = net?.remotes.size ? peersNear(net.remotes.values(), player.pos.x, player.pos.z, _watchers) : null;
   traffic.blockers = updateBlockers();
   cyclists?.blockInto(traffic.blockers);   // riders out in a lane are hulls the traffic waits behind
   cityLife?.trams?.blockInto(traffic.blockers);   // …and so is a tram, on its rail or in the street (js/tramyield.js)
   traffic.update(dt, player.pos, game.car);
   roadWorks?.update(dt, traffic.now(), sky?.nightK ?? 0, player.pos.x, player.pos.z);
+  // (in a session the parked cars keep one hour: js/roomview.js ROOM_PARK_TOD)
+  if (parkingLots) parkingLots.roomTod = net ? ROOM_PARK_TOD : null;
+  if (cityLife?.kerb) cityLife.kerb.roomTod = net ? ROOM_PARK_TOD : null;
   parkingLots?.update(dt, player.pos, tod(), career.activeStory() === 'forecourt' ? vasekCar : null);
   cityLife?.update(dt, player.pos, tod());
   // ragdoll physics needs to know what can hit a pedestrian: every SHARED AI
