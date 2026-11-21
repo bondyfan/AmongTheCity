@@ -176,6 +176,12 @@ export function makeSite(f, chain, front) {
       run(e, g1, e.len, 'wall');
       continue;
     }
+    // a showroom is glass on every side a passer-by can look in from
+    if (A.glassAll && e.role !== 'back' && e.len > 3.2) {
+      const m = Math.min(0.6, e.len * 0.12);
+      run(e, 0, m, 'wall'); run(e, m, e.len - m, 'glass'); run(e, e.len - m, e.len, 'wall');
+      continue;
+    }
     // a side wall is glazed from the front corner back, on the side the door is nearer to
     if ((e.role === 'left' || e.role === 'right') && (A.glassS ?? 0) > 0 && e.len > 6) {
       const doorSide = (sc < fe.len / 2 ? -1 : 1) * along < 0 ? 'left' : 'right';
@@ -217,7 +223,8 @@ export function spotsOf(site) {
   const A = site.chain.arch, w = site.door.w, s = site.side;
   const room = s > 0 ? site.uR : -site.uL;        // front left on the trolley side
   const fast = site.chain.kind === 'fast';
-  const bayLen = fast ? 0 : Math.min(6.5, room - w / 2 - 1.6);
+  // (trolleys are a grocer's: a restaurant and a showroom have none)
+  const bayLen = fast || site.chain.kind === 'showroom' ? 0 : Math.min(6.5, room - w / 2 - 1.6);
   const b0 = w / 2 + 1.1;
   const bay = bayLen >= 2.4 ? { u0: s > 0 ? b0 : -(b0 + bayLen), u1: s > 0 ? b0 + bayLen : -b0, v0: 0.5, v1: 2.5 } : null;
   let canopy;

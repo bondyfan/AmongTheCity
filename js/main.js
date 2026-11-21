@@ -17,6 +17,7 @@ import { StoreWorld } from './stores/world.js';
 import { makeCitizen } from './citizen.js';
 import './stores/crowd.js';
 import './stores/eating.js';
+import './stores/showroom.js';
 import { worldT } from './worldclock.js';
 import { CityWorld } from './city.js';
 import { planRings, planCarRings } from './streamplan.js';
@@ -706,7 +707,8 @@ function updateCamera(dt) {
   // the one that crosses a block every fifth of a second.
   const flying = !!(game.heli || game.jet);
   const enclosed = !flying && !game.car && (journey?.aboard || world.stationPassages?.inside(tx, tz, player.y));
-  const inShop = !flying && !game.car && !!world.stores?.covered(tx, tz);
+  // (a car is only ever under a store's roof in a showroom, and is looked at from inside it too)
+  const inShop = !flying && !!world.stores?.covered(tx, tz);
   const indoors = enclosed || inShop || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
   if (indoors) dist = Math.min(dist, enclosed ? 0.85 : 3.4);
   const flat = Math.cos(pitch) * dist;
@@ -3070,6 +3072,9 @@ async function boot() {
   world.stores = new StoreWorld(scene, world, {
     wallet, vitals, wanted, toast: policeToast, storage: globalThis.localStorage ?? null,
     hour: () => tod() * 24, time: () => worldT(), makeCitizen,
+    // a showroom's display cars are the game's own vehicles, in the same `parked` list as every other
+    cars: { add: (...a) => vehicles.add(...a), remove: (c) => vehicles.remove(c), parked,
+      driving: () => game.car, riding: () => player?.inCar ?? null },
     onAte: (hp, kcal, what) => policeToast(what, { icon: '🍴', kind: 'good', sub: '+' + hp + ' zdraví · +' + kcal + ' sytost' }),
   });
   grass = new Grass(scene, world, city);

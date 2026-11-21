@@ -2709,6 +2709,45 @@ run solid, sound geometry on fifty real footprints, worker parity, the
 drive-through on the mapped lane, layouts inside their walls, visits that are
 deterministic and never teleport, the cart, the bag and the order.
 
+## The Tesla showroom at Průhonice (js/stores/showlayout.js, showroom.js, 21 Nov 2026)
+
+Tesla Centrum Praha is at V Oblouku 727, Průhonice (the retail zone it shares
+with Čestlice, by the D1). The map has it as the building "Tesla Prague"
+(`u: car`) in tile `-18_0`: a glazed strip 6.6 m deep wrapped round the south
+corner of its workshop hall, 306 m2. No tile was rebuilt for it.
+
+It is a fourth KIND of chain store, `showroom`, next to market, hyper and fast:
+`chains.js` has the record (only a footprint tagged `shop=car` of that name
+qualifies, so the service centre in Vysočany and every "Tesla" that is a
+pharmacy or a bowling alley stay what they were), `build.js` builds the same
+shell, and four things are its own.
+
+- **The front is the wall with room behind it** (`pickShowFront`, pinned by
+  `landmark.js pinStores` like every store's front). A grocer fronts its car
+  park; here a car has to stand nose to the gate and be driven straight out,
+  so each wall long enough for the gate's leaves is tried and the one with the
+  biggest floor directly behind its gate wins. `arch.glassAll` glazes every
+  wall that is not the back.
+- **The door is a gate 5.2 m wide.** It is the ordinary sliding door of
+  `shellfx.js`, and the ordinary doorway of `storeSolids` (a car's corner
+  probes pass under a solid whose `bot` is over 0.5). `world.js` opens it for
+  a car as well as for a walker.
+- **A car stands on the floor.** `city.surfaceY` asks `stores.deck(x, z)`: a
+  showroom's slab and the apron out of its gate, so the wheels are on the
+  floor the mesh draws and roll down the same ramp a walker climbs.
+- **The display cars are `parked` cars** (`showroom.js`), left open, with
+  `car._show = { o, id, gone }`. Which car is on which stand is a function of
+  the store's key and the slot; one that was driven away does not come back
+  this session, and like a kerb car that fact stays on the client that took it.
+
+**The theft rule** is `watchDisplay`, once a frame for the car the local player
+drives: a display car that is not `owned` and is more than `LOT_PAD` (9 m) from
+the footprint is charged once, `THEFT_HEAT` 46, which is two stars from a clean
+record (`wanted.js STAR_AT[2]` is 45). Sitting in it, and rolling it out onto
+the apron, cost nothing. Stars are local, so in co-op each player answers for
+the car they took. A car bought with B (`garage.js`) is the player's and is
+never charged; the Roadster has no price row, so it cannot be bought.
+
 ## Cars: true shapes, paint with a history, a solid hull, the Roadster (Nov 2026)
 
 **Shapes.** The Octavia (liftback and Combi) and the Model 3 were redrawn against the

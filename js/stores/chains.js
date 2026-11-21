@@ -30,6 +30,8 @@ const HOUSING = /^(apartments|residential|dormitory|terrace|panel|house|detached
 const market = (o) => ({ kind: 'market', minA: 520, maxA: 9000, hours: [7, 21], ...o });
 const hyper = (o) => ({ kind: 'hyper', minA: 2400, maxA: 60000, hours: [7, 22], ...o });
 const fast = (o) => ({ kind: 'fast', minA: 150, maxA: 1400, hours: [6, 24], ...o });
+// a car maker's own showroom: a glass box with cars standing in it (js/stores/showroom.js)
+const showroom = (o) => ({ kind: 'showroom', minA: 150, maxA: 6000, hours: [9, 20], ...o });
 
 export const CHAINS = [
   market({ id: 'lidl', re: /^lidl\b/i, label: 'Lidl',
@@ -95,6 +97,14 @@ export const CHAINS = [
       fin: 0xf5ebdc, finH: 6.2, accent: 0xff8732 },
     sign: { bg: 0xf5ebdc, fg: 0xd62300 },
     eat: { kiosks: 3, tills: 3, drive: true } }),
+  // Tesla Centrum Praha, V Oblouku 727, Průhonice (the map's "Tesla Prague"): a
+  // glazed strip round the corner of its workshop hall. Its door is a gate a
+  // car is driven out through; `show.cars` are what stands on the floor.
+  showroom({ id: 'tesla', re: /^tesla\b/i, label: 'Tesla',
+    arch: { style: 'box', hF: 6.2, hB: 6.2, glassF: 0.94, glassS: 0, glassAll: true, wall: 0xf3f3f1, base: 0x2b2d30,
+      band: 0x191a1c, bandH: 1.3, frame: 0x1f2124, roof: 0x8f9498, canopy: 0x191a1c, door: 'centre', doorW: 5.2 },
+    sign: { bg: 0x191a1c, fg: 0xffffff, accent: 0xe82127, text: 'TESLA', square: true },
+    show: { cars: ['roadster', 'tesla'] } }),
 ];
 
 const BY_ID = new Map(CHAINS.map((c) => [c.id, c]));
@@ -134,7 +144,8 @@ export function standalone(f, chain) {
   for (const h of f.i ?? []) if (h.length >= 3) hole += ringArea(h);
   if (hole > a * 0.12) return false;
   const u = f.u ?? '';
-  if (chain.kind === 'fast' ? u !== 'fast_food' && u !== 'restaurant'
+  if (chain.kind === 'showroom' ? u !== 'car'
+    : chain.kind === 'fast' ? u !== 'fast_food' && u !== 'restaurant'
     : !/^(supermarket|hypermarket|wholesale|convenience)$/.test(u)) return false;
   return a >= chain.minA && a <= chain.maxA;
 }
