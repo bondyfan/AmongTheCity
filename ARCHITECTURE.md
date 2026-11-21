@@ -2127,6 +2127,57 @@ save has part one and not part two. Like part one it is played in one sitting:
 * **Sound**: `scripts/gen-heist-audio.mjs` (ElevenLabs, run only when asked).
   `storyRecording()` gained `set(level)` for looping beds (the van's radio).
 
+## Part two, second pass: the weave, the villa's rooms, the buyer (21 Nov 2026)
+
+Frank, 21 Nov 2026, five things, all in `js/heist*.js` and `js/story-props.js`:
+
+- **Jarda weaves and gives up the wheel** (`heist-ride.js`, `heist-farmer.js`).
+  `rideScript` runs the stretch from the farm to the forest: `ride` (Jarda
+  drives; `farmer.weave(0|1|2)` widens the sine he wanders by, `pullOver()`
+  stops him on the verge), `swap` (he walks round the bonnet with `man.walk`,
+  takes seat 1 once the player has left it; the player takes seat 0 by the
+  game's own E), `drive` (the van is an ordinary car of the game now), `drop`
+  (`takeWheel()` moves Jarda back across, then `leave()`). A car the player
+  has ridden in is off main.js's `parked` list, so the van asks `host.offer`
+  to be findable again. A skipped ride (retry) is the old one: he drives it all.
+- **The villa** (`heist-villa.js`, `heist-house.js`, `heist-lasers.js`). The
+  map's "Perníková chaloupka" is rewritten when its tile is read (`geo.js`:
+  `t: 'house'`, `sealed`, no trade, no name). `sealed` means no inside of the
+  city's making (`interiors.hasInterior`), so it is a solid block to a walker,
+  and no lit window (`typologylit.litOf`). `host.quiet({x,z,r})` sets
+  `peds.keepOut` and `interiors.keepOut`: nobody walks there, nobody lives
+  there. The way in is the story's: a ladder and a window on the west wall
+  (a fade), into four rooms that are a set 46 m under the house. While he is
+  in them `villaJob` is `world.storyCoach` (floor, and `pushOut` against
+  `walls` and `furniture`) and owns the camera: from above and from the
+  south, no ceiling, `host.aim(Math.PI)` so that W is up the picture. The
+  game's own boom does not fit between those walls.
+  A scanner (`scanners(parent, specs)`) is a camera on a wall whose beam comes
+  down to a dot that swings between two points and rests at each; `caught()`
+  is the dot and the beam below waist height. Five inside, one over the
+  ladder. Being caught is `host.fail('laser')`: back to the gate, the key on
+  the desk again (`job.reset()`). `tests/heist.test.mjs` searches place and
+  time to prove the house can be walked at a walk between the beams.
+  The key (`E` at the desk) unlocks the car (`merc.key()`); holding E starts
+  it. The broken window and the two wires are gone. `villa-music` plays from
+  the gate until the engine catches.
+- **Leaves** (`heist-car.js`). Each leaf and twig is an item with a threshold
+  of "metres driven, weighted by speed"; past it the instance on the car is
+  zeroed and a twin in `air` (an unlit InstancedMesh in the scene) leaves with
+  half the car's speed, sinks at 1.2 m/s rocking, lies on the road 11 s and
+  shrinks away. Bird lime stays on the car.
+- **The end** (`heist-garage.js`, `heist-deal.js`). `garageSet` is the room,
+  shared by two films: `garageScene` (night, the door down) ends on the card
+  "V poledne"; `dealScene` opens the door on a white noon. The briefcase
+  (`props().briefcase()`) is never parented to a hand: each frame it is put at
+  the holder's hand socket, or between two hands during a handover (`owner`
+  0..2), or laid flat on Vašek's arm with the lid up (`flat`, `open`).
+  `step` orders the scene: lines 0..5, the look into the case at 2.5.
+- **Props** (`story-props.js`): turned bottles with labels, small glasses, a
+  knitted balaclava with an eye opening, kitchen chairs with spindles, the
+  briefcase with its money. Vašek's kitchen (`prologue-house.js furnish`)
+  and the villa use them.
+
 ## A failed mission starts clean (js/story-retry.js, Nov 2026)
 
 Frank, 20 Nov 2026: dead or arrested, the mission starts again, every film can

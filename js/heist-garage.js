@@ -5,10 +5,11 @@ import { actor } from './prologue-actor.js';
 import { garageTalk } from './heist-dialogue.js';
 import { city } from './heist-route.js';
 
-// The end of part two: the door comes down and the two of them stand by the
-// car under one bulb. A closed set far below the lock-up, like Vašek's kitchen
-// (js/prologue-house.js). Set frame: x across, z from the door (−) to the back
-// wall (+), the car along the left wall.
+// The end of part two, first half: the door comes down and the two of them
+// stand by the car under one bulb. The second half is noon and the buyer
+// (js/heist-deal.js), in the same room with the door up. A closed set far
+// below the lock-up, like Vašek's kitchen (js/prologue-house.js). Set frame:
+// x across, z from the door (−) to the back wall (+), the car along the left wall.
 const DEPTH = 46;
 const HIM = { x: 1.3, z: -0.55 }, // Vašek, facing the door
   ME = { x: 1.35, z: -2.25 }; // the father, his back to it
@@ -23,7 +24,10 @@ const shots = {
 const byLine = ['car', 'me', 'him', 'me', 'two'];
 const mix = (a, b, t) => a + (b - a) * t;
 
-export function garageScene({ scene, world, player, hud, lights, friend, car, done }) {
+export const ROOM = { W: 5.8, L: 7.6, H: 2.6 };
+// The room: built once for both halves. `open(true)` lifts the door on a
+// bright noon street; `at(x, y, z, out)` is set frame → world.
+export function garageSet(scene, world) {
   const group = new THREE.Group();
   group.name = 'Příběh • garáž uvnitř';
   const ox = city.door.x,
@@ -32,15 +36,13 @@ export function garageScene({ scene, world, player, hud, lights, friend, car, do
   group.position.set(ox, oy, oz);
   scene.add(group);
   const k = scenery(group);
-  const W = 5.8, L = 7.6, H = 2.6;
+  const { W, L, H } = ROOM;
   k.box(0, -0.05, 0, W, 0.1, L, 0x4a4a48); // floor
   k.box(-0.6, 0.004, 0.4, 1.4, 0.006, 2.2, 0x2e2e2c); // old oil
   k.box(0, H + 0.05, 0, W, 0.1, L, 0x6a6a66);
   k.box(-W / 2, H / 2, 0, 0.12, H, L, 0x8a8880);
   k.box(W / 2, H / 2, 0, 0.12, H, L, 0x8a8880);
   k.box(0, H / 2, L / 2, W, H, 0.12, 0x8a8880);
-  k.box(0, H / 2, -L / 2, W, H, 0.1, 0x767a7c); // the door, down
-  for (let i = -4; i <= 4; i++) k.box(i * 0.6, H / 2, -L / 2 + 0.06, 0.03, H, 0.03, 0x5c6062);
   // shelves on the right wall, a stack of tyres, a canister
   for (const y of [0.9, 1.5, 2.05]) k.box(W / 2 - 0.3, y, 1.6, 0.46, 0.04, 2.6, 0x6b4f33);
   for (const [z, y, c] of [[0.7, 1.02, 0xb8352c], [1.3, 1.02, 0x2f5fa0], [2.2, 1.62, 0x8d8475], [1.0, 1.62, 0x3f6a34], [2.4, 1.02, 0x1d1d1d]]) k.box(W / 2 - 0.3, y + 0.1, z, 0.3, 0.24, 0.3, c);
@@ -49,11 +51,45 @@ export function garageScene({ scene, world, player, hud, lights, friend, car, do
   k.box(0.6, H - 0.12, -0.6, 0.02, 0.24, 0.02, 0x222222);
   k.box(0.6, H - 0.28, -0.6, 0.1, 0.12, 0.1, 0xffe2a6, 0, true); // the bulb
   k.finish();
+  // the door, down; and what is behind it when it is up
+  const shut = new THREE.Group(),
+    day = new THREE.Group(),
+    dk = scenery(shut),
+    yk = scenery(day);
+  dk.box(0, H / 2, -L / 2, W, H, 0.1, 0x767a7c);
+  for (let i = -4; i <= 4; i++) dk.box(i * 0.6, H / 2, -L / 2 + 0.06, 0.03, H, 0.03, 0x5c6062);
+  dk.finish();
+  yk.box(0, H - 0.04, -L / 2 + 0.7, W - 0.3, 0.05, 1.4, 0x767a7c); // the door, up under the ceiling
+  yk.box(0, -0.05, -L / 2 - 3.5, 14, 0.1, 7, 0x8b8b86); // the yard outside
+  yk.box(0, 4, -L / 2 - 7.2, 30, 14, 0.1, 0xe9f1f8, 0, true); // a white noon
+  for (const x of [-W / 2 - 2.2, W / 2 + 2.2]) yk.box(x, H / 2, -L / 2 - 0.05, 4.3, H + 0.5, 0.2, 0x9a978e);
+  yk.box(0, H + 0.3, -L / 2 - 0.05, W + 0.4, 0.5, 0.2, 0x9a978e);
+  yk.finish();
+  day.visible = false;
+  group.add(shut, day);
+  return {
+    at: (x, y, z, out) => out.set(ox + x, oy + y, oz + z),
+    open(on) {
+      shut.visible = !on;
+      day.visible = on;
+    },
+    dispose() {
+      k.dispose();
+      dk.dispose();
+      yk.dispose();
+      group.removeFromParent();
+    },
+  };
+}
+
+export function garageScene({ scene, player, hud, lights, set, friend, car, done }) {
+  const { H } = ROOM;
   // the car itself comes down with them: it is the game's own car, so its
   // wheels, its missing plates and its broken window are what they were
-  car.x = ox - 1.25;
-  car.z = oz + 0.5;
-  car.y = oy;
+  const spot = set.at(-1.25, 0, 0.5, new THREE.Vector3());
+  car.x = spot.x;
+  car.z = spot.z;
+  car.y = spot.y;
   car.heading = Math.PI; // nose to the back wall
   car.speed = car.steer = 0;
   car._grounded = true;
@@ -61,7 +97,7 @@ export function garageScene({ scene, world, player, hud, lights, friend, car, do
   const act = actor(player, lights),
     eye = new THREE.Vector3(),
     look = new THREE.Vector3();
-  const at = (x, y, z, out) => out.set(ox + x, oy + y, oz + z);
+  const at = set.at;
   let beat = 'door',
     age = 0,
     line = -1,
@@ -151,10 +187,11 @@ export function garageScene({ scene, world, player, hud, lights, friend, car, do
             ++token;
             voice?.stop();
             hud.say();
-            hud.veil(true, 'Konec druhé části', 'Poslední vlak');
+            // the cut to noon happens in the dark
+            hud.veil(true, 'V poledne', 'Na Staré poště · 12:00');
           }
         }
-      } else if (beat === 'end' && age > 4.8) finish();
+      } else if (beat === 'end' && age > 2.6) finish();
     },
     pose(dt) {
       if (!live) return false;
@@ -199,7 +236,6 @@ export function garageScene({ scene, world, player, hud, lights, friend, car, do
       voice?.stop();
       storyDuck(0);
       act.dispose();
-      k.dispose();
     },
   };
 }
