@@ -4,7 +4,7 @@
 // letter, two arcs), in the proportions the real sign has. Nothing here is a
 // copy of a logo file or a traced image. Whether the public game shows these,
 // the plain name panels or look-alike names is the owner's decision; the
-// switch is SIGN_STYLE.logos and it ships on 'plain'.
+// switch is SIGN_STYLE.logos, and the owner chose 'drawn' (20 Nov 2026).
 //
 // Every painter draws into a design space: tile(g) 256 x 256, band(g) 1024 x 256.
 
@@ -28,7 +28,41 @@ function arches(g, cx, cy, w, h, colour) {
   g.stroke();
 }
 
+// the maker's T: a shallow arc over a bar whose stem runs down to a point
+function teslaT(g, cx, cy, s, colour) {
+  const w = s * 0.98, top = cy - s / 2;
+  g.fillStyle = colour;
+  g.beginPath();
+  g.moveTo(cx - w / 2, top + s * 0.105);
+  g.quadraticCurveTo(cx, top - s * 0.075, cx + w / 2, top + s * 0.105);
+  g.lineTo(cx + w * 0.455, top + s * 0.165);
+  g.quadraticCurveTo(cx, top + s * 0.005, cx - w * 0.455, top + s * 0.165);
+  g.closePath(); g.fill();
+  g.beginPath();
+  g.moveTo(cx - w * 0.44, top + s * 0.215);
+  g.quadraticCurveTo(cx, top + s * 0.065, cx + w * 0.44, top + s * 0.215);
+  g.lineTo(cx + w * 0.37, top + s * 0.33);
+  g.quadraticCurveTo(cx + w * 0.2, top + s * 0.245, cx + s * 0.085, top + s * 0.265);
+  g.lineTo(cx, top + s);
+  g.lineTo(cx - s * 0.085, top + s * 0.265);
+  g.quadraticCurveTo(cx - w * 0.2, top + s * 0.245, cx - w * 0.37, top + s * 0.33);
+  g.closePath(); g.fill();
+}
+// a name in wide capitals, letter by letter (the maker's own type is wider than any system face)
+function spaced(g, text, cx, cy, size, gap, colour) {
+  g.fillStyle = colour; g.font = `bold ${size}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  const x0 = cx - gap * (text.length - 1) / 2;
+  for (let i = 0; i < text.length; i++) {
+    g.save(); g.translate(x0 + i * gap, cy); g.scale(1.25, 0.82); g.fillText(text[i], 0, 0); g.restore();
+  }
+}
+
 const TILE = {
+  tesla(g) {
+    g.fillStyle = '#191a1c'; g.fillRect(0, 0, 256, 256);
+    teslaT(g, 128, 104, 150, '#e82127');
+    spaced(g, 'TESLA', 128, 216, 34, 40, '#ffffff');
+  },
   lidl(g) {
     g.fillStyle = '#0050aa'; g.fillRect(0, 0, 256, 256);
     g.fillStyle = '#fff000'; g.beginPath(); g.arc(128, 128, 112, 0, 7); g.fill();
@@ -84,6 +118,10 @@ const TILE = {
 };
 
 const BAND = {
+  tesla(g) {
+    g.fillStyle = '#191a1c'; g.fillRect(0, 0, 1024, 256);
+    spaced(g, 'TESLA', 512, 134, 150, 176, '#ffffff');
+  },
   albert(g) {
     g.fillStyle = '#0072bc'; g.fillRect(0, 0, 1024, 256);
     g.fillStyle = '#ffffff'; mid(g);

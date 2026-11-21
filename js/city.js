@@ -1748,6 +1748,13 @@ export class CityWorld {
   }
 
   surfaceY(x, z, near) {
+    const s = this._surfaceY(x, z, near);
+    // a showroom's floor and the apron out of its gate carry a car too (js/stores/world.js deck)
+    const deck = this.stores?.deck(x, z);
+    if (deck != null && deck > s.y) { s.y = deck; s.road = true; }
+    return s;
+  }
+  _surfaceY(x, z, near) {
     _surf.road = false;
     // THE GROUND FIRST. Every height below is a thickness of surfacing — 20 cm
     // of asphalt, 10 of paving, 5 of grass — measured from the ground, not from

@@ -156,7 +156,7 @@ function shell(kit, f, l, ctx) {
   roofPlant(kit, site, deck);
   // ---- the room: ceiling and floor ----
   kit.set(CEIL, K.plaster); kit.gl = 0.75;
-  lid(kit, site, (x, z) => site.topAt(x, z) - (flat ? 0.75 : 0.3), false);
+  lid(kit, site, (x, z) => Math.min(site.topAt(x, z) - (flat ? 0.75 : 0.3), (A.ceil ?? Infinity) + 0.03), false);
   kit.set(FLOOR, K.paving); kit.gl = 0.2;
   lid(kit, site, () => site.floor, true);
   kit.gl = 0; kit.ao = true;

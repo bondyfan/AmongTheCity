@@ -9,6 +9,7 @@ import { CHAINS, STORES, storeChain, chainOfName } from './chains.js';
 import { buildStore, storeSolids } from './build.js';
 import { siteOf, around } from './site.js';
 import { driveOf } from './drive.js';
+import { pickShowFront } from './showlayout.js';
 
 /** One landmark entry per chain: `id` is what a feature remembers (`_lm`). */
 export const STORE_LANDMARKS = CHAINS.map((chain) => ({
@@ -40,6 +41,11 @@ export function pinStores(cell) {
     if (!STORES.on) { if (f._lm === undefined && chainOfName(f.n)) f._lm = ''; continue; }
     const c = storeChain(f);
     if (!c) continue;
+    // a showroom's gate goes where a car can stand behind it (js/stores/showlayout.js)
+    if (c.kind === 'showroom' && f._sf === undefined) {
+      const i = pickShowFront(f, c, around(f, cell));
+      if (i >= 0) f._sf = i;
+    }
     siteOf(f, c, cell);
     if (c.eat?.drive) driveOf(f, around(f, cell)?.roads);
   }

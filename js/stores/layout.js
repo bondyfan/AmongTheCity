@@ -109,7 +109,9 @@ export function marketLayout(site) {
     const a = aAisle0 + 1.3 + i * 3.1;
     for (const off of [-1.35, 1.35]) {
       fx('produce', a, lc + off, 'a', 2.4, { cat: 'produce', v: (i * 2 + (off > 0 ? 1 : 0)) % 6 });
-      pt('shelf', a, lc + off * 2.05, { cat: 'produce' });
+      // served from its outer side, or from the lane where the wall is right behind it
+      const pb = lc + off * 2.05;
+      pt('shelf', a, pb > 0.4 && pb < W - 0.4 ? pb : lc + off * 0.35, { cat: 'produce' });
     }
   }
   // ---- gondola rows, away from the front ----

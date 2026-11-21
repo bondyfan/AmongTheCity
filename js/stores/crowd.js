@@ -182,4 +182,5 @@ class Crowd {
   }
 }
 
-registerCrowd((rec, layout, d) => (d.makeCitizen ? new Crowd(rec, layout, d) : null));
+// (a showroom has its own adviser and no shoppers' plans: js/stores/showroom.js)
+registerCrowd((rec, layout, d) => (d.makeCitizen && layout.kind !== 'showroom' ? new Crowd(rec, layout, d) : null));

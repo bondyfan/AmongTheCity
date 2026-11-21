@@ -176,6 +176,12 @@ export function makeSite(f, chain, front) {
       run(e, g1, e.len, 'wall');
       continue;
     }
+    // a showroom is glass on every side a passer-by can look in from
+    if (A.glassAll && e.role !== 'back' && e.len > 3.2) {
+      const m = Math.min(0.6, e.len * 0.12);
+      run(e, 0, m, 'wall'); run(e, m, e.len - m, 'glass'); run(e, e.len - m, e.len, 'wall');
+      continue;
+    }
     // a side wall is glazed from the front corner back, on the side the door is nearer to
     if ((e.role === 'left' || e.role === 'right') && (A.glassS ?? 0) > 0 && e.len > 6) {
       const doorSide = (sc < fe.len / 2 ? -1 : 1) * along < 0 ? 'left' : 'right';
@@ -217,7 +223,8 @@ export function spotsOf(site) {
   const A = site.chain.arch, w = site.door.w, s = site.side;
   const room = s > 0 ? site.uR : -site.uL;        // front left on the trolley side
   const fast = site.chain.kind === 'fast';
-  const bayLen = fast ? 0 : Math.min(6.5, room - w / 2 - 1.6);
+  // (trolleys are a grocer's: a restaurant and a showroom have none)
+  const bayLen = fast || site.chain.kind === 'showroom' ? 0 : Math.min(6.5, room - w / 2 - 1.6);
   const b0 = w / 2 + 1.1;
   const bay = bayLen >= 2.4 ? { u0: s > 0 ? b0 : -(b0 + bayLen), u1: s > 0 ? b0 + bayLen : -b0, v0: 0.5, v1: 2.5 } : null;
   let canopy;
@@ -337,7 +344,10 @@ export function inRing(o, x, z) {
  * footprint gives its bigger leg. { u0, u1, v0, v1 } in local metres.
  */
 export function shopRect(site, m = 0.5) {
-  if (site._rect) return site._rect;
+  // remembered per margin: the roof plant asks with 1.5 and the floor with 0.45, and whichever
+  // came first used to answer for both (a chunk built on the main thread shrank its own shop floor)
+  const memo = (site._rects ??= new Map());
+  if (memo.has(m)) return memo.get(m);
   const us = new Set(), vs = new Set();
   for (const p of site.ring) {
     const [u, v] = site.local(p[0], p[1]);
@@ -346,10 +356,27 @@ export function shopRect(site, m = 0.5) {
   // (a footprint of forty corners has forty of each: every other one is enough)
   const thin = (a) => { while (a.length > 14) a = a.filter((_, i) => i % 2 === 0 || i === a.length - 1); return a; };
   const U = thin([...us].sort((a, b) => a - b)), V = thin([...vs].sort((a, b) => a - b));
-  const inside = (u, v) => { const [x, z] = site.world(u, v); return inRing(site.ring, x, z); };
+  // Inside means: its middle is in the footprint and no wall passes through it.
+  // (It used to be a 5 x 5 grid of samples, and a notch between two samples put
+  // an Albert's shelves three metres outside its wall.)
+  const LR = site.ring.map((p) => site.local(p[0], p[1]));
+  const cuts = (p, q, a0, a1, b0, b1) => {
+    let t0 = 0, t1 = 1;
+    const du = q[0] - p[0], dv = q[1] - p[1];
+    if (Math.abs(du) < 1e-9) { if (p[0] <= a0 || p[0] >= a1) return false; } else {
+      const x = (a0 - p[0]) / du, y = (a1 - p[0]) / du;
+      t0 = Math.max(t0, Math.min(x, y)); t1 = Math.min(t1, Math.max(x, y));
+      if (t0 >= t1) return false;
+    }
+    if (Math.abs(dv) < 1e-9) return p[1] > b0 && p[1] < b1;
+    const x = (b0 - p[1]) / dv, y = (b1 - p[1]) / dv;
+    return Math.max(t0, Math.min(x, y)) < Math.min(t1, Math.max(x, y));
+  };
   const ok = (a0, a1, b0, b1) => {
-    for (let i = 0; i <= 4; i++) for (let j = 0; j <= 4; j++)
-      if (!inside(a0 + (a1 - a0) * i / 4, b0 + (b1 - b0) * j / 4)) return false;
+    const [x, z] = site.world((a0 + a1) / 2, (b0 + b1) / 2);
+    if (!inRing(site.ring, x, z)) return false;
+    for (let i = 0, n = LR.length; i < n; i++)
+      if (cuts(LR[i], LR[(i + 1) % n], a0 - 0.1, a1 + 0.1, b0 - 0.1, b1 + 0.1)) return false;
     return true;
   };
   let best = null, area = 0;
@@ -365,5 +392,6 @@ export function shopRect(site, m = 0.5) {
   }
   // a ring with no rectangle to speak of (a wedge): a box about its middle
   best ??= { u0: -site.hu * 0.4, u1: site.hu * 0.4, v0: -site.hv * 0.4, v1: site.hv * 0.4 };
-  return (site._rect = best);
+  memo.set(m, best);
+  return best;
 }
