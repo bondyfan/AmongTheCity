@@ -356,10 +356,27 @@ export function shopRect(site, m = 0.5) {
   // (a footprint of forty corners has forty of each: every other one is enough)
   const thin = (a) => { while (a.length > 14) a = a.filter((_, i) => i % 2 === 0 || i === a.length - 1); return a; };
   const U = thin([...us].sort((a, b) => a - b)), V = thin([...vs].sort((a, b) => a - b));
-  const inside = (u, v) => { const [x, z] = site.world(u, v); return inRing(site.ring, x, z); };
+  // Inside means: its middle is in the footprint and no wall passes through it.
+  // (It used to be a 5 x 5 grid of samples, and a notch between two samples put
+  // an Albert's shelves three metres outside its wall.)
+  const LR = site.ring.map((p) => site.local(p[0], p[1]));
+  const cuts = (p, q, a0, a1, b0, b1) => {
+    let t0 = 0, t1 = 1;
+    const du = q[0] - p[0], dv = q[1] - p[1];
+    if (Math.abs(du) < 1e-9) { if (p[0] <= a0 || p[0] >= a1) return false; } else {
+      const x = (a0 - p[0]) / du, y = (a1 - p[0]) / du;
+      t0 = Math.max(t0, Math.min(x, y)); t1 = Math.min(t1, Math.max(x, y));
+      if (t0 >= t1) return false;
+    }
+    if (Math.abs(dv) < 1e-9) return p[1] > b0 && p[1] < b1;
+    const x = (b0 - p[1]) / dv, y = (b1 - p[1]) / dv;
+    return Math.max(t0, Math.min(x, y)) < Math.min(t1, Math.max(x, y));
+  };
   const ok = (a0, a1, b0, b1) => {
-    for (let i = 0; i <= 4; i++) for (let j = 0; j <= 4; j++)
-      if (!inside(a0 + (a1 - a0) * i / 4, b0 + (b1 - b0) * j / 4)) return false;
+    const [x, z] = site.world((a0 + a1) / 2, (b0 + b1) / 2);
+    if (!inRing(site.ring, x, z)) return false;
+    for (let i = 0, n = LR.length; i < n; i++)
+      if (cuts(LR[i], LR[(i + 1) % n], a0 - 0.1, a1 + 0.1, b0 - 0.1, b1 + 0.1)) return false;
     return true;
   };
   let best = null, area = 0;
