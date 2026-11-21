@@ -53,6 +53,7 @@ import { standY, groundReady, motorwaySave } from './savespot.js';
 import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
 import { start as heistStart } from './heist-route.js';
 import { retry } from './story-retry.js';
+import { region, regionId, arrival } from './regions.js';
 
 const store = browserStore();
 
@@ -89,6 +90,10 @@ export function choose(choice) {
   startPick = typeof choice?.start === 'string' ? choice.start : null;
   const res = store.load();
   state = res.state;
+  // A position belongs to the region it was taken in (js/regions.js): Mahé's
+  // metres are not Pardubice's. Another region's spot is dropped, the rest of
+  // the career (money, car, stats) comes along.
+  if (state.pos && (state.pos.rg ?? 'cz') !== regionId()) state = { ...state, pos: null };
   // the look chosen in the creator lives in localStorage; a save made with one
   // brings it back to a browser that lost it
   if (state.look && !loadMyLook()) saveMyLook(state.look);
@@ -107,7 +112,8 @@ export function choose(choice) {
 /** A chapter selects the objective. The position is always in the streamed world. */
 export const storyTrip = () => state.storyTrip;
 export function activeStory() {
-  return solo && !freeroam && startPick !== 'praha' ? state.prologue : null;
+  // (the campaign is Czech: on Mahé there is no chapter to play)
+  return solo && !freeroam && startPick !== 'praha' && region().czech ? state.prologue : null;
 }
 // THE CAMPAIGN IS NOT SAVED BEFORE ITS END (Frank, 18 Nov 2026): a missed train
 // or a death starts it again from the street in Kolín, and so does closing the
@@ -140,7 +146,7 @@ const storyRunning = () => partOneRunning() || heistPending();
 // the one that says it is over. A save that ends at Vašek's table therefore
 // opens on his street at half past four in the morning.
 export function heistPending() {
-  return !!state && solo && !freeroam && startPick !== 'praha' && state.prologue === 'done' && state.heist !== 'done';
+  return !!state && solo && !freeroam && startPick !== 'praha' && region().czech && state.prologue === 'done' && state.heist !== 'done';
 }
 export function completeHeist() {
   state.heist = 'done';
@@ -345,8 +351,15 @@ function apply() {
     // raises is what sends the police out again)
     if (s.wanted.heat > 0) wanted.add(s.wanted.heat, s.wanted.crime);
     if (s.owed) settleOwed(s.owed.stars);
-    else if (activeStory() !== 'forecourt' && !storyRunning()) toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ od posledního uložení', ms: 7000 });
+    else if (activeStory() !== 'forecourt' && !arrival() && !storyRunning()) toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ od posledního uložení', ms: 7000 });
   }
+  // Arrived from another region (js/regions.js): the game as it was the moment
+  // you left beats the last save (the ticket is paid), but it is NOT written,
+  // saves stay autosave-only. The flight's landing hour too, alone only.
+  const came = arrival();
+  if (came?.carry?.live) applyLive(came.carry.live);
+  const landTod = came?.carry?.flight?.tod;
+  if (solo && Number.isFinite(landTod)) setSoloTime(((landTod % 1) + 1) % 1);
   if (loadNote === 'corrupt')
     toast('Uložená hra se nedala načíst', { icon: '⚠️', kind: 'warn', sub: 'Začínáš novou. Původní data jsou odložená.', ms: 9000 });
   if (loadNote === 'newer')
@@ -359,6 +372,25 @@ function apply() {
   const takePumps = (pois) => { for (const p of pois ?? []) if (p.t === 'fuel' && p.p) pumps.push({ x: p.p[0], z: p.p[1] }); };
   takePumps(city?.pois);
   city?.onTileLoaded?.((t) => takePumps(t.pois));
+}
+
+// ---- crossing to another region (js/regions.js) ------------------------------
+// What a reload would otherwise roll back to the last autosave: money, health,
+// the stars on you, and the menu's choice (co-op or alone) so the other side
+// boots straight into play. main.js hands this to regions.setCarryHook.
+export function live() {
+  return {
+    money: wallet.money(),
+    vitals: { hp: vitals.hp(), armour: vitals.armour(), energy: vitals.energy() },
+    wanted: { heat: wanted.heat(), crime: wanted.lastCrime() },
+    choice: { mode: solo ? 'single' : 'server', start: startPick, freeroam },
+  };
+}
+function applyLive(l) {
+  if (Number.isFinite(l.money)) wallet.setMoney(l.money);
+  if (l.vitals) vitals.restore(l.vitals);
+  wanted.clear();
+  if (l.wanted?.heat > 0) wanted.add(l.wanted.heat, l.wanted.crime);
 }
 
 // ---- saving -------------------------------------------------------------------
@@ -375,7 +407,7 @@ function snapshot() {
     prologue: state.prologue,
     heist: state.heist ?? null,
     storyTrip: state.storyTrip,
-    pos: lastSafe,
+    pos: lastSafe && regionId() !== 'cz' ? { ...lastSafe, rg: regionId() } : lastSafe,
     tod: solo ? tod() : null,
     played: Math.round(played),
     vitals: { hp: vitals.hp(), armour: vitals.armour(), energy: vitals.energy() },
@@ -424,7 +456,7 @@ function write(point, held) {
 export function reloadLast() {
   if (!applied || !h || storyRunning()) return null;
   const s = store.load().state;
-  if (!(s?.savedAt > 0) || !s.pos) return null;
+  if (!(s?.savedAt > 0) || !s.pos || (s.pos.rg ?? 'cz') !== regionId()) return null;
   wallet.setMoney(s.money);
   vitals.restore(s.vitals);
   try { jobs.load(s.jobs); } catch { /* an older save's board: keep the live one */ }

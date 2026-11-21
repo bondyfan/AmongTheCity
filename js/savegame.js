@@ -89,6 +89,9 @@ function sanePos(p) {
   // stood on the highest floor close above the ground instead.
   const y = fin(p.y, NaN);
   if (Number.isFinite(y) && y > -500 && y < 5000) out.y = +y.toFixed(2);
+  // rg, the region the spot is in (js/regions.js); absent is the Czech world,
+  // so every save written before regions existed reads exactly as it did
+  if (typeof p.rg === 'string' && p.rg !== 'cz' && /^[a-z0-9-]{1,16}$/.test(p.rg)) out.rg = p.rg;
   return out;
 }
 

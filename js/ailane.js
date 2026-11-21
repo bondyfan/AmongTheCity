@@ -22,6 +22,12 @@
 // lane is then continuous in position and direction and is a path a car can
 // take, and the speed planner reads the radius of the very curve the wheel is
 // turned for (cornerAt's R).
+import { laneSide } from './regions.js';
+// +1 where traffic keeps right (Czechia), -1 where it keeps left (Mahé,
+// js/regions.js). Every `off` here means "metres right of travel" as the
+// callers compute it; the two public entries turn it into the live side.
+const SIDE = laneSide();
+
 const T_MAX = 25;                            // m: no rounding longer than this on either side
 const SHORT_SEG = 5;                         // m: a segment shorter than this is inside a corner
 const RUN_MAX = 6;                           // ...and at most this many of them make one corner
@@ -236,6 +242,7 @@ export function cornerAt(route, i, k, off, r0, o) {
  * a pursuit point is always defined.
  */
 export function laneAt(route, i, seg, arc, off, out = lanePt, r0 = 5) {
+  off *= SIDE;   // (Mahé keeps left: the same lane, mirrored about the centreline)
   if (i < 0) i = 0;
   if (i >= route.length) i = route.length - 1;
   while (i > 0 && arc < route[i].base) { i--; seg = 1e9; }
@@ -335,6 +342,7 @@ export function projectArc(route, i, arc0, x, z, h, ahead, back = 1) {
  * v^2 = vc^2 + 2 b d, d to where the rounding begins.
  */
 export function curveCap(route, i, arc, reach, aLat, brake, off = 0, r0 = 5, lockR = r0) {
+  off *= SIDE;   // (the lane cornerAt rounds is laneAt's, so it is mirrored the same way)
   let cap = Infinity, lastS = NaN;
   const hi = arc + reach;
   while (i > 0 && route[i].base > arc - T_MAX) i--;

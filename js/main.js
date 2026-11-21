@@ -8,6 +8,8 @@
 import * as THREE from 'three';
 import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR, START_PLACES, FLEET_STRIDE, HOSPITALS } from './config.js';
 import { arriveText, nearestHospital, tilesReady } from './startplace.js';
+import { region, dataUrl, setCarryHook } from './regions.js';             // which world this page is
+import { manifestUrl, legacyFallback, arrivalChoice, regionStartPoint, arriveLine } from './regionboot.js';
 import { loadCity, chunkKey, venueAt, forEachChunkInRadius } from './geo.js';
 import { StationPassages } from './station-passages.js';
 import { STORES } from './stores/chains.js';
@@ -2228,7 +2230,7 @@ function updateHorizon(dt) {
   if (Math.abs(fogWant - _fogOpen) < 1e-3) _fogOpen = fogWant;
   sky.fogOpen = _fogOpen;
   const farOn = sky.fogOpen > 0.001;
-  if (farTerrain) farTerrain.photos = gs.ortho !== false;
+  if (farTerrain) farTerrain.photos = gs.ortho !== false && region().ortho;
   farTerrain?.update(eye.x, eye.z, farOn, renderer, fogWant > 0);
   const er = world.edgeR ?? radius;
   _farEdge[0] = world.edgeX ?? eye.x; _farEdge[1] = world.edgeZ ?? eye.z; _farEdge[2] = er - 200; _farEdge[3] = er - 20;
@@ -2391,7 +2393,7 @@ async function initNavigation(city) {
       import('./place.js'), import('./navigation.js'), import('./navline.js'),
     ]);
     placeFinder = new PlaceFinder(city);
-    navigation = new Navigation(city, { overview: 'data/overview.json' });   // (a far pin: js/coarseroute.js)
+    navigation = new Navigation(city, { overview: dataUrl('overview.json') });   // (a far pin: js/coarseroute.js)
     navLine = new NavLine(scene);
   } catch (err) {
     console.warn('navigation unavailable:', err.message);
@@ -3038,17 +3040,21 @@ async function boot() {
   // Where: the save, or the square of the city the menu shows (career.js
   // startPoint). Only THAT place's tiles are asked for, so a Prague game no
   // longer loads (and pins) six Pardubice tiles first.
-  let sp = career.startPoint();
+  // (another region, js/regions.js: its own manifest, the hand-over's pose
+  // after a flight, and no Pardubice to fall back to)
+  let sp = regionStartPoint(career.startPoint);
   const label0 = $id('enter-label');
-  if (label0) label0.textContent = arriveText(sp.place);
-  let city = await loadCity('data/manifest.json').catch(() => null);
+  if (label0) label0.textContent = arriveLine(sp, arriveText);
+  let city = await loadCity(manifestUrl()).catch(() => null);
   if (city) {
     await city.ensureTiles(sp.x, sp.z);
     const cell = city.chunkIndex.get(chunkKey(sp.x, sp.z));
     // (a saved spot in open country may have no road in its cell; a start
     // square always has, and is what tells a manifest that is still filling)
-    if (!cell || (!sp.saved && !cell.roads.length)) city = null; // manifest too young: legacy
+    if (legacyFallback() && (!cell || (!sp.saved && !cell.roads.length))) city = null; // manifest too young: legacy
   }
+  if (!city && !legacyFallback())
+    throw new Error('Data ostrova ' + region().name + ' se nepodařilo načíst. Obnov stránku pro další pokus.');
   // the legacy single file is Pardubice: whatever was picked, it starts there
   let legacy = false;
   if (!city && career.activeStory() && career.activeStory() !== 'done')
@@ -3183,6 +3189,9 @@ async function boot() {
   cyclists = new Cyclists(scene, city, world.footing ?? world.terrain, { peds, traffic, parked,
     playerCar: () => game.car, walker: () => (game.car || game.heli || game.jet ? null : player.pos) });
   cyclists.max = getSettings().peds ?? 34;
+  // (their riding line is drawn at the right-hand kerb; Mahé keeps left and its
+  // hill roads see few bicycles, so another region has none until it is mirrored)
+  if (!region().czech) cyclists.enabled = false;
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact,
   // attenuated by distance like the debris audio. The gender used to be
   // `Math.random() < 0.5` PER SCREAM, so one victim could scream as a man and
@@ -3306,7 +3315,8 @@ async function boot() {
   parkingLots = new ParkingLots(city, vehicles, world, parked);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)
-  orthoMgr = initOrtho(world.terrain);   // the photo lies ON the ground now
+  // (ČÚZK photographs Czechia only: another region's ground is drawn from its classes)
+  orthoMgr = region().ortho ? initOrtho(world.terrain) : null;   // the photo lies ON the ground now
   // initSettings moved to start(): the gear must exist while the MENU is up,
   // before boot ever runs — boot only re-applies the loaded values to the
   // freshly built world.
@@ -3340,7 +3350,7 @@ async function boot() {
         for (let i = 0; i < 6; i++) world.update(1 / 60, player.pos);
         if (label && (warmFrames & 7) === 0) {
           const { built, total } = world.bootProgress(player.pos);
-          label.textContent = `${arriveText(sp.place)} ${Math.min(99, Math.round(built / total * 100))} %`;
+          label.textContent = `${arriveLine(sp, arriveText)} ${Math.min(99, Math.round(built / total * 100))} %`;
         }
         if (world.readyFull(player.pos) || ++warmFrames > 1500) resolve();
         else setTimeout(warm, 0); // setTimeout, not rAF — hidden tabs still boot
@@ -4232,7 +4242,8 @@ async function start() {
     music.volume = getSettings().volume ?? 0.8;
     music.play().catch(() => {}); // Audio availability never blocks entering the city.
   };
-  const choice = await showMenu(playLoadingMusic);
+  // (a flight from another region lands in play: the menu was answered there)
+  const choice = arrivalChoice() ?? await showMenu(playLoadingMusic);
   ui.setSelf({ name: choice.name || getPlayerName(), uid: localUid() });
   if (choice.mode === 'server') {
     try {
@@ -4280,6 +4291,8 @@ async function start() {
   // co-op: the saved hour was dropped (and overwritten with none) and an owned
   // fleet car came back as a second car on top of the original.
   career.choose({ ...choice, mode: net ? 'server' : 'single' });
+  // what a crossing to another region carries (js/regions.js enterRegion)
+  setCarryHook(() => ({ ...career.live(), name: getPlayerName() }));
   if (net) shareWorld();     // co-op: traffic, crowd and police are everybody's (js/worldsettings.js)
   const chapter = career.activeStory();
   const opening = chapter && chapter !== 'done';

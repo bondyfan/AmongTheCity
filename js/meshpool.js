@@ -26,6 +26,7 @@ import { decode } from './geomcodec.js';
 import { facadeMaterial, brandMarkMat } from './meshes.js';
 import { mergeMarks } from './wordmarkatlas.js';
 import { BATCH } from './batchflags.js';
+import { regionId, DEFAULT_REGION } from './regions.js';
 
 /** Hard ceiling on workers. Past four the queue is never the bottleneck. */
 const MAX_WORKERS = 4;
@@ -85,8 +86,14 @@ export function poolSize(max = MAX_WORKERS) {
  *   without a DOM Worker (and so a spawn that throws is a normal, tested path).
  */
 export function makeMeshPool(opts = {}) {
-  const spawn = opts.spawn ?? (() => new Worker(
-    new URL('./meshworker.js', import.meta.url), { type: 'module' }));
+  // (the worker reads its region from its own URL, js/regions.js: the trees
+  // and anything else that differs by region must grow the same on both sides)
+  const workerUrl = () => {
+    const u = new URL('./meshworker.js', import.meta.url);
+    if (regionId() !== DEFAULT_REGION) u.searchParams.set('region', regionId());
+    return u;
+  };
+  const spawn = opts.spawn ?? (() => new Worker(workerUrl(), { type: 'module' }));
   const now = opts.now ?? (() => performance.now());
   const workers = [];
   let nextId = 1;

@@ -39,9 +39,13 @@ import * as THREE from 'three';
 import { setAirFog, FOG_WALL_START, AFTERGLOW_GLSL } from './heightfog.js';
 import { SkyEnv } from './envmap.js';
 import { LOOK_AB } from './lookab.js';
+import { region } from './regions.js';
 
 // ---- the sun's path, and the darkness that FOLLOWS from it ----
-const SUNRISE = 5, SUNSET = 21, SUN_PEAK = 75; // hours, hours, degrees
+// (the live region's: Pardubice's long summer day, or Mahé's twelve hours
+// under a sun nearly overhead, js/regions.js)
+const SUN = region().sun;
+const SUNRISE = SUN.rise, SUNSET = SUN.set, SUN_PEAK = SUN.peak; // hours, hours, degrees
 // How far under the horizon the sun stands at solar midnight. The night half
 // of the path used to mirror the day half (75 degrees down), and since the
 // night is half as long as the day the sun DOUBLED its speed the instant it
@@ -49,7 +53,7 @@ const SUNRISE = 5, SUNSET = 21, SUN_PEAK = 75; // hours, hours, degrees
 // switch. At 40 degrees it crosses the horizon at the speed it arrived with
 // (about 15 degrees an hour on both sides), which is also much nearer the
 // truth of a Central European summer, where the sun never gets far under.
-const SUN_DIP = 40;
+const SUN_DIP = SUN.dip;
 // 0..1 from sunrise to sunset, then 1..2 on through the night — one continuous
 // phase, so elevation genuinely goes negative after dark instead of the disc
 // parking above the horizon all night

@@ -373,6 +373,11 @@ import * as MW from './mwtraffic.js';
 import { laneTick, laneOffset, blinkOf, bodyLane, bodyAdopt } from './mwlanes.js';
 import { horn } from './audio.js';   // safe headless — no-ops without an AudioContext
 import { worldT } from './worldclock.js';
+import { laneSide } from './regions.js';
+// +1 keep right (Czechia), -1 keep left (Mahé). js/ailane.js mirrors every
+// lane it draws; the few places below that place a car or judge a side by
+// hand multiply by this too, so the whole system is the Czech one mirrored.
+const SIDE = laneSide();
 import { SignalBatch } from './signalbatch.js';
 
 // AI-local tuning (config.js owns the player-facing numbers)
@@ -3486,8 +3491,8 @@ export class Traffic {
     p.laneOff = Math.min(TRAFFIC.laneOffsetK * e.road.w, TRAFFIC.laneOffsetMax);
     if (e.mw) { bodyAdopt(p); p.eOn = e.mw === 1 ? 1 : 0; p.laneOff = laneOffset(p, p.ri, p.s, wt); }
     p.sh = p.ph = heading;
-    p.sx = p.px = pose.x - pose.dz * p.laneOff;   // right of travel = (-dz, dx)
-    p.sz = p.pz = pose.z + pose.dx * p.laneOff;
+    p.sx = p.px = pose.x - pose.dz * p.laneOff * SIDE;   // right of travel = (-dz, dx), mirrored on the left
+    p.sz = p.pz = pose.z + pose.dx * p.laneOff * SIDE;
     // LAYER_Y.road is the thickness of the asphalt over the GROUND, not a
     // height above the sea. The AI drives its cars by writing this pose
     // directly (it never goes through driveStep), so it is the one place that
@@ -4322,7 +4327,8 @@ export class Traffic {
             // every screen: both standing was no moment of hesitation when
             // both were already at rest, it was for good)
             const olat = ofx * -rz - ofz * -rx;
-            const mine = lat > 0, theirs = olat > 0;
+            // (where traffic keeps left the rule is mirrored: give way to the left)
+            const mine = lat * SIDE > 0, theirs = olat * SIDE > 0;
             if (mine !== theirs ? mine : (p.seed >>> 0) < (o.seed >>> 0)) {
               tgt = 0; hard = true; held = true; crossHeld = true;
               if (e.mw) this.mwCrossN = (this.mwCrossN | 0) + 1;   // (a census for tests/d11-traffic: stays near 0)
@@ -4654,7 +4660,7 @@ export class Traffic {
     // Cars parked along this kerb (js/kerbparking.js): drive round them, as
     // one does, a door's width off their flanks. Only the direction whose
     // right-hand kerb they stand at moves over; the other lane is as it was.
-    if (this.kerbOf && this.kerbOf(re.road) === -re.offSign)
+    if (this.kerbOf && this.kerbOf(re.road) === -re.offSign * SIDE)
       offTgt = Math.max(0, Math.min(offTgt, re.road.w / 2 - this.kerbIntrudes - 0.35 - (car.wid ?? 1.8) / 2));
     // A bus about to call at a stop pulls into its lay-by where the street has
     // one (js/streets.js bayAt is the very width the kerb steps out by), and
@@ -4664,7 +4670,7 @@ export class Traffic {
     if (p.stops) {
       const st = p.stops[Math.min(p.nstop, p.stops.length - 1)], sp = p.nstop > 0 ? p.stops[p.nstop - 1] : null;
       if (Math.abs(st.arc - p.sR) < 19 || (sp && Math.abs(sp.arc - p.sR) < 19))
-        bay = bayAt(re.road, re.off0 + re.offSign * p.s, -re.offSign) * 0.9;
+        bay = bayAt(re.road, re.off0 + re.offSign * p.s, -re.offSign * SIDE) * 0.9;
     }
     // (squeeze: over towards the kerb, into the half metre the usual clamp
     // keeps free, to let an oncoming car by on a street too narrow for two.

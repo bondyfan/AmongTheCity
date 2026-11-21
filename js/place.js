@@ -42,8 +42,9 @@
 import { CHUNK } from './config.js';
 import { distPointToSegment } from './geo.js';
 import { motorwayPlace } from './mwhud.js';
+import { dataUrl } from './regions.js';
 
-const PLACES_URL = 'data/places.json';
+const PLACES_URL = dataUrl('places.json');   // the live region's gazetteer
 
 // ---- timing ---------------------------------------------------------------
 const STREET_DT = 0.25;   // s between street scans (4 Hz — a car at 130 km/h
