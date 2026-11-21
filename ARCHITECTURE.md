@@ -2905,3 +2905,55 @@ coach's door step (`world.storyCoach.boarding`, prologue.js). The campaign's yar
 (`prologue-tracks.js`) stay as they were. Pedestrians walk mapped footways, which cross the
 rails only where the map has a crossing. Pure in tile data and position, so co-op screens
 agree without a word.
+
+## Regions: Mahé is its own world (js/regions.js, js/mahe/, Nov 2026)
+
+Frank wants his players to fly from Pardubice airport to the Seychelles and play
+on Mahé. Mahé is 7 800 km from the Czech frame, so it is a separate REGION with
+its own origin, projection, data folder, sun, time zone, sea and side of the road.
+
+- **One region per page.** `regionId()` comes from the URL (`?region=mahe`,
+  absent = `cz`, so every existing link opens the Czech world unchanged).
+  Crossing is a page reload behind the boot cover: `enterRegion(id, spawn,
+  carry)` writes a hand-over to sessionStorage and navigates; boot reads it
+  once with `arrival()` (2 min TTL, must match the live region). main.js builds
+  ~40 systems once per page; the browser's teardown is the only complete one.
+  `setCarryHook` (main.js registers `career.live()` and the player's name)
+  carries money, health, stars and the menu's choice across, without writing
+  the save; the menu is skipped on arrival.
+- **A false origin.** Mahé is drawn 100 km NORTH of the Czech world's northern
+  edge (`REGIONS.mahe.offset = {x: 0, z: -100000}`, island at z -108..-80 km).
+  Dozens of modules hold hand-measured Czech coordinates (the station hall,
+  the D35, LKPD, the terrain stamps, the Labe weirs); with the island drawn
+  around zero every one within 25 km of Pardubice would have appeared in
+  Victoria. With the offset none can ever reach it, including ones not yet
+  written. Float32 stays at 7.8 mm, what Prague already runs at. Rule for new
+  code: a hand-measured Czech position needs no region check; anything that
+  behaves differently by region (side of the road, sun, data URL, ortho,
+  hospitals) reads `region()`.
+- **Data.** Every runtime data URL goes through `dataUrl(path)`: `data/` for
+  the Czech world, `data/regions/mahe/` for Mahé. The mesh worker gets the
+  region in its own URL (js/meshpool.js), so both build paths agree.
+  `scripts/lib/world-area.mjs` takes `ATC_REGION`; split-extracts and
+  build-region then REFUSE to run without their own RAW_DIR, OUT_DIR and
+  URL_DIR, so a Mahé build can never touch `public/data`. Mahé's own steps are
+  in scripts/mahe/ (fetch, coast, ground, extras, creole); see their headers.
+- **Side of the road.** `laneSide()` is +1 (keep right) or -1 (keep left).
+  js/ailane.js mirrors every lane at its two public entries; traffic.js
+  mirrors the spawn, the give-way rule (give way to the left), the kerb and the
+  bus bay side; kerbparking.js mirrors the parked rows. Cyclists are off on
+  Mahé until their riding line is mirrored. The cars are still left-hand drive
+  (follow-up).
+- **Time and sun.** `worldclock.tod()` adds `todShift()` (Mahé: +3 h on the
+  shared clock) and `setSoloTime` takes the local hour. sky.js reads
+  `region().sun` (Mahé: a 12.3 h day, the sun nearly overhead).
+- **Co-op.** One room, separate worlds: every state and event carries `rg`
+  (absent in the Czech world, so the Czech wire is unchanged); a client never
+  applies a packet from another region, hides that player and lists them as
+  "na Mahé". Wreckage snapshots stay Czech. No change to the relay.
+- **Mahé's look.** js/mahe/sea.js (the ocean to the horizon, coloured by the
+  lagoon map: shallows, reef crest, drop-off), species 15 = the coconut palm
+  (js/treeshapes.js, the canopy raster's two low bits carry the vegetation
+  zone), js/mahe/landmarks.js (Clock Tower, cathedral bell tower, temple
+  gopuram, market sign), js/mahe/boulders.js (granite), Creole wall and tin
+  roof colours baked into the tiles by scripts/mahe/creole.mjs.
