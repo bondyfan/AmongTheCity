@@ -5,9 +5,22 @@ export const offsets = [-26.7, 0, 26.7];
 export const carriageAt = (u) =>
   offsets.reduce((a, b) => (Math.abs(u - b - 3) < Math.abs(u - a - 3) ? b : a));
 export const doorX = 14;
+// One coach takes this much of the train: its body and the gangway behind it.
+export const PITCH = 26.7;
+// Who sits where in every coach: [bay, side, facing].
+export const riders = [
+  [0, 1, -1],
+  [2, -1, 1],
+  [4, 1, 1],
+  [6, -1, -1],
+];
+export const riderSeat = ([bay, side, facing]) => ({ x: -8.2 + bay * 2.62 + facing * 0.84, y: -0.26, z: side * 1.08, yaw: (facing * Math.PI) / 2 });
 
 // A second-class open saloon, four seats around a table, with an end vestibule.
-export function coach(k) {
+// `doors` 2 gives it a real door on the far side too (the trains of the open
+// world, js/railcoach.js: a platform can be on either side); the campaign's
+// own train keeps the one it boards by and a fixed panel across from it.
+export function coach(k, { destination = 'Pardubice hl. n.', doors = 1 } = {}) {
   const { box, sign } = k,
     z = 0;
   const blue = 0x1b5791,
@@ -78,15 +91,76 @@ export function coach(k) {
     box(12.64, 1.43, z + side * 1.0, 0.12, 2.5, 0.92, cream);
     box(12.57, 1.59, z + side * 0.99, 0.04, 0.58, 0.57, 0x708a98);
   }
-  sign(14.16, 2.45, z + 1.58, 2.24, 0.33, ['2   Pardubice hl. n.'], 0, '#17222a', '#ffd46c');
+  if (doors === 1) sign(14.16, 2.45, z + 1.58, 2.24, 0.33, ['2   ' + destination], 0, '#17222a', '#ffd46c');
+  else for (const side of [-1, 1])
+    sign(15.44, 2.27, z + side * 1.585, 1.3, 0.2, ['2   ' + destination], side > 0 ? 0 : Math.PI, '#17222a', '#ffd46c');
   sign(12.72, 2.32, z, 1.14, 0.21, ['2   TICHÝ ODDÍL'], Math.PI / 2);
   sign(4.3, 0.61, z + 1.58, 2.2, 0.27, ['České dráhy'], 0, '#255489');
   for (const side of [-1, 1]) {
     for (let i = 0; i < 4; i++) box(doorX, -0.06 - i * 0.2, side * (1.5 + i * 0.28), 1.46, 0.18, 0.42, metal);
   }
-  box(doorX, 1.34, 1.51, 1.46, 2.56, 0.09, blue);
-  box(doorX, 1.65, 1.57, 0.84, 0.93, 0.03, metal);
+  if (doors === 1) {
+    box(doorX, 1.34, 1.51, 1.46, 2.56, 0.09, blue);
+    box(doorX, 1.65, 1.57, 0.84, 0.93, 0.03, metal);
+  }
   for (const x of [-7.8, -5.7, 11.4, 13.5]) box(x, -0.29, z, 0.63, 0.74, 2.18, 0x30383e);
+}
+
+// One sliding leaf of a door, about its own middle. `direction` is the way it
+// slides open along the train, `side` the flank it is on (-1: the campaign's).
+export function doorLeaf(k, direction, side = -1) {
+  const z = side * 1.53;
+  k.box(0, 1.42, z, 0.74, 2.51, 0.09, 0x245581);
+  k.box(0, 1.73, z, 0.57, 0.83, 0.11, 0x293d4b);
+  k.box(0, 1.74, z, 0.47, 0.7, 0.12, 0x839fa9);
+  k.box(direction * 0.29, 1.42, z, 0.045, 2.48, 0.105, 0x283942);
+  k.box(0, 0.32, z, 0.72, 0.1, 0.11, 0xf2c34d);
+}
+// Where a leaf is: `closed` 1 shut … 0 open. It plugs out of the wall, then slides.
+export function leafAt(direction, closed, side = -1) {
+  const open = 1 - closed;
+  return { x: doorX + direction * (0.365 + 0.74 * Math.min(1, open * 1.17)), z: side * 0.12 * Math.min(1, open * 5) };
+}
+// The concertina between two coaches, at the back of the one in front of it.
+export function gangway(k, x = 16.35) {
+  k.box(x, 0.075, 0, 0.81, 0.18, 1.22, 0x505658);
+  for (const side of [-1, 1])
+    for (let j = 0; j < 5; j++)
+      k.box(x - 0.24 + j * 0.12, 1.27, side * (0.66 + (j % 2) * 0.035), 0.13, 2.35, 0.12, 0x393b3c);
+  k.box(x, 2.42, 0, 0.85, 0.19, 1.45, 0x3d4143);
+}
+// A driving cab's face at `end`, looking along `face`. `lamp` is the colour
+// its two lamps burn, or null where somebody else lights them (js/railcoach.js).
+export function cab(k, end, face, lamp) {
+  k.box(end, 1.95, 0, 0.18, 0.95, 2.8, 0x273c4a);
+  for (const side of [-1, 1]) {
+    k.box(end + face * 0.11, 2.0, side * 0.65, 0.05, 0.66, 1.17, 0x738b99);
+    if (lamp != null) k.box(end + face * 0.12, 0.88, side * 1.02, 0.06, 0.13, 0.25, lamp, 0, true);
+    k.box(end + face * 0.21, -0.02, side * 0.9, 0.31, 0.18, 0.3, 0x384349);
+  }
+}
+export const cabLamp = (end, face, side) => ({ x: end + face * 0.12, y: 0.88, z: side * 1.02, w: 0.06, h: 0.13, d: 0.25 });
+// What is under and on top of one coach: bogies, the roof units, the underframe.
+export function running(k, offset = 0) {
+  for (const u of [-6.65, 12.45]) {
+    k.box(offset + u, -0.39, 0, 3.12, 0.36, 2.23, 0x40494c);
+    for (const axle of [-0.98, 0.98])
+      for (const side of [-1, 1]) {
+        k.box(offset + u + axle, -0.33, side * 0.82, 0.79, 0.79, 0.19, 0x41484a, 0, false, 'round');
+        k.box(offset + u + axle, -0.33, side * 0.92, 0.62, 0.62, 0.05, 0x707879, 0, false, 'round');
+      }
+  }
+  for (const u of [-6.2, 6.2]) {
+    k.box(offset + u, 2.96, 0, 2.15, 0.22, 1.07, 0xa6aaa8);
+    for (let x = -0.86; x < 0.9; x += 0.19) k.box(offset + u + x, 3.08, 0, 0.073, 0.035, 0.83, 0x65747a);
+  }
+  k.box(offset + 1, -0.34, 0, 5.4, 0.58, 1.92, 0x414a4e);
+}
+// The lettering on the flank the campaign boards by (and, mirrored, the other).
+export function lettering(k, offset = 0, side = -1) {
+  const yaw = side < 0 ? Math.PI : 0;
+  k.sign(offset - 2, 0.63, side * 1.59, 2.4, 0.32, ['České dráhy'], yaw, '#1b5386');
+  k.sign(offset + 12.42, 1.75, side * 1.59, 0.53, 0.61, ['2'], yaw, '#244f78');
 }
 
 export function trainBody(scene) {
@@ -102,80 +176,31 @@ export function trainBody(scene) {
       (x, ...rest) =>
         fn(x + offset, ...rest);
     coach({ box: shifted(shell.box), sign: shifted(shell.sign) });
-    shell.sign(offset - 2, 0.63, -1.59, 2.4, 0.32, ['České dráhy'], Math.PI, '#1b5386');
-    shell.sign(offset + 12.42, 1.75, -1.59, 0.53, 0.61, ['2'], Math.PI, '#244f78');
+    lettering(shell, offset);
     for (const direction of [-1, 1]) {
       const panel = new THREE.Group(),
         k = scenery(panel);
-      k.box(0, 1.42, -1.53, 0.74, 2.51, 0.09, 0x245581);
-      k.box(0, 1.73, -1.53, 0.57, 0.83, 0.11, 0x293d4b);
-      k.box(0, 1.74, -1.53, 0.47, 0.7, 0.12, 0x839fa9);
-      k.box(direction * 0.29, 1.42, -1.53, 0.045, 2.48, 0.105, 0x283942);
-      k.box(0, 0.32, -1.53, 0.72, 0.1, 0.11, 0xf2c34d);
+      doorLeaf(k, direction);
       k.finish();
       group.add(panel);
       leaves.push({ panel, x: offset + doorX + direction * 0.365, direction });
       doorKits.push(k);
     }
-    for (const [bay, side, facing] of [
-      [0, 1, -1],
-      [2, -1, 1],
-      [4, 1, 1],
-      [6, -1, -1],
-    ]) {
-      const x = offset - 8.2 + bay * 2.62 + facing * 0.84;
-      const person = makeCitizen({ uid: 'kolin-' + x, archetype: bay === 2 ? 'woman' : 'man' });
+    for (const rider of riders) {
+      const seat = riderSeat(rider),
+        x = offset - 8.2 + rider[0] * 2.62 + rider[2] * 0.84;
+      const person = makeCitizen({ uid: 'kolin-' + x, archetype: rider[0] === 2 ? 'woman' : 'man' });
       person.sitPose(1, 0);
-      person.group.position.set(x, -0.26, side * 1.08);
-      person.group.rotation.y = (facing * Math.PI) / 2;
+      person.group.position.set(x, seat.y, seat.z);
+      person.group.rotation.y = seat.yaw;
       group.add(person.group);
       passengers.push(person);
     }
   }
-  for (const offset of [-26.7, 0]) {
-    const x = offset + 16.35;
-    shell.box(x, 0.075, 0, 0.81, 0.18, 1.22, 0x505658);
-    for (const side of [-1, 1])
-      for (let j = 0; j < 5; j++)
-        shell.box(x - 0.24 + j * 0.12, 1.27, side * (0.66 + (j % 2) * 0.035), 0.13, 2.35, 0.12, 0x393b3c);
-    shell.box(x, 2.42, 0, 0.85, 0.19, 1.45, 0x3d4143);
-  }
+  for (const offset of [-26.7, 0]) gangway(shell, offset + 16.35);
   // The last car has a driving cab beyond the through aisle.
-  for (const end of [-36.88, 42.88]) {
-    const face = end < 0 ? -1 : 1;
-    shell.box(end, 1.95, 0, 0.18, 0.95, 2.8, 0x273c4a);
-    for (const side of [-1, 1]) {
-      shell.box(end + face * 0.11, 2.0, side * 0.65, 0.05, 0.66, 1.17, 0x738b99);
-      shell.box(
-        end + face * 0.12,
-        0.88,
-        side * 1.02,
-        0.06,
-        0.13,
-        0.25,
-        end < 0 ? 0xa63e32 : 0xffe6b7,
-        0,
-        true,
-      );
-      shell.box(end + face * 0.21, -0.02, side * 0.9, 0.31, 0.18, 0.3, 0x384349);
-    }
-  }
-  for (const offset of offsets) {
-    for (const u of [-6.65, 12.45]) {
-      shell.box(offset + u, -0.39, 0, 3.12, 0.36, 2.23, 0x40494c);
-      for (const axle of [-0.98, 0.98])
-        for (const side of [-1, 1]) {
-          shell.box(offset + u + axle, -0.33, side * 0.82, 0.79, 0.79, 0.19, 0x41484a, 0, false, 'round');
-          shell.box(offset + u + axle, -0.33, side * 0.92, 0.62, 0.62, 0.05, 0x707879, 0, false, 'round');
-        }
-    }
-    for (const u of [-6.2, 6.2]) {
-      shell.box(offset + u, 2.96, 0, 2.15, 0.22, 1.07, 0xa6aaa8);
-      for (let x = -0.86; x < 0.9; x += 0.19)
-        shell.box(offset + u + x, 3.08, 0, 0.073, 0.035, 0.83, 0x65747a);
-    }
-    shell.box(offset + 1, -0.34, 0, 5.4, 0.58, 1.92, 0x414a4e);
-  }
+  for (const end of [-36.88, 42.88]) cab(shell, end, end < 0 ? -1 : 1, end < 0 ? 0xa63e32 : 0xffe6b7);
+  for (const offset of offsets) running(shell, offset);
   for (const x of [-36.8, 42.8]) shell.box(x, 1.42, 0, 0.12, 2.56, 1.24, 0xadb3b0);
   shell.finish();
   scene.add(group);

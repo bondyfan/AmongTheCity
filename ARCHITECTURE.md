@@ -2866,3 +2866,52 @@ coach's door step (`world.storyCoach.boarding`, prologue.js). The campaign's yar
 (`prologue-tracks.js`) stay as they were. Pedestrians walk mapped footways, which cross the
 rails only where the map has a crossing. Pure in tile data and position, so co-op screens
 agree without a word.
+
+## Every train is the train from Kolín (21 Nov 2026)
+
+Frank: "vlaky, aby všechny vlaky byly tak, jako je to, když nastupuje jako z Kolína ...
+úplně jako takhle stejný model toho vlaku, nastoupit, sednout si tam a tak dále. A musí
+opravdu ten vlak přijet, potom se odjet fyzicky."
+
+* **One coach, two users.** `js/prologue-coach.js` is cut into parts (`coach`, `running`,
+  `gangway`, `cab`, `doorLeaf`, `lettering`, `riders`); the campaign's `trainBody` calls
+  them with the numbers it always had (a recording kit shows the same 2267 boxes, signs
+  and seats before and after). `js/railcoach.js` gathers the same calls into three merged
+  geometries (solid with the kit's grain shader on merged attributes, glass, glow) shared
+  by every coach of every train: three draws a coach, plus four door leaves, the signs and
+  a box that throws the shadow. Beyond 150 to 185 m a coach is its far model (a dozen
+  boxes in the same colours). `coach(k, { doors: 2 })` gives the open world's coach a real
+  door on BOTH flanks (a platform can be on either side); the campaign keeps its one.
+* **A train** (`js/trains.js`) is a row of that coach, a cab at each end, no locomotive:
+  three for the random trains, five for the express. Each coach still rides on its own
+  two bogies, so the set bends. It stops with its MIDDLE at the station (`stopS`), its
+  doors open (`t.closed` 1 shut to 0 open, the campaign's rates), start to close
+  `DOOR_LEAD` before the dwell ends, and it does not move until they are shut. At the end
+  of a line (no station) they stay shut.
+* **The deck** (`js/traindeck.js`, pure): every coach has a frame `{ x, z, c, s, y, first,
+  last }` written by `_place`; floor, door steps, walls, seats and cab walls are the
+  campaign's own (`js/prologue-deck.js` `stepY`, `coachWalls`, `endWall`), asked per coach,
+  with the slots of two coaches overlapping by 0.35 m so a bend opens no gap in the
+  gangway. `trains.deck` is `world.rideDeck`, consulted beside `world.storyCoach` in
+  `city.js supportY/collide` and in `railbarrier.js allowed()` (inside a coach, and at an
+  open door out to 3.4 m, a walker may be in the track strip). A train on the move is no
+  wall and no floor to anyone outside it.
+* **Riding** (`js/trainride.js`, methods of Trains): he rides from the step he takes into
+  a coach of a standing train with its doors open to the step he takes out of one. The
+  train carries him by keeping his place in his coach's frame: read before the trains
+  move, written after. For that `trains.update` now runs BEFORE the walker's update in
+  main.js (it came after the crowd, and his body trailed the coach by a frame). E aboard
+  is the seat (`prologue-seat.js`, the campaign's movement), never a teleport; `board()`
+  and `alight()` remain for tests and scripts. `trains.locked` (the campaign is playing)
+  turns the deck and boarding off: its own train is the only one. The camera is `enclosed`
+  aboard, as in the campaign's coach.
+* **The express arrives** (`js/express.js`): it is put on the line 420 m east of Pardubice
+  hl. n. 48 to 30 s before its minute, runs in, stands with its doors open until the
+  departure (`t.dwellFor`), and leaves. Its ticket is charged as the rider steps in
+  (`onBoard`); without the money he rides without one. A skip (N) keeps him in his coach.
+* **People** (`js/trainpeople.js`): the campaign's four seated passengers a coach, in ONE
+  train at a time (the ridden one, else the nearest within 95 m), seated one a frame.
+* Not done: the conductor walking the aisle, a timetable for the random trains, trains
+  seen the same by two co-op players (they are local state, as before), a walker hit by
+  a moving train. `js/trains.js` is still 1080 lines (it was 1279).
+* Tests: `tests/trainride.test.mjs`, `tests/express.test.mjs`.
