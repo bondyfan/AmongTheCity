@@ -243,6 +243,10 @@ const CRIMES = Object.freeze({
   // pulling a driver out of his car where somebody can see it: two stars on
   // the spot (46 is one over the second line), and they come to arrest you
   prepadeni: Object.freeze({ key: 'prepadeni', heat: 46, noun: 'přepadení řidiče' }),
+  // traffic offences seen by the police (js/roadlaw.js): one star and no more,
+  // the caller tops the heat up to its cap rather than adding the full price
+  rychlost: Object.freeze({ key: 'rychlost', heat: 26, noun: 'překročení rychlosti' }),
+  cervena:  Object.freeze({ key: 'cervena',  heat: 26, noun: 'jízda na červenou' }),
 });
 export { CRIMES };
 

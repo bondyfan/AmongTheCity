@@ -27,6 +27,8 @@
 // samples with the old synth as fallback, and sfxAt()/setListener() add a
 // zero-cost distance falloff for the world's one-shots (debris, screams).
 
+import { createSpatial } from './spatialsfx.js';
+
 let ctx = null;      // the one AudioContext (created on first gesture)
 let master = null;   // master gain — setVolume() scales everything at once
 let volume = 1;      // remembered so setVolume() before initAudio() sticks
@@ -176,29 +178,64 @@ function loadBuffer(name) {
 // 110 m — which only meant a horn at 109 m was as loud as one at two.
 const CAR_HORNS = ['car_horn_short', 'car_horn_long', 'car_horn_double'];
 const HORN_MAX = 220;                              // m — a car horn is loud
+// …but "close" is close: inside 5 m a horn is as loud as it gets, and three
+// cars back it is already half that. With the city's 10 m radius a horn in the
+// queue behind you was as loud as your own steering wheel (Frank, 21 Nov 2026:
+// "zni jako strasne blizko me"). js/spatialsfx.js does the rest: the side it
+// is on, the treble the distance takes, the street answering it.
+const HORN_REF = 5;
 export function horn(x, z) {
   if (!ctx || ctx.state !== 'running') return;
   const name = Math.random() < 0.08 ? 'truck_horn'
     : CAR_HORNS[(Math.random() * CAR_HORNS.length) | 0];
   const rate = 0.94 + Math.random() * 0.12;        // ±6 % — a different car each time
-  let vol = (name === 'truck_horn' ? 0.8 : 0.65) * (0.85 + Math.random() * 0.3);
-  if (x !== undefined) {
-    vol = gainAt(vol, x, z, HORN_MAX);
-    if (vol < 0.015) return;
+  const vol = (name === 'truck_horn' ? 0.8 : 0.65) * (0.85 + Math.random() * 0.3);
+  if (x === undefined) {
+    const buf = buffers.get(name);
+    if (buf) { playBuffer(buf, vol, rate); return; }
+    if (buf === null) { hornLegacy(vol); return; }   // known missing → old mix
+    loadBuffer(name).then(b => b ? playBuffer(b, vol, rate) : hornLegacy(vol));
+    return;
   }
-  const buf = buffers.get(name);
-  if (buf) { playBuffer(buf, vol, rate); return; }
-  if (buf === null) { hornLegacy(vol); return; }   // known missing → old mix
-  loadBuffer(name).then(b => b ? playBuffer(b, vol, rate) : hornLegacy(vol));
+  playAt(name, vol, rate, x, z, HORN_REF, HORN_MAX, () => hornLegacy(vol, x, z));
 }
 
 // The pre-v7 horn: two generated horns picked per honk, themselves falling
 // back to the synthesized dyad via fallback() when those files are missing too.
-function hornLegacy(scale = 1) {
+// Placed in the street like the real ones when the honk came from somewhere.
+function hornLegacy(scale = 1, x, z) {
   const angry = Math.random() < 0.4;   // most honks are the mild one
-  sfx(angry ? 'horn_angry' : 'horn_far',
-    scale * (angry ? 0.75 : 0.6) * (0.88 + Math.random() * 0.24));
+  const name = angry ? 'horn_angry' : 'horn_far';
+  const vol = scale * (angry ? 0.75 : 0.6) * (0.88 + Math.random() * 0.24);
+  if (x === undefined) { sfx(name, vol); return; }
+  playAt(name, vol, 1, x, z, HORN_REF, HORN_MAX,
+    () => fallback(name, gainAt(vol, x, z, HORN_MAX)));
 }
+
+// One positioned sample through js/spatialsfx.js's voice pool, fetched on the
+// first call like every other sound; `alt` runs instead when the file is known
+// to be missing. The pool is built on the first positioned sound and handed the
+// current ears at once, so its first horn is not aimed from the origin.
+let spatial = null;
+function spat() {
+  if (!spatial && ctx && ctx.state === 'running') {
+    spatial = createSpatial(ctx, master, verbBus);
+    if (lisSet) spatial.listener(lisX, lisZ, lisDx, lisDz);
+  }
+  return spatial;
+}
+function playAt(name, vol, rate, x, z, ref, maxD, alt) {
+  const sp = spat();
+  if (!sp) return;
+  const buf = buffers.get(name);
+  if (buf) { sp.play(buf, vol, rate, x, z, ref, maxD); return; }
+  if (buf === null) { alt?.(); return; }
+  loadBuffer(name).then(b => { if (b) sp.play(b, vol, rate, x, z, ref, maxD); else alt?.(); });
+}
+/** How many positioned voices are sounding (tests, the dev overlay). */
+export function spatialBusy() { return spatial ? spatial.busy() : 0; }
+/** What the sounding positioned voices are doing: [{ x, z, gain, cutoff, pan, wet }]. */
+export function spatialState() { return spatial ? spatial.state() : []; }
 
 // ---- positioned one-shots ------------------------------------------------
 // The cheap spatializer for debris, screams and other world events: a plain
@@ -224,6 +261,8 @@ export function setListener(x, z, dx, dz) {
     const L = Math.hypot(dx, dz) || 1;
     lisDx = dx / L; lisDz = dz / L;
   }
+  // the sounding positioned voices follow the ears (turn, walk, drive away)
+  spatial?.listener(lisX, lisZ, lisDx, lisDz);
 }
 
 // Sound pressure falls as 1/r, not linearly. The old linear taper made a car
@@ -246,7 +285,12 @@ export function gainAt(vol, x, z, maxDist) {
   return vol * (REF / Math.max(REF, d)) * (1 - d / maxDist);
 }
 
-export function sfxAt(name, vol, x, z, maxDist = 260, cooldown = 0) {
+// Since 21 Nov 2026 these are PLACED, not just turned down: js/spatialsfx.js
+// pans them to their side, takes the treble off with distance and sends the far
+// ones into the street reverb (the traffic going past, a siren, a crash, a
+// scream). `rate` is a playback rate (the ambulance's two-tone is the police
+// clip played faster).
+export function sfxAt(name, vol, x, z, maxDist = 260, cooldown = 0, rate = 1) {
   if (!ctx || ctx.state !== 'running') return;
   const g = gainAt(vol, x, z, maxDist);
   if (g < 0.015) return;                     // inaudible — don't burn the cooldown
@@ -255,7 +299,8 @@ export function sfxAt(name, vol, x, z, maxDist = 260, cooldown = 0) {
     if (last !== undefined && ctx.currentTime - last < cooldown) return;
     sfxLast.set(name, ctx.currentTime);
   }
-  sfx(name, g);
+  if (!lisSet) { sfx(name, g, rate); return; }
+  playAt(name, vol, rate, x, z, REF, maxDist, () => fallback(name, g));
 }
 
 function playBuffer(buf, vol, rate = 1) {

@@ -21,9 +21,42 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
 #speedo {
   position: absolute; right: 22px; bottom: 96px; color: #f2f5fb; text-align: right;
   text-shadow: 0 2px 8px rgba(0,0,0,0.85);
+  /* a row, so the limit disc can sit left of the number; number and unit
+     still share a baseline exactly as when they were two inline spans */
+  display: flex; align-items: baseline; justify-content: flex-end;
 }
 #speedo #speed-num { font-size: 44px; font-weight: 800; letter-spacing: 1px; }
 #speedo small { font-size: 13px; margin-left: 5px; opacity: 0.75; }
+/* Over the limit the number warms; more than half as fast again (the police
+   take a star for that, js/roadlaw.js) it goes the HUD's red. */
+#speedo.over #speed-num { color: var(--sem-warn); }
+#speedo.way #speed-num { color: var(--sem-bad); }
+/* The limit: a Czech B 20a, the red-ringed white disc. No glass panel, like
+   everything on this rail; the sign itself is the frame. The ring is 12 % of
+   the diameter, as on the real plate, and a dark hairline outside it keeps
+   the white edge readable against a pale sky. */
+#limit-sign {
+  align-self: center; flex: 0 0 auto;
+  width: 42px; height: 42px; margin-right: 12px; border-radius: 50%;
+  background: #fff; border: 5px solid #d42a2a;
+  box-shadow: 0 0 0 1.5px rgba(10,12,16,0.75), 0 2px 8px rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  text-shadow: none;
+}
+#limit-sign b {
+  color: #111; font: 800 17px/1 "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+  letter-spacing: -0.5px; font-variant-numeric: tabular-nums;
+}
+#limit-sign.w3 b { font-size: 14px; letter-spacing: -0.8px; }
+/* The model, at the very foot of the block: under the fuel gauge, on the same
+   22 px rail, clear above #controls-hint. Type and shadow only. */
+#car-model {
+  position: absolute; right: 22px; bottom: 44px; max-width: min(58vw, 300px);
+  text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--hud-ink); opacity: 0.92;
+  font: 700 12.5px/1.1 system-ui, sans-serif; letter-spacing: 0.6px;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.95), 0 0 10px rgba(0,0,0,0.6);
+}
 /* Vehicle name card — the GTA move: sit it directly above the speed readout,
    right-aligned on the same 22px rail, so getting in reads as one block of
    information (what you are driving, then how fast). No panel behind it: a
@@ -745,6 +778,10 @@ html, body { overscroll-behavior: none; touch-action: none; }
   #wanted { gap: 3px; }
   #wanted .wt-star { width: 13px; height: 13px; }
   #fuel { width: 106px; bottom: 62px; }
+  #car-model { bottom: 42px; font-size: 11.5px; }
+  #limit-sign { width: 36px; height: 36px; border-width: 4px; margin-right: 9px; }
+  #limit-sign b { font-size: 15px; }
+  #limit-sign.w3 b { font-size: 12px; }
 }
 
 /* =========================================================================

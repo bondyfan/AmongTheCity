@@ -203,8 +203,8 @@
 // rate is not free to move much — under ~0.70 the sample's own reverb tail
 // smears into a drone and you can hear that it is a slowed recording; over
 // ~0.88 it is audibly the police car with a cold. 0.78 is about the widest gap
-// that still sounds like a siren. sfx() takes the rate and gainAt() gives the
-// 1/r law, so the distance question is still asked in exactly one place.
+// that still sounds like a siren. sfxAt() takes the rate and places the wail
+// (its 1/r law, its side, its distance filter), the same door police.js uses.
 //
 // SIREN_GAP is 4.55 s against the 5.13 s stretched clip: 0.58 s of overlap, so
 // the wail is continuous rather than pulsing, the same trade police.js makes.
@@ -314,7 +314,7 @@
 import * as THREE from 'three';
 import { TRAFFIC, LAYER_Y } from './config.js';
 import { distPointToSegment, roadGradeY, bridgeDeckHeight } from './geo.js';
-import { sfx, gainAt } from './audio.js';   // headless-safe: both no-op without a context
+import { sfxAt } from './audio.js';   // headless-safe: both no-op without a context
 import { worldT } from './worldclock.js';
 // Namespace imports on purpose, both of them. A NAMED import of something a
 // stale sibling does not export is a hard link error that takes the whole page
@@ -1409,13 +1409,10 @@ export class Ambulance {
     }
     if (!near) return;
     this._sirenAt = this._t + SIREN_GAP;
-    // sfxAt() would do the attenuation for us and is what police.js uses, but it
-    // does not take a playback rate and the rate IS the difference between the
-    // two services. gainAt() is the same 1/r law sfxAt applies, so the distance
-    // question is still asked in exactly one place in the game; the 0.015 floor
-    // is sfxAt's own, transcribed so an inaudible wail does not burn a source.
-    const g = gainAt(SIREN_VOL, near.x, near.z, SIREN_R);
-    if (g >= 0.015) sfx(SIREN_CLIP, g, SIREN_RATE);
+    // sfxAt() takes a playback rate now (the rate IS the difference between the
+    // two services), so the wail is placed in the street like police.js's: on
+    // its side of you, duller the further it is (js/spatialsfx.js).
+    sfxAt(SIREN_CLIP, SIREN_VOL, near.x, near.z, SIREN_R, 0, SIREN_RATE);
   }
 
   // ------------------------------------------------------------ driving ----

@@ -36,6 +36,7 @@ import { BATTER, roadCorr, railCorr, groundUnder, railBedded, railBedY } from '.
 import { Canopy } from './canopy.js';
 import { GroundClass } from './groundclass.js';
 import { mwCollide } from './mwsolids.js';
+import { railCollide } from './railbarrier.js';
 import { freezeStatic } from './scenegraph.js';
 
 // Wake the mesher workers as soon as the page has this module, which is while
@@ -2274,6 +2275,14 @@ export class CityWorld {
     pushed = quayStairsCollide(pos, radius, opts) || pushed;
     // the shelves, tills and shut doors of a chain store (js/stores/world.js)
     pushed = this.stores?.collide(pos, radius, opts) || pushed;
+    // …and the railway is not a pavement (js/railbarrier.js, Frank 21 Nov 2026):
+    // a walker is kept off every heavy-rail track at grade except where a way
+    // crosses it, on the station's own floors, or a level above or below
+    // (underpass, footbridge, bridge)
+    if (opts?.interior) {
+      const feet = opts.aboveY !== undefined ? opts.aboveY - 0.3 : opts.yLo;
+      pushed = railCollide(this, pos, radius, feet) || pushed;
+    }
     const cell = this.city.chunkIndex.get(chunkKey(pos.x, pos.z));
     if (!cell) return pushed;
     const walker = !!opts?.interior;

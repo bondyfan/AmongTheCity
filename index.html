@@ -86,7 +86,10 @@
         <span class="wt-star"></span>
       </div>
     </div>
-    <div id="speedo" class="hidden"><span id="speed-num">0</span><small id="speed-unit">km/h</small></div>
+    <!-- #limit-sign: the limit of the road under the wheels (js/roadlaw.js), a
+         Czech B 20a disc left of the number. Only while you drive a car;
+         main.js toggles .hidden and writes the number, nothing else. -->
+    <div id="speedo" class="hidden"><span id="limit-sign" class="hidden" title="Nejvyšší povolená rychlost"><b></b></span><span id="speed-num">0</span><small id="speed-unit">km/h</small></div>
     <!-- the car you just got into, named over the speedo for 3 s. Never
          display:none — main.js only adds/removes .show so the fade runs. -->
     <div id="car-name"><span class="cn-name"></span><span class="cn-sub"></span></div>
@@ -110,6 +113,10 @@
     <div id="fuel" class="hidden">
       <div class="fu-bar"><i></i></div><span class="fu-type"></span><span class="fu-range"></span>
     </div>
+    <!-- What you are driving, for as long as you drive it: the last line of the
+         bottom-right block, under the fuel gauge (the name card over the
+         speedo is the three-second announcement of the same thing). -->
+    <div id="car-model" class="hidden"></div>
     <div id="reticle" class="hidden"><span></span></div>
     <!-- Objective tracker (js/tracker.js): what you are doing, where it is,
          how far, how long you have and what it pays. One card, top left, shared

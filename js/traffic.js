@@ -2622,6 +2622,23 @@ export class Traffic {
   }
 
   /**
+   * fn(edge) for every directed edge whose polyline passes through the 3×3
+   * grid cells around (x, z): about 100 m either way. An edge crossing two of
+   * those cells is visited once per cell. js/roadlaw.js finds the lane under
+   * the player's wheels with it, for the limit sign and the red-light rule.
+   */
+  edgesNear(x, z, fn) { this._egrid.near(x, z, fn); }
+
+  /**
+   * What the light at the end of edge `e` shows its approach now: 0 green,
+   * 1 amber, 2 red, -1 no signal. The very phase the AI drivers stop for (the
+   * shared clock, the junction's offset, the edge's bucket).
+   */
+  lightOf(e, wt = this._wt || this.now()) {
+    return e?.sig ? this._phase(e.sig, e.sigPh, wt) : -1;
+  }
+
+  /**
    * A patrol car with no schedule and no brain, for a caller that wants to
    * drive one itself — a unit called in from off-map, or a roadblock. It is
    * NOT in this.cars and NOT in this.patrols, traffic will never touch it, and

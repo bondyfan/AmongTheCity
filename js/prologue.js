@@ -159,6 +159,9 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     carrying: (x, z) => roofCtl.carrying(x, z) || coachDeck.carrying(x, z),
     support: (x, z, limit) => (roofCtl.carrying(x, z) ? roofCtl.support() : coachDeck.support(x, z, limit)),
     collide: (pos, r, opts) => roofCtl.collide(pos, r) || coachDeck.collide(pos, r, opts),
+    // the step between the platform edge and the coach door is over the track
+    // strip js/railbarrier.js keeps walkers off: this is the one way in
+    boarding: (x, z) => atTrain(x, z),
   };
   world.storyCoach = deck;
   // where a walker in the yard may be off the platforms: in the train, at its door

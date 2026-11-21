@@ -54,6 +54,8 @@ import { PRICE, pumpBrand, pumpPrice, kc2, kc } from './prices.js';
 import { Combat } from './combat.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
+import { RoadLaw } from './roadlaw.js';
+import { createLawHud } from './lawhud.js';
 import { toast as policeToast } from './toasts.js';
 import { Ambulance } from './ambulance.js';
 import { ChatBubbles } from './chatbubbles.js';
@@ -296,6 +298,8 @@ let _stationT = 0;
 let combat = null;       // fists, and what falls out of people — js/combat.js
 let police = null;       // the patrol that wants you — js/police.js
 let ambulance = null;    // and the one that comes for the body — js/ambulance.js
+let roadLaw = null;      // the limit of your road and the police who watch it: js/roadlaw.js
+let lawHud = null;       // the limit disc and the model line on the HUD: js/lawhud.js
 let chatter = null;      // who says what, and when — js/chatter.js
 let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
@@ -2606,6 +2610,8 @@ function updateHud(dt) {
     $id('speed-num').textContent = `${kmh}`;
     $id('speed-unit').textContent = `km/h · ${Math.round(game.heli.y)} m`;
   }
+  // the limit of this road beside the speed, the model under the fuel
+  lawHud?.(game.car, roadLaw?.limit ?? 0, game.car ? carLabel(game.car) : '');
   // vehicle name card: counted down per frame, not on the 0.2 s hint tick, so
   // three seconds is three seconds and not "three seconds rounded to a tick"
   if (_carNameHold > 0) {
@@ -3338,6 +3344,11 @@ async function boot() {
     },
     onArrest: () => busted(), onTackle: () => tackled() });
   ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL, hospitals: HOSPITALS });
+  // Speeding past the police and running a red under their noses: one star
+  // (Frank, 21 Nov 2026). It reads the traffic's edges and lights and writes
+  // only your own heat.
+  roadLaw = new RoadLaw({ traffic, police, wanted, toast: policeToast });
+  lawHud = createLawHud(document);
 
   // ---- the body, the wallet and the tank ----
   statusbar.init();
@@ -3914,6 +3925,7 @@ function stepGame(dt) {
   _polCtx.onFoot = _vitCtx.onFoot; _polCtx.y = game.car ? NaN : player.y;
   _polCtx.lying = !!player.ragdoll;
   police?.update(dt, _polCtx);
+  roadLaw?.update(dt, game.mode === 'play' ? game.car : null);
   ambulance?.update(dt, _polCtx);
   combatInput(dt);
   updateStars();
@@ -4353,6 +4365,7 @@ window.__atc = {
   get police() { return police; },
   get roadWorks() { return roadWorks; },
   get ambulance() { return ambulance; },
+  get roadLaw() { return roadLaw; },
   get traffic() { return traffic; },
   said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
   get interiors() { return world?.interiors; },
