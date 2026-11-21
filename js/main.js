@@ -3383,7 +3383,9 @@ async function boot() {
       if (t.includes('Vystupte')) sfxOr('voice_police_out', null, 0.9);   // the one order that is recorded
     },
     onArrest: () => busted(), onTackle: () => tackled() });
-  ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL, hospitals: HOSPITALS });
+  // (another region's own hospitals, js/regions.js: Pardubice is 7 800 km from Mahé)
+  ambulance = new Ambulance({ traffic, vehicles, city, scene, peds,
+    hospital: region().hospitals?.[0] ?? HOSPITAL, hospitals: region().hospitals ?? HOSPITALS });
   // Speeding past the police and running a red under their noses: one star
   // (Frank, 21 Nov 2026). It reads the traffic's edges and lights and writes
   // only your own heat.

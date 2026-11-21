@@ -43,6 +43,7 @@ export const REGIONS = {
     ortho: true,          // ČÚZK aerial photos under the ground (js/ortho.js)
     czech: true,          // the D11, the stations, the campaign, the chains
     sun: { rise: 5, set: 21, peak: 75, dip: 40 },
+    hospitals: null,      // config.js HOSPITALS (and the D11 services) stay the Czech list
     spawns: {},           // START_PLACES in config.js stay the Czech list
   },
   // Mahé. The origin is a round anchor just south of Victoria's harbour, NOT a
@@ -87,6 +88,9 @@ export const REGIONS = {
       stand: { x: 7872, z: -93868, heading: 0.907 },
       terminal: { landside: { x: 7798, z: -93774 } },
     },
+    // where you wake after the death card: Seychelles Hospital at Mont Fleuri,
+    // Victoria (stub: the OSM build puts it at its mapped door)
+    hospitals: [{ x: 0, z: -100000, name: 'Seychelles Hospital', stub: true }],
     home: 'victoria',
     spawns: {
       // on final for 13 from the north-west: 9 km out on a 3 degree path

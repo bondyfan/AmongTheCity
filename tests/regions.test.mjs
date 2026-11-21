@@ -161,3 +161,15 @@ test('the SEZ airport and the arrival spawn are on Mahé', () => {
   assert.ok(Math.abs(ax * dz - az * dx) / len < 30, 'on the centreline');
   assert.ok(arr.y > 300 && arr.y < 900);
 });
+
+test('a death on Mahé wakes you in Victoria, a death in Pardubice in Pardubice', async () => {
+  const { nearestHospital } = await import('../js/startplace.js');
+  const cz = nearestHospital(100, 100);
+  assert.equal(cz.name, 'Pardubická nemocnice');
+  R._setRegionForTest('mahe');
+  try {
+    const h = nearestHospital(5000, -90000);
+    assert.equal(h.name, 'Seychelles Hospital');
+    assert.ok(Math.abs(h.z - -100000) < 15000, 'on the island');
+  } finally { R._setRegionForTest(null); }
+});
