@@ -9,6 +9,7 @@ import { K } from '../landmarkskit.js';
 import { Frame } from '../landmarksframe.js';
 import { signBrand, signAspect, signQuad } from './signs.js';
 import { dressFast } from './dressfast.js';
+import { dressShow } from './dressshow.js';
 import { apronOf } from './site.js';
 
 const STEEL = 0x9da1a5, DARK = 0x33373c;
@@ -141,6 +142,7 @@ export function dressStore(kit, f, site, ctx) {
   const F = new Frame(kit, site.door.x, site.door.z, site.nx, site.nz, 0);
   kit.ao = false;
   if (chain.kind === 'fast') { dressFast(kit, F, site, ctx, f); kit.ao = true; return; }
+  if (chain.kind === 'showroom') { dressShow(kit, F, site, ctx); kit.ao = true; return; }
 
   // ---- the canopy ----
   const c = sp.canopy;

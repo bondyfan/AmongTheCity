@@ -103,7 +103,8 @@ function quadGeo(quads) {
 
 /** The ceiling height over local (u, v): the roof's own underside. */
 export function ceilAt(site, v) {
-  if (site.hF === site.hB) return site.hF - 0.78;
+  // (`arch.ceil`: a hung ceiling, where a lower neighbour's eaves would show under the roof)
+  if (site.hF === site.hB) return Math.min(site.hF - 0.78, site.chain.arch.ceil ?? Infinity);
   const t = Math.max(0, Math.min(1, (v + site.hv) / Math.max(1, 2 * site.hv)));
   return site.hB + (site.hF - site.hB) * t - 0.33;
 }
