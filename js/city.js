@@ -2116,8 +2116,14 @@ export class CityWorld {
   // staircase is, the walk controller merely keeps finding a surface 175 mm
   // higher than the last one.
   supportY(x, z, maxY) {
-    const coach = this.storyCoach?.support(x, z, maxY);
+    let coach = this.storyCoach?.support(x, z, maxY);
     if (Number.isFinite(coach) && this.storyCoach.carrying(x, z)) return coach;
+    // …and the trains of the open world the same way (js/trainride.js)
+    const ride = this.rideDeck?.support(x, z, maxY);
+    if (Number.isFinite(ride)) {
+      if (this.rideDeck.carrying(x, z)) return ride;
+      if (!(coach > ride)) coach = ride;
+    }
     const passage = this.stationPassages?.floor(x, z, maxY);
     if (Number.isFinite(passage)) return passage;
     let best = this.heightAt(x, z, maxY);
@@ -2251,6 +2257,8 @@ export class CityWorld {
     if (opts?.interior && this.stationPassages?.contain(pos, opts.aboveY - 0.3, radius)) return true;
     let pushed = this.storyCoach?.collide(pos, radius, opts) ?? false;
     if (opts?.interior && this.storyCoach?.carrying(pos.x, pos.z)) return pushed;
+    if (this.rideDeck?.collide(pos, radius, opts)) pushed = true;
+    if (opts?.interior && this.rideDeck?.carrying(pos.x, pos.z)) return pushed;
     // A CAR IS A SOLID OBJECT, even for someone on foot. Walking through a
     // parked Octavia was the same lie as an NPC driving through it, and it
     // stayed in for exactly as long as nobody thought of the pavement as

@@ -79,6 +79,7 @@ import { Fighter } from './aircraft.js';
 import { Clouds } from './clouds.js';
 import { WorldMap } from './worldmap.js';
 import { Trains } from './trains.js';
+import { trainPassengers } from './trainpeople.js';
 import { Express, screenFade } from './express.js';
 import { Weapons } from './weapons.js';
 import { SpeedStreaks } from './speedfx.js';
@@ -341,6 +342,7 @@ let jetWasAir = false;   // edge detector for touchdown
 let jetBraking = false;  // …and for the brakes, so the sample fires once
 let worldMap = null;   // the full-region map on M, and the waypoint it owns
 let trains = null;     // České dráhy on the real 532 km network
+let trainPeople = null; // who sits in the one near the player (js/trainpeople.js)
 let express = null;    // the R train Pardubice - Praha on top of them (js/express.js)
 let weapons = null;  // the rocket pod under that machine, and what it does to walls
 let streaks = null;  // the air, showing itself past 100 km/h
@@ -570,7 +572,7 @@ function updateCamera(dt) {
   // the chase cam across the street the moment C switched back.
   if (input.takeZoomHome()) { camDist = CAM_DIST_0; footDist = FOOT_DIST_0; }
   // the wheel zooms the boom that is in use: the walker's, or the vehicle's
-  if (game.car || game.heli || game.jet || trains?.riding) camDist = Math.max(CAM_DIST_MIN, Math.min(CAM_DIST_MAX, camDist + input.takeWheel() * 1.4));
+  if (game.car || game.heli || game.jet) camDist = Math.max(CAM_DIST_MIN, Math.min(CAM_DIST_MAX, camDist + input.takeWheel() * 1.4));
   else footDist = Math.max(FOOT_DIST_MIN, Math.min(FOOT_DIST_MAX, footDist + input.takeWheel() * 0.45));
   fpHideSelf(!!fpCar);
   // the cabin is in for the driver's eyes, and for as long as a door stands open
@@ -714,7 +716,7 @@ function updateCamera(dt) {
   // bug. The helicopter was already excluded; the jet was not, and the jet is
   // the one that crosses a block every fifth of a second.
   const flying = !!(game.heli || game.jet);
-  const enclosed = !flying && !game.car && (journey?.aboard || world.stationPassages?.inside(tx, tz, player.y));
+  const enclosed = !flying && !game.car && (journey?.aboard || !!trains?.riding || world.stationPassages?.inside(tx, tz, player.y));
   // (a car is only ever under a store's roof in a showroom, and is looked at from inside it too)
   const inShop = !flying && !!world.stores?.covered(tx, tz);
   const indoors = enclosed || inShop || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
@@ -1264,26 +1266,14 @@ input.onKey('KeyE', () => {
   if (world.stores?.use({ car: game.car, onFoot: !game.car && !player.inCar })) return;
   let jetNear = null;              // set by the fighter branch's own test
   if (trains?.riding) {
-    // only with the doors open — stepping off at 140 km/h is not a feature
-    if (!trains.alight()) { ui_hint('Vystoupit lze jen ve stanici'); return; }
-    // the train is the one ride that showed the speedo without ever hiding it
-    // again (updateHud only ever fills it), so stepping onto the platform left
-    // the carriage's last speed frozen in the corner until you found a car
-    $id('speedo').classList.add('hidden');
-    sfx('train_doors', 0.7);
-  } else if (!player.inCar && !game.car && !game.heli && !game.jet && !player.boarding && !player.exiting
-      && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
-    // !player.inCar, not just !game.car: a PASSENGER has no game.car but his
-    // pos mirrors the vehicle's, so parking within 6 m of a halted train used
-    // to board it from the seat — riding a train and sitting in a car at once,
-    // with two updates fighting over player.pos.
-    const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
-    // the express charges a ticket as you board (the random trains stay free)
-    if (t?.express && !wallet.pay(PRICE.train.ticket, 'jízdenka')) {
-      ui_hint('Jízdenka stojí ' + kc(PRICE.train.ticket) + ', tolik nemáš');
-      return;
+    // Aboard, E is the seat (js/trainride.js): down onto the nearest one, or
+    // up from it. Nobody is put on the platform by a key any more: the way
+    // out is the door, at a station, on foot (Frank, 21 Nov 2026).
+    if (!trains.use()) {
+      const t = trains.riding;
+      ui_hint(!t.halted ? 'Vystoupit lze jen ve stanici'
+        : t.closed < 0.2 ? 'Vystup dveřmi na nástupiště' : 'Dveře jsou zavřené');
     }
-    if (trains.board(t)) sfx('train_doors', 0.7);
   } else if (player.boarding) {
     player.cancelBoarding();             // second E aborts the walk-up
   } else if (player.exiting) {
@@ -2719,18 +2709,18 @@ function updateHud(dt) {
     const hint = $id('action-hint');
     if (_hintHold > 0) { _hintHold -= 0.2; }
     else if (trains?.riding) {
-      const t = trains.riding;
+      const t = trains.riding, act = trains.seatAction;
+      const seat = act === 'sit' ? ' · <kbd>E</kbd> sednout si' : act === 'rise' ? ' · <kbd>E</kbd> vstát' : '';
       hint.innerHTML = (t.label ? t.label + ' · ' : '') + (t.halted
-        ? `<b>${t.stopName ?? 'Stanice'}</b> · odjezd za ${Math.ceil(t.dwellLeft ?? 0)} s · <kbd>E</kbd> vystoupit`
-        : `Jedete do <b>${t.nextStopName ?? 'další stanice'}</b>`
+        ? `<b>${t.stopName ?? 'Trať'}</b>` + (t.station ? ` · odjezd za ${Math.ceil(t.dwellLeft ?? 0)} s` : '') + seat
+        : `Jedete do <b>${t.nextStopName ?? 'další stanice'}</b>` + seat
           + (express?.skipping ? '' : ' · <kbd>N</kbd> do další stanice'));
       hint.classList.remove('hidden');
     }
-    else if (!player.inCar && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 6)) {
-      const t = trains.nearestBoardable(player.pos.x, player.pos.z, 6);
-      hint.innerHTML = t.express
-        ? '<kbd>E</kbd> nastoupit: ' + t.label + ' · jízdenka ' + kc(PRICE.train.ticket)
-        : '<kbd>E</kbd> nastoupit do vlaku';
+    else if (!player.inCar && !journey && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 9)?.station) {
+      const t = trains.nearestBoardable(player.pos.x, player.pos.z, 9);
+      hint.innerHTML = (t.express ? t.label + ' · jízdenka ' + kc(PRICE.train.ticket) + ' · ' : '')
+        + (t.closed < 0.2 ? 'Nastup dveřmi' : 'Dveře se zavírají') + ` · odjezd za ${Math.ceil(t.dwellLeft ?? 0)} s`;
       hint.classList.remove('hidden');
     }
     else if (!player.inCar && !game.car && express?.hintAt(player.pos.x, player.pos.z)) {
@@ -3259,7 +3249,21 @@ async function boot() {
     quiet: () => ui_hint('Řidič neodpovídá'),
   });
   minimap = new Minimap($id('minimap'), city);
-  trains = new Trains(scene, city, { terrain: world.terrain });   // (the terrain: trains ran 220 m underground)
+  trains = new Trains(scene, city, {
+    terrain: world.terrain,   // (the terrain: trains ran 220 m underground)
+    player,
+    // the express charges its ticket as he steps in (the other trains stay free)
+    onBoard: (t) => {
+      if (!t.express || t._paid) return;
+      t._paid = true;
+      if (!wallet.pay(PRICE.train.ticket, 'jízdenka')) ui_hint('Na jízdenku nemáš: jedeš načerno');
+    },
+    // the train is the one ride that showed the speedo without ever hiding it again
+    onAlight: () => $id('speedo').classList.add('hidden'),
+  });
+  // its floor, walls and doors, for the walker (js/city.js, js/railbarrier.js)
+  world.rideDeck = trains.deck;
+  trainPeople = trainPassengers(trains);
   express = new Express(trains, city, player);
   worldMap = new WorldMap(city, minimap);
   initNavigation(city);   // lazy + optional; never blocks the boot
@@ -3507,7 +3511,7 @@ async function boot() {
     if (player.inCar) player.setInCar(null);
     // …and a train hides the avatar outright (trains.js:1004) rather than
     // parenting it, so that one is a visibility flag and not a seat.
-    if (trains?.riding) { trains.riding = null; player.mesh.visible = true; }
+    trains?.eject();
     fpView = false;
     $id('speedo').classList.add('hidden');
     hideCarName();
@@ -3774,6 +3778,16 @@ function stepGame(dt) {
   trees?.update(camera, dt, sky?.nightK ?? 0, sky?.lightDir);
   farSkyline?.update(camera, sky?.edgeFar ?? scene.fog?.far);
 
+  // The trains move BEFORE the walker does (they used to come after the
+  // crowd): whoever stands in a coach is carried with it first, and then
+  // walks, sits and is drawn in the coach where it now is. The other way
+  // round his body trailed the train by a frame, 0.7 m at line speed.
+  // While the campaign plays, its own train is the only one to board.
+  if (trains) trains.locked = !!journey;
+  trains?.update(dt, focus);
+  express?.update(dt, focus);
+  trainPeople?.update(dt, focus);
+
   if (game.jet) {
     // Same hands as the helicopter, and the same hands GTA trained everyone's
     // fingers on: W/S is the ENGINE, the arrows are the attitude. ↓ pulls the
@@ -3842,7 +3856,7 @@ function stepGame(dt) {
     // car as it is, in metres per second; nothing here divides by a top speed.
     carDrive(dt, game.car, engineLoad(game.car, gas), gas, input.keys.has('Space'), world.city);
     if (shouldEject(game.car)) ejectDriver(game.car);
-  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt) && !heist?.posePlayer(dt)) {
+  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt) && !heist?.posePlayer(dt) && !trains?.posePlayer(dt)) {
     if (!world.stores?.posePlayer(dt, player)) player.update(dt, { input, camYaw, world });
   }
   {
@@ -3924,8 +3938,6 @@ function stepGame(dt) {
   peds.update(dt, focus);
   streetLife?.update(dt, focus, view, game.car, peds.cars);   // after the crowd: dogs and prams follow their people
   if (cyclists) { cyclists.setViewer(view); cyclists.update(dt, focus); }   // after the crowd: its crossers list is theirs too
-  trains?.update(dt, focus);
-  express?.update(dt, focus);
   for (const h of helis) if (h !== game.heli) h.update(dt, { pitch: 0, roll: 0, yaw: 0, lift: 0 }, world);
   for (const j of fighters) if (j !== game.jet) j.update(dt, { throttle: 0 }, world);
   // There are machines at two airports now, but everything downstream — the
