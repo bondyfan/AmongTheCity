@@ -30,6 +30,18 @@ import { strHash, lookForUid, baseUid, localUid, shortId } from './identity.js';
 import { sanitizeLook, setLookFor } from './characters/appearance.js';
 import { setEpoch } from './worldclock.js';
 import { CLOSE_CODES } from './netnotice.js';
+import { regionId, REGIONS, DEFAULT_REGION } from './regions.js';
+
+// ---- regions (js/regions.js): one room, separate worlds ----
+// Every state and event carries `rg`, the region its sender is playing in,
+// absent for the Czech world so a client from before regions reads as Czech
+// and nothing about the Czech wire changes. A packet from another region is
+// never applied here: its coordinates are another world's. The other player
+// is not drawn; the roster says where they are ("na Mahé"). The relay needs
+// no change, it never looks inside a state or an event.
+const RG = () => (regionId() === DEFAULT_REGION ? null : regionId());
+const rgOf = (o) => (o && typeof o.rg === 'string' ? o.rg : DEFAULT_REGION);
+export const sameRegion = (o) => rgOf(o) === regionId();
 
 const MSG = {
   HELLO: 'hello', STATE: 'state', EVENT: 'event', SNAP: 'snap', META: 'meta',
@@ -167,7 +179,7 @@ export const CityNetWS = {
     switch (m.t) {
       case MSG.META:  this._handlers.meta?.(m.meta); break;
       case MSG.STATE: this._handlers.peerState?.(m.from, m.state); break;
-      case MSG.EVENT: this._handlers.event?.(m.ev); break;
+      case MSG.EVENT: if (sameRegion(m.ev)) this._handlers.event?.(m.ev); break;
       case MSG.SNAP:  this._handlers.snap?.(m.snap); break;
       case MSG.PONG: this._syncClock(m.now, m.ts); break;
       case MSG.PEER:
@@ -238,6 +250,7 @@ export const CityNetWS = {
   sendEvent(obj, toUid = null) {
     const clean = {};
     for (const [k, v] of Object.entries(obj)) if (v !== undefined) clean[k] = v;
+    if (RG()) clean.rg = RG();
     this._send({ t: MSG.EVENT, ev: clean, ...(toUid ? { to: toUid } : {}) });
   },
   onEvent(fn) { this._handlers.event = fn; },
@@ -401,6 +414,7 @@ class NetGame {
   constructor(net) {
     this.net = net;
     this.remotes = new Map();     // uid -> remote avatar record
+    this.away = new Map();        // uid -> { rg, name }: in the room, playing another region
     // ---- SIBLING HOOK (seating) ----
     // (uid, veh, remote) → { x, y, z, heading? } | null, where x/y/z is the
     // WORLD-space cushion top of the seat the peer says they are in. main.js
@@ -457,7 +471,9 @@ class NetGame {
       // to the name is the person you are looking for on the street.
       names: uids.map((u) => ({
         uid: u,
-        name: this.remotes.get(u)?.name || fallbackName(u),
+        name: this.away.has(u)
+          ? (this.away.get(u).name || fallbackName(u)) + ' (' + (REGIONS[this.away.get(u).rg]?.at ?? 'jinde') + ')'
+          : this.remotes.get(u)?.name || fallbackName(u),
         color: lookForUid(baseUid(u)).jacket,
       })),
     });
@@ -466,13 +482,24 @@ class NetGame {
   // ---- inbound ----
   _peerState(uid, s) {
     // null is OUR OWN leave signal (see _dispatch / onclose) — drop the avatar.
-    if (s === null) { this._drop(uid); return; }
+    if (s === null) { this.away.delete(uid); this._drop(uid); return; }
     // Anything else has to look like a state before it is allowed to touch a
     // record. A `{t:'state'}` with no `state` field used to be a TypeError on
     // s.x for a peer we had not seen, and for one we had it still stamped
     // lastSeen — which is worse than the crash, because the reap timer then
     // never fires and the avatar stands in the street until the tab closes.
     if (typeof s !== 'object' || !Number.isFinite(s.x) || !Number.isFinite(s.z)) return;
+    // another region's player: no avatar here, a line in the roster
+    if (!sameRegion(s)) {
+      const was = this.away.get(uid), name = typeof s.nm === 'string' ? sanitizeName(s.nm) : '';
+      if (this.remotes.has(uid)) this._drop(uid);
+      if (!was || was.rg !== rgOf(s) || (name && was.name !== name)) {
+        this.away.set(uid, { rg: rgOf(s), name: name || was?.name || '' });
+        this._emitStatus();
+      }
+      return;
+    }
+    if (this.away.delete(uid)) this._emitStatus();
 
     let r = this.remotes.get(uid);
     if (!r) {
@@ -697,6 +724,7 @@ class NetGame {
       veh: this._vehDesc(ctx),
       ...(_myName ? { nm: _myName } : {}),
       ...(_myLook ? { ap: _myLook } : {}),
+      ...(RG() ? { rg: RG() } : {}),
     }, 0);   // our own 10 Hz gate already throttled; don't double-gate
   }
 

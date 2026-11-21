@@ -4165,9 +4165,11 @@ function installEventHandler() {
   // people in the room do not all reply to one arrival with a 15 KB snapshot.
   CityNetWS.onPeer((m) => {
     if (m?.event !== 'join' || CityNetWS.role !== 'host') return;
-    if (world?.hitLog?.length) CityNetWS.sendSnap(world.hitLog);
+    // (the wreckage of the Czech world only: a snapshot carries no region, so
+    // an authority on Mahé keeps its own, and a page on Mahé applies none)
+    if (world?.hitLog?.length && region().czech) CityNetWS.sendSnap(world.hitLog);
   });
-  CityNetWS.onSnap((snap) => { world?.applyHits?.(snap); });
+  CityNetWS.onSnap((snap) => { if (region().czech) world?.applyHits?.(snap); });
 }
 
 function onNetEvent(ev) {
