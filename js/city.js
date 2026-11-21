@@ -20,6 +20,8 @@ import { streetPull } from './footslab.js';
 import { railGradeY } from './geo.js';
 import { takeMeshPool, prewarmMeshPool } from './meshpool.js';
 import { Poles } from './poles.js';
+import { TreeSolids, crownFold } from './treesolid.js';
+import { farCrownExtent } from './treeshapes.js';
 import { barrierCollide } from './mwsolid.js';
 import { quayStairY, isQuayStairWay, quayStairsCollide } from './quayflights.js';
 import { sweepBrandMats } from './meshes.js';
@@ -541,6 +543,9 @@ export class CityWorld {
     // across the whole session, which masts are lying in the road.
     this.poles = new Poles(scene);
     this.poles.groundAt = (x, z) => this.walkY(x, z);
+    // …and so is a tree trunk (js/treesolid.js): read off each chunk's own tree
+    // batch, never fellable, forgotten with its chunk
+    this.trunks = new TreeSolids(CHUNK);
     this.built = new Map();     // key -> Group (or null for empty cells)
     // Turning this OFF inverts the rule below, so upgrades outrank empty
     // cells exactly as the single-FIFO streamer used to. It exists for one
@@ -891,7 +896,7 @@ export class CityWorld {
           this.scene.remove(group);
           shed(group);
         }
-        this.poles?.unregister(key);
+        this.poles?.unregister(key); this.trunks?.unregister(key);
         this.built.delete(key);
         this._detail.delete(key);
         this._px.delete(key);
@@ -1290,6 +1295,7 @@ export class CityWorld {
     // with every pole upright again, and poles.js is what remembers which of
     // them are lying in the road.
     this._registerPoles(key, group);
+    this._registerTrees(key, group);
     this._detail.set(key, lod);
     // …and whatever made it stale has now been answered. Anything that marks
     // it again below re-adds it, which is the ONLY way back into the set.
@@ -1625,7 +1631,7 @@ export class CityWorld {
         this.scene.remove(group);
         shed(group);
       }
-      this.poles?.unregister(key);
+      this.poles?.unregister(key); this.trunks?.unregister(key);
       this.built.delete(key);
       this._stale?.delete(key);
       this._forget(key);
@@ -1677,7 +1683,7 @@ export class CityWorld {
       }
       // a cell outside today's window is never rebuilt: its lamp posts must
       // not stay behind as things to drive into, nor its notes as books
-      this.poles?.unregister(key);
+      this.poles?.unregister(key); this.trunks?.unregister(key);
       this._forget(key);
     }
     this.built.clear();
@@ -2189,6 +2195,28 @@ export class CityWorld {
     if (!n) this.poles.unregister(key);
   }
 
+  /**
+   * Hand this chunk's tree batch to treesolid.js, which reads the trunks off it
+   * the first time something comes near. Found by its material, as js/trees.js
+   * finds it, so a chunk meshed in the worker and one meshed here are the same.
+   */
+  _registerTrees(key, group) {
+    if (!this.trunks) return;          // (a world built without its constructor: the tests)
+    let crown = null;
+    if (group) for (const o of group.children) {
+      if (o.isInstancedMesh && o.material === this.mats.crown && o.instanceColor) { crown = o; break; }
+    }
+    if (!crown) { this.trunks?.unregister(key); return; }
+    this.trunks?.register(key, {
+      a: crown.instanceMatrix.array, col: crown.instanceColor.array, n: crown.count,
+      fold: crownFold(crown.geometry.getAttribute('position'), farCrownExtent()),
+      gx: group.position.x, gy: group.position.y, gz: group.position.z,
+    });
+  }
+
+  /** Tree trunks within `reach` of (x, z) at level y, as [x, z, r] triples in `out`: how many. */
+  trunksNear(x, z, reach, y, out) { return this.trunks?.near(x, z, reach, y, out) ?? 0; }
+
   crashDebris(x, y, z, color, n, energy) {
     const d = this.interiors?.debris;
     if (!d) return;
@@ -2266,6 +2294,14 @@ export class CityWorld {
     // A LAMP MAST IS SOLID. It is instanced geometry, so it never went near
     // the footprint tests below — you drove through seven metres of steel.
     pushed = this.poles?.collide(pos, radius, lv) || pushed;
+    // A TREE TRUNK IS SOLID TOO (js/treesolid.js), to whoever says who is asking:
+    // somebody on foot, a body thrown out, a helicopter's skids. A driven car's
+    // own corner probes are left out, like the exact hulls above: four discs
+    // at the corners let a trunk through the middle of the bonnet, so
+    // vehicles.js wallPass meets the trunks with the whole body instead. And a
+    // caller with no opts at all (a spawn point nudged clear of walls) is not
+    // a body: where a car is parked must not depend on which chunks have loaded.
+    if (opts && !(opts.y !== undefined && !opts.interior)) pushed = this.trunks?.collide(pos, radius, lv) || pushed;
     // the D11's median barrier and guard rails (js/mwsolid.js, the mesher's own plan)
     pushed = barrierCollide(this, pos, radius, opts) || pushed;
     // …and so are the D11 gantry legs and sign posts (js/mwsolids.js), never fellable

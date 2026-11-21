@@ -922,9 +922,11 @@ function motionBlurAmount() {
 //     screen and leaves him strolling on the other, for up to a whole TRIP_T;
 //   · crashing writes the player's own car, whose pose every peer is watching
 //     — bouncing off thin air is the desync everybody actually sees;
-//   · boarding one hands the player a car with no shared identity, and the
-//     steal is not even broadcast (slotKey() is null for a ghost), so the peer
-//     goes on driving his own generation through the one you are sitting in.
+//   (boarding one used to be on this list: its door was dead in co-op, which
+//   is how "nemůžu otevřít jezdící teslu" came about, 21 Nov 2026: the car you
+//   stand in front of until it stops IS a ghost eleven seconds later. It is
+//   taken like any other now, and traffic.stealRef() names it to the peers by
+//   slot and generation, so nobody deletes the next generation's car for it.)
 // Left deliberately ghost-inclusive, because they only move pixels: the
 // minimap, the traffic hum, and the rocket pod (a rocket must not fly through
 // a car body you can see — and the detonation is computed once here and then
@@ -993,8 +995,10 @@ function nearestEnterableCar() {
     if (d < bd) { bd = d; best = c; }
   }
   if (traffic) for (const c of traffic.cars) {
-    // a ghost is on borrowed time and belongs to nobody — the door is locked
-    if (isGhostCar(c) || !sameLevel(py, c.y)) continue;
+    // (a ghost's door opens like any other: for a long time it did not in
+    // co-op, and a ghost is exactly the car you stood in front of until it
+    // stopped. What the peers are told about it is traffic.stealRef's business.)
+    if (!sameLevel(py, c.y)) continue;
     const d = Math.hypot(c.x - px, c.z - pz);
     // moving traffic must slow right down before you can yank the door
     if (d < bd && Math.abs(c.speed) < 3) { bd = d; best = c; }
@@ -1352,9 +1356,14 @@ input.onKey('KeyE', () => {
       // claimSlot() and kill its own copy of this car — traffic is a shared
       // SCHEDULE, so without this the peer keeps driving the phantom of the
       // Fabia you just took, in the middle of the road you are now on.
-      const key = traffic.slotKey(car);
+      // A ghost (a car this client kept on screen after the schedule let it
+      // go) is taken the same way, under its own event: the generation says
+      // WHICH car of that slot, so a peer drops his copy of this one and never
+      // the next generation's car that wears the same slot string. An older
+      // client does not know 'steal_g' and ignores it.
+      const ref = traffic.stealRef(car);
       traffic.steal(car);                // stops driving while we walk up
-      if (net && key) queueEvent('steal', { key });
+      if (net && ref) queueEvent(ref.ghost ? 'steal_g' : 'steal', { key: ref.key, gen: ref.gen });
     }
     const pi = parked.indexOf(car);
     if (pi >= 0) parked.splice(pi, 1);
@@ -4143,7 +4152,11 @@ function onNetEvent(ev) {
     // — through him, on the road he is on. claimSlot works even for a slot we
     // never built (he may be beyond our streaming frontier).
     case 'steal':
-      if (typeof ev.key === 'string') traffic?.claimSlot?.(ev.key);
+      if (typeof ev.key === 'string') traffic?.claimSlot?.(ev.key, Number.isFinite(ev.gen) ? ev.gen : undefined);
+      break;
+    // …or the door of a ghost (see traffic.stealRef): only ever with its generation
+    case 'steal_g':
+      if (typeof ev.key === 'string' && Number.isFinite(ev.gen)) traffic?.claimSlot?.(ev.key, ev.gen);
       break;
     default: break;
   }
