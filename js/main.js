@@ -188,6 +188,14 @@ const heistHost = {
   dropPatrol(c) { vehicles.remove(c); },
   kombi: () => vasekCar,
   mend: (c) => straighten(c),
+  // nobody walks in this circle ({ x, z, r }, or null to lift it): js/pedestrians.js _slots
+  quiet(area) { if (peds) peds.keepOut = area; if (world?.interiors) world.interiors.keepOut = area; },
+  // a story car he has stepped out of is one E can find again (boarding takes it off the list)
+  offer(c) { if (game.car !== c && player.inCar !== c && !parked.includes(c)) parked.push(c); },
+  // the story moved him: the boom starts again behind him
+  camReset() { camInit = false; camYaw = player.heading; },
+  // the story's own camera looks this way, so W walks away from it (the villa's rooms)
+  aim(yaw) { camYaw = yaw; },
   driving: () => game.car,
   exitCar() {
     const c = game.car;

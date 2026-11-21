@@ -70,14 +70,15 @@ test('a skipped talk still does what waited for its last word; a stopped one doe
 });
 
 test('every film of the campaign can be left with T on a retry, and only then', () => {
-  for (const film of ['prologue-opening.js', 'prologue-table.js', 'heist-garage.js'])
+  for (const film of ['prologue-opening.js', 'prologue-table.js', 'heist-garage.js', 'heist-deal.js'])
     assert.match(source(film), /\n    skip\(\) \{/, film + ' has a way out');
   // the owners ask the mark before they let anything go
   assert.match(source('prologue.js'), /if \(film\?\.running\) \{\s+if \(retry\.on\) film\.skip\(\);/);
   for (const owner of ['prologue-parking.js', 'heist.js'])
     assert.match(source(owner), /skip\(\) \{\s+if \(!retry\.on \|\| over\) return false;\s+if \(film\?\.running\) return film\.skip\(\);/, owner);
-  // the ride in Jarda's van is a film with a steering wheel in it
-  assert.match(source('heist.js'), /farmer\.skipRide\(hud\)/);
+  // the ride in Jarda's van is a film with a steering wheel in it (while he still drives)
+  assert.match(source('heist.js'), /if \(stage === 'ride' && ride\.skippable\) return ride\.skip\(\);/);
+  assert.match(source('heist-ride.js'), /farmer\.skipRide\(hud\)/);
 });
 
 test('main.js marks the failure, puts the estate home before part one starts again, and gives T to the story', () => {

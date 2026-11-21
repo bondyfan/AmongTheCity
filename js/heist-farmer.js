@@ -3,12 +3,18 @@ import { makeCitizen } from './citizen.js';
 import { seatAnchor } from './vehicles.js';
 import { SIT_DROP, seatX } from './seating.js';
 import { unlock } from './carlocks.js';
+import { setDriver, setPassenger } from './cardoor.js';
+import { voiceToMouth } from './characters/mouth.js';
 import { storyRecording } from './audio.js';
 import { farm } from './heist-route.js';
 import { chunkKey } from './geo.js';
 
 // Jarda and his van (Frank, 20 Nov 2026: a farmer in Brozany who smokes weed,
 // plays reggae, talks astrology and drives the player to the forest himself).
+// 21 Nov 2026: on the road he weaves from one side to the other, worse when
+// he is told so, and in the end pulls over, walks round the bonnet and gives
+// up the wheel: the rest of the way he is the passenger. At the forest he
+// moves back across and drives home.
 // The van is a real car of the game with Jarda in its driver's seat, so E puts
 // the player in the passenger seat by the game's own rules; nobody simulates
 // it, so this file writes its pose along a path, the way the story train goes.
@@ -50,6 +56,7 @@ export function track(points, rounds = 3) {
   };
 }
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const ROAD = 262; // metres of the farm's own track before the road
 
 function smokeTexture() {
   const c = document.createElement('canvas');
@@ -96,37 +103,68 @@ export function farmerVan(host, scene, world, player) {
     speed = 0,
     t = 0,
     hop = null, // a skipped ride: the picture is black while the forest road arrives
-    hopped = false;
-  function seat() {
+    hopped = false,
+    amp = 0.32, // metres he wanders either side of his line
+    ampWant = 0.32,
+    ph = 0, // the phase of the weave
+    stopAt = Infinity, // metres along the path at which he pulls over
+    round = null, // his walk round the bonnet: { pts, i, phase, there }
+    seatNo = -1; // the seat he is in (0 the wheel, 1 beside it), −1 on his feet
+  const JACKET = 0x8a6a2c;
+  // into a seat of his own van; the glass shows him too (js/cardoor.js)
+  function sitIn(i) {
     man.sitPose(1, 1);
     van.seats ??= [];
-    van.seats[0] = man;
-    const p = seatAnchor(van, 0);
+    van.seats[i] = man;
+    const p = seatAnchor(van, i);
     van.mesh.add(man.group);
     man.group.position.set(seatX(p.x), p.y - SIT_DROP, p.z);
     man.group.rotation.y = 0;
     ember.visible = false;
+    if (i === 0) setDriver(van, { jacket: JACKET, cit: man });
+    else setPassenger(van, man);
+    seatNo = i;
   }
+  function getOut() {
+    if (seatNo < 0) return;
+    if (van.seats?.[seatNo] === man) van.seats[seatNo] = null;
+    if (seatNo === 0) setDriver(van, null);
+    else setPassenger(van, null);
+    seatNo = -1;
+    scene.add(man.group);
+  }
+  // a point beside the van: `side` metres to its right, `ahead` metres forward
+  const beside = (side, ahead) => ({
+    x: van.x + Math.cos(van.heading) * side - Math.sin(van.heading) * ahead,
+    z: van.z - Math.sin(van.heading) * side - Math.cos(van.heading) * ahead,
+  });
   function drive(dt) {
     // slow for what is coming: a bend, and the end of the road
     const h = path.heading(s),
       bend = Math.abs(wrap(path.heading(s + 11) - h)) + Math.abs(wrap(path.heading(s + 5) - h));
-    const want = Math.min(11.5 - Math.min(8.3, bend * 9), Math.sqrt(2 * 1.5 * Math.max(0, path.length - s)) + 0.15);
+    const want = Math.min(11.5 - Math.min(8.3, bend * 9), Math.sqrt(2 * 1.5 * Math.max(0, Math.min(path.length, stopAt) - s)) + 0.15);
     speed += Math.max(-2.8 * dt, Math.min(1.3 * dt, want - speed));
     speed = Math.max(0, speed);
     s = Math.min(path.length, s + speed * dt);
     // he does not hold a line: the van wanders a little inside its lane
     // on the road he keeps (roughly) to the right; the farm's own track is one lane wide
-    const onRoad = stage === 'leave' || (s > 262 && s < path.length - 30);
-    lane += Math.max(-0.6 * dt, Math.min(0.6 * dt, (onRoad ? 1.45 : 0) - lane));
+    const onRoad = stage === 'leave' || (s > ROAD && s < path.length - 30);
+    const pulling = stopAt < Infinity; // onto the verge, and straight for once
+    lane += Math.max(-0.6 * dt, Math.min(0.6 * dt, (pulling ? 2.5 : onRoad ? 1.45 : 0) - lane));
+    // the weave: wider and quicker the more he has been told about it
+    const wantAmp = pulling ? 0.05 : onRoad ? ampWant : 0.32;
+    amp += Math.max(-1.1 * dt, Math.min(0.7 * dt, wantAmp - amp));
+    const rate = 0.55 + 0.75 * Math.min(1, Math.max(0, amp - 0.32) / 1.5),
+      live = Math.min(1, speed / 6);
+    ph += rate * dt;
     const p = path.point(s),
-      sway = lane + 0.32 * Math.sin(t * 0.55) * Math.min(1, speed / 6),
+      sway = lane + amp * Math.sin(ph) * live,
       turn = wrap(path.heading(s + 3) - h);
-    van.heading = h + 0.03 * Math.cos(t * 0.55) * Math.min(1, speed / 6);
+    van.heading = h + Math.atan2(amp * rate * Math.cos(ph) * live, Math.max(5, speed));
     van.x = p.x + Math.cos(h) * sway;
     van.z = p.z - Math.sin(h) * sway;
     van.speed = speed;
-    van.steer = Math.max(-0.5, Math.min(0.5, turn * 1.6));
+    van.steer = Math.max(-0.5, Math.min(0.5, turn * 1.6 - amp * 0.22 * Math.cos(ph) * live));
     van.y = world.surfaceY?.(van.x, van.z, van.y)?.y ?? world.heightAt(van.x, van.z);
     van._grounded = true;
   }
@@ -144,8 +182,28 @@ export function farmerVan(host, scene, world, player) {
     board() {
       if (stage !== 'wait') return;
       stage = 'seated';
-      seat();
+      sitIn(0);
       unlock(van);
+    },
+    // is he out on the road yet (the farm's own track is behind him)?
+    get onRoad() {
+      return stage === 'ride' && s > ROAD + 15;
+    },
+    // how he holds his lane: 0 as a man who knows the road, 1 weaving, 2 all over it
+    weave(level) {
+      ampWant = [0.32, 1.25, 1.95][level] ?? 0.32;
+    },
+    // "Tak jo, tak řiď ty": onto the verge and stop
+    pullOver() {
+      if (stage !== 'ride' || stopAt < Infinity || s > path.length - 160) return false;
+      stopAt = s + Math.max(24, (speed * speed) / 3 + 8);
+      return true;
+    },
+    // set down by the forest with the player at the wheel: he moves across
+    takeWheel() {
+      if (stage !== 'shotgun' || seatNo !== 1) return;
+      getOut();
+      sitIn(0);
     },
     go() {
       if (stage !== 'seated') return;
@@ -168,8 +226,14 @@ export function farmerVan(host, scene, world, player) {
     },
     // set down by the forest: round on the verge and back the way he came
     leave() {
-      if (stage !== 'stopped') return;
+      if (stage !== 'stopped' && stage !== 'shotgun') return;
+      if (seatNo !== 0) {
+        getOut();
+        sitIn(0);
+      }
       stage = 'leave';
+      stopAt = Infinity;
+      ampWant = 0.32;
       const h = van.heading,
         r = { x: Math.cos(h), z: -Math.sin(h) },
         f = { x: -Math.sin(h), z: -Math.cos(h) },
@@ -185,8 +249,9 @@ export function farmerVan(host, scene, world, player) {
       speed = 0;
     },
     // `inside`: the player is in the passenger seat; `talking`: somebody speaks
-    update(dt, { inside = false, talking = false, facing = null } = {}) {
+    update(dt, { inside = false, talking = false, facing = null, speech = 0 } = {}) {
       t += dt;
+      man.mouth?.(voiceToMouth(speech));
       if (stage === 'gone') return;
       if (hop) {
         const [ex, ez] = farm.ride.at(-1);
@@ -215,20 +280,55 @@ export function farmerVan(host, scene, world, player) {
         const up = 0.5 + 0.5 * Math.sin(t * 0.9);
         man.parts.armR.rotation.x += 0.35 + 0.75 * up;
         man.parts.elbowR.rotation.x += 0.5 + 1.2 * up;
+      } else if (stage === 'shotgun') host.offer?.(van);
+      else if (stage === 'swap') {
+        host.offer?.(van);
+        // out of his door, round the bonnet, and in on the other side once the seat is free
+        const r = round,
+          to = beside(...r.pts[r.i]),
+          from = man.group.position,
+          dx = to.x - from.x,
+          dz = to.z - from.z,
+          d = Math.hypot(dx, dz),
+          step = Math.min(d, 1.25 * dt);
+        if (d > 0.05) {
+          from.x += (dx / d) * step;
+          from.z += (dz / d) * step;
+          from.y = world.heightAt(from.x, from.z);
+          man.group.rotation.y = Math.atan2(-dx, -dz);
+          man.walk((r.phase += step * 1.6), 0.8, 0, 1.25);
+        } else if (r.i < r.pts.length - 1) r.i++;
+        else {
+          r.there = true;
+          man.group.rotation.y = van.heading - Math.PI / 2; // facing his van
+          man.standPose();
+          if (player.inCar !== van || player.seat !== 1) {
+            sitIn(1);
+            stage = 'shotgun';
+          }
+        }
       } else if (stage === 'stopped') {
         // (a skipped ride may stop before the ground here has arrived)
         van.y = world.surfaceY?.(van.x, van.z, van.y)?.y ?? world.heightAt(van.x, van.z);
       } else if (stage === 'ride' || stage === 'leave') {
         drive(dt);
-        if (s >= path.length - 0.05 && speed < 0.2) {
+        if (stage === 'ride' && s >= stopAt - 0.4 && speed < 0.25) {
+          // on the verge: he gets out, and the wheel is free
+          speed = van.speed = van.steer = 0;
+          stage = 'swap';
+          getOut();
+          const a = beside(-1.5, 0.6);
+          man.group.position.set(a.x, world.heightAt(a.x, a.z), a.z);
+          round = { pts: [[-1.65, 3.7], [1.65, 3.7], [1.6, 0.5]], i: 0, phase: 0, there: false };
+        } else if (s >= path.length - 0.05 && speed < 0.2) {
           speed = van.speed = 0;
           if (stage === 'ride') stage = 'stopped';
           else {
             stage = 'gone';
             music.stop(0.5);
             hens.stop(0.5);
-            if (van.seats?.[0] === man) van.seats[0] = null;
-            van.mesh.remove(man.group);
+            getOut();
+            man.group.removeFromParent();
             man.group.visible = false;
             host.removeCar(van);
           }
@@ -272,7 +372,7 @@ export function farmerVan(host, scene, world, player) {
       }
       tex.dispose();
       if (stage !== 'gone') {
-        if (van.seats?.[0] === man) van.seats[0] = null;
+        getOut();
         man.group.removeFromParent();
         host.removeCar(van);
       }

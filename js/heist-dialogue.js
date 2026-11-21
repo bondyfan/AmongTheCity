@@ -1,7 +1,8 @@
 // Part two of the Last Train: the car under Kunětická hora. Every line is
 // [recording id, speaker on the caption, words, voice role, direction for the
 // voice model]. Roles: father (the player), friend (Vašek), farmer (Jarda),
-// radio (the police dispatcher). scripts/gen-heist-audio.mjs renders them.
+// radio (the police dispatcher), buyer (the man with the money).
+// scripts/gen-heist-audio.mjs renders them.
 
 // On the street in front of Dražkovická 119, half past two at night.
 export const sendOff = [
@@ -21,7 +22,14 @@ export const farmTalk = [
   ['farm-06', 'Jarda', 'Čistou hlavu. To je hezký. Já ji měl naposled v devadesátým osmým. Tak nasedat, kosmonaute.', 'farmer', 'dreamy, amused, slow'],
 ];
 
-// In the van, on the way to the forest. He never stops talking.
+// In the van. He never stops talking, and on the road he never holds a line
+// (Frank, 21 Nov 2026: "jak je zhulený, tak bude jezdit ze strany na stranu").
+// rideTalk: down the farm's track. rideNag: the first swerves. swapAsk: he
+// offers to drive and is told no. swapInsist: he insists, and Jarda pulls
+// over. driveTalk: Jarda as a passenger. The old ride-07 and ride-10 are his
+// monologues for the second half.
+const slepice = ['ride-07', 'Jarda', 'Já když si zahulim, tak slyším, co si povídaj slepice. Většinou o mně. Nic hezkýho.', 'farmer', 'stoned, confiding, a bit hurt'],
+  merkur = ['ride-10', 'Jarda', 'Merkur je teď retrográdní, víš? To se nemaj podepisovat smlouvy. A krást auta. Ne že bych něco věděl. Já nevím nic. Já jsem jenom rajče.', 'farmer', 'stoned, drifting, the last sentence almost whispered'];
 export const rideTalk = [
   ['ride-01', 'Jarda', 'Co jseš za znamení?', 'farmer', 'stoned, curious, slow'],
   ['ride-02', 'Ty', 'Kozoroh.', 'father', 'flat, looking at the road'],
@@ -29,24 +37,43 @@ export const rideTalk = [
   ['ride-04', 'Jarda', 'Vidíš tu Kuňku? To je starej vulkán. Tam jde energie rovnou ze země. Proto mi tady tak roste.', 'farmer', 'stoned, reverent, pointing through the windscreen'],
   ['ride-05', 'Ty', 'Co vám roste?', 'father', 'careful'],
   ['ride-06', 'Jarda', 'Rajčata. Taky rajčata.', 'farmer', 'long pause, innocent, then a small giggle'],
-  ['ride-07', 'Jarda', 'Já když si zahulim, tak slyším, co si povídaj slepice. Většinou o mně. Nic hezkýho.', 'farmer', 'stoned, confiding, a bit hurt'],
+];
+export const rideNag = [
   ['ride-08', 'Ty', 'Nemohl byste se dívat na cestu?', 'father', 'tense, polite'],
   ['ride-09', 'Jarda', 'Cesta se dívá na mě, brácho. My dva se známe.', 'farmer', 'serene, unbothered, slow'],
-  ['ride-10', 'Jarda', 'Merkur je teď retrográdní, víš? To se nemaj podepisovat smlouvy. A krást auta. Ne že bych něco věděl. Já nevím nic. Já jsem jenom rajče.', 'farmer', 'stoned, drifting, the last sentence almost whispered'],
 ];
+export const swapAsk = [
+  ['swap-01', 'Ty', 'Hele, Jardo. Ty jezdíš ze strany na stranu. Radši budu řídit já.', 'father', 'tense, trying to stay polite, holding on to the door'],
+  ['swap-02', 'Jarda', 'Ne, ne, ne. V klidu, brácho. To nejezdím já. To se vlní silnice.', 'farmer', 'very stoned, slow, amused, completely unbothered'],
+];
+export const swapInsist = [
+  ['swap-03', 'Ty', 'Jardo, fakt. Zastav. Budu řídit já.', 'father', 'firm, frightened, raising his voice'],
+  ['swap-04', 'Jarda', 'Tak jo. Tak řiď ty. Já si aspoň prohlídnu hvězdy.', 'farmer', 'stoned, shrugging, cheerful, slow'],
+];
+export const driveTalk = [['drive-01', 'Jarda', 'Ty vole. Ty jedeš rovně. To je úplně jinej zážitek.', 'farmer', 'stoned, honestly amazed, slow'], slepice, merkur];
+// The whole ride when it is skipped past (a retry): he drove all the way.
+export const rideWhole = [...rideTalk, slepice, ...rideNag, merkur];
 
-// At the roadside by the forest.
+// At the roadside by the forest. drop: as they stop. bye: he is out, Jarda has
+// moved across to the wheel. dropTalk is the old goodbye, for a skipped ride.
+export const dropLine = ['drop-01', 'Jarda', 'Tak jsme tady. Dál nejedu. V lese jsou srnky a ty mě soudí.', 'farmer', 'stoned, dead serious'];
+export const byeTalk = [
+  ['bye-01', 'Ty', 'Tak díky. Zpátky už to zvládneš?', 'father', 'getting out of the van, doubtful'],
+  ['bye-02', 'Jarda', 'Jasně. Tu cestu mám v karmě. Tak se měj, kosmonaute. A hodně štěstí.', 'farmer', 'warm, slow, kind, a small laugh'],
+];
 export const dropTalk = [
-  ['drop-01', 'Jarda', 'Tak jsme tady. Dál nejedu. V lese jsou srnky a ty mě soudí.', 'farmer', 'stoned, dead serious'],
+  dropLine,
   ['drop-02', 'Ty', 'Díky za odvoz.', 'father', 'relieved to get out'],
   ['drop-03', 'Jarda', 'Není zač. A kdyby něco, tak dejchej. Nádech nosem, výdech pusou. A pozdravuj Saturn.', 'farmer', 'warm, slow, kind'],
 ];
 
-// Vašek on the phone while he walks to the villa.
+// Vašek on the phone while he walks to the villa. The key is in the house
+// (Frank, 21 Nov 2026), so he says how to get in and what is waiting there.
 export const villaCall = [
   ['call-01', 'Vašek', 'Tak co, žiješ? Dovez tě Jarda?', 'friend', 'on the phone, low, a little amused'],
   ['call-02', 'Ty', 'Dovez. Je úplně mimo.', 'father', 'quiet, walking'],
-  ['call-03', 'Vašek', 'To je. Poslouchej. Ta vila je hned u lesa. Auto stojí vzadu za domem pod přístřeškem. Klíčky nehledej, nejsou.', 'friend', 'on the phone, serious now'],
+  ['call-07', 'Vašek', 'To je. Poslouchej. Ta vila je hned u lesa. Auto stojí vzadu pod přístřeškem, ale klíč je v domě. Musíš si pro něj dojít.', 'friend', 'on the phone, serious now'],
+  ['call-08', 'Vašek', 'Dveře jsou zamčený. U boční zdi je žebřík, tím se dostaneš k oknu. Uvnitř jsou čidla, takový červený paprsky. Do těch nesmíš vlízt.', 'friend', 'on the phone, slow and precise'],
   ['call-04', 'Vašek', 'Na rohu domu je kamera. Než tam vlezeš, nasaď si tu kuklu.', 'friend', 'on the phone, insisting'],
   ['call-05', 'Vašek', 'A hlavně nezapomeň sundat značky. Normálně je urvi. Obě.', 'friend', 'on the phone, slow and clear, this is the important part'],
   ['call-06', 'Ty', 'Jasně.', 'father', 'short, breath in the cold'],
@@ -76,4 +103,15 @@ export const garageTalk = [
   ['end-05', 'Vašek', 'Bude. Slibuju. Běž se vyspat.', 'friend', 'sincere, gentle'],
 ];
 
-export const heistLines = [...sendOff, ...farmTalk, ...rideTalk, ...dropTalk, ...villaCall, startLine, radioPlate, radioBare, ...cityCall, ...garageTalk];
+// At noon the buyer comes (Frank, 21 Nov 2026: "aby tam bylo vidět, jak ten
+// kupec dá tomu Vaškovi peníze a ten Vašek dá potom ty peníze v kufříku").
+export const dealTalk = [
+  ['deal-01', 'Kupec', 'Tak tohle je ono? Pěkný kousek. A nikdo vás neviděl?', 'buyer', 'a calm businessman, low and dry, walking round a car'],
+  ['deal-02', 'Vašek', 'Nikdo.', 'friend', 'tense, trying to sound casual'],
+  ['deal-03', 'Kupec', 'Tady to máte. Přepočítávat to nemusíte.', 'buyer', 'flat, final, holding something out'],
+  ['deal-04', 'Vašek', 'Tady. Dvě stě padesát tisíc. Jak jsem slíbil.', 'friend', 'quiet, sincere, relieved'],
+  ['deal-05', 'Ty', 'Díky, Vašku.', 'father', 'worn out, moved, quiet'],
+  ['deal-06', 'Vašek', 'Neděkuj. Běž za malou.', 'friend', 'gentle, a small smile in the voice'],
+];
+
+export const heistLines = [...sendOff, ...farmTalk, ...rideWhole, ...swapAsk, ...swapInsist, driveTalk[0], ...dropTalk, ...byeTalk, ...villaCall, startLine, radioPlate, radioBare, ...cityCall, ...garageTalk, ...dealTalk];

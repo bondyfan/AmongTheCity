@@ -58,6 +58,7 @@ const LIT_OF = {
 };
 /** Per-building night character: { band, dens } */
 export function litOf(f, typ) {
+  if (f.sealed) return { band: 0, dens: 0 };   // nobody home, and nobody has been (js/geo.js)
   const [band, base] = LIT_OF[typ] ?? LIT_OF.block;
   // some houses are out, some have everybody home; a few offices work late
   let dens = base * (0.35 + rnd(f._id, 21) * 1.3);

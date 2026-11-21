@@ -91,6 +91,19 @@ export function dressVilla(scene, world) {
   const cam = villa.camera, cy = g(cam.u, cam.v) + cam.up;
   k.box(cam.v - 0.16, cy, -cam.u, 0.32, 0.07, 0.07, 0x9aa0a6);
   k.box(cam.v - 0.36, cy - 0.06, -cam.u + 0.1, 0.16, 0.14, 0.3, 0xe8eaec, 0.2);
+  // the ladder somebody left against the side wall, and the window over it
+  const lad = villa.ladder, ly = g(lad.u, lad.v);
+  for (const du of [-0.21, 0.21]) k.box(lad.v + 0.2, ly + 1.55, -(lad.u + du), 0.05, 3.25, 0.05, 0x8a6a42, -0.253);
+  for (let i = 0; i < 9; i++) k.box(lad.v - 0.19 + i * 0.086, ly + 0.3 + i * 0.335, -lad.u, 0.035, 0.035, 0.46, 0x7a5a36);
+  k.box(lad.v + 0.56, ly + 3.05, -lad.u, 0.07, 0.86, 1.0, 0x2c2a26);
+  k.box(lad.v + 0.53, ly + 3.05, -lad.u, 0.03, 0.72, 0.86, 0x05070c, 0, true);
+  k.box(lad.v + 0.4, ly + 3.05, -(lad.u - 0.55), 0.3, 0.72, 0.04, 0xe6e2d6); // the sash, swung out
+  // the back door in the wing's north wall, one step up
+  const bd = villa.back, by = g(bd.u + 0.5, bd.v);
+  k.box(bd.v, by + 1.03, -(bd.u - 0.03), 0.95, 2.06, 0.08, 0x4d3423);
+  k.box(bd.v, by + 1.05, -(bd.u - 0.06), 1.11, 2.2, 0.05, 0x2c2a26);
+  k.box(bd.v + 0.34, by + 1.02, -(bd.u + 0.03), 0.04, 0.12, 0.05, 0xc9b27a);
+  k.box(bd.v, by + 0.07, -(bd.u + 0.35), 1.3, 0.14, 0.7, 0x8d8475);
   // the lean-to behind the house
   const car = villa.car;
   for (const [u, v] of [[car.u - 2.9, -1.7], [car.u + 3.3, -1.7], [car.u - 2.9, 2.5], [car.u + 3.3, 2.5]]) k.box(v, g(u, v) + 1.2, -u, 0.12, 2.4, 0.12, 0x4c3a28);
@@ -115,6 +128,8 @@ export function dressVilla(scene, world) {
   group.add(led);
   return {
     ground: base,
+    group, // local x is v, local z is −u: the scanner over the ladder hangs in it
+    floorAt: g,
     blink(t) {
       led.visible = t % 1.6 < 0.9;
     },
