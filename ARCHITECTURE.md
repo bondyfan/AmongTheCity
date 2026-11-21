@@ -2745,8 +2745,14 @@ drives: a display car that is not `owned` and is more than `LOT_PAD` (9 m) from
 the footprint is charged once, `THEFT_HEAT` 46, which is two stars from a clean
 record (`wanted.js STAR_AT[2]` is 45). Sitting in it, and rolling it out onto
 the apron, cost nothing. Stars are local, so in co-op each player answers for
-the car they took. A car bought with B (`garage.js`) is the player's and is
-never charged; the Roadster has no price row, so it cannot be bought.
+the car they took.
+
+**Buying one** (Frank, 21 Nov 2026: "Ano, dej cenu"). A car still on the
+premises is sold NEW with B, at `PRICE.showroom` (`prices.js showroomOffer`:
+Model 3 289 000, Roadster 990 000), through the ordinary car panel and
+`garage.buy`. The used-car ladder `PRICE.cars` is untouched, so a Roadster met
+in the street is still not for sale. A bought car is `owned` and is never
+charged; one driven off unpaid loses the showroom's price with its innocence.
 
 ## Cars: true shapes, paint with a history, a solid hull, the Roadster (Nov 2026)
 
