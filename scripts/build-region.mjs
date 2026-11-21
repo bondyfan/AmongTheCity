@@ -42,8 +42,9 @@ import { RoofPhoto } from './lib/roofphoto.mjs';
 import { buildRoutes } from './lib/routes.mjs';
 import { decodePNG } from './lib/png.mjs';
 
-const px = (lon) => +((lon - ORIGIN.lon) * M_PER_LON).toFixed(1);
-const pz = (lat) => +((ORIGIN.lat - lat) * M_PER_LAT).toFixed(1); // south positive
+// (+ the region's false origin, scripts/lib/world-area.mjs: zero in Czechia)
+const px = (lon) => +(OFFSET.x + (lon - ORIGIN.lon) * M_PER_LON).toFixed(1);
+const pz = (lat) => +(OFFSET.z + (ORIGIN.lat - lat) * M_PER_LAT).toFixed(1); // south positive
 
 // The grid is no longer a rectangle (scripts/lib/world-area.mjs owns its shape),
 // so ownership clamps to the nearest WANTED tile rather than to a bounding box:

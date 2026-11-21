@@ -31,12 +31,16 @@ const P = (lat, lon) => [+W.xOf(lon).toFixed(1), +W.zOf(lat).toFixed(1)];
 const nodes = new Map();
 const places = [], rocks = [], named = [];
 const ways = [];   // { id, refs, t } for the few kinds asked about below
+const allWays = new Map();   // id → refs, for multipolygon members (the hospital)
+const hospitals = [];        // { name, refs: [[ids]] }
 const RANK = { city: 0, town: 1, village: 2, suburb: 3, quarter: 4, neighbourhood: 4, hamlet: 4, locality: 5, isolated_dwelling: 5 };
 // what to look for, by name (any language tag) or by tags
 const LANDMARKS = [
   { id: 'clocktower', re: /clock\s*tower|lorloz|little ben/i, tag: (t) => t.man_made === 'clock' || t.amenity === 'clock' || t.historic === 'monument' },
-  { id: 'market', re: /selwyn|market/i, tag: (t) => t.amenity === 'marketplace' || !!t.building },
-  { id: 'cathedral', re: /immaculate|cathedral/i, tag: (t) => t.amenity === 'place_of_worship' || t.building === 'cathedral' || t.building === 'church' },
+  // (by the names OSM actually carries: the market without its hyphen, the
+  // cathedral in French, "Cathédrale de l'Immaculée Conception")
+  { id: 'market', re: /selwyn/i, tag: (t) => t.amenity === 'marketplace' || !!t.building },
+  { id: 'cathedral', re: /immacul/i, tag: (t) => t.amenity === 'place_of_worship' || t.building === 'cathedral' || t.building === 'church' || !!t.building },
   { id: 'temple', re: /vinayagar|navasakthi|hindu|temple/i, tag: (t) => t.amenity === 'place_of_worship' || !!t.building },
   { id: 'anglican', re: /st\.?\s*paul|saint paul/i, tag: (t) => t.amenity === 'place_of_worship' || !!t.building },
   { id: 'statehouse', re: /state house/i, tag: () => true },
@@ -55,10 +59,16 @@ readPbf(PBF, {
     if (n) named.push({ kind: 'node', n, t, p: P(lat, lon) });
   },
   onWay(id, refs, t) {
+    allWays.set(id, refs);
     if (!t) return;
+    if (t.amenity === 'hospital' && t.name) hospitals.push({ name: t.name, rings: [refs] });
     if (t.aeroway === 'runway' || t.aeroway === 'terminal' || t.aeroway === 'apron' || t.aeroway === 'parking_position'
       || t.natural === 'bare_rock' || (nameOf(t) && (t.building || t.amenity || t.historic || t.tourism)))
       ways.push({ id, refs, t });
+  },
+  onRelation(id, members, t) {
+    if (t?.amenity === 'hospital' && t.name)
+      hospitals.push({ name: t.name, rings: members.filter((m) => m.type === 'way' && m.role !== 'inner').map((m) => allWays.get(m.ref)).filter(Boolean) });
   },
 });
 const geom = (refs) => refs.map((r) => nodes.get(r)).filter(Boolean).map(([la, lo]) => P(la, lo));
@@ -101,6 +111,22 @@ for (const w of ways) {
   else if (w.t.aeroway === 'parking_position') air.stands.push({ ref: w.t.ref ?? '', a: g[0], b: g[g.length - 1] });
 }
 air.runways.sort((p, q) => q.len - p.len);
+// OSM draws SEZ's runway in pieces (a bridge over the lagoon channel, the
+// thresholds): the runway is the farthest pair of all their ends
+{
+  const ends = air.runways.flatMap((r) => [r.a, r.b]);
+  let best = null, bd = 0;
+  for (const p of ends) for (const q of ends) { const d = Math.hypot(p[0] - q[0], p[1] - q[1]); if (d > bd) { bd = d; best = [p, q]; } }
+  if (best) {
+    // the '13' end is the north-west one (runway 13 is flown towards 130°)
+    const [p, q] = best[0][0] < best[1][0] ? best : [best[1], best[0]];
+    air.runway = { width: air.runways[0]?.width ?? 45, ends: { '13': p, '31': q }, len: +bd.toFixed(1) };
+  }
+}
+air.hospitals = hospitals.map((h) => {
+  const pts = h.rings.flatMap((r) => geom(r));
+  return pts.length ? { name: h.name, p: centroid(pts) } : null;
+}).filter(Boolean);
 writeFileSync(`${OUT}/airport.json`, JSON.stringify(air));
 
 // ---- the granite -------------------------------------------------------------------
@@ -131,6 +157,8 @@ writeFileSync(`${OUT}/boulders.json`, JSON.stringify({ b: boulders }));
 
 console.log(`places ${places.length}: ${places.slice(0, 8).map((p) => p.n).join(', ')}`);
 console.log('landmarks:', Object.entries(marks).map(([k, v]) => `${k}=${v.name} @${v.p}`).join(' | ') || 'none found');
+console.log(`hospitals: ${air.hospitals.map((h) => h.name + ' @' + h.p).join(' | ')}`);
+console.log(`runway joined: ${JSON.stringify(air.runway)}`);
 console.log(`airport: ${air.runways.map((r) => `${r.ref} ${r.len.toFixed(0)} m × ${r.width} m`).join(', ') || 'no runway'}`
   + `, terminal ${air.terminal?.name ?? 'none'}, ${air.aprons.length} aprons, ${air.stands.length} stands`);
 console.log(`granite: ${rocks.length} mapped rocks, ${boulders.length} boulders in all`);

@@ -168,8 +168,8 @@ test('a death on Mahé wakes you in Victoria, a death in Pardubice in Pardubice'
   assert.equal(cz.name, 'Pardubická nemocnice');
   R._setRegionForTest('mahe');
   try {
-    const h = nearestHospital(5000, -90000);
-    assert.equal(h.name, 'Seychelles Hospital');
-    assert.ok(Math.abs(h.z - -100000) < 15000, 'on the island');
+    // Beau Vallon wakes in Victoria, Anse Intendance in Anse Royale
+    assert.equal(nearestHospital(-2200, -100300).name, 'Victoria Hospital');
+    assert.equal(nearestHospital(5000, -82000).name, 'Anse Royale Hospital');
   } finally { R._setRegionForTest(null); }
 });

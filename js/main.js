@@ -3048,6 +3048,7 @@ async function boot() {
   let sp = regionStartPoint(career.startPoint);
   const label0 = $id('enter-label');
   if (label0) label0.textContent = arriveLine(sp, arriveText);
+  if (!region().czech) document.title = 'Among The City: ' + region().name;
   let city = await loadCity(manifestUrl()).catch(() => null);
   if (city) {
     await city.ensureTiles(sp.x, sp.z);

@@ -73,30 +73,38 @@ export const REGIONS = {
     // climbs nearly overhead and drops through twilight fast.
     sun: { rise: 6.0, set: 18.3, peak: 78, dip: 70 },
     sea: { level: 0 },
-    // Seychelles International on the reclaimed land at Pointe Larue. The
-    // shape is the contract js/flight.js reads; `stub: true` says the numbers
-    // are the AIP reference point, length and bearing (scripts/mahe/stub.mjs),
-    // and the OSM build replaces them with the surveyed ones.
+    // Seychelles International on the reclaimed land at Pointe Larue, as OSM
+    // surveyed it (scripts/mahe/extras.mjs → airport.json; the runway is three
+    // OSM ways, 2 986 m end to end against the AIP's 2 987). Elevations are
+    // the built terrain's. The shape is the contract js/flight-airports.js reads.
     // Headings: 0 faces north (-z), dirX = -sin h, dirZ = -cos h.
     airport: {
-      stub: true, icao: 'FSIA', iata: 'SEZ', name: 'Seychelles International',
+      icao: 'FSIA', iata: 'SEZ', name: 'Seychelles International',
       runway: {
-        width: 45,
-        ends: { '13': { x: 6806, z: -94929.7, elev: 3 }, '31': { x: 9159.8, z: -93090.7, elev: 3 } },
+        width: 46,
+        ends: { '13': { x: 6745.8, z: -94847.6, elev: 3.8 }, '31': { x: 9197.2, z: -93142.5, elev: 4.4 } },
       },
-      // a narrowbody parked parallel to the terminal, its left side to it
-      stand: { x: 7872, z: -93868, heading: 0.907 },
-      terminal: { landside: { x: 7798, z: -93774 } },
+      // on the apron before the terminal, parallel to the runway, nose to the
+      // north-west, its left side (the doors) to the terminal
+      stand: { x: 6870.4, z: -94500.4, heading: 0.9631 },
+      terminal: { landside: { x: 6792.8, z: -94327.2 } },
     },
-    // where you wake after the death card: Seychelles Hospital at Mont Fleuri,
-    // Victoria (stub: the OSM build puts it at its mapped door)
-    hospitals: [{ x: 0, z: -100000, name: 'Seychelles Hospital', stub: true }],
+    // where you wake after the death card: beside the two hospitals' doors
+    // (OSM's Victoria Hospital at Mont Fleuri and Anse Royale Hospital), each
+    // on the pavement of the road that serves it and clear of every wall
+    hospitals: [
+      { x: 584.6, z: -98755.5, name: 'Victoria Hospital' },
+      { x: 7395.2, z: -86742.8, name: 'Anse Royale Hospital' },
+    ],
     home: 'victoria',
     spawns: {
-      // on final for 13 from the north-west: 9 km out on a 3 degree path
-      'sez-arrival': { x: -286.1, z: -100470.7, y: 490, heading: -2.234 },
-      'sez-terminal': { x: 7798, z: -93774, heading: 2.478 },
-      victoria: { x: 0, z: -100000, heading: 0 },
+      // on final for 13 from the north-west: 9 km out on a 3 degree path, which
+      // is over Victoria's harbour, as the real approach is
+      'sez-arrival': { x: -642.7, z: -99986.7, y: 490, heading: -2.1785 },
+      // in front of the terminal, landside, facing its doors
+      'sez-terminal': { x: 6792.8, z: -94327.2, heading: -0.608 },
+      // Albert Street, beside the Clock Tower, facing it
+      victoria: { x: 263.9, z: -99651.6, heading: 1.6 },
     },
   },
 };
