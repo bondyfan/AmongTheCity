@@ -142,6 +142,45 @@ function seabed(dl, dr) {
   return Math.max(-45, (beyond ? -1.2 : -2.8) - from * 0.035);    // the drop-off
 }
 
+// ---- the shore, exactly ---------------------------------------------------------
+// The land mask is a 10 m raster and the terrain a 20 m grid, so a coast made
+// from them is a staircase, and where the sea plane cuts the triangulated
+// ground it drew teeth fifty metres long along every beach. Within NEAR of the
+// water the height is instead a plane in the TRUE signed distance to the OSM
+// coastline (land positive): a triangle mesh represents a plane exactly, so
+// the waterline the sea draws is the surveyed one, and a beach shelves into
+// the lagoon at the slope of a beach (RAMP, 3 %). Past NEAR it blends back
+// into the relief inland and the lagoon floor offshore.
+const NEAR = 40, RAMP = 0.03, SB = 50;
+const segs = [], sgrid = new Map();
+for (const r of coast.land) for (let i = 0; i < r.length; i++) {
+  const a = r[i], b = r[(i + 1) % r.length], n = segs.length;
+  segs.push(a[0], a[1], b[0], b[1]);
+  const i0 = Math.floor((Math.min(a[0], b[0]) - NEAR) / SB), i1 = Math.floor((Math.max(a[0], b[0]) + NEAR) / SB);
+  const j0 = Math.floor((Math.min(a[1], b[1]) - NEAR) / SB), j1 = Math.floor((Math.max(a[1], b[1]) + NEAR) / SB);
+  for (let gi = i0; gi <= i1; gi++) for (let gj = j0; gj <= j1; gj++) {
+    const key = gi + ',' + gj;
+    let list = sgrid.get(key);
+    if (!list) sgrid.set(key, list = []);
+    list.push(n);
+  }
+}
+// unsigned distance to the nearest coast segment, and which side of it (OSM
+// keeps the land on the LEFT of a coastline; left of (dx, dz) here is (dz, -dx))
+function shore(x, z) {
+  const list = sgrid.get(Math.floor(x / SB) + ',' + Math.floor(z / SB));
+  if (!list) return null;
+  let bd = Infinity, side = 0;
+  for (const n of list) {
+    const ax = segs[n], az = segs[n + 1], dx = segs[n + 2] - ax, dz = segs[n + 3] - az, L = dx * dx + dz * dz || 1e-9;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L));
+    const qx = ax + dx * t, qz = az + dz * t, d = Math.hypot(x - qx, z - qz);
+    if (d < bd) { bd = d; side = (x - ax) * dz - (z - az) * dx; }
+  }
+  return bd === Infinity ? null : { d: bd, land: side > 0 };
+}
+const smooth01 = (a, b, v) => { const t = Math.max(0, Math.min(1, (v - a) / (b - a))); return t * t * (3 - 2 * t); };
+
 const hash = (i, j, s) => {
   let h = Math.imul(i ^ 0x9e3779b1, 2654435761) ^ Math.imul(j ^ s, 0x27d4eb2d);
   h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13;
@@ -163,14 +202,21 @@ for (const [tx, tz] of tiles) {
     const x = tx * T + i * TR, z = tz * T + j * TR, k = gridAt(x, z);
     const lat = W.latOf(z), lon = W.lonOf(x);
     let h;
-    if (land[k]) {
+    const near = (land[k] ? toSea[k] : toLand[k]) < NEAR + 20 ? shore(x, z) : null;
+    // the side: the mask, except right at the water, where the exact line decides
+    const isLand = near && near.d < 15 ? near.land : !!land[k];
+    if (isLand) {
       anyLand = true;
       h = demAt(lat, lon);
       if (coverAt(lat, lon) === TREE) h -= FOREST_BIAS * Math.min(1, toSea[k] / 120);
       // a beach rises out of the water at a beach's slope, whatever the radar saw
       h = Math.max(0.35, Math.min(h, 0.35 + toSea[k] * 0.35));
+      if (near && near.d < NEAR) { const w = smooth01(NEAR / 2, NEAR, near.d); h = (1 - w) * RAMP * near.d + w * h; }
       if (h > peak) { peak = h; peakAt = [lat, lon]; }
-    } else h = seabed(toLand[k], toReef[k]);
+    } else {
+      h = seabed(toLand[k], toReef[k]);
+      if (near && near.d < NEAR) { const w = smooth01(NEAR / 2, NEAR, near.d); h = (1 - w) * -RAMP * near.d + w * h; }
+    }
     g[j * TN + i] = Math.round(h * 10);
   }
   writeFileSync(`${OUT}/terrain/${tx}_${tz}.bin`, Buffer.from(g.buffer));
@@ -201,16 +247,20 @@ for (const [tx, tz] of tiles) {
 }
 
 // ---- the lagoon map for the water shader ---------------------------------------
-// One byte per 20 m: the depth in decimetres, 254 the reef crest, 255 land. For the
+// Two bytes per 20 m: the depth in decimetres (land is 0, the shallowest the
+// water gets, so a filtered sample along the coast is a beach and not the
+// average of "land" and a depth), and the reef crest as its own channel, for
+// the same reason. For the
 // whole island box, read once by js/mahe/sea.js.
 const SR = 20, SW = Math.ceil((GW - 1) * CR / SR) + 1, SH = Math.ceil((GH - 1) * CR / SR) + 1;
-const sea = new Uint8Array(SW * SH);
+const sea = new Uint8Array(SW * SH * 2);
 for (let j = 0; j < SH; j++) for (let i = 0; i < SW; i++) {
-  const k = gridAt(GX0 + i * SR, GZ0 + j * SR);
-  sea[j * SW + i] = land[k] ? 255 : reef[k] ? 254 : Math.min(253, Math.round(-seabed(toLand[k], toReef[k]) * 10));
+  const k = gridAt(GX0 + i * SR, GZ0 + j * SR), o = (j * SW + i) * 2;
+  sea[o] = land[k] ? 0 : Math.min(255, Math.round(-seabed(toLand[k], toReef[k]) * 10));
+  sea[o + 1] = reef[k] ? 255 : 0;
 }
 writeFileSync(`${OUT}/sea.bin`, Buffer.from(sea.buffer));
-writeFileSync(`${OUT}/sea.json`, JSON.stringify({ x0: GX0, z0: GZ0, res: SR, w: SW, h: SH, unit: 0.1, reef: 254, land: 255 }));
+writeFileSync(`${OUT}/sea.json`, JSON.stringify({ x0: GX0, z0: GZ0, res: SR, w: SW, h: SH, unit: 0.1, channels: ['depth', 'reef'] }));
 console.log(`terrain: ${tiles.length} tiles; highest point ${peak.toFixed(0)} m at ${peakAt?.map((v) => v.toFixed(4)).join(', ')}`
   + ` (Morne Seychellois is 905 m)`);
 console.log(`canopy: ${landTiles} tiles, ${canopyCells.toLocaleString()} tree cells; zones coast/low/high/mangrove ${zoneN.join('/')}`);

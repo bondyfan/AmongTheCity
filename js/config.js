@@ -1,4 +1,5 @@
 // ---- Among The City: all tunables in one place ----
+import { region } from './regions.js';
 
 // The world origin is the railway=station node of Pardubice hlavní nádraží —
 // which OSM parks amid the TRACKS. The 305 m functionalist hall spans
@@ -149,6 +150,11 @@ export const COLORS = {
   railBed: 0x6d6a62, rail: 0x3c3e42, sleeper: 0x5a5248,
   treeTrunk: 0x6b4a2e, treeCrown: [0x5d8a4a, 0x6a9a52, 0x527e42, 0x74a25e],
 };
+// Another region's unmapped ground (js/regions.js). Between Mahé's trees and
+// gardens the land is a deep tropical green on red-brown laterite, never the
+// grey-green of a Czech suburb verge. One number, read by the chunk builder in
+// both the worker and the main thread, which both know the region.
+if (region().id === 'mahe') COLORS.groundBase = 0x627f45;
 
 // building wall palettes by type — Czech city: pastel plasters in the old
 // town, gray panel housing, brick industry. Roofs derived darker.

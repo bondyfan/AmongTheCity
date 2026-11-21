@@ -2221,8 +2221,11 @@ function updateHorizon(dt) {
   // the window's edge dissolves into it instead (sky.js OPEN_*, heightfog.js
   // setFarEdge). Never in the air (its rings are its own) or in Prague, which
   // has its own far skyline and far ground (js/landmarksfar.js).
+  // (an island, js/regions.js, is always open: Morne Seychellois stands over
+  // every street in Victoria, and fogging it out at the edge of town was a
+  // town with no mountain behind it)
   const farK = flier || praha || gs.farLand === false ? 0
-    : Math.min(1, Math.max(0, (open - 0.55) / 0.4));
+    : region().sea ? 1 : Math.min(1, Math.max(0, (open - 0.55) / 0.4));
   // (eased: openness eases by itself, but crossing into Prague's skyline or
   // taking off switches farK at once, and the wall would jump kilometres; a
   // teleport takes the new value at once, there is nothing to ease from)

@@ -124,7 +124,17 @@ export async function buildLandmarks(scene, terrain) {
     for (const q of o) far = Math.max(far, (q[0] - c.p[0]) * -Math.sin(hd) + (q[1] - c.p[1]) * -Math.cos(hd));
     place(bellTower(), c.p[0] - Math.sin(hd) * (far + 4), c.p[1] - Math.cos(hd) * (far + 4), hd);
   }
-  if (marks.temple) place(gopuram(), marks.temple.p[0], marks.temple.p[1], marks.temple.h ?? 0);
+  if (marks.temple) {
+    // the gopuram is the GATE: it stands at the street front of the temple, not
+    // over its hall. The front is taken as the side facing the town centre
+    // (the Clock Tower), just clear of the footprint, its gate facing out.
+    const t = marks.temple, c = marks.clocktower?.p ?? [t.p[0], t.p[1] + 1];
+    let dx = c[0] - t.p[0], dz = c[1] - t.p[1];
+    const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
+    let far = 0;
+    for (const q of t.o ?? []) far = Math.max(far, (q[0] - t.p[0]) * dx + (q[1] - t.p[1]) * dz);
+    place(gopuram(), t.p[0] + dx * (far + 3.2), t.p[1] + dz * (far + 3.2), Math.atan2(dx, dz));
+  }
   if (marks.market) {
     const s = marketSign(marks.market.name);
     if (s) {

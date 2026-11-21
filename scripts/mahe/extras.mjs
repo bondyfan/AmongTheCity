@@ -132,6 +132,19 @@ writeFileSync(`${OUT}/airport.json`, JSON.stringify(air));
 // ---- the granite -------------------------------------------------------------------
 // Bare-rock cells of WorldCover (class 60) on land: a boulder group per 40 m
 // cell, hashed so it is the same rock on every machine and every rebuild.
+// Only where the ground is STEEP (the glacis, a rocky headland): WorldCover
+// also calls Victoria's flat reclaimed port and every building site "bare",
+// and granite does not lie about on a quay. The slope is read off the height
+// maps ground.mjs wrote.
+const TN = 241, terr = new Map();
+const hgt = (x, z) => {
+  const tx = Math.floor(x / W.TILE), tz = Math.floor(z / W.TILE), k = tx + '_' + tz;
+  if (!terr.has(k)) { const f = `${OUT}/terrain/${k}.bin`; terr.set(k, existsSync(f) ? new Int16Array(readFileSync(f).buffer.slice(0)) : null); }
+  const g = terr.get(k); if (!g) return 0;
+  const i = Math.min(TN - 1, Math.round((x - tx * W.TILE) / 20)), j = Math.min(TN - 1, Math.round((z - tz * W.TILE) / 20));
+  return g[j * TN + i] / 10;
+};
+const slope = (x, z) => Math.max(Math.abs(hgt(x + 20, z) - hgt(x - 20, z)), Math.abs(hgt(x, z + 20) - hgt(x, z - 20))) / 40;
 const boulders = rocks.map((r) => [r.p[0], r.p[1], r.big ? 4 + (r.p[0] * 7 % 3) : 1.4]);
 if (existsSync(COVER)) {
   const t = openTiff(COVER);
@@ -146,6 +159,8 @@ if (existsSync(COVER)) {
     if (bare < 3) continue;
     const lon = t.geo.x0 + (c0 + i + 2) * t.geo.dx, lat = t.geo.y0 + (r0 + j + 2) * t.geo.dy, u = hash(c0 + i, r0 + j);
     const p = P(lat, lon);
+    const h0 = hgt(p[0], p[1]), sl = slope(p[0], p[1]);
+    if (h0 < 0.5 || !(sl > 0.16 || (h0 < 12 && sl > 0.07))) continue;   // flat ground, or the sea
     const k = 1 + Math.floor(u * 3);
     for (let n = 0; n < k; n++) {
       const v = hash(c0 + i + n * 17, r0 + j + n * 31);

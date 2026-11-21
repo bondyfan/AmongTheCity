@@ -7,8 +7,8 @@
 //
 // So the sea is ONE surface at sea level that follows the camera, and its
 // colour is read from the lagoon map scripts/mahe/ground.mjs bakes from the
-// coastline and the reef: one byte per 20 m, the depth in decimetres, 254 for
-// the reef crest, 255 for land. The terrain under it is the seabed the same
+// coastline and the reef: two bytes per 20 m, the depth in decimetres (land
+// reads 0) and the reef crest. The terrain under it is the seabed the same
 // script made, so where the map says shallow, the ground really is just under
 // the surface, and the beach rises out of the water where the coast is.
 //
@@ -35,6 +35,10 @@ export class Sea {
     }]);
     const mat = new THREE.ShaderMaterial({
       uniforms: this.uniforms, fog: true,
+      // the ocean runs to the horizon: it must not take part in the streamed
+      // window's edge dissolve (js/heightfog.js), or past the built radius the
+      // sea vanished and the far landscape's seabed showed through as land
+      defines: { ATC_NO_EDGE: '' },
       // a hair toward the camera: the beach shelf is 30 cm under the surface,
       // which at a kilometre is inside one depth step without it
       polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
@@ -54,8 +58,9 @@ export class Sea {
     try {
       const meta = await (await fetch(dataUrl('sea.json'))).json();
       const buf = await (await fetch(dataUrl('sea.bin'))).arrayBuffer();
-      const tex = new THREE.DataTexture(new Uint8Array(buf, 0, meta.w * meta.h), meta.w, meta.h,
-        THREE.RedFormat, THREE.UnsignedByteType);
+      // two channels: depth in decimetres, and the reef crest (scripts/mahe/ground.mjs)
+      const tex = new THREE.DataTexture(new Uint8Array(buf, 0, meta.w * meta.h * 2), meta.w, meta.h,
+        THREE.RGFormat, THREE.UnsignedByteType);
       tex.magFilter = THREE.LinearFilter; tex.minFilter = THREE.LinearFilter;
       tex.needsUpdate = true;
       this.uniforms.uMap.value = tex;
@@ -113,10 +118,10 @@ const SEA_FRAG = /* glsl */`
     if (uHas < 0.5 || uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
       depth = 40.0; reef = 0.0; land = 0.0; return;
     }
-    float v = texture2D(uMap, uv).r * 255.0;
-    land = smoothstep(254.4, 255.0, v);
-    reef = smoothstep(253.2, 253.9, v) * (1.0 - land);
-    depth = mix(v * 0.1, 0.4, max(reef, land));
+    vec2 t = texture2D(uMap, uv).rg;
+    land = 0.0;                       // the terrain covers the land; the map's land is depth 0
+    reef = smoothstep(0.3, 0.8, t.g);
+    depth = mix(t.r * 25.5, 0.4, reef);
   }
 
   // swell from the south-east trades, plus the chop on top of it
@@ -140,9 +145,9 @@ const SEA_FRAG = /* glsl */`
     float day = 1.0 - uNight;
 
     // colour of the water column: sand showing through, turquoise, teal, ink
-    vec3 sand = vec3(0.55, 0.86, 0.80), turq = vec3(0.12, 0.70, 0.72);
-    vec3 teal = vec3(0.04, 0.42, 0.56), deep = vec3(0.02, 0.14, 0.32);
-    vec3 col = mix(sand, turq, smoothstep(0.2, 1.6, depth));
+    vec3 sand = vec3(0.36, 0.80, 0.74), turq = vec3(0.06, 0.62, 0.66);
+    vec3 teal = vec3(0.03, 0.38, 0.52), deep = vec3(0.02, 0.13, 0.30);
+    vec3 col = mix(sand, turq, smoothstep(0.25, 1.4, depth));
     col = mix(col, teal, smoothstep(2.0, 7.0, depth));
     col = mix(col, deep, smoothstep(9.0, 30.0, depth));
     // the coral heads of the reef flat: darker patches through the shallows
@@ -152,7 +157,7 @@ const SEA_FRAG = /* glsl */`
 
     // the sky in the water, and the sun on it
     float fresnel = pow(1.0 - max(dot(n, viewDir), 0.0), 5.0);
-    col = mix(col, uSky * (0.25 + 0.75 * day), clamp(0.04 + fresnel * 0.9, 0.0, 0.85));
+    col = mix(col, uSky * (0.25 + 0.75 * day), clamp(0.03 + fresnel * 0.75, 0.0, 0.7));
     vec3 halfDir = normalize(normalize(uSun) + viewDir);
     float sunUp = smoothstep(-0.05, 0.08, uSun.y);
     col += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, halfDir), 0.0), 220.0) * 1.6 * sunUp * day;
@@ -160,9 +165,10 @@ const SEA_FRAG = /* glsl */`
     // white water: the swell breaking on the reef, and the wash on the beach
     float t = uTime;
     float breakers = reef * (0.55 + 0.45 * sin(dot(vWorld.xz, vec2(0.11, 0.07)) - t * 1.7));
-    float wash = smoothstep(0.75, 0.32, depth) * (1.0 - land) * (0.5 + 0.5 * sin(depth * 18.0 - t * 1.2));
+    // (only the last few metres: the beach shelf is 3 cm deeper a metre out)
+    float wash = smoothstep(0.42, 0.30, depth) * (1.0 - land) * (0.5 + 0.5 * sin(depth * 60.0 - t * 1.2));
     vec3 foam = vec3(0.92, 0.95, 0.95) * (0.12 + 0.88 * day);
-    col = mix(col, foam, clamp(breakers * 0.75 + wash * 0.45, 0.0, 0.85));
+    col = mix(col, foam, clamp(breakers * 0.75 + wash * 0.35, 0.0, 0.85));
 
     gl_FragColor = vec4(col, 1.0);
     #include <tonemapping_fragment>

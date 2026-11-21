@@ -37,7 +37,7 @@ import { LAYER_Y } from './config.js';
 import { GrassMask } from './grassmask.js';
 import { region } from './regions.js';
 // the lowest ground grass grows on: anywhere in Czechia, above the beach on an island
-const SHORE_Y = region().sea ? 1.4 : -Infinity;
+const SHORE_Y = region().sea ? 0.8 : -Infinity;
 
 // ---- and it GROWS IN, it does not arrive ---------------------------------
 // The ring is one buffer swapped whole, so everything it gained since the last
