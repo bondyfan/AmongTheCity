@@ -2810,3 +2810,53 @@ teslu", every kind in fact). Now:
 - `traffic.claimSlot(key, gen)` on the peer drops his scheduled copy of that
   generation and his own ghost of it, and leaves a slot that holds another generation
   alone. Ghosts stay out of the crash list and the run-over list, as before.
+
+## Riding along in a car another player drives (21 Nov 2026)
+
+In co-op a peer's car is a proxy this client only draws (`js/netvehicles.js`): not in
+`vehicles.cars`, not in traffic, not in the crash list. It still is none of those. What it
+gained is passenger seats.
+
+- **The boardable face.** A ghost of a car somebody DRIVES (seat 0, not bound) carries
+  `r.veh`, an object shaped like a vehicle (`proxy: true`, `uid`, `kind`, `x z y heading
+  speed len wid mesh seats`, `gone`, `quiet`), kept on the drawn pose every frame.
+  `ghosts.proxies()` lists them, `nearestEnterableCar()` in `js/main.js` adds them under the
+  traffic rule (under 3 m/s), and the E handler sends a proxy to `boardPeerCar()`: the same
+  `player.boardVehicle()` walk round the body, door and seat as any car, for seats from 1
+  up. The wheel is never offered. `gone` is raised when the driver steps out, leaves, turns
+  passenger or is suddenly in a different kind of car.
+- **Who sits where** (`js/netride.js` `makeSeatBook`). `veh.seats` is local, so the seat is
+  announced: event `seat_claim { ho: driver's uid, s, on }` for the walk-up, and the state
+  packet's `veh.ho` + `veh.st` once seated. Advisory, like the helicopter's claim: two who
+  press E inside one round trip both start walking, the lower uid keeps the seat, the other
+  is walked away with "Místo zabral …". Somebody seated beats somebody walking. Seats per
+  kind are `seatsOf()` (4, a roadster, van and lorry 2, a bus 8).
+- **Seating a remote passenger by name.** A passenger's descriptor carries `ho`, and
+  `sync()` binds him to that driver's ghost (or to our own car when `ho` is `ghosts.selfUid`)
+  with no distance test. Guessing by distance only worked standing still: at 90 km/h the
+  position he reports is a third of a second old and outside `BIND_R`, which built him a
+  second car trailing the first. A sender without `ho` (an older client) is guessed as before.
+- **What the passenger's eye rides on.** The camera is rigid to `player.pos`, which mirrors
+  the proxy. A proxy with somebody local in it (or walking up to it) is chased with a
+  critically damped spring (`follow()`, `RIDE_W`) instead of the fixed-rate ease, so a packet
+  that lands early or late bends the velocity and never steps it. `sync(uid, v, age)` also
+  takes how long the packet waited for its frame, which removes a frame's worth of sawtooth
+  from every ghost's target.
+- **Rides that end without E** (`makeRides().update`, once a frame after `ghosts.update`):
+  the car is gone (`'gone'`: the body is stood up beside where the seat was, on `supportY`),
+  it pulled away during the walk-up (`'left'`, over 4.5 m/s), or the seat was somebody
+  else's (`'rival'`). The same update tells the room when our seat is taken and given back,
+  whichever way the ride ended, and puts `player.pos` on this frame's pose. A driver whose
+  packets stop is standing still; the passenger is told after 6 s and stays seated until he
+  presses E or the fleet reaps the ghost (35 s).
+- **Peers in the glass** (`js/netcrew.js`). A car is opaque and the people behind its
+  windows are pictures the body shader paints (`js/carglass.js`), of whoever the car was
+  told about. Nobody told it about a peer: a friend in your passenger seat was a name tag
+  over an empty seat, and a peer's proxy showed a stock civilian at the wheel. Once a frame
+  `pumpGhosts` asks `ghosts.hostOf(uid)` which car each peer sits in and `netCrew.show()`
+  calls `setDriver` / `setPassenger` on a change, and takes them out again when they leave.
+- Known limits: the glass has pictures for the FRONT seats only, so somebody in a back seat
+  (or in a bus) is not drawn from outside; their name tag rides the car. When the driver
+  steps out, the proxy disappears on the passenger's screen (as it always did for
+  onlookers), so the passenger is put down too. The driver does not see the passenger's
+  door open. Older clients ignore `seat_claim` and `ho`.
