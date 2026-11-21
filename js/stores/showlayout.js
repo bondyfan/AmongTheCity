@@ -138,7 +138,9 @@ export function leftLot(o, x, z, pad = LOT_PAD) {
  */
 export function watchDisplay(car, d) {
   const s = car?._show;
-  if (!s || s.gone || car.owned || !leftLot(s.o, car.x, car.z)) return false;
+  if (!s || s.gone) return false;
+  if (car.owned) { s.gone = true; return false; }      // bought: nobody's business from here on
+  if (!leftLot(s.o, car.x, car.z)) return false;
   s.gone = true;
   d.wanted?.add(THEFT_HEAT, THEFT_NOUN);
   d.toast?.('Alarm autosalonu', { icon: '🚨', kind: 'warn', sub: 'Odjel jsi s vystaveným vozem. Jde po tobě policie.' });
