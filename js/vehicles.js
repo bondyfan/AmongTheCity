@@ -51,7 +51,7 @@ import { hookScene, setCarInstancing, carInstancingOn, carInstanceStats } from '
 import { attachTrailer, updateTrailer, updateBlink } from './semitrailer.js';   // round 8: the articulated lorry, indicators
 import { pitchOf } from './roadpose.js';
 import { sameLevel, inBand } from './levelsep.js';
-import { discOffsets } from './carhull.js';
+import { discOffsets, hullPushOut, hullReach } from './carhull.js';
 import { crash, sfxAt, skidChirp, skidBark } from './audio.js';   // no-ops headless — safe for node --check/tests
 
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
@@ -1525,6 +1525,8 @@ function drawAfterLight(o) {
 // omit it and the step degrades gracefully to walls-only, v2 behavior).
 const _pt = { x: 0, z: 0 };
 let _hitX = 0, _hitZ = 0;   // last building-contact point this step
+let _hitTree = false;        // …and whether that was a tree trunk (nothing to chip off a tree)
+const _trunks = [];          // [x, z, r] of the trunks round the car this pass
 // ---- crumple: BeamNG-style permanent sheet-metal deformation ------------
 // The hulls are lofted BufferGeometries, so a crash can deform them the honest
 // way: push every vertex near the impact point INWARD along the impact normal,
@@ -1761,6 +1763,7 @@ function wallPass(car, world) {
   // the second clear of the wall, so a square hit read as a one-corner hit and
   // span the car on a dead-straight run into a flat wall.
   let n = 0, snx = 0, snz = 0, sax = 0, saz = 0, sw = 0, deep = 0;
+  _hitTree = false;
   for (let i = 0; i < nPts; i++) {
     const of = i < 2 ? hl : i < 4 ? -hl : 0, os = i & 1 ? hw : -hw;
     const wox = fx * of + rx * os, woz = fz * of + rz * os;
@@ -1775,6 +1778,22 @@ function wallPass(car, world) {
       if (pl > deep) { deep = pl; _hitX = ox; _hitZ = oz; }   // where metal met masonry
     }
   }
+  // A TREE TRUNK MEETS THE WHOLE BODY (js/treesolid.js, js/carhull.js). The
+  // corner discs above are for walls, which are longer than a car is wide; a
+  // trunk is 30 cm across and went between them, through the middle of the
+  // bonnet and out of the boot. So each trunk in reach is pushed out of the
+  // car's own plan, and what would move the trunk moves the car the other way:
+  // one more contact in the same sums, with its lever at the trunk.
+  const nT = world.trunksNear ? world.trunksNear(car.x, car.z, hullReach(car), _wallOpts.y, _trunks) : 0;
+  for (let i = 0; i < nT; i++) {
+    const tx = _trunks[i * 3], tz = _trunks[i * 3 + 1];
+    _pt.x = tx; _pt.z = tz;
+    if (!hullPushOut(_pt, _trunks[i * 3 + 2], car)) { _trunks[i * 3 + 2] = -1; continue; }   // (-1: clear of it)
+    const px = tx - _pt.x, pz = tz - _pt.z, pl = Math.sqrt(px * px + pz * pz);
+    snx += px; snz += pz; n++;
+    sax += (tx - car.x) * pl; saz += (tz - car.z) * pl; sw += pl;
+    if (pl > deep) { deep = pl; _hitX = tx; _hitZ = tz; _hitTree = true; }
+  }
   if (!n) return;
   const nl = Math.sqrt(snx * snx + snz * snz);
   if (nl < 1e-6 || sw < 1e-9) return;
@@ -1786,6 +1805,11 @@ function wallPass(car, world) {
     _pt.x = car.x + fx * of + rx * os; _pt.z = car.z + fz * of + rz * os;
     const ox = _pt.x, oz = _pt.z;
     if (world.collide(_pt, 0.5, _wallOpts)) depth = Math.max(depth, (_pt.x - ox) * nx + (_pt.z - oz) * nz);
+  }
+  for (let i = 0; i < nT; i++) {
+    if (_trunks[i * 3 + 2] < 0) continue;
+    _pt.x = _trunks[i * 3]; _pt.z = _trunks[i * 3 + 1];
+    if (hullPushOut(_pt, _trunks[i * 3 + 2], car)) depth = Math.max(depth, (_trunks[i * 3] - _pt.x) * nx + (_trunks[i * 3 + 1] - _pt.z) * nz);
   }
   car.x += nx * depth; car.z += nz * depth;
   const ax = sax / sw, az = saz / sw;            // lever: centre → contact
@@ -1830,7 +1854,7 @@ function wallPass(car, world) {
       Math.min(10, 2 + impact * 0.5 | 0), impact * 0.45);
     if (sev > 0.4) car._crushR = ((car._crushR ?? 0) + (Math.random() - 0.5) * 0.07);
     car._chipCd = Math.max(0, (car._chipCd ?? 0));
-    if (impact > 14 && car._chipCd <= 0 && world.damageBuilding) {
+    if (impact > 14 && car._chipCd <= 0 && world.damageBuilding && !_hitTree) {
       car._chipCd = 1.5;
       const hy = car.y + 1.0, rad = 2.0 + sev * 1.2;
       world.damageBuilding(null, _hitX, hy, _hitZ, rad);

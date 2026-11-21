@@ -648,6 +648,8 @@ const RING_W = 72;                     // width of the in-cone attach band. Wide
 // The deferral is intact — it just has a floor under it instead of a wall.
 const NOTICE_R = 240;
 const ATTACH_R_MAX = Math.max(TRAFFIC.spawnR, HIDE_R_MAX + RING_W);
+// the slot a ghost's key was made from (_toGhost appends '#g' + generation)
+const ghostBase = (key) => { const i = String(key).indexOf('#g'); return i < 0 ? key : key.slice(0, i); };
 const GHOST_MAX = 120;                 // s a locally-retired car may linger in view
 const LOOK_BACK = 6;                   // s a car stays protected after leaving the cone —
                                        // long enough to survive a head turn and a glance back
@@ -3815,7 +3817,34 @@ export class Traffic {
     this.patrols.delete(car);
     car.ai = null;
     if (p) { p.stolen = 1; p.car = null; if (p.ghost) this._ghosts.delete(p); }
+    // A ghost's slot was handed back when it became one, and the same
+    // generation's schedule is in the pool again, without a mesh while the
+    // ghost stood (the _standIn rule). The car has just been taken: that
+    // schedule must not grow a second body of it, here or on a peer's screen
+    // (stealRef, claimSlot with a generation).
+    // (claimSlot, the peer's own entry: it burns the record that is there, or
+    // lays the tombstone if the scan has not put the slot back yet)
+    if (p?.ghost) {
+      const base = ghostBase(p.key);
+      if (this._standIn.get(base) === p) this._standIn.delete(base);
+      this.claimSlot(base, p.gen);
+    }
     return car;
+  }
+
+  // What the peers need to let go of THEIR copy of a car that is being taken:
+  // the slot it was born in and the generation it belongs to. Unlike slotKey()
+  // this answers for a ghost too (read BEFORE steal(), which takes car.ai).
+  // A ghost is a car one client kept on screen after the schedule let it go,
+  // and for the longest time its door was simply dead in co-op: the car you
+  // stood in front of until it stopped was, eleven seconds later, exactly
+  // that car. The slot string alone must never be sent for it (on the peer's
+  // machine it may already name the next generation's car), so the generation
+  // travels with it and claimSlot() only touches a car of that generation.
+  stealRef(car) {
+    const p = car?.ai;
+    if (!p || typeof p.key !== 'string' || !Number.isFinite(p.gen)) return null;
+    return { key: p.ghost ? ghostBase(p.key) : p.key, gen: p.gen, ghost: !!p.ghost };
   }
 
   // null for a GHOST on purpose. A ghost has no slot any more — on the peer's
@@ -3831,9 +3860,21 @@ export class Traffic {
   // of the generation. Works even if we never built the schedule (the peer may
   // be a street ahead of our streaming frontier) — the tombstone carries the
   // slot's real cell/index so the generation rollover reaps it on time.
-  claimSlot(key) {
+  //
+  // `gen` (a peer that sends one): the generation of the car he took. Then our
+  // own ghost of that car goes as well, and a slot that already holds ANOTHER
+  // generation is left alone: that is a different car, and he did not take it.
+  claimSlot(key, gen) {
+    const hasGen = Number.isFinite(gen);
+    if (hasGen) {
+      for (const g of this._ghosts) {
+        if (g.key !== key + '#g' + gen) continue;
+        this._detach(g); g.stolen = 1; this._ghosts.delete(g);
+        if (this._standIn.get(key) === g) this._standIn.delete(key);
+      }
+    }
     const p = this._pool.get(key);
-    if (p) { this._detach(p); p.stolen = 1; return; }
+    if (p) { if (!hasGen || p.gen === gen) { this._detach(p); p.stolen = 1; } return; }
     // the third group takes a SIGN because of the patrol slot: POLICE_K is -1
     // and a tombstone that would not parse is a peer quietly driving a police
     // car we also keep a copy of — the exact ghosting the tombstone exists to
@@ -3844,8 +3885,9 @@ export class Traffic {
     const ci = +m[1], cj = +m[2], k = +m[3];
     const ss = hash32(WORLD_SEED, ci, cj, k);
     const wt = this._wt || this.now();
-    const gen = Math.floor((wt + rnd01(hash32(ss, 7)) * TRIP_T) / TRIP_T);
-    this._pool.set(key, { key, ci, cj, k, gen, cell: null, stolen: 1, car: null, route: null,
+    const now = Math.floor((wt + rnd01(hash32(ss, 7)) * TRIP_T) / TRIP_T);
+    if (hasGen && gen !== now) return;      // his car was of a generation that is over here
+    this._pool.set(key, { key, ci, cj, k, gen: now, cell: null, stolen: 1, car: null, route: null,
       police: k === POLICE_K ? 1 : k === MW_POLICE_K ? 2 : 0 });
   }
 

@@ -399,6 +399,68 @@ test('stealing a ghost does not broadcast a slot the peer would delete', () => {
   assert.equal(A.t.cars.has(c), false);
 });
 
+// Frank, 21 Nov 2026: in co-op a moving Tesla could not be opened. Any car
+// could not: the car you stand in front of until it stops falls behind its
+// schedule and is let go as a ghost, and a ghost's door was dead whenever a
+// session was up. Its door opens now, and what travels is the slot AND the
+// generation, so a peer drops his copy of that car and nothing else.
+test('a ghost can be taken: the slot and its generation name the car for the peers', () => {
+  const A = client({ maxCars: 240 });
+  A.run(120, 20, stand, lookEast);
+  const c = [...A.t.cars].find((x) => !x.ai.ghost && !x.ai.fixed && A.t._visible(x.ai.sx, x.ai.sz));
+  const p = c.ai, key = p.key, gen = p.gen;
+  assert.deepEqual(A.t.stealRef(c), { key, gen, ghost: false }, 'a scheduled car is named by its slot');
+  A.t._standIn.set(key, p); A.t._toGhost(p);        // as the lag clamp does to a car held up
+  assert.equal(A.t.slotKey(c), null);
+  assert.deepEqual(A.t.stealRef(c), { key, gen, ghost: true }, 'and so is its ghost, by the slot it came from');
+  A.t.steal(c);
+  assert.equal(c.ai, null);
+  assert.equal(A.t.stealRef(c), null, 'a car that is nobody\'s schedule has no reference');
+  assert.equal(A.t._standIn.has(key), false);
+  // the same generation's schedule never grows a second body of the car taken
+  // (stepped on from where the clock stands: run() starts again at T0)
+  let again = 0;
+  for (let i = 1; i <= 20 * 40; i++) {
+    A.at(120 + i / 20);
+    A.t.setViewer({ ...lookEast(), fovRad: 1.19, aspect: 1, fogFar: 634 });
+    A.t.update(1 / 20, stand, null);
+    for (const x of A.t.cars) if (x.ai?.key === key && x.ai.gen === gen) again++;
+  }
+  assert.equal(again, 0, 'the slot refilled behind the thief');
+  assert.ok(A.t.cars.size > 8, 'and the rest of the traffic drives on');
+});
+
+test('a peer told of a taken car drops that car, scheduled or ghost, and never another generation', () => {
+  const mk = () => { const C = client({ maxCars: 240 }); C.run(120, 20, stand, lookEast); return C; };
+  const pick = (C) => [...C.t.cars].find((x) => !x.ai.ghost && !x.ai.fixed && C.t._visible(x.ai.sx, x.ai.sz));
+  // 1. he still has it on its schedule
+  let B = mk(), c = pick(B), key = c.ai.key, gen = c.ai.gen;
+  B.t.claimSlot(key, gen);
+  assert.equal(B.t.cars.has(c), false, 'the scheduled copy went');
+  assert.equal(B.t._pool.get(key)?.stolen, 1, 'and the slot is held for the generation');
+  // 2. he has let it go as a ghost himself (it was held up on his screen too)
+  B = mk(); c = pick(B); key = c.ai.key; gen = c.ai.gen;
+  const g = c.ai;
+  B.t._standIn.set(key, g); B.t._toGhost(g);
+  B.t.claimSlot(key, gen);
+  assert.equal(B.t.cars.has(c), false, 'his ghost of it went');
+  assert.equal(B.t._ghosts.has(g), false);
+  // 3. the slot is a generation on: that is another car, and it stays
+  B = mk(); c = pick(B); key = c.ai.key; gen = c.ai.gen;
+  B.t.claimSlot(key, gen - 1);
+  assert.equal(B.t.cars.has(c), true, 'the next generation\'s car was deleted for a car that is gone');
+  assert.equal(c.ai.stolen, 0);
+  // 4. no generation sent (an older client): as it always was
+  B.t.claimSlot(key);
+  assert.equal(B.t.cars.has(c), false);
+  // 5. a slot never built here, of a generation that is over here: no tombstone
+  const C = client({ maxCars: 240 });
+  C.at(120);
+  C.t.update(1 / 20, stand, null);
+  C.t.claimSlot('900,900/0', 1);
+  assert.equal(C.t._pool.has('900,900/0'), false);
+});
+
 // ---------------------------------------------------------------------------
 // 7+8. the two regressions the critic left behind
 // ---------------------------------------------------------------------------

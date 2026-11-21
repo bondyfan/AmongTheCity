@@ -2764,6 +2764,53 @@ Pardubice, třída Míru 7.0 and 7.0 ms a frame before, 6.8 and 7.9 after; by th
 6.9 after; a Prague street 6.9 and 6.6 before, 7.5 and 6.8 after. The differences are
 inside the noise of a machine other sessions were using.
 
+## Solid trees, and a ghost's door in co-op (21 Nov 2026)
+
+**A tree trunk is solid** (`js/treesolid.js`). The trunks are not a new data set: they
+are read off the tree batch every chunk already draws (`js/meshes.js`, one
+InstancedMesh whose matrix is the crown and whose colour carries the species). The
+foot is the crown's centre taken `groundOf(species)` crown radii down the crown's own
+axis, the girth is the species' `tau` share of the crown radius (0.13 to 0.7 m, a shrub
+has none). So nothing new crosses the worker boundary, every client has the same
+trunks, and a tree that is not drawn (trees switched off in the settings) is not there.
+- `World._registerTrees(key, group)` hands the batch over when a chunk is finalised;
+  the batch is only decoded the first time something asks near that chunk (a wood is
+  thousands of trees and most chunks are never visited), into an 8 m grid per chunk.
+- `world.collide()` pushes out of trunks for whoever passes `opts` (on foot, a body
+  thrown from a car, a helicopter's skids), on their own level (`js/levelsep.js`). A
+  call without `opts` (a spawn point nudged clear of walls) does not see trees: where a
+  car is parked must not depend on which chunks happen to be loaded.
+- A driven car's four corner probes are left out, as they are for the exact car hulls:
+  a 30 cm trunk went between them, through the bonnet. `vehicles.js wallPass` asks
+  `world.trunksNear()` and pushes each trunk out of the car's own plan
+  (`js/carhull.js hullPushOut`); what would move the trunk moves the car the other way,
+  as one more contact in the wall sums. So a tree is a wall: the impulse, the dent, the
+  damage, the debris and the ejection through the windscreen are the wall's own. It
+  chips no facade.
+- Scheduled traffic does not ask (it drives its lanes, and the mesher keeps trees out
+  of carriageways). The crowd does not ask either (it walks a shared timetable).
+- Cost, measured in the game on the M1 Pro (Pardubice station square, 84 chunks
+  registered, 14 of them ever decoded, 260 trunks): a trunk query is 0.14 to 0.21
+  microseconds; a walker's whole `world.collide()` went from 7.03 to 7.33 microseconds
+  a call. A frame makes a handful of those calls, so nothing a frame time can show.
+
+**A ghost's door opens in co-op.** A traffic car leaves the shared schedule and drives
+on as a local ghost when its generation rolls over in view, and also when it falls
+`LAG_MAX` behind, which is what standing in front of it for about eleven seconds does.
+With a session up such a car was left out of `nearestEnterableCar`: E did nothing, with
+no hint, on exactly the car the player had just stopped ("nemůžu otevřít jezdící
+teslu", every kind in fact). Now:
+- `traffic.stealRef(car)` names any schedule car, ghost or not, as `{ key, gen, ghost }`:
+  the slot it was born in and its generation (a ghost's own key is `slot#g<gen>`).
+- `traffic.steal(car)` of a ghost also burns the same generation's re-minted slot, so
+  the schedule never grows a second body of the car taken.
+- The wire: `steal { key, gen }` for a scheduled car (an older client reads the key as
+  before), `steal_g { key, gen }` for a ghost (an older client ignores it, which is
+  right: the bare slot string may name the next generation's car there).
+- `traffic.claimSlot(key, gen)` on the peer drops his scheduled copy of that
+  generation and his own ghost of it, and leaves a slot that holds another generation
+  alone. Ghosts stay out of the crash list and the run-over list, as before.
+
 ## Horns in space, the limit on the HUD, the law at a red light, no walking on the rails (Nov 2026)
 
 Frank, 21 Nov 2026: horns around him sounded close, all at one level and from one side;
