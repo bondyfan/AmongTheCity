@@ -298,7 +298,7 @@ test('the display cars are the game\'s own parked cars, and a stand does not ref
     parked.map((c) => [c.kind, c.x, c.z, c.heading, c.color, c.look, c._show.id]));
   // the hint tells a driver what driving off will cost, and a walker what E does
   const roadster = parked[0];
-  assert.match(shop.hint(roadster.x + 2, roadster.z, { onFoot: true }), /^E nasednout · Tesla Roadster/);
+  assert.match(shop.hint(roadster.x + 2, roadster.z, { onFoot: true }), /^E nasednout · B koupit za 990.000.Kč · Tesla Roadster$/);
   assert.match(shop.hint(roadster.x, roadster.z, { onFoot: false, car: roadster }), /policie/);
   const spec = layout.points.find((p) => p.kind === 'spec');
   assert.equal(shop.use(spec.x, spec.z, { onFoot: true }), true, 'E at a card does nothing');
@@ -320,4 +320,52 @@ test('the display cars are the game\'s own parked cars, and a stand does not ref
   assert.deepEqual(parked.map((c) => c.kind), ['tesla'], 'the stand refilled behind the stolen Roadster');
   shop.dispose();
   resetShowrooms();
+});
+
+test('a display car is sold new at the showroom\'s price, and a bought one is the player\'s to drive away', async () => {
+  const { PRICE, showroomOffer, carOffer } = await import('../js/prices.js');
+  const { Garage } = await import('../js/garage.js');
+  const wallet = await import('../js/wallet.js');
+  const { f, site } = showroom();
+  const st = showLayout(site).stands[0];
+  assert.equal(showroomOffer('roadster').price, PRICE.showroom.roadster.price);
+  assert.equal(showroomOffer('roadster').cond, 1);
+  assert.ok(showroomOffer('roadster', 1).price < PRICE.showroom.roadster.price, 'a wrecked display car costs list');
+  assert.equal(showroomOffer('fabia'), null);
+  assert.ok(PRICE.showroom.tesla.price > PRICE.cars.find((c) => c.kind === 'tesla').price, 'a new Model 3 is cheaper than a used one');
+  assert.ok(PRICE.showroom.roadster.price > PRICE.showroom.tesla.price);
+  // the used-car ladder is untouched: a Roadster met in the street is still not for sale
+  assert.equal(carOffer('roadster', 1, 0), null);
+  const parked = [];
+  const garage = new Garage({ game: { car: null }, parked, parkedFleet: [] });
+  const mk = (kind, show) => ({ kind, x: st.x, z: st.z, speed: 0, damage: 0, ...(show ? { _show: { o: f.o, id: st.id, gone: false } } : {}) });
+  const street = mk('roadster', false), display = mk('roadster', true), model3 = mk('tesla', true);
+  parked.push(street, display, model3);
+  assert.equal(garage.view(street).offer, null);
+  assert.equal(garage.view(display).offer.price, PRICE.showroom.roadster.price);
+  assert.equal(garage.view(display).name, 'Tesla Roadster');
+  assert.equal(garage.view(model3).offer.price, PRICE.showroom.tesla.price);
+  // not enough money: nothing changes hands
+  wallet.setMoney(5000);
+  assert.equal(garage.buy(display), false);
+  assert.ok(!display.owned);
+  assert.equal(wallet.money(), 5000);
+  // paid: it is the player's, the money is gone, and driving it off is no crime
+  wallet.setMoney(PRICE.showroom.roadster.price + 1000);
+  assert.equal(garage.buy(display), true);
+  assert.equal(display.owned, true);
+  assert.equal(wallet.money(), 1000);
+  wanted.reset();
+  display.x = site.door.x + site.nx * 60; display.z = site.door.z + site.nz * 60;
+  assert.equal(watchDisplay(display, { wanted, toast() {} }), false);
+  assert.equal(wanted.stars(), 0);
+  // ...and stays no crime after it is traded in for something else
+  display.owned = false;
+  assert.equal(watchDisplay(display, { wanted, toast() {} }), false);
+  // a display car driven off unpaid is stolen goods: the showroom's price no longer applies to it
+  const stolen = mk('tesla', true);
+  stolen.x = display.x; stolen.z = display.z;
+  assert.equal(watchDisplay(stolen, { wanted, toast() {} }), true);
+  assert.equal(garage.view(stolen).offer.list, PRICE.cars.find((c) => c.kind === 'tesla').price);
+  wanted.reset(); wallet.reset();
 });

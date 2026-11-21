@@ -24,7 +24,7 @@ import { planRings, planCarRings } from './streamplan.js';
 import { input } from './input.js';
 import { Player, worldSeatAnchor, localSeatAnchor } from './player.js';
 import { Carjack, witnessed } from './carjack.js';
-import { setDriver } from './cardoor.js';
+import { setDriver, setPassenger } from './cardoor.js';
 import { isLocked, unlock } from './carlocks.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
   attachCabin, detachCabin, setVehicleEventSink, pickCarColor } from './vehicles.js';
@@ -109,6 +109,8 @@ import { localUid, strHash, baseId } from './identity.js';
 import { hash32 } from './jobgen.js';
 import { makeGhostCars } from './netvehicles.js';
 import { peersNear, ROOM_PARK_TOD } from './roomview.js';
+import { makeRides } from './netride.js';
+import { makeNetCrew } from './netcrew.js';
 import { makeNetUI } from './netui.js';
 // jobs, ownership, stats, the save: the whole gameplay layer hangs off this one
 // module (js/career.js lists the hooks main.js calls, and why there are so few)
@@ -361,6 +363,11 @@ const parkedFleet = [];
 // mean every `ghosts?.` site below silently doing nothing in single player
 // where it should simply be cheap.
 let ghosts = null;      // makeGhostCars(vehicles) — built in boot()
+let rides = null;       // makeRides(…): a passenger seat in a peer's car (js/netride.js), built in boot()
+// the other players in the glass of the cars they ride (js/netcrew.js)
+const netCrew = makeNetCrew({ setDriver, setPassenger });
+// (the local player sits in that seat of that car: their own picture stays)
+const _crewKeep = (car, seat) => !!player?.inCar && player.inCar.mesh === car.mesh && player.seat === seat;
 let ui = null;          // makeNetUI() — built in start(), before the socket
 // uid → the `veh` descriptor object we last handed to ghosts.sync. netcity
 // replaces r.state (and with it r.state.veh) wholesale on every packet, so
@@ -1030,6 +1037,14 @@ function nearestEnterableCar() {
     // moving traffic must slow right down before you can yank the door
     if (d < bd && Math.abs(c.speed) < 3) { bd = d; best = c; }
   }
+  // …and the car another PLAYER is driving, by the same rule. What comes back
+  // is the proxy's boardable face (`proxy: true`, js/netvehicles.js proxyOf):
+  // its passenger seats only, and the E handler never offers its wheel.
+  if (net && ghosts) for (const c of ghosts.proxies()) {
+    if (!sameLevel(py, c.y)) continue;
+    const d = Math.hypot(c.x - px, c.z - pz);
+    if (d < bd && Math.abs(c.speed) < 3) { bd = d; best = c; }
+  }
   return best;
 }
 
@@ -1355,6 +1370,8 @@ input.onKey('KeyE', () => {
     const car = nearestEnterableCar();
     if (meeting && car === meeting.car && !meeting.ready) { ui_hint('Nejdřív promluv s Vaškem'); return; }
     if (!car) { career.use(); return; }   // nothing to board: maybe a food counter
+    // somebody in the room is driving it: a passenger seat, never the wheel
+    if (car.proxy) { boardPeerCar(car); return; }
     // A claimed car is already out of `parked`, so this is the double-book
     // window only (two people press E inside one round trip). Say who has it,
     // by name, exactly as the helicopter does — "Obsazeno" on a car standing
@@ -1454,6 +1471,48 @@ input.onKey('KeyE', () => {
     });
   }
 });
+
+// ---------- riding along in a car another player drives ----------
+// The proxy is HIS car, simulated on his machine and only drawn here, so this
+// is the short version of the block above: no lock to try, nobody to haul out
+// of the seat, no claim on the fleet, no engine to start. Which seat is agreed
+// with the room (js/netride.js): the lowest one nobody else has, from 1 up.
+function boardPeerCar(car) {
+  const seat = rides.seatFor(car);
+  if (seat < 0) { ui_hint('Plné, řídí ' + (net?.peerName(car.uid) || 'jiný hráč')); return; }
+  player.boardVehicle(car, seat, {
+    onDoor: () => carSfx('open', 0.8),
+    onShut: () => carSfx('slam', 0.75),
+    onSeated: () => {
+      if (!player.doorAnim) sfx('door_close', 0.6);
+      showCarName(car);
+      camDist = CAM_DIST_MIN;
+    },
+    // Given up on a car that would not stand still (the walk ran out of
+    // patience behind a creeping bumper): say what would have helped. Any
+    // other ending has its own line, said after this one (leavePeerCar).
+    onCancel: () => { if (!car.gone && Math.abs(car.speed) > 0.8) ui_hint('Řidič musí zastavit'); },
+  });
+}
+
+// …and the ride that ends without E. `why` is js/netride.js's: 'gone' the car
+// is no longer there (the driver got out, left the room, or the session
+// ended), 'left' it pulled away while we were still walking to it, 'rival'
+// somebody else had the better right to the seat (two pressed E at once).
+function leavePeerCar(why, uid) {
+  const who = net?.peerName(uid) || 'jiný hráč';
+  if (player.boarding) player.cancelBoarding();
+  else if (player.inCar) {
+    fpView = false;
+    hideCarName();
+    // A car that is gone has no door to open: beginExit() then stands the body
+    // up beside where the seat was, on whatever ground supportY() finds there.
+    if (why === 'gone') player.beginExit(); else stepOutOfCar();
+  }
+  ui_hint(why === 'rival' ? 'Místo zabral ' + who
+    : why === 'left' ? 'Auto odjelo'
+      : net?.remotes.has(uid) ? 'Řidič vystoupil' : 'Řidič se odpojil');
+}
 
 // The driver's exit, shared by E and by an arrest: control goes now, the body
 // follows through the door.
@@ -2747,6 +2806,13 @@ function updateHud(dt) {
         const fl = agl > 1.5 ? ` · ${Math.max(1, Math.round(agl / 3) + 1)}. patro` : '';
         hint.innerHTML = `🏠 ${inside}${fl}`;
         hint.classList.remove('hidden');
+      } else if (car?.proxy) {
+        // A peer's car: say who is at the wheel, or that there is no seat
+        // left. The name came off the wire, so it goes in as text, not markup.
+        const who = net?.peerName(car.uid) || 'jiný hráč';
+        if (rides.seatFor(car) < 0) hint.textContent = 'Plné, řídí ' + who;
+        else { hint.innerHTML = '<kbd>E</kbd> přisednout · řídí '; hint.append(who); }
+        hint.classList.remove('hidden');
       } else if (car) { hint.innerHTML = '<kbd>E</kbd> nastoupit'; hint.classList.remove('hidden'); }
       else {
         // …and the shops that are NOT a building of their own. A unit in a
@@ -3175,10 +3241,23 @@ async function boot() {
   ghosts.localVehicles = () => {
     const l = [];
     if (game.car) l.push(game.car);
-    if (player?.inCar && player.inCar !== game.car) l.push(player.inCar);
+    // (not a peer's proxy we ride in: that one is not ours, and the fleet
+    // already knows it as its driver's ghost)
+    if (player?.inCar && player.inCar !== game.car && !player.inCar.proxy) l.push(player.inCar);
     for (const h of helis) l.push(h);
     return l;
   };
+  // so a passenger who names US as his driver is seated in our car outright
+  ghosts.selfUid = localUid();
+  // A passenger seat in a peer's car: who sits where, and what ends the ride.
+  // Built in single player too, like the fleet: an empty book costs nothing.
+  rides = makeRides({
+    player,
+    self: localUid,
+    send: (type, data) => { if (net) queueEvent(type, data); },
+    leave: leavePeerCar,
+    quiet: () => ui_hint('Řidič neodpovídá'),
+  });
   minimap = new Minimap($id('minimap'), city);
   trains = new Trains(scene, city, { terrain: world.terrain });   // (the terrain: trains ran 220 m underground)
   express = new Express(trains, city, player);
@@ -4069,7 +4148,10 @@ function pumpGhosts(dt) {
       // hand to sync() is a patched copy — otherwise the patch itself looks
       // like a new packet every frame.
       _ghostVeh.set(uid, veh);
-      ghosts.sync(uid, heliAltitude(veh, r.state));
+      // (with how long the packet has waited for this frame: netcity stamps
+      // lastSeen on arrival, off the same clock)
+      ghosts.sync(uid, heliAltitude(veh, r.state), (performance.now() - r.lastSeen) / 1000);
+      rides.observe(uid, veh);         // a passenger's packet names his seat (js/netride.js)
     }
     // Reap anyone netcity has already forgotten (a leave, or the 30 s silence
     // reap). ghosts has its own 35 s backstop, but a friend who says goodbye
@@ -4090,6 +4172,7 @@ function pumpGhosts(dt) {
       const pk = _parkClaims.get(uid);
       if (pk !== undefined) setParkClaim(uid, pk, false);
       ghosts.drop(uid);
+      rides.forget(uid);
       if (_heliClaims.delete(uid)) applyHeliVisibility();
     }
   } else if (_ghostVeh.size) {
@@ -4100,6 +4183,21 @@ function pumpGhosts(dt) {
     if (_heliClaims.size) { _heliClaims.clear(); applyHeliVisibility(); }
   }
   ghosts.update(dt);
+  // After the proxies have moved: the rider's body goes on this frame's pose,
+  // and a ride whose car has just gone ends here, on the road.
+  if (!net && rides.book.size) rides.reset();
+  rides.update(dt);
+  // …and who the glass of each car shows. A peer's body is placed on its seat
+  // by netcity, inside an opaque shell; the windows show whoever the car has
+  // been told about, so tell it: the peer at the wheel of their own proxy, the
+  // peer in the front passenger seat of ours or of somebody else's.
+  netCrew.begin();
+  if (net) for (const [uid, r] of net.remotes) {
+    if (!r.cit) continue;                      // not built yet: too far to see through a window
+    const h = ghosts.hostOf(uid);
+    if (h) netCrew.show(uid, h.car, h.seat, r.cit);
+  }
+  netCrew.end(_crewKeep);
 }
 
 // ---------- menu gate ----------
@@ -4202,6 +4300,11 @@ function onNetEvent(ev) {
     // …or the door of a ghost (see traffic.stealRef): only ever with its generation
     case 'steal_g':
       if (typeof ev.key === 'string' && Number.isFinite(ev.gen)) traffic?.claimSlot?.(ev.key, ev.gen);
+      break;
+    // A peer is walking up to (or has let go of) a passenger seat in a car
+    // somebody drives: js/netride.js keeps the book and validates the fields.
+    case 'seat_claim':
+      rides?.onEvent(ev);
       break;
     default: break;
   }
@@ -4432,6 +4535,7 @@ window.__atc = {
   // __atc.ghosts.pose(uid), not go looking for the car in traffic.
   get net() { return net; },
   get ghosts() { return ghosts; }, get ui() { return ui; },
+  get rides() { return rides; },       // a passenger seat in a peer's car (js/netride.js)
   get uid() { return localUid(); },
   // the shared clock, so a harness can prove two tabs agree on the hour
   get tod() { return tod(); }, get heliClaims() { return [..._heliClaims]; },

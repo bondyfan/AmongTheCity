@@ -19,7 +19,7 @@
 import * as wallet from './wallet.js';
 import * as fuel from './fuel.js';
 import { makeCarMesh } from './vehicles.js';
-import { carOffer, repairCost, canisterCost, PRICE } from './prices.js';
+import { carOffer, showroomOffer, repairCost, canisterCost, PRICE } from './prices.js';
 import { hash32 } from './jobgen.js';
 import { standsIn } from './parkinglots.js';
 
@@ -80,7 +80,10 @@ export class Garage {
   view(car) {
     const mine = car === this.car;
     const damage = Math.min(1, car.damage ?? 0);
-    const offer = mine ? null : carOffer(car.kind, this.seedOf(car), damage);
+    // a car still on a showroom's premises is sold new, at the showroom's price (js/stores/showroom.js);
+    // one that was driven off them is stolen goods and is priced, or refused, like any other car
+    const show = !mine && car._show && !car._show.gone ? showroomOffer(car.kind, damage) : null;
+    const offer = mine ? null : show ?? carOffer(car.kind, this.seedOf(car), damage);
     const stopped = Math.abs(car.speed ?? 0) < 0.5;
     return {
       car, mine, damage, offer,
