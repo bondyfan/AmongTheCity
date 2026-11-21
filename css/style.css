@@ -1330,6 +1330,11 @@ html, body { overscroll-behavior: none; touch-action: none; }
   padding: 5px 13px;
   font-size: 13px;
 }
+/* T on a retry (js/story-retry.js): on the left, clear of the phone on the right */
+.story-cinema .journey-hud .journey-skip {
+  right: auto;
+  left: 4%;
+}
 @media (max-width: 850px) {
   .journey-heading {
     max-width: 38%;

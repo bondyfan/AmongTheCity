@@ -5,6 +5,7 @@ import { SIT_DROP, seatX } from './seating.js';
 import { unlock } from './carlocks.js';
 import { storyRecording } from './audio.js';
 import { farm } from './heist-route.js';
+import { chunkKey } from './geo.js';
 
 // Jarda and his van (Frank, 20 Nov 2026: a farmer in Brozany who smokes weed,
 // plays reggae, talks astrology and drives the player to the forest himself).
@@ -93,7 +94,9 @@ export function farmerVan(host, scene, world, player) {
     lane = 0, // metres to the right of the path: his side of the road
     s = 0,
     speed = 0,
-    t = 0;
+    t = 0,
+    hop = null, // a skipped ride: the picture is black while the forest road arrives
+    hopped = false;
   function seat() {
     man.sitPose(1, 1);
     van.seats ??= [];
@@ -150,6 +153,19 @@ export function farmerVan(host, scene, world, player) {
       path = track(farm.ride);
       s = 0;
     },
+    get hopped() {
+      return hopped;
+    },
+    // T after a failed mission (js/story-retry.js): the ride is ridden. The
+    // picture goes black, the road by the forest (another tile) is fetched,
+    // and the van is put a few lengths short of where it stops.
+    skipRide(hud) {
+      if (stage !== 'ride' || hopped) return false;
+      hopped = true;
+      hop = { t: 0, hud };
+      hud.veil(true);
+      return true;
+    },
     // set down by the forest: round on the verge and back the way he came
     leave() {
       if (stage !== 'stopped') return;
@@ -172,6 +188,25 @@ export function farmerVan(host, scene, world, player) {
     update(dt, { inside = false, talking = false, facing = null } = {}) {
       t += dt;
       if (stage === 'gone') return;
+      if (hop) {
+        const [ex, ez] = farm.ride.at(-1);
+        hop.t += dt;
+        if (!hop.asked && hop.t > 0.5) {
+          hop.asked = true;
+          world.city?.ensureTiles?.(ex, ez)?.catch?.(() => {});
+          world.terrain?.ensure?.(ex, ez);
+        } else if (hop.asked && !hop.moved && (world.terrain.ready(ex, ez) || hop.t > 30)) {
+          hop.moved = true;
+          hop.t = 0;
+          if (stage === 'ride') {
+            s = Math.max(s, path.length - 14);
+            speed = Math.min(speed, 5);
+          }
+        } else if (hop.moved && ((hop.t > 1.4 && world.built.has(chunkKey(van.x, van.z))) || hop.t > 30)) {
+          hop.hud.veil(false);
+          hop = null;
+        }
+      }
       if (stage === 'wait') {
         man.group.position.y = world.heightAt(stand.x, stand.z);
         if (facing) man.group.rotation.y = Math.atan2(stand.x - facing.x, stand.z - facing.z);
@@ -180,6 +215,9 @@ export function farmerVan(host, scene, world, player) {
         const up = 0.5 + 0.5 * Math.sin(t * 0.9);
         man.parts.armR.rotation.x += 0.35 + 0.75 * up;
         man.parts.elbowR.rotation.x += 0.5 + 1.2 * up;
+      } else if (stage === 'stopped') {
+        // (a skipped ride may stop before the ground here has arrived)
+        van.y = world.surfaceY?.(van.x, van.z, van.y)?.y ?? world.heightAt(van.x, van.z);
       } else if (stage === 'ride' || stage === 'leave') {
         drive(dt);
         if (s >= path.length - 0.05 && speed < 0.2) {
@@ -223,6 +261,7 @@ export function farmerVan(host, scene, world, player) {
       hens.set(inside ? 0 : Math.max(0, 1 - dy / 45) * 0.55);
     },
     dispose() {
+      hop?.hud.veil(false);
       music.stop();
       hens.stop();
       ember.geometry.dispose();

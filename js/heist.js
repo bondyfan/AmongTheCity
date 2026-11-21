@@ -17,6 +17,7 @@ import { balaclava } from './heist-mask.js';
 import { dressFarm, dressVilla, dressGarage } from './heist-sets.js';
 import { sendOff, farmTalk, rideTalk, dropTalk, villaCall, startLine, cityCall } from './heist-dialogue.js';
 import { start, kombi, farm, villa, villaAt, villaLocal, villaIn, city, hours, dist } from './heist-route.js';
+import { retry } from './story-retry.js';
 
 // PART TWO of the Last Train: the car under Kunětická hora (Frank, 18 and 20
 // Nov 2026). Half past two at night in front of Vašek's house:
@@ -89,6 +90,7 @@ export function createHeist({ scene, world, player, map, input, traffic, host, c
       estate = host.kombi() ?? host.addCar('octaviaCombi', kombi.x, kombi.z, kombi.h, 0x54695d);
       unlock(estate);
       estate.story = true;
+      host.mend?.(estate); // whatever the last try did to it
       if (dist(estate, kombi) > 28 && host.driving() !== estate) {
         Object.assign(estate, { x: kombi.x, z: kombi.z, heading: kombi.h, speed: 0 });
         estate.y = world.surfaceY?.(kombi.x, kombi.z, world.heightAt(kombi.x, kombi.z))?.y ?? world.heightAt(kombi.x, kombi.z);
@@ -107,6 +109,7 @@ export function createHeist({ scene, world, player, map, input, traffic, host, c
       goal(null);
       farmer.go();
     } else if (next === 'drop') {
+      storyClock.to(hours.drop);
       talk.run(dropTalk, { gap: 0.7 });
     } else if (next === 'walk') {
       farmer.leave();
@@ -291,6 +294,19 @@ export function createHeist({ scene, world, player, map, input, traffic, host, c
       }
       return false;
     },
+    // T after a failed mission (js/story-retry.js): the film, the ride in the
+    // van or the talk that is running is over at once.
+    skip() {
+      if (!retry.on || over) return false;
+      if (film?.running) return film.skip();
+      if (stage === 'ride') {
+        if (farmer.skipRide(hud)) talk.stop();
+        return true;
+      }
+      if (!talk.busy) return false;
+      talk.skip();
+      return true;
+    },
     update(dt) {
       if (over) return;
       age += dt;
@@ -326,7 +342,7 @@ export function createHeist({ scene, world, player, map, input, traffic, host, c
         if (seated) goal(farmer.van, 'Dodávka', false);
         if (player.inCar === farmer.van && !player.boarding) enter('ride');
       } else if (stage === 'ride') {
-        if (age > 3.5 && age - dt <= 3.5) talk.run(rideTalk, { gap: 1.5 });
+        if (!farmer.hopped && age > 3.5 && age - dt <= 3.5) talk.run(rideTalk, { gap: 1.5 });
         storyClock.to(lerp(hours.farm, hours.drop, age / 130));
         hud.guide('', '', '');
         if (farmer.stage === 'stopped') enter('drop');
@@ -346,6 +362,8 @@ export function createHeist({ scene, world, player, map, input, traffic, host, c
       } else if (stage === 'theft') theft(dt);
       else if (stage === 'run') run(dt);
       else if (stage === 'end') end(dt);
+      const riding = stage === 'ride' && !farmer.hopped && farmer.stage === 'ride';
+      hud.offer(retry.on && (film?.running || riding || talk.busy) ? (film?.running ? 'Přeskočit film' : riding ? 'Přeskočit jízdu' : 'Přeskočit rozhovor') : '');
       forest?.set(stage === 'walk' || stage === 'theft' ? 0.5 : 0);
       if (stage !== 'farm' && stage !== 'theft' && stage !== 'end') lights.a.intensity = 0;
       // the forest at four in the morning is black: on foot he lights his way
@@ -447,5 +465,6 @@ export function createHeist({ scene, world, player, map, input, traffic, host, c
     },
   };
   hud.button.onclick = () => api.use();
+  hud.skip.onclick = () => api.skip();
   return api;
 }

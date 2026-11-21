@@ -46,6 +46,8 @@ import * as vitals from './vitals.js';
 import { shouldEject, launchDamage, impactDamage } from './ejection.js';
 import { sameLevel } from './levelsep.js';
 import * as fuel from './fuel.js';
+import { retry, setHome, parkHome } from './story-retry.js';
+import { straighten } from './garage.js';
 import { indexPumps, pumpAt as pumpAtForecourt } from './pumps.js';
 import * as statusbar from './statusbar.js';
 import { PRICE, pumpBrand, pumpPrice, kc2, kc } from './prices.js';
@@ -183,6 +185,7 @@ const heistHost = {
   },
   dropPatrol(c) { vehicles.remove(c); },
   kombi: () => vasekCar,
+  mend: (c) => straighten(c),
   driving: () => game.car,
   exitCar() {
     const c = game.car;
@@ -220,6 +223,7 @@ function failStory(why) {
   }
   document.body.append(veil);
   requestAnimationFrame(() => veil.classList.add('on'));
+  retry.mark();            // he has seen its films: from now on T skips them
   storyOver = { veil, t: 0, moved: false };
 }
 function pumpStoryOver(dt) {
@@ -231,6 +235,15 @@ function pumpStoryOver(dt) {
     if (!heist) { journey?.dispose(); journey = null; meeting?.close?.(); meeting = null; }
     if (player.ragdoll) player.endRagdoll();
     heistHost.exitCar();
+    // Part one starts with Vašek by his estate in front of the station, so the
+    // estate goes back to its bay whole (he waits wherever it stands: Frank,
+    // 20 Nov 2026, found him missing after a first drive that ended badly).
+    if (!heist && vasekCar && parkHome(vasekCar)) {
+      straighten(vasekCar);
+      fuel.fill(vasekCar, Infinity);
+      vasekCar.mesh.position.set(vasekCar.x, vasekCar.y, vasekCar.z);
+      vasekCar.mesh.rotation.y = vasekCar.heading;
+    }
     player.held = null;
     vitals.revive();
     statusbar.hideBanner();
@@ -1183,7 +1196,10 @@ function applyParkVisibility() {
 
 // N on a moving train: skip to the next station (js/express.js). One game
 // hour is one real minute, so the ride to Prague is 50 real minutes without it.
-input.onKey('KeyT', () => { if (game.mode === 'play' && !document.body.dataset.panelOpen) journey?.skip(); });
+input.onKey('KeyT', () => {
+  if (game.mode !== 'play' || document.body.dataset.panelOpen || storyOver) return;
+  if (journey) journey.skip(); else (meeting ?? heist)?.skip();
+});
 input.onKey('KeyN', () => {
   if (game.mode !== 'play' || !trains?.riding || trains.riding.halted) return;
   express?.skip(screenFade);
@@ -1918,7 +1934,7 @@ function placeParkedCars(city, spawn = SPAWN, base = 0) {
     const car = vehicles.add(kind, pos.x, pos.z, h, color);
     // The claim key. Stamped at spawn and never renumbered, because `parked`
     // is spliced all session while parkedFleet is not — see the declaration.
-    if (spots[i] === meetSpot) { vasekCar = car; unlock(car); }   // the story's car is never locked
+    if (spots[i] === meetSpot) { vasekCar = setHome(car); unlock(car); }   // the story's car is never locked
     car.parkIdx = k;
     parkedFleet[k] = car;
     parked.push(car);
@@ -4307,6 +4323,7 @@ tick();
 window.__atc = {
   build: 'v16-coop-shared-world',   // bump on risky changes — which code a tab runs
   get journey() { return journey; },
+  get meeting() { return meeting; },
   get heist() { return heist; },
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,

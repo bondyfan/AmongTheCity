@@ -107,6 +107,22 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
     else if (beat === 'sms') enter('yes');
     else if (beat === 'yes') enter('end');
   }
+  // the lights go out on the kitchen and the street is his again
+  function finish() {
+    live = false;
+    ++token;
+    voice?.stop();
+    hud.say();
+    hud.action();
+    hud.phone();
+    act.release();
+    set.show(false);
+    storyDuck(0);
+    lights.off();
+    hud.cinema(false);
+    hud.veil(false);
+    done();
+  }
   // Vašek leaves the car's seat for the room
   scene.add(friend.group);
   set.show(true);
@@ -130,6 +146,12 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
       if (beat === 'ask') enter('sit');
       return true;
     },
+    // T after a failed mission (js/story-retry.js): the job is known, out he goes
+    skip() {
+      if (!live) return false;
+      finish();
+      return true;
+    },
     update(dt) {
       age += dt;
       tv += dt;
@@ -145,15 +167,8 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
       } else if (beat === 'sms') {
         if (age > 6.5) next();
       } else if (beat === 'end' && age > 4.6) {
-        live = false;
-        voice?.stop();
-        act.release();
-        set.show(false);
-        storyDuck(0);
-        lights.off();
-        hud.cinema(false);
-        hud.veil(false);
-        done();
+        finish();
+        return;
       }
       // the balaclava crosses the table while he talks about the cameras
       const pushed = beat === 'talk' && line === 6 ? Math.min(1, age / 1.4) : beat === 'sms' || beat === 'yes' || beat === 'end' ? 1 : -1;

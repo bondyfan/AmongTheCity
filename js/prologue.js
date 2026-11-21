@@ -18,6 +18,7 @@ import { trackGuard } from './prologue-tracks.js';
 import { storyClock } from './prologue-clock.js';
 import { trainVoice } from './prologue-voice.js';
 import { announcements } from './prologue-dialogue.js';
+import { retry } from './story-retry.js';
 
 // A skipped ride is not a cut to a standing train: the last half minute is
 // ridden, braking into the station. 25.5 m/s at the train's own 0.85 m/s².
@@ -223,6 +224,10 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     return aboard && phase === 'coach';
   }
   function skip() {
+    if (film?.running) {
+      if (retry.on) film.skip();
+      return;
+    }
     if (!seat.settled || skipped || rolled || (phase !== 'station' && phase !== 'coach')) return;
     if (phase === 'station') beginRun();
     const destination = railPose(lineLength);
@@ -273,7 +278,8 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     if (distance(stationEntry) < 220) board.update(status);
     platformSet?.update(0, night(), status, player.pos.x, player.pos.z);
     hud.countdown(phase === 'station' && !missed && !skipped ? clock(remaining) : '', remaining < 45);
-    hud.seated(seat.settled && !skipped && !rolled && phase !== 'arrival');
+    if (film?.running) hud.offer(retry.on && film.skippable ? 'Přeskočit film' : '');
+    else hud.seated(seat.settled && !skipped && !rolled && phase !== 'arrival');
     if (phase === 'bridge' || missed) return;
     if (phase === 'station' && !aboard) {
       if (roofCtl.state !== 'off') {

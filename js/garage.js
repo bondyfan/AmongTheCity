@@ -26,6 +26,26 @@ import { standsIn } from './parkinglots.js';
 const REACH = 5.5;                // m: "next to" a car, for B
 const TRADE_IN = 0.5;             // share of its own price the old car fetches
 
+/** Damage to zero and the dented shell replaced (a repair, or a story car put back). */
+export function straighten(car) {
+  car.damage = 0;
+  // dentCar() bends a private CLONE of each hull's geometry and nothing bends
+  // it back. A fresh mesh of the same kind carries the undented shapes (they
+  // are shared per kind), so each hull is handed its original geometry again
+  // and the bent clone is freed. The group itself is untouched: whoever is
+  // sitting in it, and every list that holds the car, never notices.
+  const hulls = car.mesh?.userData?.hulls ?? [];
+  if (!hulls.some((h) => h.userData.owned)) return;
+  const fresh = makeCarMesh(car.color, car.kind, car.look).group.userData?.hulls ?? [];
+  for (let i = 0; i < hulls.length && i < fresh.length; i++) {
+    const hull = hulls[i];
+    if (!hull.userData.owned) continue;
+    hull.geometry.dispose();
+    hull.geometry = fresh[i].geometry;
+    hull.userData.owned = false;
+  }
+}
+
 export class Garage {
   constructor(host) {
     this.h = host;
@@ -123,21 +143,7 @@ export class Garage {
     const v = this.view(car);
     if (!v.canRepair || v.repair <= 0) return false;
     if (!wallet.pay(v.repair, 'oprava')) return false;
-    car.damage = 0;
-    // dentCar() bends a private CLONE of each hull's geometry and nothing bends
-    // it back. A fresh mesh of the same kind carries the undented shapes (they
-    // are shared per kind), so each hull is handed its original geometry again
-    // and the bent clone is freed. The group itself is untouched: whoever is
-    // sitting in it, and every list that holds the car, never notices.
-    const hulls = car.mesh?.userData?.hulls ?? [];
-    const fresh = makeCarMesh(car.color, car.kind, car.look).group.userData?.hulls ?? [];
-    for (let i = 0; i < hulls.length && i < fresh.length; i++) {
-      const hull = hulls[i];
-      if (!hull.userData.owned) continue;
-      hull.geometry.dispose();
-      hull.geometry = fresh[i].geometry;
-      hull.userData.owned = false;
-    }
+    straighten(car);
     return true;
   }
 

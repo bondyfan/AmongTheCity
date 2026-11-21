@@ -52,6 +52,7 @@ import { startPoint as pickStart } from './startplace.js';
 import { standY, groundReady, motorwaySave } from './savespot.js';
 import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
 import { start as heistStart } from './heist-route.js';
+import { retry } from './story-retry.js';
 
 const store = browserStore();
 
@@ -121,6 +122,7 @@ function beginStory() {
 }
 export function checkpointStory(stage) {
   state.prologue = stage;
+  if (stage === 'done') retry.clear();   // part two's films are new to him
   // part one of the campaign is a mission completed: its end is a point, and
   // the one write made while part two is still ahead (only part one holds it)
   if (stage === 'done' && applied) write('mission', partOneRunning());
@@ -142,6 +144,7 @@ export function heistPending() {
 }
 export function completeHeist() {
   state.heist = 'done';
+  retry.clear();
   if (applied) autosave('mission');      // part two is a mission completed too
 }
 

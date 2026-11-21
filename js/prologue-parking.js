@@ -10,6 +10,7 @@ import { waymark } from './prologue-marker.js';
 import { vasekHouse, house, doorAt } from './prologue-house.js';
 import { tableScene } from './prologue-table.js';
 import { storyClock } from './prologue-clock.js';
+import { retry, besideCar } from './story-retry.js';
 
 // The Pardubice half of part one. Vašek waits by his estate car in front of
 // the station; they talk, he gets in, and the player drives him home to
@@ -31,10 +32,9 @@ export function meetVasek(car, scene, world, map, complete, player) {
     far = 1, // metres to the house when the drive began
     fade = 0,
     over = false;
-  const sx = car.x + Math.cos(car.heading) * 1.55,
-    sz = car.z - Math.sin(car.heading) * 1.55;
+  const { x: sx, z: sz, facing } = besideCar(car);
   friend.group.position.set(sx, world.terrain.heightAt(sx, sz), sz);
-  friend.group.rotation.y = car.heading + Math.PI / 2;
+  friend.group.rotation.y = facing;
   scene.add(friend.group);
   map.setWaypoint(car.x, car.z);
   let voice;
@@ -99,6 +99,8 @@ export function meetVasek(car, scene, world, map, complete, player) {
     map.setWaypoint(d.x, d.z);
   }
   hud.button.onclick = () => api.use(player);
+  hud.skip.onclick = () => api.skip();
+  const talking = () => (stage === 'talk' || stage === 'drive') && line >= 0 && line < parkingLines.length;
   const api = {
     car,
     get ready() {
@@ -118,8 +120,23 @@ export function meetVasek(car, scene, world, map, complete, player) {
       }
       return false;
     },
+    // T after a failed mission: the talk at the car is said, and he is in his
+    // seat; at the table, the film is over.
+    skip() {
+      if (!retry.on || over) return false;
+      if (film?.running) return film.skip();
+      if (!talking()) return false;
+      voice?.stop();
+      friend.talk?.(0);
+      player._cit?.talk?.(0);
+      if (!ready) aboard();
+      line = parkingLines.length;
+      hud.say();
+      return true;
+    },
     update(player_, dt = 0.016) {
       if (over) return;
+      hud.offer(retry.on && (film?.running || talking()) ? (film?.running ? 'Přeskočit film' : 'Přeskočit rozhovor') : '');
       if (stage === 'talk') {
         storyClock.flow(dt, 20.7);
         near = !player.inCar && distance({ x: sx, z: sz }) < 4.8;

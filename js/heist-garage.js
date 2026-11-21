@@ -93,6 +93,18 @@ export function garageScene({ scene, world, player, hud, lights, friend, car, do
       },
     });
   }
+  // the film is over: the game has its lights, its picture and its player back
+  function finish() {
+    live = false;
+    ++token;
+    voice?.stop();
+    hud.say();
+    act.release();
+    storyDuck(0);
+    lights.off();
+    hud.cinema(false);
+    done();
+  }
   scene.add(friend.group);
   friend.group.visible = true;
   storyDuck(0.9);
@@ -111,7 +123,13 @@ export function garageScene({ scene, world, player, hud, lights, friend, car, do
       return live;
     },
     use() {
-      return true; // nothing here is skipped
+      return true; // E skips nothing here
+    },
+    // T after a failed mission (js/story-retry.js): the door is down, it is over
+    skip() {
+      if (!live) return false;
+      finish();
+      return true;
     },
     update(dt) {
       age += dt;
@@ -136,14 +154,7 @@ export function garageScene({ scene, world, player, hud, lights, friend, car, do
             hud.veil(true, 'Konec druhé části', 'Poslední vlak');
           }
         }
-      } else if (beat === 'end' && age > 4.8) {
-        live = false;
-        act.release();
-        storyDuck(0);
-        lights.off();
-        hud.cinema(false);
-        done();
-      }
+      } else if (beat === 'end' && age > 4.8) finish();
     },
     pose(dt) {
       if (!live) return false;

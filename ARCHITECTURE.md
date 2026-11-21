@@ -2127,6 +2127,27 @@ save has part one and not part two. Like part one it is played in one sitting:
 * **Sound**: `scripts/gen-heist-audio.mjs` (ElevenLabs, run only when asked).
   `storyRecording()` gained `set(level)` for looping beds (the van's radio).
 
+## A failed mission starts clean (js/story-retry.js, Nov 2026)
+
+Frank, 20 Nov 2026: dead or arrested, the mission starts again, every film can
+be skipped, and Vašek waits at the station again.
+
+- `retry` is the mark a failure leaves (`failStory` in main.js sets it; it is
+  stored under `atc-story-retry`, so a reload keeps it). `career.checkpointStory('done')`
+  and `career.completeHeist()` lift it. A first play still skips nothing.
+- While the mark is set, T (`journey.skip()`, `meeting.skip()`, `heist.skip()`)
+  ends what is running: the opening film (`opening.skip`, not during the title
+  card, which is the loading), the talk at the car park (Vašek is put in his
+  seat), the film at the table, any talk of part two (`talker.skip` still calls
+  what waited for the last word), the ride in Jarda's van (`farmer.skipRide`:
+  black, the forest road's tile fetched, the van put 14 m short of its stop)
+  and the film in the lock-up. The button is `hud.offer(label)`.
+- `setHome(car)` stamps the estate's bay when the fleet is parked;
+  `parkHome(car)` puts it back there on a restart of part one, whole and
+  fuelled, with `_grounded = false` so it settles when that ground is known
+  (he may have failed in Kolín). Vašek stands at `besideCar(car)`, so he is in
+  front of the station again. Part two mends the estate in `enter('wake')`.
+
 ## Doors, locks, jumps and arrests: the step before part two (Nov 2026)
 
 Stealing a car and moving a body, so that part two (the theft at Kunětická

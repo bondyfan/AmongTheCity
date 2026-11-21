@@ -12,7 +12,8 @@ import { rooftop } from './prologue-roof.js';
 //   title → ring1 → call1 → out1 → card → est → sms → step → drop → ring2 → call2 → done
 // The title card is also the last of the loading: it stays black until the
 // street has its cars and its traffic, so nothing arrives in front of the lens.
-// E answers a ringing phone. Speech and shots are never skipped.
+// E answers a ringing phone. Speech and shots are never skipped the first
+// time; after a failed mission (js/story-retry.js) T ends the film at once.
 const SILENT = { est: 5.2, sms: 6.2, step: 2.6, drop: 3.6, out1: 3.1, card: 3.3 };
 const CUT_AT = 3.2, // seconds into the nurse's long sentence
   CUT_FOR = 4.2;
@@ -199,6 +200,22 @@ export function opening({ scene, world, player, hud, birds, lights, done, crowd 
       if (room.on) room.camera(camera);
       else if (onStreet() || beat === 'title') streetSet.camera(camera, dt, beat === 'call1' ? line : beat === 'out1' ? 6 : -1);
       else roofSet.camera(camera, dt, beat === 'call2' ? 'f' + line : beat === 'ring2' ? 'ring' : beat);
+      return true;
+    },
+    // What T may do on a retry: not the title card, which is still loading.
+    get skippable() {
+      return beat !== 'done' && beat !== 'title';
+    },
+    // The whole film at once: he is on the roof, Vašek has hung up, the clock runs.
+    skip() {
+      if (beat === 'done' || beat === 'title') return false;
+      ring?.stop();
+      ring = null;
+      if (room.on) room.show(false);
+      storyClock.to(20 + 3 / 60);
+      roofSet.begin();
+      beat = 'call2'; // the last beat: advance() hands the roof over
+      advance();
       return true;
     },
     // Test harness: cut straight to a beat (and a line of its call).

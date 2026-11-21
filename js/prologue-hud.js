@@ -48,7 +48,12 @@ export function storyHud() {
       timer.classList.toggle('urgent', urgent);
     },
     seated(on) {
-      skip.hidden = !on;
+      this.offer(on ? 'Přeskočit cestu' : '');
+    },
+    // T: what may be skipped right now ('' takes the button away)
+    offer(label = '') {
+      skip.hidden = !label;
+      if (label) put(skip, 'T　' + label);
     },
     travel(on) {
       if (on) {

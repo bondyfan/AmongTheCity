@@ -9,8 +9,10 @@ export function talker(hud) {
     timer = 0,
     token = 0,
     busy = false,
-    role = '';
+    role = '',
+    finish = null; // what waits for the end of the talk that is running
   function stop() {
+    finish = null;
     ++token;
     clearTimeout(timer);
     voice?.stop();
@@ -33,6 +35,7 @@ export function talker(hud) {
     run(lines, { phone = false, level = 1.8, gap = 0.45, each, done } = {}) {
       stop();
       busy = true;
+      finish = done;
       const mine = token;
       let i = -1;
       const next = () => {
@@ -40,6 +43,7 @@ export function talker(hud) {
         if (++i >= lines.length) {
           busy = false;
           role = '';
+          finish = null;
           hud.say();
           done?.();
           return;
@@ -66,5 +70,12 @@ export function talker(hud) {
       this.run([line], opts);
     },
     stop,
+    // T after a failed mission (js/story-retry.js): the talk is over now, and
+    // whatever waited for its last word happens.
+    skip() {
+      const then = finish;
+      stop();
+      then?.();
+    },
   };
 }
