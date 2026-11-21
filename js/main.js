@@ -320,6 +320,7 @@ let lightPools = null;            // what the street lamps do to the street
 let farSkyline = null;            // Prague's tall landmarks beyond the streamed ring (js/landmarksfar.js)
 let farTerrain = null;            // the land beyond it everywhere else (js/farterrain.js)
 let regionSea = null;             // an island region's ocean (js/mahe/sea.js), else null
+let island = null;                // Mahé's landmarks and granite (js/mahe/island.js), else null
 let farLandLights = null;         // …and its towns' lights at night (js/farlightsland.js)
 const _farEdge = [0, 0, 0, 0];
 // (js/openness.js: a sight line over the Prague Vltava, the pools over the lowered bed)
@@ -3100,6 +3101,9 @@ async function boot() {
   farTerrain = new FarTerrain(scene, world.terrain);
   // (an island region: the ocean to the horizon, coloured by its lagoon map)
   regionSea = region().sea ? new Sea(scene) : null;
+  // Mahé's own pieces, loaded only there (a Czech page never fetches this code)
+  if (region().id === 'mahe') import('./mahe/island.js').then((m) => m.initIsland({ scene, world }))
+    .then((i) => { island = i; }).catch((e) => console.warn('[mahe] island extras', e));
   farLandLights = new FarLandLights(scene, world.terrain);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
   // because it is the whole identity contract in one line: this same string
@@ -3853,6 +3857,7 @@ function stepGame(dt) {
   updateAim(dt);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
   regionSea?.update(dt, camera.position, sky, scene.fog);
+  island?.update(dt);
   // …and the water off the same two numbers. One shared material for every
   // river in the world, so this is one assignment a frame, not one per chunk.
   // Without it the shader falls back to the constants it was born with and the
