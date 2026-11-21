@@ -35,6 +35,9 @@
 import * as THREE from '../libs/three.module.js';
 import { LAYER_Y } from './config.js';
 import { GrassMask } from './grassmask.js';
+import { region } from './regions.js';
+// the lowest ground grass grows on: anywhere in Czechia, above the beach on an island
+const SHORE_Y = region().sea ? 1.4 : -Infinity;
 
 // ---- and it GROWS IN, it does not arrive ---------------------------------
 // The ring is one buffer swapped whole, so everything it gained since the last
@@ -350,6 +353,8 @@ export class Grass {
       // difference. The layer only says what fraction of it it draws.
       const h = (cm / 100) * L.hMul * (0.72 + 0.56 * rnd(i, j, 4));
       const y = terrain.heightAt(x, z) + LAYER_Y.green;
+      // (an island region, js/regions.js: nothing grows on the beach or the seabed)
+      if (y < SHORE_Y) continue;
       this._q.setFromAxisAngle(UP, rnd(i, j, 5) * Math.PI * 2);
       this._p.set(x, y, z);
       const w = 0.85 + 0.45 * rnd(i, j, 6);

@@ -10,6 +10,7 @@ import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR, START_PLACES, FLEET_STRIDE, HOSP
 import { arriveText, nearestHospital, tilesReady } from './startplace.js';
 import { region, dataUrl, setCarryHook } from './regions.js';             // which world this page is
 import { manifestUrl, legacyFallback, arrivalChoice, regionStartPoint, arriveLine } from './regionboot.js';
+import { Sea } from './mahe/sea.js';                                      // an island's ocean (js/regions.js `sea`)
 import { loadCity, chunkKey, venueAt, forEachChunkInRadius } from './geo.js';
 import { StationPassages } from './station-passages.js';
 import { STORES } from './stores/chains.js';
@@ -318,6 +319,7 @@ let clouds = null;                // the sky to fly the machines through
 let lightPools = null;            // what the street lamps do to the street
 let farSkyline = null;            // Prague's tall landmarks beyond the streamed ring (js/landmarksfar.js)
 let farTerrain = null;            // the land beyond it everywhere else (js/farterrain.js)
+let regionSea = null;             // an island region's ocean (js/mahe/sea.js), else null
 let farLandLights = null;         // …and its towns' lights at night (js/farlightsland.js)
 const _farEdge = [0, 0, 0, 0];
 // (js/openness.js: a sight line over the Prague Vltava, the pools over the lowered bed)
@@ -3096,6 +3098,8 @@ async function boot() {
   lightPools = new LightPools(scene);
   farSkyline = new FarSkyline(scene, world);
   farTerrain = new FarTerrain(scene, world.terrain);
+  // (an island region: the ocean to the horizon, coloured by its lagoon map)
+  regionSea = region().sea ? new Sea(scene) : null;
   farLandLights = new FarLandLights(scene, world.terrain);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
   // because it is the whole identity contract in one line: this same string
@@ -3848,6 +3852,7 @@ function stepGame(dt) {
   weapons?.update(dt, { cars: _blastList(), peds });
   updateAim(dt);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
+  regionSea?.update(dt, camera.position, sky, scene.fog);
   // …and the water off the same two numbers. One shared material for every
   // river in the world, so this is one assignment a frame, not one per chunk.
   // Without it the shader falls back to the constants it was born with and the
