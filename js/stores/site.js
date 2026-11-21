@@ -344,7 +344,10 @@ export function inRing(o, x, z) {
  * footprint gives its bigger leg. { u0, u1, v0, v1 } in local metres.
  */
 export function shopRect(site, m = 0.5) {
-  if (site._rect) return site._rect;
+  // remembered per margin: the roof plant asks with 1.5 and the floor with 0.45, and whichever
+  // came first used to answer for both (a chunk built on the main thread shrank its own shop floor)
+  const memo = (site._rects ??= new Map());
+  if (memo.has(m)) return memo.get(m);
   const us = new Set(), vs = new Set();
   for (const p of site.ring) {
     const [u, v] = site.local(p[0], p[1]);
@@ -372,5 +375,6 @@ export function shopRect(site, m = 0.5) {
   }
   // a ring with no rectangle to speak of (a wedge): a box about its middle
   best ??= { u0: -site.hu * 0.4, u1: site.hu * 0.4, v0: -site.hv * 0.4, v1: site.hv * 0.4 };
-  return (site._rect = best);
+  memo.set(m, best);
+  return best;
 }

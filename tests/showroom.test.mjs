@@ -136,6 +136,19 @@ test('the Roadster stands behind the gate, nose out, and the floor is clear ahea
   assert.ok(shopRect(site, 0.45).v1 - shopRect(site, 0.45).v0 >= SHOW_CARS.roadster.len + 0.9);
 });
 
+test('the floor is the same whether the chunk was built here first or in the worker', () => {
+  // a chunk built on the main thread asks the site for its roof plant's rectangle (a wider margin)
+  // BEFORE the interior asks for its floor; in the worker's case the floor is asked first
+  const first = showroom(), second = showroom();
+  shopRect(first.site, 1.5);
+  const a = showLayout(first.site), b = showLayout(second.site);
+  shopRect(second.site, 1.5);
+  assert.equal(a.stands.length, 2, 'the roof plant\'s margin emptied the showroom');
+  assert.deepEqual(JSON.parse(JSON.stringify(a.stands)), JSON.parse(JSON.stringify(b.stands)));
+  assert.deepEqual(shopRect(first.site, 1.5), shopRect(second.site, 1.5));
+  assert.notDeepEqual(shopRect(first.site, 1.5), shopRect(first.site, 0.45));
+});
+
 test('the showroom builds sound geometry with its signs, and its marks are drawn', () => {
   const { f, cell, chain } = showroom();
   const l = landmarkOf(f), batch = new LandmarkBatch(), marks = new Map();

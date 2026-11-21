@@ -101,7 +101,8 @@ export const CHAINS = [
   // glazed strip round the corner of its workshop hall. Its door is a gate a
   // car is driven out through; `show.cars` are what stands on the floor.
   showroom({ id: 'tesla', re: /^tesla\b/i, label: 'Tesla',
-    arch: { style: 'box', hF: 6.2, hB: 6.2, glassF: 0.94, glassS: 0, glassAll: true, wall: 0xf3f3f1, base: 0x2b2d30,
+    // (ceil: the hall behind is 4.3 m to its eaves, and they reach in over the back wall)
+    arch: { style: 'box', hF: 6.2, hB: 6.2, ceil: 3.95, glassF: 0.94, glassS: 0, glassAll: true, wall: 0xf3f3f1, base: 0x2b2d30,
       band: 0x191a1c, bandH: 1.3, frame: 0x1f2124, roof: 0x8f9498, canopy: 0x191a1c, door: 'centre', doorW: 5.2 },
     sign: { bg: 0x191a1c, fg: 0xffffff, accent: 0xe82127, text: 'TESLA', square: true },
     show: { cars: ['roadster', 'tesla'] } }),
