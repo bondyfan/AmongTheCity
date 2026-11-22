@@ -23,10 +23,12 @@
 // Convention (ARCHITECTURE.md): x east, z SOUTH, y up; heading 0 faces −z,
 // dir = (−sin h, −cos h), mesh.rotation.y = heading.
 
-import * as THREE from 'three';
 import { LAYER_Y } from './config.js';
 import { bridgeElevation, distPointToSegment, railGradeY, bridgeDeckHeight } from './geo.js';
-import { trainStart, trainStop, trainSet, sfx } from './audio.js';
+import { sfx } from './audio.js';
+import { makeCoach, COACH } from './railcoach.js';
+import { frameAt } from './traindeck.js';
+import { installRide } from './trainride.js';
 
 // ---- chaining + route tunables ----
 const JOIN = 3;            // m — endpoints this close are the same rail joint
@@ -45,7 +47,9 @@ const A_LAT = 1.5;         // m/s² of comfort through a curve
 const CURVE_WIN = 30;      // m each side — curvature is INTEGRATED over this, so
                            // the radius does not depend on OSM's node density
 const V_CURVE_MIN = 10;    // …but never crawl below this for geometry alone
-const DWELL = 14;          // s standing at a platform, doors open
+const DWELL = 18;          // s standing at a platform, doors open
+const DOOR_LEAD = 1.8;     // s before it leaves that the doors start to close
+const DOOR_OPENS = 0.69, DOOR_SHUTS = 0.65;   // per second (the campaign's doors)
 const TURN_DWELL = 9;      // s at the end of the line before reversing
 const ARRIVE_GAP = 0.6;    // m — inside this and slow, we call it a stop
 const PAST_STOP = 3;       // m past a platform before it stops being "ahead"
@@ -59,26 +63,14 @@ const SEP = 400;           // m of arc between two trains sharing a route
 const SPAWN_EVERY = 1.5;   // s between spawn attempts — a fleet, not a burst
 const NEAR_EVERY = 3.0;    // s between route-candidate rescans
 
-// ---- consist geometry (metres, ČD 362 + Bdmpee coaches) ----
-const GAP = 0.9;           // coupler slack between vehicles
-const BOGIE_INSET = 3.2;   // bogie pivot this far in from each end
-const V = {
-  loco: { len: 19.0, wid: 3.00, cab: true },
-  car: { len: 24.5, wid: 3.00, cab: false },
-  tail: { len: 24.5, wid: 3.00, cab: false, marker: true },
-};
-const FLOOR = 1.05, BODY_H = 2.55, ROOF_H = 0.34, WHEEL_R = 0.46;
-
-// ---- modern České dráhy livery ----
-const LIVERY = {
-  blue: 0x12305e,   // the body
-  white: 0xeef0f2,  // the band along the window line
-  roof: 0xb4b9bd,   // light grey roof
-  glass: 0x10161c,  // window strip
-  red: 0xc8102e,    // ČD red on the nose
-  gear: 0x24262a,   // bogies + wheels
-  skirt: 0x16233a,  // underframe, a shade under the body blue
-};
+// ---- consist geometry ----
+// Every vehicle is the campaign's coach (js/railcoach.js, Frank 21 Nov 2026:
+// every train is the train from Kolín). A set is a row of them with a cab at
+// each end: no locomotive, and the coaches' own slots leave no slack between.
+const CAR = COACH.pitch;                                   // m of train per coach
+const BOGIE_F = COACH.front - COACH.mid - COACH.bogie;     // slot front → front bogie
+const BOGIE_B = COACH.mid - COACH.bogie - COACH.back;      // slot back → rear bogie
+const BOGIE_SPAN = COACH.bogie * 2;
 
 // audio proximity gates — cues only fire near the listener
 const BELL_R = 140, PASS_R = 70, PASS_V = 14;
@@ -86,164 +78,6 @@ const BELL_R = 140, PASS_R = 70, PASS_V = 14;
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 // normalize into (−π, π] — the cant math differences two headings
 const angWrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
-
-// ============================ rail vehicle mesh ============================
-// Built exactly like vehicles.js: geometry cached per KIND, materials shared
-// forever, an inner `body` group so the shell can cant into a curve while the
-// bogies stay planted on the steel. Local y = 0 is the RAILHEAD, so the whole
-// vehicle drops straight onto the route's own elevation with no offsets.
-
-let _M = null;
-function mats() {
-  if (_M) return _M;
-  const m = (c) => new THREE.MeshLambertMaterial({ color: c });
-  // lamps overbright and untonemapped, like the cars — bloom needs the headroom
-  const lamp = (c, e, i) => new THREE.MeshLambertMaterial(
-    { color: c, emissive: e, emissiveIntensity: i, toneMapped: false });
-  _M = {
-    blue: m(LIVERY.blue), white: m(LIVERY.white), roof: m(LIVERY.roof),
-    glass: m(LIVERY.glass), red: m(LIVERY.red), gear: m(LIVERY.gear),
-    skirt: m(LIVERY.skirt),
-    head: lamp(0xfff6de, 0xffeec2, 2.6),
-    marker: lamp(0x7a1616, 0xff2418, 2.2),
-    // the open-doors strip: warm interior light spilling onto the platform
-    door: lamp(0xffe6b0, 0xffcf7a, 2.0),
-  };
-  return _M;
-}
-
-// One box, sized and placed in vehicle-local space. Every part of the shell is
-// one of these — the livery is a stack of slightly different boxes, which is
-// the whole low-poly trick and costs nothing to read at game camera distance.
-function slab(w, h, l, y, z = 0) {
-  const g = new THREE.BoxGeometry(w, h, l);
-  g.translate(0, y, z);
-  return g;
-}
-
-const _geo = new Map();
-function geomFor(kind) {
-  let g = _geo.get(kind);
-  if (g) return g;
-  const K = V[kind] ?? V.car;
-  const L = K.len, W = K.wid;
-  const top = FLOOR + BODY_H;                 // 3.60 — where the roof starts
-  g = {
-    K,
-    body: slab(W, BODY_H, L, FLOOR + BODY_H / 2),
-    skirt: slab(W - 0.30, FLOOR - 0.72, L - 0.6, (FLOOR + 0.72) / 2),
-    // the white band sits proud of the paint so it never z-fights the body
-    band: slab(W + 0.02, 0.70, L - 0.10, top - 0.75),
-    // …and the glass proud of the band, inset from the ends (solid corners).
-    // A loco gets two short CAB windows instead: one 15 m strip of glass down
-    // the flank is what makes a locomotive read as a carriage.
-    glass: K.cab ? slab(W + 0.05, 0.55, 2.4, top - 0.70)
-      : slab(W + 0.05, 0.48, L - 3.6, top - 0.72),
-    panArm: K.cab ? new THREE.BoxGeometry(0.09, 1.15, 0.09) : null,
-    panBar: K.cab ? new THREE.BoxGeometry(2.0, 0.07, 0.09) : null,
-    roof: slab(W - 0.16, ROOF_H, L - 0.35, top + ROOF_H / 2),
-    bogie: slab(W - 0.62, 0.44, 4.6, 0.66),
-    wheel: (() => {
-      const c = new THREE.CylinderGeometry(WHEEL_R, WHEEL_R, W - 0.55, 10);
-      c.rotateZ(Math.PI / 2);                 // axis onto x — a wheelset
-      return c;
-    })(),
-    // one lit threshold strip per flank, hidden until the doors "open"
-    door: slab(0.08, 0.16, L - 5.5, FLOOR + 0.14),
-    plate: slab(0.05, 0.34, 0.78, FLOOR + 0.85),   // the small painted ČD plate
-    nose: K.cab ? slab(W + 0.03, 0.62, 0.5, FLOOR + 0.55) : null,
-    headL: K.cab ? new THREE.BoxGeometry(0.30, 0.20, 0.10) : null,
-    markL: K.marker ? new THREE.BoxGeometry(0.22, 0.16, 0.10) : null,
-  };
-  _geo.set(kind, g);
-  return g;
-}
-
-/**
- * makeRailVehicle(kind) → { group, body, doors, markers }
- * kind: 'loco' | 'car' | 'tail'. The group's origin is on the railhead under
- * the vehicle's centre; `doors` are the two lit strips the dwell logic shows
- * and `markers` the red tail lamps faceMarkers() walks from end to end.
- * Every child freezes its matrix — nothing inside a carriage ever moves again,
- * so at six trains × six vehicles the per-frame cost is one matrix each.
- */
-export function makeRailVehicle(kind) {
-  const g = geomFor(kind), K = g.K, M = mats();
-  const group = new THREE.Group();
-  const body = new THREE.Group();               // canted into curves per frame
-  group.add(body);
-  const shell = new THREE.Mesh(g.body, M.blue);
-  shell.castShadow = true;
-  body.add(shell, new THREE.Mesh(g.skirt, M.skirt),
-    new THREE.Mesh(g.band, M.white), new THREE.Mesh(g.roof, M.roof));
-  if (K.cab) for (const end of [-1, 1]) {          // a cab window at each end
-    const w = new THREE.Mesh(g.glass, M.glass);
-    w.position.z = end * (K.len / 2 - 1.9);
-    body.add(w);
-  } else body.add(new THREE.Mesh(g.glass, M.glass));
-  const doors = [], markers = [];
-  for (const side of [-1, 1]) {
-    const d = new THREE.Mesh(g.door, M.door);
-    d.position.x = side * (K.wid / 2 + 0.03);
-    d.visible = false;                          // doors are shut by default
-    body.add(d);
-    doors.push(d);
-    const p = new THREE.Mesh(g.plate, M.white);   // the small painted ČD plate
-    p.position.set(side * (K.wid / 2 + 0.03), 0, K.len / 2 - 3.2);
-    body.add(p);
-  }
-  if (K.cab) {
-    // a double-cab loco: red nose and lights at BOTH ends, because a Czech
-    // push-pull set spends half its life shoving the train from behind
-    for (const end of [-1, 1]) {
-      const n = new THREE.Mesh(g.nose, M.red);
-      n.position.z = end * (K.len / 2 - 0.24);
-      body.add(n);
-      for (const side of [-1, 1]) {
-        const h = new THREE.Mesh(g.headL, M.head);
-        h.position.set(side * (K.wid / 2 - 0.55), FLOOR + 0.30,
-          end * (K.len / 2 + 0.03));
-        body.add(h);
-      }
-    }
-  }
-  if (K.marker) for (const side of [-1, 1]) {    // red tail lamps on the last coach
-    const t = new THREE.Mesh(g.markL, M.marker);
-    t.position.set(side * (K.wid / 2 - 0.5), FLOOR + 0.30, K.len / 2 + 0.03);
-    body.add(t);
-    markers.push(t);
-  }
-  // running gear stays OUTSIDE the body group: the shell cants, the wheels
-  // keep sitting on the rail
-  const ax = K.len / 2 - BOGIE_INSET;
-  for (const end of [-1, 1]) {
-    const b = new THREE.Mesh(g.bogie, M.gear);
-    b.position.z = end * ax;
-    group.add(b);
-    for (const w of [-1.05, 1.05]) {
-      const wh = new THREE.Mesh(g.wheel, M.gear);
-      wh.position.set(0, WHEEL_R, end * ax + w);
-      group.add(wh);
-    }
-  }
-  for (const c of body.children) { c.updateMatrix(); c.matrixAutoUpdate = false; }
-  for (const c of group.children) {
-    if (c === body) continue;
-    c.updateMatrix(); c.matrixAutoUpdate = false;
-  }
-  return { group, body, doors, markers };
-}
-
-// Red lamps belong at the TRAILING end of the set. A push-pull consist that
-// reverses does not turn round — its labelling flips and the mesh yaws by π —
-// so the lamps have to walk to the other end of the coach with it, or the
-// train leads with two red eyes. Called at spawn and at each reversal only;
-// the frozen matrices are re-baked by hand because nothing here is per-frame.
-function faceMarkers(v, flip) {
-  if (!v.markers || !v.markers.length) return;
-  const z = (flip ? -1 : 1) * (v.len / 2 + 0.03);
-  for (const m of v.markers) { m.position.z = z; m.updateMatrix(); }
-}
 
 // ============================== route building =============================
 
@@ -634,6 +468,7 @@ export class Trains {
     // a few hundred metres of the player, and its train would vanish in view.
     this._wids = new Map();                // rail _id -> the route it is part of
     this._rid = 0;                         // route ids: never reused after a drop
+    this._tid = 0;                         // train ids, for whoever keeps things per train
     city.onTileReleased?.((t) => this.releaseTile(t));
   }
 
@@ -904,11 +739,14 @@ export class Trains {
     dt = Math.min(dt, 1 / 15);            // a tab-return spike must not teleport
     this._fx = focus.x; this._fz = focus.z;
     this._stream(dt, focus.x, focus.z);
+    // where the walker is in his coach, before it moves (js/trainride.js)…
+    this._rideBefore();
     for (const t of this.trains) {
       this._drive(t, dt);
       this._place(t, dt);
     }
-    this._rideAudio();
+    // …and the same place in it afterwards
+    this._rideAfter();
   }
 
   _stream(dt, px, pz) {
@@ -944,7 +782,7 @@ export class Trains {
     for (let attempt = 0; attempt < 10; attempt++) {
       const R = this._near[(Math.random() * this._near.length) | 0];
       const dir = Math.random() < 0.5 ? 1 : -1;
-      const nCars = 3 + ((Math.random() * 3) | 0);         // 3–5 carriages
+      const nCars = 3;                                     // the train from Kolín: three coaches
       const len = this._consistLength(nCars);
       if (R.len < len + MIN_ROUTE * 0.5) continue;
       const s = len + Math.random() * (R.len - len);
@@ -961,30 +799,31 @@ export class Trains {
   }
 
   _consistLength(nCars) {
-    return V.loco.len + nCars * (GAP + V.car.len);
+    return nCars * CAR;
   }
 
-  _spawn(R, s, dir, nCars) {
+  _spawn(R, s, dir, nCars, opts = {}) {
     // flip = "the consist is labelled back-to-front along the route". A
     // reversing train does NOT turn around, it just gets pushed — so the loco
     // stays physically put while the head end changes ends.
     const flip = Math.random() < 0.5 ? 1 : 0;
     const cars = [];
+    nCars = Math.max(2, nCars | 0);
     let off = 0;
-    for (let i = 0; i <= nCars; i++) {
-      const kind = i === 0 ? 'loco' : i === nCars ? 'tail' : 'car';
-      const K = V[kind];
-      const { group, body, doors, markers } = makeRailVehicle(kind);
-      this.scene.add(group);
-      const v = { mesh: group, body, doors, markers, kind, len: K.len, off,
-        segF: 0, segR: 0, roll: 0, prevH: 0, hasH: false };
-      faceMarkers(v, flip);
-      cars.push(v);
-      off += K.len + GAP;
+    for (let i = 0; i < nCars; i++) {
+      const coach = makeCoach({ first: i === 0, last: i === nCars - 1, destination: opts.destination });
+      this.scene.add(coach.group);
+      coach.lamps(flip);
+      cars.push({ mesh: coach.group, body: coach.body, coach, len: CAR, off, frame: {},
+        segF: 0, segR: 0, roll: 0, prevH: 0, hasH: false });
+      off += CAR;
     }
     const t = {
-      route: R, dir, s: 0, seg: 0, speed: 0, cars,
-      length: off - GAP, flip,
+      id: ++this._tid, route: R, dir, s: 0, seg: 0, speed: 0, cars,
+      length: off, flip,
+      // every coach's own frame, front to back as built (js/traindeck.js), and
+      // the doors: 1 shut … 0 open
+      frames: cars.map((v) => v.frame), closed: 1,
       dwellT: 0, station: null, departed: null, halted: false, turning: false,
       // plain mirrors of the state above, kept for the HUD so main.js never
       // has to reach into a stop object: name of the platform we stand at, the
@@ -998,7 +837,7 @@ export class Trains {
     // straight through it, and 889 m of braking distance is unforgiving.
     const st = this._nextStop(t);
     t.speed = Math.min(VMAX * 0.7, limitAt(R, t.s, 0, dir),
-      stopEnvelope(this._toEnd(t)), st ? stopEnvelope((st.s - t.s) * dir) : VMAX);
+      stopEnvelope(this._toEnd(t)), st ? stopEnvelope((this.stopS(t, st) - t.s) * dir) : VMAX);
     this.trains.add(t);
     this._place(t, 0);
     return t;
@@ -1006,7 +845,15 @@ export class Trains {
 
   _remove(t) {
     this.trains.delete(t);
+    this.onRemove?.(t);
     for (const v of t.cars) this.scene.remove(v.mesh);
+  }
+
+  /** Where the HEAD stands when the set is at stop `st`: the middle of the
+   *  train at the station, not its nose (an 80 m set stopped with its head at
+   *  the building had two coaches out past the platform's end). */
+  stopS(t, st) {
+    return clamp(st.s + t.dir * t.length / 2, this._sLo(t), this._sHi(t));
   }
 
   // the arc window the HEAD may occupy: the tail must stay on the route too,
@@ -1024,7 +871,7 @@ export class Trains {
     for (const st of t.route.stops) {
       // a fast train calls at its own stations only (js/express.js `only`)
       if (t.only && !t.only(st.name)) continue;
-      const d = (st.s - t.s) * t.dir;
+      const d = (this.stopS(t, st) - t.s) * t.dir;
       if (st === t.departed) { if (d < -30) t.departed = null; continue; }
       if (d < -PAST_STOP) continue;
       if (d < bd) { bd = d; best = st; }
@@ -1036,11 +883,19 @@ export class Trains {
     // held by a skip to the next station (js/express.js): it places the train
     if (t.hold) { t.speed = 0; return; }
     const R = t.route;
-    if (t.dwellT > 0) {                       // standing at a platform / turning
+    if (t.halted) {                           // standing at a platform / turning
       t.dwellT -= dt;
       t.dwellLeft = t.dwellT > 0 ? t.dwellT : 0;
       t.speed = 0;
-      if (t.dwellT > 0) return;
+      // the doors: open at a platform, shut again before it moves, and it
+      // does not move until they are (a walker in the doorway is not dragged)
+      const open = !!t.station && !t.turning && t.dwellT > DOOR_LEAD;
+      if (!open && t.closed < 1 && !t._shutting) {
+        t._shutting = true;
+        if (this._hears(t)) sfx('train_doors', 0.5);
+      }
+      this._doors(t, open ? t.closed - DOOR_OPENS * dt : t.closed + DOOR_SHUTS * dt);
+      if (t.dwellT > 0 || t.closed < 1) return;
       this._depart(t);
       return;
     }
@@ -1049,7 +904,7 @@ export class Trains {
     let tgt = Math.min(VMAX, limitAt(R, t.s, t.seg, t.dir));
     const st = this._nextStop(t);
     t.nextStopName = st ? st.name : null;
-    if (st) tgt = Math.min(tgt, stopEnvelope((st.s - t.s) * t.dir));
+    if (st) tgt = Math.min(tgt, stopEnvelope((this.stopS(t, st) - t.s) * t.dir));
     tgt = Math.min(tgt, stopEnvelope(this._toEnd(t)));
     if (tgt < 0) tgt = 0;
     // 0.55 up, 0.9 down: everything about the way this accelerates says the
@@ -1058,9 +913,9 @@ export class Trains {
     else t.speed = Math.max(tgt, t.speed - BRAKE * dt);
     t.s = clamp(t.s + t.dir * t.speed * dt, this._sLo(t), this._sHi(t));
     // arrival tests — a platform first, the buffer stop second
-    if (st && t.speed < 0.5 && (st.s - t.s) * t.dir <= ARRIVE_GAP) {
-      t.s = clamp(st.s, this._sLo(t), this._sHi(t));
-      this._halt(t, st, DWELL);
+    if (st && t.speed < 0.5 && (this.stopS(t, st) - t.s) * t.dir <= ARRIVE_GAP) {
+      t.s = this.stopS(t, st);
+      this._halt(t, st, t.dwellFor?.(st) ?? DWELL);
     } else if (t.speed < 0.5 && this._toEnd(t) <= ARRIVE_GAP) {
       this._halt(t, null, TURN_DWELL);
       t.turning = true;
@@ -1075,13 +930,12 @@ export class Trains {
     t.station = st;
     t.stopName = st ? st.name : null;
     t.nextStopName = t.stopName;
-    for (const v of t.cars) for (const d of v.doors) d.visible = true;
+    t._shutting = false;
     // the ČD platform chime, then the doors — but only if anyone is close
     // enough to hear it, otherwise a region's worth of trains chimes at once
-    const near = Math.hypot(t.x - this._fx, t.z - this._fz) < BELL_R;
-    if (near || t === this.riding) {
+    if (this._hears(t)) {
       if (st) sfx('station_bell', 0.5);
-      sfx('train_doors', 0.55);
+      if (st) sfx('train_doors', 0.55);
     }
   }
 
@@ -1089,9 +943,8 @@ export class Trains {
     t.dwellT = 0;
     t.dwellLeft = 0;
     t.halted = false;
-    for (const v of t.cars) for (const d of v.doors) d.visible = false;
-    const near = Math.hypot(t.x - this._fx, t.z - this._fz) < BELL_R;
-    if (near || t === this.riding) sfx('train_doors', 0.5);
+    this._doors(t, 1);
+    const near = this._hears(t);
     if (t.turning) {
       // end of the line: the head end swaps to the other end of the consist
       // and the labelling flips with it, so the loco stays exactly where it
@@ -1103,7 +956,7 @@ export class Trains {
       t.seg = 0;
       for (const v of t.cars) {
         v.segF = 0; v.segR = 0; v.hasH = false;
-        faceMarkers(v, t.flip);               // the red end walks with the flip
+        v.coach.lamps(t.flip);                // the red end walks with the flip
       }
       t.s = clamp(t.s, this._sLo(t), this._sHi(t));
       // …and the "don't brake for the platform behind me" exemption dies with
@@ -1113,10 +966,23 @@ export class Trains {
       t.departed = null;
     } else if (t.station) {
       t.departed = t.station;                 // don't brake for the one we left
-      if (near || t === this.riding) sfx('train_horn', 0.45);
+      if (near) sfx('train_horn', 0.45);
     }
     t.station = null;
     t.stopName = null;
+  }
+
+  // close enough to be heard: the platform, or aboard
+  _hears(t) {
+    return t === this.riding || Math.hypot(t.x - this._fx, t.z - this._fz) < BELL_R;
+  }
+
+  // The doors of every coach, 1 shut … 0 open.
+  _doors(t, closed) {
+    closed = clamp(closed, 0, 1);
+    if (closed === t.closed) return;
+    t.closed = closed;
+    for (const v of t.cars) v.coach.doors(closed);
   }
 
   // Place every vehicle from its two BOGIE positions along the route. This is
@@ -1133,10 +999,12 @@ export class Trains {
       const v = t.cars[i];
       // distance of this vehicle's front/rear bogie BEHIND the head end
       const base = flip ? t.length - v.off - v.len : v.off;
-      const pf = poseAt(R, t.s - t.dir * (base + BOGIE_INSET), v.segF);
+      // (a flipped coach has its BACK toward the head of the set)
+      const lead = base + (flip ? BOGIE_B : BOGIE_F);
+      const pf = poseAt(R, t.s - t.dir * lead, v.segF);
       const fx = pf.x, fy = pf.y, fz = pf.z;
       v.segF = pf.seg;
-      const pr = poseAt(R, t.s - t.dir * (base + v.len - BOGIE_INSET), v.segR);
+      const pr = poseAt(R, t.s - t.dir * (lead + BOGIE_SPAN), v.segR);
       const rx = pr.x, ry = pr.y, rz = pr.z;
       v.segR = pr.seg;
       let dx = fx - rx, dz = fz - rz;
@@ -1158,6 +1026,9 @@ export class Trains {
         v.body.rotation.z = v.roll;
       }
       v.prevH = h; v.hasH = true;
+      const m = v.mesh.position;
+      frameAt(m.x, m.y, m.z, h, v.coach.first, v.coach.last, COACH.mid, COACH.rise, v.frame);
+      v.coach.lod(Math.hypot(m.x - this._fx, m.z - this._fz));
       if (i === 0) {                       // the loco is the train's own pose
         t.x = v.mesh.position.x; t.y = v.mesh.position.y; t.z = v.mesh.position.z;
         // …but t.heading is where the TRAIN is going, not which way the loco
@@ -1198,82 +1069,7 @@ export class Trains {
     }
     return best;
   }
-
-  /**
-   * Board a halted train. Returns false if it is moving or we already ride.
-   * `player` is optional and sticky — pass it here (or as opts.player) and the
-   * rider is parked in the cab properly, mesh hidden and feet on the saloon
-   * floor; without one we still drag the update() focus along, see _rideTarget.
-   */
-  board(train, player) {
-    if (!train || !this.trains.has(train) || !train.halted || this.riding) return false;
-    if (player) this.player = player;
-    this.riding = train;
-    if (this.player?.mesh) this.player.mesh.visible = false;
-    trainStart();
-    this._syncRide();
-    this.opts.onBoard?.(train);
-    return true;
-  }
-
-  /**
-   * Step off — only while the train is standing, and onto the platform side
-   * (the station POI's side of the track) so nobody is dropped between the
-   * rails. Returns false while the train is moving, which is what makes the
-   * ride a commitment.
-   */
-  alight() {
-    const t = this.riding;
-    if (!t || !t.halted) return false;
-    const v = t.cars[0];
-    const m = v.mesh.position, h = v.mesh.rotation.y;
-    // right of heading is (cos h, −sin h); pick the side the platform is on
-    let sx = Math.cos(h), sz = -Math.sin(h);
-    const st = t.station;
-    if (st && ((st.x - m.x) * sx + (st.z - m.z) * sz) < 0) { sx = -sx; sz = -sz; }
-    const x = m.x + sx * 4.6, z = m.z + sz * 4.6;
-    this.riding = null;
-    trainStop();
-    const tgt = this._rideTarget();
-    if (tgt) { tgt.x = x; tgt.z = z; }
-    if (this.player?.mesh) this.player.mesh.visible = true;
-    if (this.player && typeof this.player.y === 'number') this.player.y = m.y;
-    this.ridePos.x = x; this.ridePos.y = m.y; this.ridePos.z = z;
-    this.opts.onAlight?.(this.ridePos);
-    return true;
-  }
-
-  // Where the rider's position has to be written. A Trains constructed with a
-  // `player` (or handed one by board()) owns the real thing; otherwise we fall
-  // back to the focus object update() was last given, which under main.js is
-  // player.pos itself. Returns null only when neither exists — a headless test.
-  _rideTarget() {
-    const p = this.player;
-    if (p?.pos && typeof p.pos.x === 'number') return p.pos;
-    const f = this._focus;
-    return f && typeof f.x === 'number' ? f : null;
-  }
-
-  // park the rider in the cab and keep the camera/streaming focus with them
-  _syncRide() {
-    const t = this.riding;
-    if (!t) return;
-    const v = t.cars[0], m = v.mesh.position;
-    // a touch toward the leading cab, and on the floor rather than the rail
-    const nose = t.flip ? -1 : 1;
-    this.ridePos.x = m.x - Math.sin(v.mesh.rotation.y) * nose * (v.len / 2 - 2.5);
-    this.ridePos.z = m.z - Math.cos(v.mesh.rotation.y) * nose * (v.len / 2 - 2.5);
-    this.ridePos.y = m.y + FLOOR;
-    const tgt = this._rideTarget();
-    if (tgt) { tgt.x = this.ridePos.x; tgt.z = this.ridePos.z; }
-    const p = this.player;
-    if (p && typeof p.y === 'number') p.y = this.ridePos.y;
-  }
-
-  _rideAudio() {
-    const t = this.riding;
-    if (!t) return;
-    this._syncRide();
-    trainSet(Math.abs(t.speed) / VMAX);
-  }
 }
+
+// boarding by the door, the ride, the seat: js/trainride.js
+installRide(Trains, VMAX);

@@ -3,8 +3,8 @@
 // 'showroom'): cars standing on the floor, a card by each, the advisers' desk.
 //
 // THE DISPLAY CARS are ordinary vehicles in main.js's `parked` list, left open:
-// E gets into one, B buys one that has a price (js/garage.js), and the gate
-// opens for it. Which car stands on which stand is a function of the store's
+// E gets into one, B buys it new at the showroom's price (js/prices.js
+// PRICE.showroom, through js/garage.js), and the gate opens for it. Which car stands on which stand is a function of the store's
 // key and the stand's slot (js/stores/showlayout.js), so two co-op players see
 // the same red Roadster behind the same gate without a word on the wire. Like
 // a car at the kerb (js/kerbparking.js), one that somebody drove away does not
@@ -20,6 +20,7 @@ import { hashK } from './site.js';
 import { FINISH, packLook } from '../carlook.js';
 import { archetypeAt } from '../people.js';
 import { PLAYER_SCALE } from '../config.js';
+import { showroomOffer, kc } from '../prices.js';
 
 const R_CAR = 3.4, R_SPEC = 1.3;
 /** Stands whose car has been taken this session: store key and slot. */
@@ -76,14 +77,15 @@ export class ShowShop {
   hint(x, z, env) {
     const drv = env?.car;
     if (drv?._show && !drv._show.gone && !drv.owned)
-      return 'Vystavený vůz · když s ním odjedeš, jde po tobě policie';
+      return 'Vystavený vůz · B koupit za ' + this._price(drv) + ' · když s ním odjedeš, jde po tobě policie';
     if (!env?.onFoot) return '';
     const sp = this._nearSpec(x, z);
     if (sp) return 'E · technické údaje';
     const e = this._nearCar(x, z);
-    if (e) return 'E nasednout · ' + e.st.name + (e.car.owned ? '' : ' (vystavený vůz)');
+    if (e) return 'E nasednout · ' + (e.car.owned ? '' : 'B koupit za ' + this._price(e.car) + ' · ') + e.st.name;
     return '';
   }
+  _price(car) { return kc(showroomOffer(car.kind, car.damage ?? 0)?.price ?? 0); }
 
   /** E: only the card on a stand is the showroom's; a car's door is main.js's. */
   use(x, z, env) {
@@ -91,7 +93,7 @@ export class ShowShop {
     const sp = this._nearSpec(x, z);
     if (!sp) return false;
     const st = this.layout.stands[sp.slot];
-    this.d.toast(st.name, { icon: '⚡', sub: st.spec });
+    this.d.toast(st.name, { icon: '⚡', sub: st.spec + ' · ' + kc(showroomOffer(st.kind)?.price ?? 0) });
     return true;
   }
 

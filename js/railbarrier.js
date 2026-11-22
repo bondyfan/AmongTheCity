@@ -32,6 +32,8 @@
 //               exception: its polygon runs under the drawn bed.
 //   the train   the story's coach (world.storyCoach) carries whoever is in it,
 //               and its `boarding(x, z)` is the step from the platform edge.
+//               Every other train the same (world.rideDeck, js/trainride.js):
+//               in it, and at its open door while it stands at a station.
 //
 // Pure in the tile data and the walker's position: two co-op screens agree on
 // where the barrier is without telling each other anything. The parts with no
@@ -203,7 +205,7 @@ export function railCollide(world, pos, radius, y) {
 
 // a walker in a track strip who is nevertheless somewhere he may be
 function allowed(world, cell, key, x, z, y) {
-  if (world.storyCoach?.boarding?.(x, z)) return true;
+  if (world.storyCoach?.boarding?.(x, z) || world.rideDeck?.boarding?.(x, z)) return true;
   const sp = world.stationPassages;
   if (sp?.floor && sp.floor(x, z, (Number.isFinite(y) ? y : 0) + 0.4) !== null) return true;
   return inGate(gatesOf(cell, key), x, z);
