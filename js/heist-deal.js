@@ -47,7 +47,9 @@ const shots = {
 const byLine = ['car', 'vasek', 'pass', 'give', 'me', 'him'];
 const SILENT = { card: 2.8, arrive: 4.4, look: 4.6, out: 4.6 };
 
-export function dealScene({ scene, player, hud, lights, set, friend, done }) {
+// `note` is the end card's second line: what the briefcase pays, or that a
+// replay pays nothing (js/career.js heistRewardNote).
+export function dealScene({ scene, player, hud, lights, set, friend, done, note }) {
   const { H } = ROOM;
   const act = actor(player, lights),
     kit = props(),
@@ -190,7 +192,7 @@ export function dealScene({ scene, player, hud, lights, set, friend, done }) {
       } else if (beat === 'out') {
         if (age > SILENT.out) {
           quiet('end');
-          hud.veil(true, 'Konec druhé části', 'Poslední vlak');
+          hud.veil(true, 'Konec druhé části', note ?? 'Poslední vlak');
         }
       } else if (beat === 'end' && age > 4.8) finish();
     },

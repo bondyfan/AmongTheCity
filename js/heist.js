@@ -42,7 +42,7 @@ import { retry } from './story-retry.js';
 const km = (m) => (m < 950 ? Math.round(m / 10) * 10 + ' m' : (m / 1000).toFixed(1).replace('.', ',') + ' km');
 const lerp = (a, b, t) => a + (b - a) * Math.max(0, Math.min(1, t));
 
-export function createHeist({ scene, world, player, map, input, traffic, host, complete }) {
+export function createHeist({ scene, world, player, map, input, traffic, host, complete, reward }) {
   const hud = storyHud(),
     lights = storyLights(scene),
     mark = waymark(scene, hud),
@@ -221,7 +221,7 @@ export function createHeist({ scene, world, player, map, input, traffic, host, c
         // the door is down and the night is over: noon, and the buyer
         done() {
           first.dispose();
-          film = dealScene({ scene, player, hud, lights, set: room, friend: vasek, done: saved });
+          film = dealScene({ scene, player, hud, lights, set: room, friend: vasek, done: saved, note: reward?.() });
         },
       }));
     }

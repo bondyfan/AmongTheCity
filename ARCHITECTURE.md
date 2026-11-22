@@ -3066,3 +3066,31 @@ trains, pursuits and the ambient ambulance are local.
 
 Fleet: a room holds about 45 % more cars than one camera (84 against 58 at noon), the
 ghosts all round instead of in the cone.
+
+## Campaigns can be played again, and the briefcase pays once (22 Nov 2026)
+
+Frank: "v nastaveni nekde musi byt zalozka kampane aby clovek si mohl kliknout na jakoukoliv
+kampan kterou delal aby ji mohl delat znovu. (ale kdyz z toho neco vyhraje treba penize tak uz
+ty penize nedostane znovu ...)" and "na konci te druhe mise kdyz dostane ten kufr s penezi tak
+se mu ty penize neprictou".
+
+* **The briefcase** is `PRICE.story.briefcase` (250 000 Kč, what Vašek says). `career.completeHeist`
+  pays it into the wallet when `state.heistPaid` is not set, sets it (a saved field,
+  js/savegame.js) and says so in a toast. A save that finished part two before this has never
+  been paid: its first replay pays. `career.heistRewardNote()` is the second line of part two's
+  end card (js/heist-deal.js `note`): what is in the briefcase, or that a replay pays nothing.
+* **A replay** (`career.beginReplay(part)`) lives in memory like the campaign itself: part one
+  goes back to 'bridge' with a new platform, part two back to pending; nothing is written
+  while it runs (the existing `storyRunning()` hold), and its end writes the 'done' the save
+  already held. Closing the tab in the middle loses the replay and nothing else.
+  `career.campaigns()` lists the parts for the tab; `canReplay` refuses an unfinished part, a
+  running campaign, co-op and a start in Prague. A replay marks the retry (T skips films).
+  After a replayed part one, part two does not follow (its 'done' was never touched).
+* **Starting one** (js/main.js `replayCampaign`): the same black card and move a failure
+  makes (`storyOver` with `replay`), to Kolín's street or to Vašek's door; part one's maker
+  (`journeyFactory`) is loaded on demand, part two is made by the loop as after part one.
+* **The tab** (js/campaignmenu.js): js/settings.js has a page 'Kampaně' and raises
+  `atc:campaigns` with the empty page each time it is opened; main.js fills it. One card a
+  part, the reward and whether it was paid, "Hrát znovu", and "Ukončit opakování" (a reload:
+  nothing of a replay is on disk).
+* Tests: `tests/campaigns.test.mjs`.

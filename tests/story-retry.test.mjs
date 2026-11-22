@@ -87,7 +87,9 @@ test('main.js marks the failure, puts the estate home before part one starts aga
   const fail = main.slice(main.indexOf('function failStory('), main.indexOf('function pumpStoryOver('));
   assert.match(fail, /retry\.mark\(\)/);
   const again = main.slice(main.indexOf('function pumpStoryOver('), main.indexOf('let roadWorks'));
-  assert.match(again, /if \(!heist && vasekCar && parkHome\(vasekCar\)\)/);
+  // (`two`: part two running, or part two being replayed from the Kampaně tab)
+  assert.match(again, /const two = heist \|\| o\.replay === 'part2';/);
+  assert.match(again, /if \(!two && vasekCar && parkHome\(vasekCar\)\)/);
   assert.ok(again.indexOf('parkHome(vasekCar)') < again.indexOf("startJourney('bridge')"), 'home first, then the film');
   assert.ok(again.indexOf('meeting?.close?.()') < again.indexOf('parkHome(vasekCar)'), 'Vašek is out of the seat before the car moves');
   assert.match(main, /if \(journey\) journey\.skip\(\); else \(meeting \?\? heist\)\?\.skip\(\);/);

@@ -226,10 +226,14 @@ export function initSettings(apply) {
   function showTab(id) {
     for (const b of tabs.children) b.classList.toggle('on', b.dataset.tab === id);
     for (const k of Object.keys(pages)) pages[k].classList.toggle('on', k === id);
+    // the campaigns page is filled by whoever knows the campaigns (main.js,
+    // js/campaignmenu.js), fresh every time it is opened
+    if (id === 'story') window.dispatchEvent(new CustomEvent('atc:campaigns', { detail: { box: pages.story, close: closePanel } }));
   }
 
   const gPage = page('gfx', 'Grafika');
   const hPage = page('game', 'Hra');
+  page('story', 'Kampaně');
   const gGrid = el('div', 'atc-set-grid');
   gGrid.append(
     selectRow('preset', '⚡ Kvalita', [['low', 'Nízká (rychlá)'], ['medium', 'Střední'],
@@ -311,7 +315,10 @@ export function initSettings(apply) {
   // body.dataset.panelOpen is the cross-module "a modal owns the mouse" flag — main reads
   // it to skip the pointer-lock re-grab on click, otherwise mouseLook would swallow the
   // very click meant for a checkbox.
-  function openPanel() { panel.classList.add('atc-open'); document.body.dataset.panelOpen = '1'; }
+  function openPanel() {
+    panel.classList.add('atc-open'); document.body.dataset.panelOpen = '1';
+    if (pages.story.classList.contains('on')) showTab('story');   // (its list may have changed since)
+  }
   function closePanel() { panel.classList.remove('atc-open'); delete document.body.dataset.panelOpen; }
   gear.addEventListener('click', () =>
     panel.classList.contains('atc-open') ? closePanel() : openPanel());

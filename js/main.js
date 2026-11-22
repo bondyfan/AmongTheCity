@@ -118,6 +118,7 @@ import { makeNetUI } from './netui.js';
 import * as career from './career.js';
 import { meetVasek } from './prologue-parking.js';
 import { createHeist } from './heist.js';
+import { fillCampaigns } from './campaignmenu.js';
 import { hours as storyHours } from './prologue-route.js';
 import { staminaHud } from './stamina.js';
 import { exitHudText, setExitLine } from './mwhud.js';
@@ -224,6 +225,42 @@ const heistHost = {
 // career.js), so this is the same start a reload would give, without the menu.
 // The screen goes black with one line, the world streams in round the first
 // scene, and the film begins again with a new platform and a full clock.
+// Part one's maker, loaded when the campaign first needs it: at boot when it
+// is being played, or when a finished one is started again from the settings.
+async function journeyFactory() {
+  if (startJourney) return;
+  const { createPrologue } = await import('./prologue.js');
+  startJourney = (stage) => createPrologue({ chapter: stage, scene, world, player, map: worldMap, trip: career.storyTrip(),
+    trains, save: career.checkpointStory, input, night: () => sky?.nightK ?? 0, fail: failStory,
+    // how many cars the street has so far: the film waits for the number to settle
+    crowd: () => parked.length + (traffic?.cars?.size ?? 0) });
+}
+// A FINISHED CAMPAIGN PLAYED AGAIN (the Kampaně tab, js/campaignmenu.js): the
+// same black card and the same move a failure makes, to the start of the part
+// he chose. js/career.js keeps the save as it was until the replay's own end.
+async function replayCampaign(part) {
+  if (game.mode !== 'play' || net || storyOver || journey || meeting || heist || vitals.down()) return false;
+  if (!career.canReplay(part)) return false;
+  if (game.heli || game.jet) { ui_hint('Nejdřív přistaň a vystup'); return false; }
+  if (part === 'part1') await journeyFactory();
+  if (storyOver || !career.canReplay(part)) return false;
+  const veil = document.createElement('div');
+  veil.className = 'story-over';
+  veil.innerHTML = '<div><strong></strong><span>Kampaň začíná znovu</span></div>';
+  veil.querySelector('strong').textContent = part === 'part1' ? 'Poslední vlak · část 1' : 'Poslední vlak · část 2';
+  document.body.append(veil);
+  requestAnimationFrame(() => veil.classList.add('on'));
+  storyOver = { veil, t: 0, moved: false, replay: part };
+  return true;
+}
+window.addEventListener('atc:campaigns', (e) => {
+  const { box, close } = e.detail;
+  fillCampaigns(box, { ...career.campaigns(), inGame: game.mode === 'play', net: !!net }, {
+    play: (id) => { close(); replayCampaign(id); },
+    // nothing of a replay is on disk: the saved game is one reload away
+    quit: () => location.reload(),
+  });
+});
 function failStory(why) {
   if (storyOver || !(startJourney || heist)) return;
   const veil = document.createElement('div');
@@ -247,13 +284,16 @@ function pumpStoryOver(dt) {
   o.t += dt;
   if (!o.moved && o.t > 1.4) {
     o.moved = true;
-    if (!heist) { journey?.dispose(); journey = null; meeting?.close?.(); meeting = null; }
+    // part two has its own way back, and its own start when it is replayed
+    const two = heist || o.replay === 'part2';
+    if (!two) { journey?.dispose(); journey = null; meeting?.close?.(); meeting = null; }
     if (player.ragdoll) player.endRagdoll();
     heistHost.exitCar();
+    trains?.eject();
     // Part one starts with Vašek by his estate in front of the station, so the
     // estate goes back to its bay whole (he waits wherever it stands: Frank,
     // 20 Nov 2026, found him missing after a first drive that ended badly).
-    if (!heist && vasekCar && parkHome(vasekCar)) {
+    if (!two && vasekCar && parkHome(vasekCar)) {
       straighten(vasekCar);
       fuel.fill(vasekCar, Infinity);
       vasekCar.mesh.position.set(vasekCar.x, vasekCar.y, vasekCar.z);
@@ -264,8 +304,10 @@ function pumpStoryOver(dt) {
     statusbar.hideBanner();
     wanted.clear?.();
     let at;
-    if (heist) { at = heist.rewind(); if (Number.isFinite(at.h)) player.heading = at.h; }
+    if (heist) at = heist.rewind();
+    else if (o.replay) at = career.beginReplay(o.replay) ?? { x: player.pos.x, z: player.pos.z };
     else { career.restartStory(); at = career.startPoint(); }
+    if (Number.isFinite(at.h) && (heist || o.replay === 'part2')) player.heading = at.h;
     player.pos.x = at.x; player.pos.z = at.z;
     player.y = world.terrain.heightAt(at.x, at.z);
     world.city.ensureTiles?.(at.x, at.z)?.catch?.(() => {});
@@ -275,7 +317,8 @@ function pumpStoryOver(dt) {
   // wait for the street to exist again (he may have died in Pardubice)
   const ready = o.moved && world.terrain.ready(player.pos.x, player.pos.z) && world.built.has(chunkKey(player.pos.x, player.pos.z));
   if (o.moved && (heist || !journey) && (ready && o.t > 3.4 || o.t > 30)) {
-    if (!heist) journey = startJourney('bridge');
+    // (a replayed part two is made by the loop below, as it is after part one)
+    if (!heist && o.replay !== 'part2' && career.activeStory() === 'bridge') journey = startJourney('bridge');
     o.veil.classList.remove('on');
     setTimeout(() => o.veil.remove(), 900);
     storyOver = null;
@@ -3540,11 +3583,7 @@ async function boot() {
 
   const chapter = career.activeStory();
   if (chapter && chapter !== 'done' && chapter !== 'forecourt') {
-    const { createPrologue } = await import('./prologue.js');
-    startJourney = (stage) => createPrologue({ chapter: stage, scene, world, player, map: worldMap, trip: career.storyTrip(),
-      trains, save: career.checkpointStory, input, night: () => sky?.nightK ?? 0, fail: failStory,
-      // how many cars the street has so far: the film waits for the number to settle
-      crowd: () => parked.length + (traffic?.cars?.size ?? 0) });
+    await journeyFactory();
     journey = startJourney(chapter);
   }
   career.attach(careerHost());
@@ -4078,7 +4117,8 @@ function stepGame(dt) {
   }
   // part two begins where part one was saved, and is saved again at its end
   if (!heist && !meeting && !journey && !storyOver && career.heistPending())
-    heist = createHeist({ scene, world, player, map: worldMap, input, traffic, host: heistHost, complete: career.completeHeist });
+    heist = createHeist({ scene, world, player, map: worldMap, input, traffic, host: heistHost,
+      complete: career.completeHeist, reward: career.heistRewardNote });
   heist?.update(dt);
   if (heist?.finished) { heist.close(); heist = null; }
   statusbar.update(dt, _vitCtx);

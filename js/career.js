@@ -34,7 +34,7 @@ import * as wanted from './wanted.js';
 import { PRICE, kc } from './prices.js';
 import { tod, setSoloTime } from './worldclock.js';
 import { browserStore, blank } from './savegame.js';
-import { isPoint, notice } from './autosave.js';
+import { isPoint, notice, PART_ONE_END } from './autosave.js';
 import { loadMyLook, saveMyLook } from './characters/appearance.js';
 import { Progress } from './progress.js';
 import { Onboarding } from './onboarding.js';
@@ -126,6 +126,10 @@ export function checkpointStory(stage) {
   // part one of the campaign is a mission completed: its end is a point, and
   // the one write made while part two is still ahead (only part one holds it)
   if (stage === 'done' && applied) write('mission', partOneRunning());
+  if (stage === 'done' && replaying === 'part1') {
+    replaying = null;
+    toast('Kampaň zopakována', { icon: '🎬', sub: 'Poslední vlak, část 1', ms: 7000 });
+  }
 }
 /** The campaign from its first frame again: a new platform, a full countdown. */
 export function restartStory() {
@@ -143,9 +147,73 @@ export function heistPending() {
   return !!state && solo && !freeroam && startPick !== 'praha' && state.prologue === 'done' && state.heist !== 'done';
 }
 export function completeHeist() {
-  state.heist = 'done';
   retry.clear();
+  // THE BRIEFCASE IS PAID ONCE (Frank, 22 Nov 2026: the money was never added
+  // to the wallet; and whoever plays the part again gets nothing a second
+  // time, and is told so). A save that finished part two before this existed
+  // has never been paid, so its first replay pays.
+  const pay = heistReward();
+  if (pay) {
+    wallet.earn(pay, 'kufřík');
+    state.heistPaid = true;
+    toast('+ ' + kc(pay), { icon: '💼', kind: 'good', sub: 'Peníze z kufříku jsou tvoje', ms: 8000 });
+  } else {
+    toast('Kampaň zopakována', { icon: '🎬', sub: 'Odměnu ' + kc(PRICE.story.briefcase) + ' už máš, podruhé se nevyplácí', ms: 9000 });
+  }
+  state.heist = 'done';
+  replaying = null;
   if (applied) autosave('mission');      // part two is a mission completed too
+}
+/** What finishing part two would pay now: the briefcase, or 0 once it has been paid. */
+export function heistReward() {
+  return state.heistPaid ? 0 : PRICE.story.briefcase;
+}
+/** The last line of part two's end card: what he gets, or that he does not. */
+export function heistRewardNote() {
+  return heistReward()
+    ? 'Poslední vlak · v kufříku ' + kc(PRICE.story.briefcase)
+    : 'Opakování · odměnu ' + kc(PRICE.story.briefcase) + ' už máš, podruhé se nevyplácí';
+}
+
+// ---- playing a finished campaign again (js/campaignmenu.js) -----------------
+// A replay lives in memory like the campaign itself: the chapter is put back
+// to its start, nothing is written while it runs, and its end writes the same
+// 'done' the save already held. Closing the tab in the middle changes nothing.
+let replaying = null;          // 'part1' | 'part2' while a finished part is played again
+export const replayOf = () => replaying;
+/** The campaigns there are, for the settings tab. */
+// (a part being replayed is still a finished one: its card must not say otherwise)
+export function campaigns() {
+  const able = !!state && solo && startPick !== 'praha' && applied;
+  const busy = partOneRunning() || heistPending();
+  return {
+    able, busy, replaying,
+    list: [
+      { id: 'part1', title: 'Poslední vlak · část 1', sub: 'Z Kolína posledním vlakem za Vaškem',
+        done: state?.prologue === 'done' || replaying === 'part1', reward: 0, paid: false },
+      { id: 'part2', title: 'Poslední vlak · část 2', sub: 'Auto pod Kunětickou horou',
+        done: state?.heist === 'done' || replaying === 'part2', reward: PRICE.story.briefcase, paid: !!state?.heistPaid },
+    ],
+  };
+}
+/** May this part be started again now? Only a finished one, and never over a running one. */
+export function canReplay(part) {
+  const c = campaigns();
+  return c.able && !c.busy && !!c.list.find((p) => p.id === part)?.done;
+}
+/**
+ * Put the campaign back to the start of `part`. Returns where it begins
+ * ({ x, z, h? }), or null when it may not be replayed. main.js moves the
+ * player there and starts the part the way it starts after a failure.
+ */
+export function beginReplay(part) {
+  if (!canReplay(part)) return null;
+  replaying = part;
+  freeroam = false;            // (?devmode's free roam: the story is on for this)
+  retry.mark();                // he has seen its films: T skips them
+  if (part === 'part1') { beginStory(); return startPoint(); }
+  state.heist = null;          // part two is pending again; the save still says done
+  return { ...PART_ONE_END };
 }
 
 /** Where boot begins, before the world exists: the save's spot when it is in
@@ -374,6 +442,7 @@ function snapshot() {
     money: wallet.money(),
     prologue: state.prologue,
     heist: state.heist ?? null,
+    heistPaid: !!state.heistPaid,
     storyTrip: state.storyTrip,
     pos: lastSafe,
     tod: solo ? tod() : null,

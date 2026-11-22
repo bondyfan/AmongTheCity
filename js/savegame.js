@@ -48,6 +48,7 @@ export function blank() {
     savedAt: 0,
     prologue: null,
     heist: null,               // 'done' once part two (js/heist.js) has been played through
+    heistPaid: false,          // its briefcase has been paid out (once: a replay pays nothing)
     storyTrip: null,
     money: 2500,
     pos: null,                 // { x, z, h, y? } or null = the station forecourt
@@ -131,6 +132,7 @@ export function sanitize(raw) {
     } : null,
     prologue: storyStops.includes(s.prologue) ? s.prologue : null,
     heist: s.heist === 'done' ? 'done' : null,
+    heistPaid: s.heistPaid === true,
     money: Math.round(clamp(fin(s.money, b.money), -MONEY_MAX, MONEY_MAX)),
     pos: sanePos(s.pos),
     tod: s.tod == null ? null : clamp(fin(s.tod, 0.25), 0, 1),

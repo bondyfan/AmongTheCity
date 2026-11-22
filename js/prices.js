@@ -289,6 +289,10 @@ export const PRICE = deepFreeze({
   // are cheaper); the owner may set it.
   train: { ticket: 169 },
 
+  // What a campaign pays, once (js/career.js): the briefcase Vašek hands over
+  // at the end of part two of the Last Train. "Dvě stě padesát tisíc."
+  story: { briefcase: 250000 },
+
   // What the police take when they finally have you: charged per star at the
   // hospital door (js/career.js), where the stars are then cleared. Two stars
   // cost more than the bed does, which is the point.
