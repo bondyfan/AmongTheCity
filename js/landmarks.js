@@ -32,6 +32,8 @@ import { buildRadnice, radniceSolids } from './landmarks-radnice.js';
 import { buildBartolomej, buildZvestovani, buildJan, buildZvonice } from './landmarks-kostely.js';
 import { buildMlyny, buildSilo, buildMost, mlynySolids } from './landmarks-mlyny.js';
 import { buildDivadlo, divadloSolids } from './landmarks-divadlo.js';
+import { buildLetiste, letisteSolids } from './landmarks-letiste.js';
+import { AT as LETISTE_AT, AREA as LETISTE_AREA, H as LETISTE_H } from './airport-plan.js';
 import { LANDMARKS_OLD, EXTRAS_OLD, ZONES_OLD, CLEAR_OLD, isOldBridgeWay } from './landmarks-praha.js';
 import { LANDMARKS_WIDE, CLEAR_WIDE, PROP_WIDE, EXTRAS_WIDE, isWideBarrier } from './landmarks-hrad.js';
 import { STORE_LANDMARKS, storeLandmark } from './stores/landmark.js';
@@ -77,6 +79,9 @@ export const LANDMARKS = [
   // the bridge between them is a skyway in the tile (y 12.4): `sky` lets it match
   { id: 'mlyny-most', at: [1846.8, -1081.9], area: 14.6, r: 4, sky: true, top: 18.2, bot: 9.2, build: buildMost },
   { id: 'divadlo', name: 'Východočeské divadlo', at: [1550.2, -568.4], area: 1153, r: 12, top: 14.6, build: buildDivadlo, solids: divadloSolids },
+  // the passenger terminal: a footprint of 26 points, named in OSM with the airport (the
+  // name is a part of it), its shell built on the plan's own frame (js/airport-plan.js)
+  { id: 'letiste-terminal', name: 'Terminál Jana Kašpara', at: LETISTE_AT, area: LETISTE_AREA, r: 12, kind: 'industrial', top: LETISTE_H.hall, build: buildLetiste, solids: letisteSolids },
   ...LANDMARKS_OLD,
   ...LANDMARKS_WIDE,
 ];

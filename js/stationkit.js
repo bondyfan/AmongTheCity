@@ -14,6 +14,17 @@ import { EXPOSURE_DAY, EXPOSURE_NIGHT } from './sky.js';
 export const FINISH = {
   tile: { color: 0xe9e4d2, grid: [0.2, 0.2], grout: 0xbdb6a3, lit: 0.62 },
   blacktile: { color: 0x23262b, grid: [0.2, 0.1], grout: 0x3a3e45, lit: 0.5 },
+  // the airport's light grey 60 cm floor tiles (js/airport-interior.js)
+  airtile: { color: 0xd3d5d2, grid: [0.6, 0.6], grout: 0x9fa29f, lit: 0.55 },
+  // its walls, banded as the photographs show them, and its ceilings: lit by the
+  // building's own lights at every hour, the way the underpass tiles are
+  airwall: { color: 0xf1f0ec, lit: 0.5 },
+  airgrey: { color: 0xd3d6d8, lit: 0.45 },
+  airdark: { color: 0x4d535a, lit: 0.32 },
+  airred: { color: 0xc4222c, lit: 0.4 },
+  airceil: { color: 0xf0efea, grid: [0.6, 0.6], grout: 0xd2d2cc, lit: 0.6 },
+  airtruss: { color: 0xc9ced2, lit: 0.3 },
+  airseat: { color: 0x9aa1a7, lit: 0.35 },
   floor: { color: 0xa5583c, grid: [0.3, 0.3], grout: 0x6f3a29, lit: 0.55 },
   skirt: { color: 0x5b2f25, lit: 0.5 },
   ceiling: { color: 0xe8e6de, lit: 0.6 },

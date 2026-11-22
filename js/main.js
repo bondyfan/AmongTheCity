@@ -113,6 +113,8 @@ import { makeNetUI } from './netui.js';
 import * as career from './career.js';
 import { meetVasek } from './prologue-parking.js';
 import { createHeist } from './heist.js';
+// the airport and the flight to the Seychelles (js/flight-life.js says what it owns)
+import { airportLife } from './flight-life.js';
 import { hours as storyHours } from './prologue-route.js';
 import { staminaHud } from './stamina.js';
 import { exitHudText, setExitLine } from './mwhud.js';
@@ -171,6 +173,10 @@ const game = {
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let journey = null, meeting = null, vasekCar = null;
 let heist = null;        // part two of the campaign (js/heist.js), after the saved end of part one
+let airport = null;      // js/flight-life.js: the terminal, the airliner and the trip, near an airport
+const flightNow = () => airport?.flight ?? null;
+// the airliner as something the streamer must keep up with (not at cruise: nothing below is seen)
+const airFlier = () => { const f = flightNow(); return f?.flying && f.phase !== 'cruise' ? f.plane : null; };
 let carjack = null;      // the drivers pulled out of their cars (js/carjack.js)
 let arrest = null;       // { veil, t, moved } while the ZATČEN card is up
 let startJourney = null, storyOver = null;
@@ -531,6 +537,15 @@ function updateCamera(dt) {
     _filmed = true;
     return;
   }
+  // seated in the airliner: the passenger's eyes, or the chase from outside (C)
+  const flightShot = flightNow()?.frameCamera(camera, dt, drag);
+  if (flightShot) {
+    fpHideSelf(flightShot === 'inside');
+    camNear = camera.near;
+    camInit = false;
+    _filmed = true;
+    return;
+  }
   // The film has just handed the camera back: the boom starts behind him,
   // looking the way he is turned (towards the station), not where it was left.
   if (_filmed) { _filmed = false; camYaw = player.heading; camInit = false; }
@@ -705,9 +720,10 @@ function updateCamera(dt) {
   // bug. The helicopter was already excluded; the jet was not, and the jet is
   // the one that crosses a block every fifth of a second.
   const flying = !!(game.heli || game.jet);
-  const enclosed = !flying && !game.car && (journey?.aboard || world.stationPassages?.inside(tx, tz, player.y));
+  const enclosed = !flying && !game.car && (journey?.aboard || flightNow()?.aboard || world.stationPassages?.inside(tx, tz, player.y));
   const inShop = !flying && !game.car && !!world.stores?.covered(tx, tz);
-  const indoors = enclosed || inShop || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
+  const inTerminal = !flying && !game.car && !!world.airport?.covered(tx, tz);
+  const indoors = enclosed || inShop || inTerminal || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
   if (indoors) dist = Math.min(dist, enclosed ? 0.85 : 3.4);
   const flat = Math.cos(pitch) * dist;
   let px = tx + Math.sin(camYaw) * flat;
@@ -715,7 +731,7 @@ function updateCamera(dt) {
   let py = ty + height * (indoors ? 0.25 : 1) * hk + Math.sin(pitch) * dist;
   // under a station canopy the lens stays under it too (js/station-passages.js lid)
   if (indoors && !enclosed) {
-    const lid = world.stationPassages?.lid(tx, tz) ?? (inShop ? world.stores.lid(tx, tz) : null);
+    const lid = world.stationPassages?.lid(tx, tz) ?? (inShop ? world.stores.lid(tx, tz) : inTerminal ? world.airport.lid(tx, tz) : null);
     if (lid != null && py > lid - 0.35) py = lid - 0.35;
   }
   // …and then it still has to not be inside a wall. March the boom back in
@@ -736,7 +752,8 @@ function updateCamera(dt) {
   // larger one, so a spot that trips the entry test also holds the pull.
   let wantT = 1;
   // (in a chain store the walls are the store's own: js/stores/world.js outside)
-  const camHit = (x, y, z, pad) => world.interiors?.occupied(x, y, z, pad) || (inShop && world.stores.outside(tx, tz, x, z));
+  const camHit = (x, y, z, pad) => world.interiors?.occupied(x, y, z, pad) || (inShop && world.stores.outside(tx, tz, x, z))
+    || (inTerminal && world.airport.outside(tx, tz, x, z));
   if (!flying && camHit(px, py, pz, 0.28)) {
     const bx = px - tx, by = py - ty, bz = pz - tz;
     const MIN_T = 0.2;
@@ -1214,6 +1231,8 @@ function applyParkVisibility() {
 // hour is one real minute, so the ride to Prague is 50 real minutes without it.
 input.onKey('KeyT', () => {
   if (game.mode !== 'play' || document.body.dataset.panelOpen || storyOver) return;
+  // a flight under way outside the campaign: T skips its taxi or its ten hours (js/flight.js)
+  if (!journey && !meeting && !heist && flightNow()?.busy) { flightNow().skip(); return; }
   if (journey) journey.skip(); else (meeting ?? heist)?.skip();
 });
 input.onKey('KeyN', () => {
@@ -1230,6 +1249,8 @@ input.onKey('KeyE', () => {
   if (journey?.use()) return;
   if (meeting?.use(player)) return;
   if (heist?.use()) return;
+  // a counter, the gate, seat 14A, getting up (js/flight.js)
+  if (!game.car && !player.inCar && flightNow()?.use()) return;
   // a shelf, a till, a kiosk, a seat: whatever the store the player is in offers
   if (world.stores?.use({ car: game.car, onFoot: !game.car && !player.inCar })) return;
   let jetNear = null;              // set by the fighter branch's own test
@@ -1586,6 +1607,7 @@ function stepOutOfCar() {
 // re-resolves the seat every frame, so a wreck or an exit drops it on its own.
 input.onKey('KeyC', () => {
   if (game.mode !== 'play') return;
+  if (flightNow()?.toggleView()) return;   // in seat 14A: the cabin or the outside
   const v = fpVehicle();
   if (!v) { ui_hint('Pohled řidiče jen ve voze'); return; }
   fpView = !fpView;
@@ -2145,7 +2167,7 @@ function updateHorizon(dt) {
   const gs = getSettings();
   const base = gs.viewChunks ?? GROUND_CHUNKS;
   // altitude drives the horizon whichever machine is up there
-  const flier = game.heli ?? game.jet;
+  const flier = game.heli ?? game.jet ?? airFlier();
   const alt = aglOf(flier);
   // Altitude is one reason to see further; SPEED is the other, and the jet has
   // it at any height. A Gripen on the deck at Mach 1 crosses the whole 720 m
@@ -2156,7 +2178,7 @@ function updateHorizon(dt) {
   // and it pulls the rings in two directions at once (wider coverage, less
   // detail) which one shared term could never express.
   const speed = game.jet ? game.jet.speed
-    : game.heli ? Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) : 0;
+    : game.heli ? Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) : airFlier()?.speed ?? 0;
   // (a car on the ground has its own rule, js/streamplan.js planCarRings; its
   // speed is eased down so a ring is not dropped and built again at every lift)
   // An open view (js/openness.js) widens the same band and moves the fog out
@@ -2184,8 +2206,9 @@ function updateHorizon(dt) {
   // filling empty cells at the cheapest tier: those cost 0.69 ms each, so the
   // count is what binds rather than the milliseconds, and 16 of them was
   // leaving the frontier short at 555 m/s.
-  world.chunksPerFrame = game.jet ? (speed > 140 ? 48 : 16) : alt > 20 ? 8 : 2;
-  world.buildBudgetMs = game.jet ? (speed > 140 ? 11 : 9) : 7;
+  const jetLike = game.jet || (airFlier()?.speed ?? 0) > 30;
+  world.chunksPerFrame = jetLike ? (speed > 140 ? 48 : 16) : alt > 20 ? 8 : 2;
+  world.buildBudgetMs = jetLike ? (speed > 140 ? 11 : 9) : 7;
   // in the air throughput wins over smoothness — the world must exist under a
   // 200 m/s jet; on the ground a short cooldown between chunk STARTS keeps
   // build work from monopolising every frame (each build is now sliced over
@@ -3066,6 +3089,9 @@ async function boot() {
   setStoreCity(city);
   world = new CityWorld(scene, city);
   world.stationPassages = new StationPassages(scene,world);
+  // the airport (the terminal near set, the airliner and the trip) answers world.airport
+  airport = airportLife({ scene, world, player: () => player, map: () => worldMap, sky: () => sky, wallet, coop: () => !!net,
+    storyBusy: () => !!(journey || meeting || heist || storyOver) });
   // the chain stores: glass, doors, fittings, people and shopping near the player
   world.stores = new StoreWorld(scene, world, {
     wallet, vitals, wanted, toast: policeToast, storage: globalThis.localStorage ?? null,
@@ -3651,6 +3677,7 @@ function stepGame(dt) {
   world.stationPassages.advanceEscalator(dt,player);
   journey?.update(dt, !!(game.car || game.heli || game.jet || trains?.riding), vasekCar);
   if (journey?.finished) { journey.dispose(); journey = null; }
+  airport?.update(dt, sky?.nightK ?? 0);
   pumpStoryOver(dt);
   pumpArrest(dt);
   carjack?.update(dt, player.pos.x, player.pos.z);
@@ -3742,7 +3769,7 @@ function stepGame(dt) {
     // car as it is, in metres per second; nothing here divides by a top speed.
     carDrive(dt, game.car, engineLoad(game.car, gas), gas, input.keys.has('Space'), world.city);
     if (shouldEject(game.car)) ejectDriver(game.car);
-  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt) && !heist?.posePlayer(dt)) {
+  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt) && !heist?.posePlayer(dt) && !flightNow()?.posePlayer(dt)) {
     if (!world.stores?.posePlayer(dt, player)) player.update(dt, { input, camYaw, world });
   }
   {
@@ -4358,6 +4385,8 @@ window.__atc = {
   get journey() { return journey; },
   get meeting() { return meeting; },
   get heist() { return heist; },
+  // the terminal, the airliner and the trip (js/flight-life.js)
+  get airport() { return airport; },
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   // `cabin` is the graft's live truth, not a copy of fpView: a harness can

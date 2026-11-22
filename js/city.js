@@ -2111,6 +2111,10 @@ export class CityWorld {
   supportY(x, z, maxY) {
     const coach = this.storyCoach?.support(x, z, maxY);
     if (Number.isFinite(coach) && this.storyCoach.carrying(x, z)) return coach;
+    // the airport (js/airport-hooks.js): the terminal's floor slab, and inside
+    // the airliner's cabin its floor alone, like the campaign's coach
+    const air = this.airport?.floor(x, z, maxY) ?? -Infinity;
+    if (air > -Infinity && this.airport.carrying(x, z)) return air;
     const passage = this.stationPassages?.floor(x, z, maxY);
     if (Number.isFinite(passage)) return passage;
     let best = this.heightAt(x, z, maxY);
@@ -2120,6 +2124,7 @@ export class CityWorld {
     const shop = this.stores?.floor(x, z, maxY);
     if (shop > best) best = shop;
     if (coach > best) best = coach;
+    if (air > best) best = air;
     const inside = this.interiors.supportY(x, z, maxY);
     return inside > best ? inside : best;
   }
@@ -2244,6 +2249,9 @@ export class CityWorld {
     if (opts?.interior && this.stationPassages?.contain(pos, opts.aboveY - 0.3, radius)) return true;
     let pushed = this.storyCoach?.collide(pos, radius, opts) ?? false;
     if (opts?.interior && this.storyCoach?.carrying(pos.x, pos.z)) return pushed;
+    // the airliner's cabin and stairs, the terminal's doors and its security lanes
+    pushed = this.airport?.collide(pos, radius, opts) || pushed;
+    if (opts?.interior && this.airport?.carrying(pos.x, pos.z)) return pushed;
     // A CAR IS A SOLID OBJECT, even for someone on foot. Walking through a
     // parked Octavia was the same lie as an NPC driving through it, and it
     // stayed in for exactly as long as nobody thought of the pavement as

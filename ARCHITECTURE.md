@@ -2866,3 +2866,79 @@ coach's door step (`world.storyCoach.boarding`, prologue.js). The campaign's yar
 (`prologue-tracks.js`) stay as they were. Pedestrians walk mapped footways, which cross the
 rails only where the map has a crossing. Pure in tile data and position, so co-op screens
 agree without a word.
+
+## Pardubice airport and the flight to the Seychelles (js/airport-*.js, js/flight*.js, js/airliner*.js, Nov 2026)
+
+Frank, 21 Nov 2026: "udelej novou sesion aby na letisti v pardubicich se dalo
+letat na Seychelly". Mahé itself and the region system are the other half
+(js/regions.js); this part is the airport, the aircraft and the journey.
+
+* **The plan is data** (`js/airport-plan.js`, worker safe, no three.js).
+  Terminál Jana Kašpara (opened 30 Jan 2018, 160 x 46 m) is one OSM ring of 26
+  points turned 2.74 degrees from the grid like runway 09/27; in a frame turned
+  by that angle every edge is axis aligned, so the plan is written in it (u east
+  along the building, v south across it): the glass hall, the porch, the two
+  wings, the doors, the walls inside, the eight counters, the two security
+  lanes, the gates, the boards and the zones. Also the apron: the stand (the top
+  of the turning loop the OSM markings draw east of the terminal, nose east, L1
+  to the building), the taxi routes as mapped taxiway vertices (`TAXI_OUT` to
+  the 09 line-up, `TAXI_IN` from the 27 exit), and the spawns the region system
+  names ('pce-airport', 'pce-arrival').
+* **The terminal** is a landmark (`js/landmarks-letiste.js`: the shell on the
+  real footprint, the curtain wall as one-sided glass so the inside looks out
+  and wraps the hall's corners, the doors as real holes, solids with door gaps
+  and the furniture) plus a near set (`js/airport-terminal.js`,
+  `airport-interior.js`, `airport-fit.js`, `airport-boards.js`, stationKit)
+  with the inside as the airport's own photographs show it: light grey 60 cm
+  tiles, white walls banded grey, red and dark grey, trusses under a tiled
+  ceiling, the gallery and its "letiště Pardubice" fascia, the counters, the
+  lanes, the gate lounges with rows of seats, the departure boards, the sliding
+  doors and the gate doors. The ground under the building rises 0.35 m across
+  it, so the whole set stands on a plinth just over its highest point.
+* **The aircraft** (`js/airliner-layout.js` pure numbers and walking,
+  `js/airliner.js` and its parts the exterior, `js/airliner-cabin.js` the
+  inside, built only when someone is near, `js/airstairs.js`,
+  `js/flight-passengers.js` the other people aboard): a generic A320-class twin,
+  no airline copied, registration OK-ATC. Plane-local frame: origin on the
+  ground between the main wheels, -z forward.
+* **The trip** (`js/flight-trip.js`): none, ticket, airside, boarding, aboard,
+  seated, flying, arrived, done; each step needs the one before (no gate before
+  the security arch, no seat without a scanned pass: the crew turn back anybody
+  who walked round the terminal). The fare is `PRICE.flight.mahe`, 14 900 Kč one
+  way, through js/wallet.js. The carrier is invented: flights ATC 740 and 741.
+* **The aircraft's sequence** (`js/flight-sequence.js`, pure): stand, doors,
+  taxi out (`js/flight-path.js`: fillets, a crew's speeds), take-off and climb
+  and the landing (`js/flight-profile.js`: VR 72 m/s, lift-off after 1.4 to 1.8
+  km, 25 degree turns, the 3 degree glide path, the flare, reverse and
+  autobrake), taxi in, parked. Seychelles International (`js/flight-airports.js`
+  from REGIONS.mahe.airport) has no parallel taxiway: departures backtrack to 13
+  and turn on the pad, arrivals turn round on the runway and backtrack.
+* **The passenger** (`js/flight-cabin.js`): up the airstairs, along the aisle,
+  a sidestep along row 14 and the campaign's own sit-down (js/prologue-seat.js)
+  onto 14A; on arrival the same backwards. world.airport (`js/airport-hooks.js`)
+  answers js/city.js supportY and collide for the cabin, the stairs, the
+  terminal's floor and doors, and the officer at the lanes.
+* **The ten hours** (`js/flight-cruise.js`, the montage in `js/flight.js`): held
+  at FL350 over the point where the climb ended, under it a scale model of a
+  cloud deck (160 m down, cells of tens of metres, so its rim stays inside the
+  1 400 m far plane at 7 degrees under the horizon), the hour driven through
+  worldclock.overrideTod from the departure hour through the stop in Dubai to
+  the far side's local hour, the trip's map on the HUD, T skips. Then the region
+  switch (js/regions.js enterRegion, a page reload) with the trip as the carry;
+  the far side resumes the passenger in 14A on final (`airport.resume`). Until
+  regions.js is on main the far end is a labelled placeholder: back down on 27 at
+  Pardubice. The way home starts at a check-in desk inside the SEZ terminal's
+  landside door (`js/flight-sezdesk.js`).
+* **Seeing and hearing it**: C between the passenger's eyes and a chase from
+  outside (`js/flight-camera.js`); the game's own synthesised jet at an
+  airliner's spool, through the cabin filter (audio.js `holdCabin`), the cabin's
+  air and the two-tone chime (`js/flight-sound.js`). The words are in
+  `js/flight-lines.js`, the HUD (boarding pass, trip map) in `js/flight-hud.js`.
+  `js/flight-life.js` creates the flight within 2.5 km of the airport and drops
+  it past 3.5 km unless a trip is under way; main.js holds only that.
+* **Co-op**: each player flies a plane of his own (nothing on the wire); the
+  region rule hides a player who is in the other region.
+
+Tests: `tests/flight.test.mjs`, `tests/flight-cabin.test.mjs`,
+`tests/airliner.test.mjs`, `tests/airport-terminal.test.mjs`. `dev/airportprobe.js`
+walks the whole trip from a console for a harness.
