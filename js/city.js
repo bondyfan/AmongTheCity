@@ -1748,6 +1748,13 @@ export class CityWorld {
   }
 
   surfaceY(x, z, near) {
+    const s = this._surfaceY(x, z, near);
+    // a showroom's floor and the apron out of its gate carry a car too (js/stores/world.js deck)
+    const deck = this.stores?.deck(x, z);
+    if (deck != null && deck > s.y) { s.y = deck; s.road = true; }
+    return s;
+  }
+  _surfaceY(x, z, near) {
     _surf.road = false;
     // THE GROUND FIRST. Every height below is a thickness of surfacing — 20 cm
     // of asphalt, 10 of paving, 5 of grass — measured from the ground, not from
@@ -2109,8 +2116,14 @@ export class CityWorld {
   // staircase is, the walk controller merely keeps finding a surface 175 mm
   // higher than the last one.
   supportY(x, z, maxY) {
-    const coach = this.storyCoach?.support(x, z, maxY);
+    let coach = this.storyCoach?.support(x, z, maxY);
     if (Number.isFinite(coach) && this.storyCoach.carrying(x, z)) return coach;
+    // …and the trains of the open world the same way (js/trainride.js)
+    const ride = this.rideDeck?.support(x, z, maxY);
+    if (Number.isFinite(ride)) {
+      if (this.rideDeck.carrying(x, z)) return ride;
+      if (!(coach > ride)) coach = ride;
+    }
     // the airport (js/airport-hooks.js): the terminal's floor slab, and inside
     // the airliner's cabin its floor alone, like the campaign's coach
     const air = this.airport?.floor(x, z, maxY) ?? -Infinity;
@@ -2249,6 +2262,8 @@ export class CityWorld {
     if (opts?.interior && this.stationPassages?.contain(pos, opts.aboveY - 0.3, radius)) return true;
     let pushed = this.storyCoach?.collide(pos, radius, opts) ?? false;
     if (opts?.interior && this.storyCoach?.carrying(pos.x, pos.z)) return pushed;
+    if (this.rideDeck?.collide(pos, radius, opts)) pushed = true;
+    if (opts?.interior && this.rideDeck?.carrying(pos.x, pos.z)) return pushed;
     // the airliner's cabin and stairs, the terminal's doors and its security lanes
     pushed = this.airport?.collide(pos, radius, opts) || pushed;
     if (opts?.interior && this.airport?.carrying(pos.x, pos.z)) return pushed;

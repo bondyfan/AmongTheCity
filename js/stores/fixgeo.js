@@ -134,6 +134,10 @@ export const FITTINGS = {
   tray: () => new Geo().box(-0.22, 0.22, 0, 0.02, -0.16, 0.16, 0x6b4a33).box(-0.16, -0.02, 0.02, 0.1, -0.1, 0.02, 0xd9a441)
     .box(0.04, 0.14, 0.02, 0.16, -0.08, 0.02, 0xc9302a).box(-0.1, 0.06, 0.02, 0.06, 0.05, 0.13, 0xf1ead6),
   // kitchen steel behind the counter
+  // a showroom: the advisers' desk, and the card that stands by each car
+  desk: () => new Geo().box(-0.65, 0.65, 0, 0.98, -0.36, 0.36, 0xf4f4f2).box(-0.67, 0.67, 0.98, 1.02, -0.38, 0.38, 0x1f2124),
+  stand: () => new Geo().box(-0.03, 0.03, 0, 1.02, -0.03, 0.03, 0x1f2124).box(-0.22, 0.22, 1.02, 1.34, -0.02, 0.02, 0x111315)
+    .box(-0.19, 0.19, 1.05, 1.31, 0.02, 0.026, 0xe9edf0),
   steel: () => new Geo().box(-0.65, 0.65, 0, 0.9, -0.38, 0.38, 0xffffff, { f: FULL, t: FULL }).box(-0.65, 0.65, 1.5, 1.95, -0.38, 0.1, 0xb4b9bd),
 };
 
@@ -142,4 +146,5 @@ export const FOOT = {
   gondola: [0.65, 0.47], rack: [0.65, 0.6], wallshelf: [0.65, 0.27], chiller: [0.65, 0.4], freezer: [0.65, 0.48],
   produce: [0.6, 0.5], bins: [0.65, 0.55], till: null, self: [0.6, 0.26], gate: null, baskets: [0.24, 0.17],
   counter: [0.65, 0.42], kiosk: [0.34, 0.2], menu: null, table4: [0.6, 0.4], chair: null, bench: [0.65, 0.28], bin: [0.35, 0.3], steel: [0.65, 0.38], partition: [0.65, 0.1], tray: null,
+  desk: [0.65, 0.38], stand: [0.12, 0.12],
 };

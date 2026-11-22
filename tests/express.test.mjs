@@ -37,7 +37,13 @@ test('the timetable: on the hour of game time, the clock it prints', () => {
   assert.ok(EXPRESS_STOPS.includes('Kolín') && EXPRESS_STOPS.includes('Praha hlavní nádraží'));
 });
 
-test('the express stands at Pardubice, runs west, passes the halt and calls at Přelouč', () => {
+// the express is put on the line east of Pardubice and runs in (21 Nov 2026):
+// step the trains until it stands at the platform
+function runIn(tr, t) {
+  for (let i = 0; i < 15 * 90 && !t.halted; i++) tr.update(1 / 15, { x: t.x, z: t.z });
+}
+
+test('the express runs in to Pardubice, stands, runs west, passes the halt and calls at Přelouč', () => {
   const city = line();
   const tr = new Trains(scene, city);
   tr.update(0.01, null);
@@ -46,8 +52,14 @@ test('the express stands at Pardubice, runs west, passes the halt and calls at P
   assert.ok(o, 'Pardubice is on the route');
   ex._spawn(o.R, o.st, 20, 0, { x: 5000, z: 5000 });
   const t = ex.train;
-  assert.ok(t && t.halted && t.express === 20, 'standing at the platform');
+  assert.ok(t && !t.halted && t.speed > 5 && t.express === 20, 'it is on its way in, not standing: ' + t?.speed);
+  assert.ok(t.x > 250, 'east of the station, where it comes from: ' + t.x);
+  runIn(tr, t);
+  assert.ok(t.halted, 'standing at the platform');
   assert.equal(t.stopName, 'Pardubice hlavní nádraží');
+  // its middle is at the station, not its nose
+  const xs = t.cars.map((v) => v.mesh.position.x);
+  assert.ok(Math.abs((Math.min(...xs) + Math.max(...xs)) / 2) < 4, 'centred on the station: ' + xs);
   const seen = [];
   let last = null;
   for (let i = 0; i < 15 * 400 && seen.length < 2; i++) {
@@ -68,6 +80,7 @@ test('a rider skips to the next station: the train is moved there and stands', a
   const o = ex._origin();
   ex._spawn(o.R, o.st, 20, 0, { x: 5000, z: 5000 });
   const t = ex.train;
+  runIn(tr, t);
   const rider = { pos: { x: t.x, z: t.z }, y: 0 };
   assert.ok(tr.board(t, rider));
   for (let i = 0; i < 15 * 30 && t.halted; i++) tr.update(1 / 15, rider.pos);
@@ -75,7 +88,7 @@ test('a rider skips to the next station: the train is moved there and stands', a
   const ok = await ex.skip(null);
   assert.ok(ok, 'arrived');
   assert.ok(t.halted && t.stopName === 'Přelouč', 'standing at ' + t.stopName);
-  // (the rider sits in the loco, which on a pushed set is at the far end)
+  // (the rider stands in the first coach, which on a pushed set is at the far end)
   assert.ok(Math.abs(rider.pos.x - -6000) < 160, 'the rider came along: ' + rider.pos.x);
 });
 

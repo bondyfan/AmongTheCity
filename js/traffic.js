@@ -373,6 +373,7 @@ import * as MW from './mwtraffic.js';
 import { laneTick, laneOffset, blinkOf, bodyLane, bodyAdopt } from './mwlanes.js';
 import { horn } from './audio.js';   // safe headless — no-ops without an AudioContext
 import { worldT } from './worldclock.js';
+import { nearAny, Trail } from './roomview.js';
 import { SignalBatch } from './signalbatch.js';
 
 // AI-local tuning (config.js owns the player-facing numbers)
@@ -655,6 +656,33 @@ const LOOK_BACK = 6;                   // s a car stays protected after leaving 
                                        // long enough to survive a head turn and a glance back
 const GHOST_LEG = 320;                 // m of extra route granted to a ghost that
                                        // runs out of itinerary while still watched
+// ---- the room (co-op): what TWO players may watch -------------------------
+// Everything v9 decides by the local camera, a mesh arriving, a finished car
+// driving on as a ghost, was decided differently by two players standing on
+// one corner and facing opposite ways. Measured on the Pardubice graph
+// (dev/coopbench.mjs backToBack): 22 % of the cars around them stood on both
+// screens, and of the rest two thirds were ghosts only one of them drew.
+// While `watchers` (the peers near us, js/roomview.js) is not empty:
+//   · WATCHED has no direction. A point is watched when it is inside the fog
+//     wall of ANY player in the room, so both clients ask one question about
+//     one set of people and get one answer;
+//   · a mesh is not handed out within NOTICE_R of anybody, behind them
+//     included (a peer may be looking exactly there), to a car that was BORN
+//     within NOTICE_R of somebody: that car has had no mesh on anyone's
+//     screen yet, and gets one on everyone's when it leaves. A car that drove
+//     in from outside has one on the screen of whoever stands there, so a
+//     player arriving late (driving up, or just connected) is handed it too
+//     and does not find his friend's street empty. Where everybody stood when
+//     a car was born is kept as a trail (js/roomview.js Trail);
+//   · a ghost keeps its SCHEDULE. The hashed walk simply goes on past the end
+//     of the trip (OT_LEG at a time, laid from the schedule's own end, not
+//     from wherever this client's body happens to be), and the body follows
+//     it under the same clamp as before, so the car both players kept on
+//     screen is in the same place on both. See _toGhost and _drive.
+// Alone on the server (no peer within ROOM_R) nothing here applies.
+const OT_LEG = 2400;                   // m of overtime laid at once: more than GHOST_MAX
+                                       // of driving, so a ghost slows for the end of a
+                                       // trip once (as it always did) and never again
 // Worst case only, for the reader: the live bound is _phantomR(), which
 // tracks the attach radius the current viewer actually asks for, so a client
 // that never calls setViewer keeps v8's cheaper sweep exactly.
@@ -1155,6 +1183,7 @@ export function stitchWays(ways) {
   return out;
 }
 
+const _trailPt = { x: 0, z: 0 };
 // shared scratch — update paths never allocate
 const _pose = { x: 0, z: 0, dx: 0, dz: 0, seg: 0 };
 const _cand = [], _straight = [];
@@ -1458,6 +1487,13 @@ export class Traffic {
     // for itself. Ghost cars must NOT be pushed into this.cars; this list is
     // read-only to us and never touched by the follow bookkeeping.
     this.actors = null;
+    // The OTHER players near us, as [{x, z}], or null alone (js/roomview.js
+    // peersNear, wired by main.js). Not obstacles: they are the rest of the
+    // audience, and while there is one the camera's cone stops deciding what
+    // may appear and what may go (see OT_LEG).
+    this.watchers = null;
+    this._trails = new Map();       // 'me' and each watcher's id -> Trail (where they stood, _bornWatched)
+    this._recutting = false;        // a way is being cut afresh (_uncut): its release recuts nothing
     this.blockers = null;   // parked hulls from main.js — see _obst below
     // People on a carriageway or about to step onto one: pedestrians.js's
     // `crossers` list, wired by main.js. Each is { cx, cz, rdx, rdz, hw, must,
@@ -1617,6 +1653,15 @@ export class Traffic {
     if (!v) return false;                       // no camera → v8 semantics
     const dx = x - v.x, dz = z - v.z;
     const d2 = dx * dx + dz * dz;
+    const w = this.watchers;
+    if (w && w.length) {
+      // the room: inside anybody's fog wall, whichever way anybody faces. A
+      // peer's share ends where our own meshes do (the detach line of
+      // _sweepPool), so a far peer does not keep a second fleet alive here.
+      if (d2 < v.hideR * v.hideR) return true;
+      const out = Math.max(TRAFFIC.despawnR, this._attachR() + 60);
+      return d2 <= out * out && nearAny(w, x, z, v.hideR);
+    }
     if (d2 >= v.hideR * v.hideR) return false;  // out past the fog wall
     return this._inCone(x, z);
   }
@@ -1678,8 +1723,17 @@ export class Traffic {
   // could not be honoured). Distance is taken from the CAMERA, because the
   // camera is the thing that would do the reading; everything else in the
   // sweep measures from the player, who sits a few metres in front of it.
-  _readableForAttach(x, z) {
+  _readableForAttach(x, z, p = null) {
     const v = this._view;
+    const w = this.watchers;
+    if (w && w.length) {
+      // the room: readable to anybody, behind us or behind them, and refused
+      // only to a car nobody can have had a mesh for yet (see OT_LEG)
+      const rl = Math.min(NOTICE_R, v ? v.hideR : NOTICE_R) + ATTACH_SKIN;
+      const rx = x - (v ? v.x : this._px), rz = z - (v ? v.z : this._pz);
+      if (!(rx * rx + rz * rz < rl * rl) && !nearAny(w, x, z, rl)) return false;
+      return !p || this._bornWatched(p, rl);
+    }
     if (!v) return false;
     if (!this._visibleForAttach(x, z)) return false;   // behind you, or past the fog
     const dx = x - v.x, dz = z - v.z;
@@ -1687,6 +1741,42 @@ export class Traffic {
     // hideR at its 240 m floor the two coincide and this degenerates to v9.0
     const lim = Math.min(NOTICE_R, v.hideR) + ATTACH_SKIN;
     return dx * dx + dz * dz < lim * lim;
+  }
+
+  // Was this schedule born within `r` of where somebody in the room stood at
+  // that moment? (Its first edge at its entry arc; the trails of the room.)
+  _bornWatched(p, r) {
+    if (p.bx === undefined) {
+      const st = p.route[0], e = st.e, s = -st.base, pts = e.pts, cum = e.cum;
+      let i = 0;
+      while (i < pts.length - 2 && s > cum[i + 1]) i++;
+      const L = (cum[i + 1] - cum[i]) || 1e-6, t = Math.max(0, Math.min(1, (s - cum[i]) / L));
+      p.bx = pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t;
+      p.bz = pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t;
+    }
+    const r2 = r * r;
+    for (const tr of this._trails.values()) {
+      const q = tr.at(p.t0, _trailPt);
+      if (q && (q.x - p.bx) * (q.x - p.bx) + (q.z - p.bz) * (q.z - p.bz) < r2) return true;
+    }
+    return false;
+  }
+
+  // Where everybody in the room is, noted once a sweep (alone: nothing kept).
+  _trailTick(wt, px, pz) {
+    const w = this.watchers, T = this._trails;
+    if (!w || !w.length) { if (T.size) T.clear(); return; }
+    let me = T.get('me');
+    if (!me) T.set('me', me = new Trail());
+    me.push(wt, px, pz);
+    for (let i = 0; i < w.length; i++) {
+      const id = w[i].id ?? i;
+      let tr = T.get(id);
+      if (!tr) T.set(id, tr = new Trail());
+      tr.push(wt, w[i].x, w[i].z);
+    }
+    // somebody who left the room a trip ago is nobody's audience any more
+    for (const [id, tr] of T) if (wt - tr.seen > TRIP_T) T.delete(id);
   }
 
   // The cone alone, with no distance term. Needed separately because the two
@@ -1724,8 +1814,8 @@ export class Traffic {
   // created at the border — no explicit stitching pass needed. New edges then
   // look for a governing junction and new junctions claim pre-existing edges.
   addTile({ roads, signals }) {
-    const e0 = this.edges.length;
-    this._growGraph(roads ?? []);
+    // (the first NEW edge: a way cut again takes its old edges out of the list)
+    const e0 = this._growGraph(roads ?? []);
     let grown = this._growSignals(signals ?? []);
     // real OSM clusters first, THEN synthesis — an actual signal within
     // SYNTH_CLEAR of a crossing suppresses the fabricated one, never vice versa
@@ -1736,10 +1826,7 @@ export class Traffic {
     // nearby. _tryBind keeps the nearest junction and gates on SIG_EDGE_R, so
     // revisiting an already-bound pair is harmless — which is why the second
     // sweep does not bother excluding the edges the first one just did.
-    for (let i = e0; i < this.edges.length; i++) {
-      const e = this.edges[i];
-      this._jgrid.near(e.b.x, e.b.z, (jn) => this._tryBind(e, jn));
-    }
+    this._bindFrom(e0);
     if (grown)
       for (const jn of grown)
         this._egrid.near(jn.x, jn.z, (e) => this._tryBind(e, jn));
@@ -1761,10 +1848,22 @@ export class Traffic {
     // the polylines the GRAPH is cut from: the way's own points, plus the
     // junction points the tile build simplified away (see stitchWays)
     const stitched = stitchWays(drivable);
+    // (kept on the way: one that is cut again below is cut from the polyline
+    // it was first cut from, whatever batch it finds itself in)
+    for (const r of drivable) { const st = stitched.get(r); if (st) r._st = st; }
+    const again = this._resplit(drivable);
+    if (again) for (const r of again) { r._tg = 1; drivable.push(r); }
+    return this._cut(drivable);
+  }
+
+  // Count the ways' points into the usage census and cut them into edges.
+  // Returns the index of the first edge it made.
+  _cut(drivable) {
+    const e0 = this.edges.length;
     for (const r of drivable) {
       // every count this way adds, so releaseTile can take exactly those back
       const mine = this._ukeys ? [] : null;
-      for (const [x, z] of stitched.get(r) ?? r.p) {
+      for (const [x, z] of r._st ?? r.p) {
         const k = keyOf(x, z);
         const u = this._usage.get(k);
         if (!u) { this._usage.set(k, { n: 1, last: r }); mine?.push(k); }
@@ -1776,14 +1875,10 @@ export class Traffic {
     // another drivable way also uses (that's where junctions live in OSM).
     // startOff tracks meters from the WAY start to the edge start, so bridge
     // ramps can later ask "how far along the whole way am I?"
-    // Known incremental blind spot, accepted: if a LATER tile's way crosses an
-    // ALREADY-BUILT edge mid-polyline, that old edge is not retro-split (cars
-    // on it drive past the new junction; cars arriving on the new way can only
-    // continue along it). Cross-tile connections are overwhelmingly clipped
-    // way ENDPOINTS — which are always nodes — so this stays a non-issue in
-    // practice and spares us remapping the `s` of every car on a split edge.
+    // (a LATER tile's way that meets an ALREADY-BUILT edge mid-polyline: the
+    // old way was taken out and is in this batch again, see _resplit)
     for (const r of drivable) {
-      const p = stitched.get(r) ?? r.p;
+      const p = r._st ?? r.p;
       let start = 0, startOff = 0, d = 0;
       for (let i = 1; i < p.length; i++) {
         d += dist(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]);
@@ -1795,6 +1890,91 @@ export class Traffic {
       if (r._len == null) r._len = d; // loadCity sets it; tests may not
     }
     this._culDirty = true;            // new arms: what is a dead end has changed
+    return e0;
+  }
+
+  // THE GRAPH MAY NOT DEPEND ON THE ORDER THE TILES CAME IN. A way is cut into
+  // edges at the points another way shares, and it is cut when it arrives: a
+  // way of a LATER tile that joins it mid-polyline used to find no node there,
+  // so the old edge ran past the new junction and the new street was a dead
+  // end. Whether that happened depended on which of the two tiles the network
+  // delivered first, and two co-op clients fetch the same tiles in parallel:
+  // on the four tiles around Pardubice's centre (which is their common
+  // corner) 68 edges differed between two arrival orders, and every car
+  // routed through one of them took another street on the other screen.
+  // So an earlier way that this batch turns a vertex of into a junction is
+  // taken out of the graph (releaseSteps, the same code a far tile leaves by)
+  // and cut again with the batch. Schedules routed over its old edges are
+  // dropped; the next scan mints them afresh from their slot, which is what a
+  // client that had both tiles from the start holds. Tiles land far ahead of
+  // the player or under the loading overlay, so no car anyone watches goes.
+  _resplit(batch) {
+    let again = null;
+    for (const r of batch) {
+      for (const [x, z] of r._st ?? r.p) {
+        const k = keyOf(x, z), u = this._usage.get(k);
+        if (!u || u.n !== 1 || u.last === r) continue;
+        if (this._nodes.has(k)) continue;         // an end of its edge already
+        // (a release forgets who else was here: the edge that owns the vertex knows)
+        const was = u.last?._tg ? u.last : this._wayAt(k, x, z);
+        if (was && was !== r) (again ??= new Set()).add(was);
+      }
+    }
+    if (!again) return null;
+    this._uncut(again);
+    return again;
+  }
+
+  // Take these ways out of the graph to be cut afresh (their _tg is left
+  // cleared), with every schedule that was routed over them.
+  _uncut(ways) {
+    this._recutting = true;
+    for (const _ of this.releaseSteps({ roads: [...ways] }));
+    this._recutting = false;
+    const over = (p) => { for (const st of p.route) if (ways.has(st.e.road)) return true; return false; };
+    for (const p of this._pool.values()) if (!p.fixed && !p.stolen && p.route && over(p)) this._reap(p);
+    for (const p of this._ghosts) if (p.route && over(p)) { this._detach(p); this._ghosts.delete(p); }
+  }
+
+  // The way an edge with a vertex at this snapped point belongs to, or null.
+  _wayAt(k, x, z) {
+    let way = null;
+    this._egrid.near(x, z, (e) => {
+      if (way) return;
+      for (const q of e.pts) if (keyOf(q[0], q[1]) === k) { way = e.road; return; }
+    });
+    return way;
+  }
+
+  // …AND THE SAME THE OTHER WAY ROUND. When a tile leaves, a way of a tile
+  // that stays may be left cut at a point only the departed ways shared: a
+  // node in the middle of a street, which a client that never had that tile
+  // does not have (and every route step past it is hashed by its index). Such
+  // a way is cut again as well, into what it would have been alone.
+  _recut(keys, gone) {
+    let ways = null;
+    for (const k of keys) {
+      const u = this._usage.get(k), n = this._nodes.get(k);
+      if (!u || u.n !== 1 || !n) continue;
+      const r = (n.out[0] ?? n.inn[0])?.road;
+      if (!r || gone.has(r) || !r._tg) continue;
+      u.last = r;
+      const p = r._st ?? r.p;
+      if (keyOf(p[0][0], p[0][1]) === k || keyOf(p[p.length - 1][0], p[p.length - 1][1]) === k) continue;
+      (ways ??= new Set()).add(r);
+    }
+    if (!ways) return;
+    this._uncut(ways);
+    for (const r of ways) r._tg = 1;
+    this._bindFrom(this._cut([...ways]));
+  }
+
+  // every edge from index e0 on asks the junction grid what stands near its END node
+  _bindFrom(e0) {
+    for (let i = e0; i < this.edges.length; i++) {
+      const e = this.edges[i];
+      this._jgrid.near(e.b.x, e.b.z, (jn) => this._tryBind(e, jn));
+    }
   }
 
   _node(x, z) {
@@ -2783,7 +2963,8 @@ export class Traffic {
       // stops in a motorway lane because a hash said the trip was over)
       if (end >= p.routeM) { p.routeEnd = Math.min(p.routeM, end); p.roll = last.e.mw ? 1 : 0; return; }
       const h = hash32(p.seed, p.route.length, 0x51);
-      const nx = p.ghost ? this._pickNextGhost(last.e, h) : this._pickNextDet(last.e, h);
+      // (in a room a ghost's road is everybody's: the hashed walk, see OT_LEG)
+      const nx = p.ghost && !this.watchers?.length ? this._pickNextGhost(last.e, h) : this._pickNextDet(last.e, h);
       if (!nx) { p.routeEnd = end; return; }     // dead end: the trip is over here
       const dot = last.e.ldx * nx.fdx + last.e.ldz * nx.fdz;
       const crs = last.e.ldx * nx.fdz - last.e.ldz * nx.fdx;
@@ -2899,7 +3080,7 @@ export class Traffic {
       const v0 = atStart ? _caps.v0 : Math.min(vz, p.nvOut > 2 ? p.nvOut : 2);
       // …and we must be able to STOP at a destination and be slow at a stop
       // line, whatever colour it turns out to be
-      const v1 = ((atRouteEnd && !p.roll) || stopHere) ? 2
+      const v1 = ((atRouteEnd && !this._rolls(p)) || stopHere) ? 2
         : sigHere ? Math.min(p.vMax, SIG_APPROACH)
           : atSegEnd ? _caps.v1 : vz;
       const dur = pieceTime(L, v0, v1, vz);
@@ -3076,7 +3257,7 @@ export class Traffic {
       heldT: 0, sigQ: false, graceT: 0, stolen: 0, dead: 0,
       // v9: local-only. A ghost has left the shared population and drives on
       // by itself until the player stops looking at it.
-      ghost: 0, ghostT: 0,
+      ghost: 0, ghostT: 0, ot: 0,
       // a timetabled trip (a bus): its spec, where it stops and when it got there
       fixed: null, stops: null, nstop: 0, stopT: null, tEnd: 0,
       // …and the stop its CAR is serving: next one to call at, seconds stood
@@ -3303,6 +3484,7 @@ export class Traffic {
     // the boundary does not flicker on and off; it is dropped as soon as it is
     // both out there and out of sight.
     const outR = Math.max(TRAFFIC.despawnR, aR + 60), outR2 = outR * outR;
+    const room = !!this.watchers?.length;
     for (const p of this._pool.values()) {
       // generation rollover: this slot's car has served its time. A STOLEN slot
       // (or one claimed over the wire before we ever built it) sits here as a
@@ -3363,8 +3545,10 @@ export class Traffic {
       const dx = pose.x - px, dz = pose.z - pz;
       const d2 = dx * dx + dz * dz;
       if (d2 >= inR2) continue;
-      if (this._readableForAttach(pose.x, pose.z)) continue;
-      if (d2 > ringR2 && !this._inCone(pose.x, pose.z)) continue;
+      if (this._readableForAttach(pose.x, pose.z, p)) continue;
+      // (in a room the far band is everybody's: a car one player met beyond
+      // the fog wall has to be on the other's street as well, see OT_LEG)
+      if (d2 > ringR2 && !room && !this._inCone(pose.x, pose.z)) continue;
       // …and not on top of somebody crossing the road. A mesh arrives at the
       // schedule's speed, and a car that takes one 3 m short of a zebra with a
       // person on it has no stopping distance left to use. It asks again in a
@@ -3398,7 +3582,7 @@ export class Traffic {
   // ghost until it is out of sight. See the v9 header for why the slot is
   // released rather than held as a tombstone.
   _retire(p) {
-    if (p.car && !p.stolen && this._heldVisible(p)) { this._toGhost(p); return; }
+    if (p.car && !p.stolen && this._heldVisible(p)) { this._toGhost(p, 1); return; }
     this._reap(p);
   }
 
@@ -3417,9 +3601,15 @@ export class Traffic {
     this._birth(sk, p.cell, p.k, ss, gen, gen * TRIP_T - ph, wt, p.police);
   }
 
-  _toGhost(p) {
+  // `sched`: the schedule simply ran out (the trip ended, the generation
+  // rolled over). In a room such a ghost keeps following it into overtime
+  // (p.ot, see OT_LEG); one a blockage or a crash made is this client's alone.
+  _toGhost(p, sched = 0) {
     this._pool.delete(p.key);
     p.ghost = 1;
+    // (only while the hand-over is seamless: a schedule that has already come
+    // to rest at a dead end would resume from the past, a street ahead of its car)
+    p.ot = sched && this.watchers?.length && (!p.ndone || this._rolls(p)) ? 1 : 0;
     p.ghostT = 0;
     p.dead = 0;                  // the ghost is driving again, not expiring
     p.stolen = 0;
@@ -3685,6 +3875,7 @@ export class Traffic {
       // released (or ghosted) here, and _scanCells immediately behind mints the
       // next generation into the same slot in the same tick. The shared fleet
       // therefore never has a hole, whatever the local deferral decided.
+      this._trailTick(wt, px, pz);
       this._sweepPool(wt, px, pz);
       this._scanCells(wt, px, pz);
       if (this._ghosts.size) this._ghostSweep(since);
@@ -3977,6 +4168,17 @@ export class Traffic {
     if (!p.ghost) { this._standIn.set(p.key, p); this._toGhost(p); }
   }
 
+  // Does this trip run out AT SPEED? On a carriageway always (nobody stops in a
+  // motorway lane because a hash said the trip was over). In a room every trip
+  // that ends by length does: the schedule passes its end without braking, a
+  // car somebody watches carries straight on into overtime (OT_LEG) with its
+  // lag intact, and one nobody watches is taken away as it always was. A stop
+  // at the end would restart every client's copy from a different moment.
+  // (A dead end is still a stop: routeEnd falls short of routeM there.)
+  _rolls(p) {
+    return p.roll || (this.watchers?.length && !p.fixed && p.routeEnd >= p.routeM - 1e-6) ? 1 : 0;
+  }
+
   // A ghost about to run out of itinerary gets another leg. This is the piece
   // that makes "let it drive out of sight" actually terminate: without it a
   // ghost created near the end of its trip would stop at the kerb 30 m in
@@ -3985,10 +4187,12 @@ export class Traffic {
   // come from the same deterministic chooser the schedule uses, seeded past
   // the shared range, purely so a ghost drives like a car rather than like a
   // random walk; nothing about it needs to agree with anybody else.
-  _ghostExtend(p) {
+  // (`from`, `leg`: overtime lays its road from the schedule's own end, which
+  // every client holds, and not from this client's body)
+  _ghostExtend(p, from = p.sR, leg = GHOST_LEG) {
     if (!p.route) return;
     const was = p.routeEnd;
-    p.routeM = Math.max(p.routeM, p.sR + GHOST_LEG);
+    p.routeM = Math.max(p.routeM, from + leg);
     // MAX_SAFE_INTEGER, not a step count: _routeEnsure's real terminator is
     // "the itinerary now covers routeM" (or a dead end), and it is the branch
     // that writes routeEnd. Asking for a step number instead would push one
@@ -4022,7 +4226,7 @@ export class Traffic {
   // gets there), the bus stop it is about to call at, the end of its trip.
   // Read only, the schedule is not touched.
   _schedStop(p, T) {
-    let stop = p.roll ? Infinity : p.routeEnd;
+    let stop = this._rolls(p) ? Infinity : p.routeEnd;
     if (p.ndone || p.nwait > 0) return stop;
     const st = p.route[p.ni], e = st?.e;
     if (!e) return stop;
@@ -4127,16 +4331,28 @@ export class Traffic {
     // that is not hold the same keys at every moment.
     if (!p.ghost && !p.fixed && p.ndone && p.sR > p.routeEnd - END_ROLL && this._heldVisible(p)) {
       const sk = p.key;
-      this._toGhost(p);
+      this._toGhost(p, 1);
       this._refill(sk, p, T);
-    } else if (p.roll && p.ndone && !p.ghost && !p.fixed) {
+    } else if (p.ndone && !p.ghost && !p.fixed && this._rolls(p)) {
       // A trip that ends on a carriageway is let off at speed, wherever the
       // body is: driven on as a ghost if somebody sees it, else taken away
       // at the next sweep (unseen, so nobody watches it brake for nothing).
-      if (this._heldVisible(p)) { const sk = p.key; this._toGhost(p); this._refill(sk, p, T); }
+      if (this._heldVisible(p)) { const sk = p.key; this._toGhost(p, 1); this._refill(sk, p, T); }
       else p.dead = 1;
     }
-    if (p.ghost) {
+    if (p.ghost && p.ot) {
+      // OVERTIME (a room, see OT_LEG): the schedule goes on. When it reaches
+      // the end of what is laid, more is laid from that end, at that instant
+      // of the schedule's own time, so every client that kept this car holds
+      // the same road and the same nominal for it.
+      this._nomTo(p, T);
+      if (p.ndone) {
+        this._ghostExtend(p, p.routeEnd, OT_LEG);
+        if (p.ndone) p.ot = 0;         // a one-way trap: this client's ghost from here on
+        else this._nomTo(p, T);
+      }
+    }
+    if (p.ghost && !p.ot) {
       // A ghost's road has to be LAID. The itinerary is lazy and it is the
       // schedule that lays it (_nomTo, a step ahead of the nominal car); a car
       // that became a ghost behind a blockage keeps the legs its schedule had
@@ -4155,6 +4371,8 @@ export class Traffic {
       Snom = this._nomArc(p, T);
       lag = Snom - p.sR;
     }
+    // does this car follow a schedule (every car but a local ghost)
+    const sched = !p.ghost || p.ot;
     const e = p.edge;
 
     // ---- target speed: this DRIVER's desire (limit × vK), corners ahead, the
@@ -4697,7 +4915,7 @@ export class Traffic {
     //   · when pinned at the schedule the envelope hands it the schedule's own
     //     speed, so the wheels and the engine hum match what it is doing.
     const b = p.body;
-    const nomV = p.ghost ? 0 : this._nomV(p);
+    const nomV = sched ? this._nomV(p) : 0;
     // (the body's own arc, which may be a little past the reported one: see
     // the projection below)
     const bArc = p.bArc ?? p.sR;
@@ -4709,7 +4927,7 @@ export class Traffic {
       const buf = p.ndone ? 0 : SCHED_GAP0 + SCHED_GAP_T * b.speed;
       const env = Math.sqrt(nomV * nomV + 2 * BRAKE * Math.max(0, Snom - bArc - buf));
       if (env < tgt) tgt = env;
-      const stop = p.ghost ? Infinity : this._schedStop(p, T);
+      const stop = sched ? this._schedStop(p, T) : Infinity;
       if (stop < Infinity) {
         // (the end of the trip is driven right up to: arrival below is a
         // metre's tolerance, and a car stopped short of it stood there for good)
@@ -4719,7 +4937,7 @@ export class Traffic {
         if (es < tgt) tgt = es;
       }
     }
-    if (!p.ghost && !blocked && lag > LAG_MAX - HAUL_W) {
+    if (sched && !blocked && lag > LAG_MAX - HAUL_W) {
       let hv = nomV + (lag - (LAG_MAX - HAUL_W)) * HAUL_K;
       // (on a motorway the haul is the catch-up's own few km/h over desire at
       // most: a lag there is paid off over a minute, not at 168 km/h)
@@ -4814,7 +5032,7 @@ export class Traffic {
     p.bArc = arc;
     if (arc > Snom) arc = Snom;
     if (arc < p.sR) arc = p.sR;
-    if (!p.ghost && arc < Snom - LAG_MAX) {
+    if (sched && arc < Snom - LAG_MAX) {
       // Fallen behind past the clamp. NOT dragged through a hull: that is what
       // the clamp used to do: eleven seconds after you left your car in the
       // lane, the queue behind it was hauled forward and drove straight
@@ -4832,7 +5050,9 @@ export class Traffic {
       // is put back on its schedule where nobody can see it, and is let go as
       // a ghost where somebody can: a car may not jump in front of the player.
       if (blocked || (arc < Snom - LAG_MAX - HAUL_SNAP && this._heldVisible(p))) {
-        this._standIn.set(p.key, p); this._toGhost(p);
+        // (an overtime ghost held up like this is let off its schedule too)
+        if (p.ghost) p.ot = 0;
+        else { this._standIn.set(p.key, p); this._toGhost(p); }
       } else if (arc < Snom - LAG_MAX - HAUL_SNAP) {
         // (just inside the haul band, so the floor does not have to drag it
         // the last metres and it does not stand at the clamp's very edge)
@@ -5042,6 +5262,7 @@ export class Traffic {
     // 2. the edge grid and the population cells: only the keys the dead edges
     // were filed under (the same walk Buckets.addLine and _cellAdd made), so
     // the cost is the tile's and not the session's
+    let lone = null;                  // points left with one way: see _recut
     const gk = new Set(), ck = new Set();
     for (const e of dead) {
       if ((++step & 1023) === 0) yield;
@@ -5076,7 +5297,10 @@ export class Traffic {
         const u = this._usage.get(k);
         if (!u) continue;
         if (--u.n <= 0) this._usage.delete(k);
-        else if (u.last === r) u.last = null;
+        else {
+          if (u.last === r) u.last = null;
+          if (u.n === 1 && !this._recutting) (lone ??= []).push(k);
+        }
       }
       this._ukeys.delete(r);
       r._tg = 0;
@@ -5100,5 +5324,6 @@ export class Traffic {
       }
     }
     this._culDirty = true;
+    if (lone) this._recut(lone, gone);
   }
 }

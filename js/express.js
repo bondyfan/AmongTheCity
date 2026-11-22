@@ -2,7 +2,8 @@
 // js/trains.js runs a fleet of RANDOM trains (Math.random spawn and
 // direction, free, nothing says where one goes). This adds the one train a
 // player can plan on: "R Pardubice - Praha", leaving Pardubice hl.n. every
-// hour of GAME time (at half past, the clock's own phase), calling at Přelouč, Kolín, Český Brod and Praha-Libeň,
+// hour of GAME time (at half past, the clock's own phase; it runs in from the
+// east and stands there with its doors open first), calling at Přelouč, Kolín, Český Brod and Praha-Libeň,
 // and running into Praha hl.n. over the 6.2 km the chainer could not join
 // (js/railstitch.js). A ticket is charged on boarding (main.js), and because
 // one game hour is one real minute, a rider can skip to the next station
@@ -34,7 +35,10 @@ const STOP_SET = new Set(EXPRESS_STOPS);
 const calls = (name) => STOP_SET.has(name);
 const GAME_MIN = DAY_LENGTH / 1440;        // real seconds per game minute
 export const HEADWAY = 60 * GAME_MIN;      // s of worldT between departures
-const STAND = 25;                           // s at Pardubice with the doors open
+const LEAD = 48;                            // s before its departure the express is put on the line…
+const LEAD_MIN = 30;                        // …and no later than this: it must have time to run in
+const APPROACH = 420;                       // m up the line from the platform it comes from
+const STAND_MIN = 8;                        // s with the doors open, even when it runs late
 const NEAR = 2500;                          // m: the express is set up when the player is this near
 const CARS = 5;
 const MAIN_MIN = 4000;                      // m: shorter is a platform track or a siding
@@ -120,7 +124,7 @@ export class Express {
     const o = this._origin();
     if (!o || Math.hypot(o.st.x - focus.x, o.st.z - focus.z) > NEAR) return;
     const now = worldT(), dep = nextDeparture(now);
-    if (dep === this._dep || dep - now > STAND || dep - now < 3) return;
+    if (dep === this._dep || dep - now > LEAD || dep - now < LEAD_MIN) return;
     this._spawn(o.R, o.st, dep, now, focus);
   }
 
@@ -130,23 +134,32 @@ export class Express {
     const probe = Math.min(R.len, st.s + 200), back = Math.max(0, st.s - 200);
     const pf = posAt(R, probe), pb = posAt(R, back);
     const dir = pf[0] < pb[0] ? 1 : -1;
-    // the platform must be free: a random train standing there is taken off
-    // unless the player can see it (then this departure is skipped)
+    // the platform and the way in to it must be free: a random train there
+    // is taken off unless the player can see it (then this departure is skipped)
     for (const o of tr.trains) {
       if (o.route !== R || o === tr.riding) continue;
-      if (Math.abs(o.s - st.s) > 400) continue;
+      if (Math.abs(o.s - st.s) > APPROACH + 300) continue;
       if (Math.hypot(o.x - focus.x, o.z - focus.z) < 250) return;
       tr._remove(o);
     }
-    const t = tr._spawn(R, st.s, dir, CARS);
+    // IT ARRIVES (Frank, 21 Nov 2026: "musí opravdu ten vlak přijet, potom se
+    // odjet fyzicky"). It used to appear standing at the platform; now it is
+    // put on the line APPROACH m short of it, rolling, runs in, stops with
+    // its middle at the station and waits there for its minute.
+    const t = tr._spawn(R, st.s - dir * (APPROACH - CARS * 13), dir, CARS, { destination: 'Praha hl. n.' });
     if (!t) return;
     this._dep = dep;
     t.express = dep;
     t.label = EXPRESS_NAME;
-    t.only = calls;
-    t.s = Math.max(tr._sLo(t), Math.min(tr._sHi(t), st.s));
-    tr._halt(t, st, dep - now);
-    tr._place(t, 0);
+    // (Pardubice is its stop only until it has stood there: it does not call
+    // again on a later pass)
+    let stood = false;
+    t.only = (name) => calls(name) || (!stood && name === ORIGIN);
+    t.dwellFor = (at) => {
+      if (at.name !== ORIGIN) return undefined;
+      stood = true;
+      return Math.max(STAND_MIN, dep - worldT());
+    };
     this.train = t;
   }
 
@@ -218,7 +231,7 @@ export class Express {
       for (let i = 0; i < 60 && tr.riding === t; i++) {
         const st = tr._nextStop(t);
         const end = t.dir > 0 ? tr._sHi(t) : tr._sLo(t);
-        const goal = st ? Math.max(tr._sLo(t), Math.min(tr._sHi(t), st.s)) : end;
+        const goal = st ? tr.stopS(t, st) : end;
         const step = Math.max(-JUMP, Math.min(JUMP, goal - t.s));
         t.s += step;
         tr._place(t, 0);
@@ -269,7 +282,7 @@ export class Express {
 Express.prototype._land = function (t) {
   const p = this.player;
   if (!p || typeof p.y !== 'number') return;
-  p.y = t.y;
+  p.y = this.trains.floorY?.() ?? t.y;
   if (typeof p.vy === 'number') p.vy = 0;
 };
 

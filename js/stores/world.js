@@ -25,9 +25,10 @@ import { marketLayout } from './layout.js';
 import { MarketShop, carrierMesh } from './shopping.js';
 import { Cart, Bag, Order } from './cart.js';
 import { StorePanel } from './panels.js';
-import { isOpen, hoursText, chainOfName } from './chains.js';
-import { GOODS, DEPT_NAME, priceAt, menuOf } from './catalog.js';
+import { isOpen, hoursText } from './chains.js';
+import { tenantPanel } from './tenant.js';
 import { buildLotPaint } from './lotpaint.js';
+import { watchDisplay } from './showlayout.js';
 
 const SEE = 380, NEAR = 130, SCAN_DT = 0.5;
 // how the arms hold a trolley's handle: js/gait.js HOLD.push
@@ -50,7 +51,8 @@ const bbDist = (bb, x, z) => Math.hypot(Math.max(bb.minX - x, 0, x - bb.maxX), M
 
 export class StoreWorld {
   /**
-   * @param deps { wallet, vitals, wanted, toast, storage, hour(): 0..24, time(): shared seconds, makeCitizen }
+   * @param deps { wallet, vitals, wanted, toast, storage, hour(): 0..24, time(): shared seconds, makeCitizen,
+   *   cars: { add, remove, parked, driving(), riding() } the game's own vehicles (js/stores/showroom.js) }
    */
   constructor(scene, world, deps) {
     this.scene = scene; this.world = world; this.d = deps;
@@ -65,6 +67,7 @@ export class StoreWorld {
     this.here = null;                      // the store the player is at
     this._scanT = 0; this._hint = ''; this._x = 0; this._z = 0;
     this.reachT = 0; this.scanning = null;
+    this.shows = 0;                        // showrooms among the records (deck() is asked by every wheel)
     this.player = null;
   }
 
@@ -72,6 +75,7 @@ export class StoreWorld {
     return {
       cart: this.cart, bag: this.bag, order: this.order, panel: this.panel, wallet: this.d.wallet, wanted: this.d.wanted,
       vitals: this.d.vitals, toast: this.d.toast, hour: this.d.hour, time: this.d.time, makeCitizen: this.d.makeCitizen,
+      cars: this.d.cars,
       player: () => this.player, scene: this.scene, world: this.world,
       onCarrier: (kind, rec) => this._setCarrier(kind, rec),
       onPick: () => { this.carry?.setCount(this.cart.count()); this.reachT = 0.55; },
@@ -138,6 +142,7 @@ export class StoreWorld {
       doorX: site.door.x, doorZ: site.door.z };
     this.recs.set(f._id, rec);
     this.list.push(rec);
+    if (chain.kind === 'showroom') this.shows++;
     return rec;
   }
   _furnish(rec) {
@@ -163,6 +168,7 @@ export class StoreWorld {
     rec.fx.dispose();
     if (rec.paint) { rec.paint.removeFromParent(); rec.paint.geometry.dispose(); }
     this.recs.delete(rec.f._id);
+    if (rec.chain.kind === 'showroom') this.shows--;
     const i = this.list.indexOf(rec);
     if (i >= 0) this.list.splice(i, 1);
   }
@@ -206,6 +212,8 @@ export class StoreWorld {
       // ---- the sliding door ----
       const dd = Math.hypot(px - rec.doorX, pz - rec.doorZ);
       let want = open && env.onFoot && dd < 4.2 ? 1 : 0;
+      // a showroom's gate opens for a car too, and lets one that is inside out after hours
+      if (rec.chain.kind === 'showroom' && env.car && dd < 9 && (open || inRing(rec.f.o, env.car.x, env.car.z))) want = 1;
       if (!want && open && rec.full) for (const c of rec.full.crowds) if (c.atDoor?.()) { want = 1; break; }
       if (Math.abs(want - rec.doorK) > 0.001) {
         rec.doorK += (want - rec.doorK) * Math.min(1, dt * 5);
@@ -225,6 +233,7 @@ export class StoreWorld {
     this._hint = hint;
     this._carry(p, env);
     this._gesture(p, dt, env);
+    watchDisplay(env.car, this.d);         // a display car driven off the premises: js/stores/showlayout.js
   }
 
   /** The hand that takes a thing off a shelf, and the arm that scans at a self-checkout. */
@@ -276,16 +285,26 @@ export class StoreWorld {
       const y = rec.base + rec.site.floor + 0.03;
       return y <= maxY ? y : null;
     }
-    // the apron before a door: the ramp the mesh draws (js/stores/site.js apronOf)
+    return this._apron(x, z, maxY, null);
+  }
+  /** The apron before a door: the ramp the mesh draws (js/stores/site.js apronOf). */
+  _apron(x, z, maxY, kind) {
     for (const r of this.list) {
       const dx = x - r.doorX, dz = z - r.doorZ;
-      if (dx * dx + dz * dz > 400) continue;
+      if (dx * dx + dz * dz > 400 || (kind && r.chain.kind !== kind)) continue;
       const s = r.site, terrain = this.world.terrain;
       r.apron ??= apronOf(s, (px, pz) => terrain.heightAt(px, pz) - r.base);
       const ya = apronY(r.apron, dx * s.ux + dz * s.uz, dx * s.nx + dz * s.nz);
       if (ya !== null && r.base + ya <= maxY) return r.base + ya;
     }
     return null;
+  }
+  /** What a CAR's wheels stand on at a showroom: its floor and the apron out of its gate (js/city.js surfaceY). */
+  deck(x, z) {
+    if (!this.shows) return null;
+    const rec = this.at(x, z);
+    if (rec) return rec.chain.kind === 'showroom' ? rec.base + rec.site.floor + 0.03 : null;
+    return this._apron(x, z, Infinity, 'showroom');
   }
   /** Under a store's roof (the camera is kept short and low: js/main.js). */
   covered(x, z) { return !!this.at(x, z); }
@@ -344,37 +363,8 @@ export class StoreWorld {
   }
   /** A store may pose the player itself (seated at a table). True when it did. */
   posePlayer(dt, player) { return !!this.here?.full?.shop.posePlayer?.(dt, player); }
-  /**
-   * E at a chain that is only a TENANT (a Lidl under an office block, a KFC in
-   * a station hall): there is no shop floor to walk, so the chain sells over
-   * one screen, its own goods at its own prices. True when `name` is a chain's.
-   */
-  tenant(name) {
-    const chain = chainOfName(name);
-    if (!chain || !isOpen(chain, this.d.hour())) return false;
-    const fast = chain.kind === 'fast', o = new Order();
-    const menu = fast ? menuOf(chain.id)
-      : GOODS.filter((g) => g.keep !== false).map((g) => ({ ...g, price: priceAt(chain.id, g), sec: DEPT_NAME[g.dept] }));
-    this.panel.menu({
-      title: chain.label.toUpperCase(), menu, order: o, have: () => this.d.wallet.money(),
-      payLabel: fast ? 'Objednat a zaplatit' : 'Zaplatit',
-      note: fast ? 'Najíš se hned u pultu.' : 'Nákup půjde do tašky. Klávesou I ji otevřeš a můžeš jíst.',
-      onPay: () => {
-        const sum = o.total();
-        if (!this.d.wallet.pay(sum, fast ? 'jídlo' : 'nákup')) return false;
-        if (fast) {
-          const w = o.worth();
-          this.d.vitals.heal(w.hp); this.d.vitals.eat(w.kcal);
-          this.d.onAte?.(w.hp, w.kcal, 'Dobrou chuť');
-        } else {
-          this.bag.takeAll(o.list());
-          this.d.toast('Zaplaceno ' + sum + ' Kč', { icon: '🧾', kind: 'good', sub: 'Nákup máš v tašce (klávesa I).' });
-        }
-        return true;
-      },
-    });
-    return true;
-  }
+  /** E at a chain that is only a TENANT of a bigger building: it sells over one screen (js/stores/tenant.js). */
+  tenant(name) { return tenantPanel(this, name); }
   /** I: the bag of shopping. */
   openBag() {
     if (this.panel.isOpen) { this.panel.close(); return; }

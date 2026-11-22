@@ -2709,6 +2709,51 @@ run solid, sound geometry on fifty real footprints, worker parity, the
 drive-through on the mapped lane, layouts inside their walls, visits that are
 deterministic and never teleport, the cart, the bag and the order.
 
+## The Tesla showroom at Průhonice (js/stores/showlayout.js, showroom.js, 21 Nov 2026)
+
+Tesla Centrum Praha is at V Oblouku 727, Průhonice (the retail zone it shares
+with Čestlice, by the D1). The map has it as the building "Tesla Prague"
+(`u: car`) in tile `-18_0`: a glazed strip 6.6 m deep wrapped round the south
+corner of its workshop hall, 306 m2. No tile was rebuilt for it.
+
+It is a fourth KIND of chain store, `showroom`, next to market, hyper and fast:
+`chains.js` has the record (only a footprint tagged `shop=car` of that name
+qualifies, so the service centre in Vysočany and every "Tesla" that is a
+pharmacy or a bowling alley stay what they were), `build.js` builds the same
+shell, and four things are its own.
+
+- **The front is the wall with room behind it** (`pickShowFront`, pinned by
+  `landmark.js pinStores` like every store's front). A grocer fronts its car
+  park; here a car has to stand nose to the gate and be driven straight out,
+  so each wall long enough for the gate's leaves is tried and the one with the
+  biggest floor directly behind its gate wins. `arch.glassAll` glazes every
+  wall that is not the back.
+- **The door is a gate 5.2 m wide.** It is the ordinary sliding door of
+  `shellfx.js`, and the ordinary doorway of `storeSolids` (a car's corner
+  probes pass under a solid whose `bot` is over 0.5). `world.js` opens it for
+  a car as well as for a walker.
+- **A car stands on the floor.** `city.surfaceY` asks `stores.deck(x, z)`: a
+  showroom's slab and the apron out of its gate, so the wheels are on the
+  floor the mesh draws and roll down the same ramp a walker climbs.
+- **The display cars are `parked` cars** (`showroom.js`), left open, with
+  `car._show = { o, id, gone }`. Which car is on which stand is a function of
+  the store's key and the slot; one that was driven away does not come back
+  this session, and like a kerb car that fact stays on the client that took it.
+
+**The theft rule** is `watchDisplay`, once a frame for the car the local player
+drives: a display car that is not `owned` and is more than `LOT_PAD` (9 m) from
+the footprint is charged once, `THEFT_HEAT` 46, which is two stars from a clean
+record (`wanted.js STAR_AT[2]` is 45). Sitting in it, and rolling it out onto
+the apron, cost nothing. Stars are local, so in co-op each player answers for
+the car they took.
+
+**Buying one** (Frank, 21 Nov 2026: "Ano, dej cenu"). A car still on the
+premises is sold NEW with B, at `PRICE.showroom` (`prices.js showroomOffer`:
+Model 3 289 000, Roadster 990 000), through the ordinary car panel and
+`garage.buy`. The used-car ladder `PRICE.cars` is untouched, so a Roadster met
+in the street is still not for sale. A bought car is `owned` and is never
+charged; one driven off unpaid loses the showroom's price with its innocence.
+
 ## Cars: true shapes, paint with a history, a solid hull, the Roadster (Nov 2026)
 
 **Shapes.** The Octavia (liftback and Combi) and the Model 3 were redrawn against the
@@ -2866,6 +2911,161 @@ coach's door step (`world.storyCoach.boarding`, prologue.js). The campaign's yar
 (`prologue-tracks.js`) stay as they were. Pedestrians walk mapped footways, which cross the
 rails only where the map has a crossing. Pure in tile data and position, so co-op screens
 agree without a word.
+
+## Every train is the train from Kolín (21 Nov 2026)
+
+Frank: "vlaky, aby všechny vlaky byly tak, jako je to, když nastupuje jako z Kolína ...
+úplně jako takhle stejný model toho vlaku, nastoupit, sednout si tam a tak dále. A musí
+opravdu ten vlak přijet, potom se odjet fyzicky."
+
+* **One coach, two users.** `js/prologue-coach.js` is cut into parts (`coach`, `running`,
+  `gangway`, `cab`, `doorLeaf`, `lettering`, `riders`); the campaign's `trainBody` calls
+  them with the numbers it always had (a recording kit shows the same 2267 boxes, signs
+  and seats before and after). `js/railcoach.js` gathers the same calls into three merged
+  geometries (solid with the kit's grain shader on merged attributes, glass, glow) shared
+  by every coach of every train: three draws a coach, plus four door leaves, the signs and
+  a box that throws the shadow. Beyond 150 to 185 m a coach is its far model (a dozen
+  boxes in the same colours). `coach(k, { doors: 2 })` gives the open world's coach a real
+  door on BOTH flanks (a platform can be on either side); the campaign keeps its one.
+* **A train** (`js/trains.js`) is a row of that coach, a cab at each end, no locomotive:
+  three for the random trains, five for the express. Each coach still rides on its own
+  two bogies, so the set bends. It stops with its MIDDLE at the station (`stopS`), its
+  doors open (`t.closed` 1 shut to 0 open, the campaign's rates), start to close
+  `DOOR_LEAD` before the dwell ends, and it does not move until they are shut. At the end
+  of a line (no station) they stay shut.
+* **The deck** (`js/traindeck.js`, pure): every coach has a frame `{ x, z, c, s, y, first,
+  last }` written by `_place`; floor, door steps, walls, seats and cab walls are the
+  campaign's own (`js/prologue-deck.js` `stepY`, `coachWalls`, `endWall`), asked per coach,
+  with the slots of two coaches overlapping by 0.35 m so a bend opens no gap in the
+  gangway. `trains.deck` is `world.rideDeck`, consulted beside `world.storyCoach` in
+  `city.js supportY/collide` and in `railbarrier.js allowed()` (inside a coach, and at an
+  open door out to 3.4 m, a walker may be in the track strip). A train on the move is no
+  wall and no floor to anyone outside it.
+* **Riding** (`js/trainride.js`, methods of Trains): he rides from the step he takes into
+  a coach of a standing train with its doors open to the step he takes out of one. The
+  train carries him by keeping his place in his coach's frame: read before the trains
+  move, written after. For that `trains.update` now runs BEFORE the walker's update in
+  main.js (it came after the crowd, and his body trailed the coach by a frame). E aboard
+  is the seat (`prologue-seat.js`, the campaign's movement), never a teleport; `board()`
+  and `alight()` remain for tests and scripts. `trains.locked` (the campaign is playing)
+  turns the deck and boarding off: its own train is the only one. The camera is `enclosed`
+  aboard, as in the campaign's coach.
+* **The express arrives** (`js/express.js`): it is put on the line 420 m east of Pardubice
+  hl. n. 48 to 30 s before its minute, runs in, stands with its doors open until the
+  departure (`t.dwellFor`), and leaves. Its ticket is charged as the rider steps in
+  (`onBoard`); without the money he rides without one. A skip (N) keeps him in his coach.
+* **People** (`js/trainpeople.js`): the campaign's four seated passengers a coach, in ONE
+  train at a time (the ridden one, else the nearest within 95 m), seated one a frame.
+* Not done: the conductor walking the aisle, a timetable for the random trains, trains
+  seen the same by two co-op players (they are local state, as before), a walker hit by
+  a moving train. `js/trains.js` is still 1080 lines (it was 1279).
+* Tests: `tests/trainride.test.mjs`, `tests/express.test.mjs`.
+
+## Riding along in a car another player drives (21 Nov 2026)
+
+In co-op a peer's car is a proxy this client only draws (`js/netvehicles.js`): not in
+`vehicles.cars`, not in traffic, not in the crash list. It still is none of those. What it
+gained is passenger seats.
+
+- **The boardable face.** A ghost of a car somebody DRIVES (seat 0, not bound) carries
+  `r.veh`, an object shaped like a vehicle (`proxy: true`, `uid`, `kind`, `x z y heading
+  speed len wid mesh seats`, `gone`, `quiet`), kept on the drawn pose every frame.
+  `ghosts.proxies()` lists them, `nearestEnterableCar()` in `js/main.js` adds them under the
+  traffic rule (under 3 m/s), and the E handler sends a proxy to `boardPeerCar()`: the same
+  `player.boardVehicle()` walk round the body, door and seat as any car, for seats from 1
+  up. The wheel is never offered. `gone` is raised when the driver steps out, leaves, turns
+  passenger or is suddenly in a different kind of car.
+- **Who sits where** (`js/netride.js` `makeSeatBook`). `veh.seats` is local, so the seat is
+  announced: event `seat_claim { ho: driver's uid, s, on }` for the walk-up, and the state
+  packet's `veh.ho` + `veh.st` once seated. Advisory, like the helicopter's claim: two who
+  press E inside one round trip both start walking, the lower uid keeps the seat, the other
+  is walked away with "Místo zabral …". Somebody seated beats somebody walking. Seats per
+  kind are `seatsOf()` (4, a roadster, van and lorry 2, a bus 8).
+- **Seating a remote passenger by name.** A passenger's descriptor carries `ho`, and
+  `sync()` binds him to that driver's ghost (or to our own car when `ho` is `ghosts.selfUid`)
+  with no distance test. Guessing by distance only worked standing still: at 90 km/h the
+  position he reports is a third of a second old and outside `BIND_R`, which built him a
+  second car trailing the first. A sender without `ho` (an older client) is guessed as before.
+- **What the passenger's eye rides on.** The camera is rigid to `player.pos`, which mirrors
+  the proxy. A proxy with somebody local in it (or walking up to it) is chased with a
+  critically damped spring (`follow()`, `RIDE_W`) instead of the fixed-rate ease, so a packet
+  that lands early or late bends the velocity and never steps it. `sync(uid, v, age)` also
+  takes how long the packet waited for its frame, which removes a frame's worth of sawtooth
+  from every ghost's target.
+- **Rides that end without E** (`makeRides().update`, once a frame after `ghosts.update`):
+  the car is gone (`'gone'`: the body is stood up beside where the seat was, on `supportY`),
+  it pulled away during the walk-up (`'left'`, over 4.5 m/s), or the seat was somebody
+  else's (`'rival'`). The same update tells the room when our seat is taken and given back,
+  whichever way the ride ended, and puts `player.pos` on this frame's pose. A driver whose
+  packets stop is standing still; the passenger is told after 6 s and stays seated until he
+  presses E or the fleet reaps the ghost (35 s).
+- **Peers in the glass** (`js/netcrew.js`). A car is opaque and the people behind its
+  windows are pictures the body shader paints (`js/carglass.js`), of whoever the car was
+  told about. Nobody told it about a peer: a friend in your passenger seat was a name tag
+  over an empty seat, and a peer's proxy showed a stock civilian at the wheel. Once a frame
+  `pumpGhosts` asks `ghosts.hostOf(uid)` which car each peer sits in and `netCrew.show()`
+  calls `setDriver` / `setPassenger` on a change, and takes them out again when they leave.
+- Known limits: the glass has pictures for the FRONT seats only, so somebody in a back seat
+  (or in a bus) is not drawn from outside; their name tag rides the car. When the driver
+  steps out, the proxy disappears on the passenger's screen (as it always did for
+  onlookers), so the passenger is put down too. The driver does not see the passenger's
+  door open. Older clients ignore `seat_claim` and `ho`.
+
+## One street for two players: the room (21 Nov 2026)
+
+Frank: "hraci v multiplayeru nevidi stejne auta stejny provoz atd.... proste kazdy hrac
+musi videt to stejne co ten druhy/jiny". The traffic SCHEDULE was shared already; what
+each client DREW was not. Measured with two clients on one corner of Palackého, back to
+back (`node dev/coopbench.mjs`, and once in the game with two tabs and `dev/coopprobe.js`):
+22 % of the cars around them stood in the same place on both screens. Three causes, all
+in `js/traffic.js`, none of them the schedule:
+
+- **The camera decided.** A mesh arrives, and a finished car drives on as a ghost, only
+  where the LOCAL camera cannot see the change (v9). Two players facing opposite ways
+  therefore attached and kept different cars. While `traffic.watchers` (the peers within
+  `ROOM_R` = 1200 m, `js/roomview.js peersNear`, set by `main.js` every frame) is not
+  empty, "watched" has no direction: inside the fog wall of any player. A mesh is refused
+  near anybody only to a car that was BORN near somebody (`_bornWatched`, from a `Trail`
+  of where each player stood), so a player who drives up later is handed every car his
+  friend already has. The far attach band is used all round.
+- **A ghost was nobody's but this screen's.** It drove off free of the schedule, by a
+  route chosen to leave THIS camera's view. In a room a ghost made by the end of a trip
+  or a generation keeps its schedule: every trip that ends by length ROLLS (`_rolls`, no
+  stop at the end), the hashed walk is laid `OT_LEG` further from the schedule's own end
+  (`p.ot`, overtime), and the body follows it under the usual lag clamp. A ghost made by a
+  blockage or one that falls `LAG_MAX` behind is still local (`p.ot = 0`), on the hashed
+  walk as well.
+- **The graph depended on the order the tiles arrived.** A way was cut into edges at the
+  junctions known when it arrived, so a way of a later tile joining it mid-polyline found
+  no node: 68 of 25 000 edges differed between two arrival orders of the four tiles whose
+  common corner is the centre of Pardubice, and two clients fetch those in parallel.
+  `_resplit` takes such an earlier way out (`releaseSteps`) and cuts it again with the
+  batch; `_recut` does the reverse when a tile leaves. Schedules routed over a re-cut way
+  are dropped and minted again by the next scan. This one applies in single player too.
+
+Ghosts are walls again in a session (`main.js isGhostCar`): they are on both screens now,
+and in a room about half the cars near the players are ghosts.
+
+Parked cars: `ROOM_PARK_TOD`. Car parks and kerbs fill by the hour and never change where
+the player could watch, so a street held whatever the hour was when THAT player arrived;
+in a session they all fill as at 19:00, for everybody.
+
+After (same bench, 5 min, share of cars within 2 m on both screens): side by side 1.00,
+back to back 1.00 (was 0.22), one of them blocking the junction 0.93 (0.17), 30 against
+60 fps 0.97, 150 m apart 0.65 (0.37), driving in convoy 0.87, a player driving up to the
+other 0.14 in the first minute and 0.92 from the fourth. In the game, back to back: 0.79
+(0.22), 3 % of the cars on one screen only. What is left is LAG, which is history: a
+client that met a car later holds it nearer its schedule than one whose copy has queued,
+and a ghost exists only where somebody had its car when the trip ended. The remedy for
+both is a small snapshot over the wire (slot key and arc of the cars near each player,
+the hooks `p.key` and `p.sR` the v8 header names), which is not built. Not touched and
+still decided by each camera: pedestrians (0.67 in the same game test) and cyclists
+(0.78), `_hidden()` in `js/pedestrians.js` and `js/cyclists.js`. Buses start a trip at
+whichever stop is in reach and agree from the first stop both clients share. Random
+trains, pursuits and the ambient ambulance are local.
+
+Fleet: a room holds about 45 % more cars than one camera (84 against 58 at noon), the
+ghosts all round instead of in the cone.
 
 ## Pardubice airport and the flight to the Seychelles (js/airport-*.js, js/flight*.js, js/airliner*.js, Nov 2026)
 

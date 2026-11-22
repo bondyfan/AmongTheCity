@@ -648,6 +648,11 @@ class NetGame {
       sp: +(Number.isFinite(v.speed) ? v.speed
         : Math.hypot(num(v.vx, 0), num(v.vz, 0))).toFixed(2),
       st: seat,
+      // WHOSE car, when it is another player's (js/netride.js): the proxy we
+      // ride carries its driver's uid. Receivers seat us in that driver's car
+      // by name instead of guessing by distance, and read the seat as taken.
+      // An older client ignores the field and guesses as before.
+      ...(v.proxy && typeof v.uid === 'string' && seat > 0 ? { ho: v.uid } : {}),
     };
   }
 

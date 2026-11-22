@@ -228,6 +228,17 @@ export const PRICE = deepFreeze({
     { kind: 'tesla', name: 'Tesla Model 3', price: 120000, note: 'baterie na 88 %' },
   ],
 
+  // ---- a maker's showroom (js/stores/showroom.js) ---------------------------
+  // New cars at list, sold only off the showroom floor. NOT part of the ladder
+  // above: a Roadster met in the street is somebody's and is not for sale, and
+  // the lock-up below stays the long goal of the used-car column. The Model 3
+  // new is about two and a half used ones; the Roadster is the one number in
+  // this file a player is not meant to reach by delivering parcels.
+  showroom: {
+    tesla: { name: 'Tesla Model 3 Performance', price: 289000, note: 'nový vůz z autosalonu' },
+    roadster: { name: 'Tesla Roadster', price: 990000, note: 'nový vůz z autosalonu' },
+  },
+
   // A bent car is 1 700 of mechanical work; a scraped one is 700 of paint;
   // most cars that reach a garage in this game are both, which is where the
   // brief's 2 400 comes from. Priced against the tank on purpose: one bad
@@ -313,6 +324,19 @@ export function carOffer(kind, seed = 0, damage = 0) {
   const dmg = Math.min(1, Math.max(0, Number.isFinite(damage) ? damage : 0));
   const price = Math.round(row.price * cond * (1 - 0.4 * dmg) / 100) * 100;
   return { kind, name: row.name, note: row.note, list: row.price, cond, price };
+}
+
+/**
+ * What a car standing on a showroom floor costs: list, new, less whatever a
+ * visitor has done to it. Null for a kind no showroom sells. Shaped like
+ * carOffer's answer, so the car panel prints it the same way.
+ */
+export function showroomOffer(kind, damage = 0) {
+  const row = PRICE.showroom[kind];
+  if (!row) return null;
+  const dmg = Math.min(1, Math.max(0, Number.isFinite(damage) ? damage : 0));
+  return { kind, name: row.name, note: row.note, list: row.price, cond: 1,
+    price: Math.round(row.price * (1 - 0.4 * dmg) / 100) * 100 };
 }
 
 /** The price of the rescue canister for a car burning `type`, whole koruna. */

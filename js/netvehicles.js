@@ -46,9 +46,10 @@
 // the local fleet — see dispose() for why that means a ghost must not dispose
 // them.
 
-import { makeCarMesh, seatAnchor as carSeatAnchor, normalizeKind } from './vehicles.js';
+import { makeCarMesh, seatAnchor as carSeatAnchor, normalizeKind, kindOf } from './vehicles.js';
 import { Helicopter, seatAnchor as heliSeatAnchor } from './helicopter.js';
 import { SIT_DROP, seatX } from './seating.js';
+import { follow } from './netride.js';
 
 // ---- tuning --------------------------------------------------------------
 const SMOOTH = 12;      // 1/s — how hard the rendered pose chases the target
@@ -58,6 +59,11 @@ const SNAP_D = 40;      // m — further than this is a teleport, not a drive
 const REAP_S = 35;      // s of silence before a ghost reaps itself
 const BIND_R = 4.0;     // m — "the passenger is in THAT vehicle" radius
 const UNBIND_R = 9.0;   // m — …and how far it has to drift to be wrong
+// A proxy somebody LOCAL rides in (or is walking up to) is chased with a spring
+// instead of the fixed-rate ease: see js/netride.js follow() for why.
+const RIDE_W = 6;       // 1/s, position
+const RIDE_WH = 8;      // 1/s, heading
+const YAW_MAX = 2.5;    // rad/s a car's reported turn is believed up to
 // A remote client can change how its car LOOKS only this often. Rebuilding a
 // ghost mints a licence-plate CanvasTexture per (kind|colour) into a cache
 // that is never evicted, so an unthrottled `cl` field is a memory bomb aimed
@@ -131,6 +137,8 @@ function readState(v) {
     h: fin(v.h, 0),
     sp: clamp(fin(v.sp, 0), -80, 80),
     seat: clamp(Math.round(fin(v.st, 0)), 0, 7),
+    // whose car a passenger says he is in (the driver's uid): js/netride.js
+    host: typeof v.ho === 'string' && v.ho.length > 0 && v.ho.length <= 80 ? v.ho : null,
   };
 }
 
@@ -140,6 +148,8 @@ function readState(v) {
 export function makeGhostCars(vehicles) {
   const scene = vehicles?.scene ?? vehicles ?? null;
   const recs = new Map();          // uid -> record
+  const _f = { x: 0, v: 0 };       // scratch for follow()
+  const _host = { car: null, seat: 0 };
 
   const api = {
     // OPTIONAL, set by main.js: the vehicles this client owns and already
@@ -152,7 +162,31 @@ export function makeGhostCars(vehicles) {
     // so with a world the ghost climbs bridges and ramps like everyone else,
     // and without one it drives along y = 0.
     world: null,
+    // OPTIONAL, set by main.js: this client's own uid. A passenger who names
+    // US as his driver (veh.ho) is seated in our car with no guessing.
+    selfUid: null,
     sync, drop, seatAnchor, update, has, dispose,
+    // The cars peers DRIVE, each as an object shaped like a vehicle (see
+    // proxyOf below): what E can open a passenger door of. A fresh array.
+    proxies() {
+      const out = [];
+      for (const r of recs.values()) if (r.veh) out.push(r.veh);
+      return out;
+    },
+    proxyOf(uid) { return recs.get(uid)?.veh ?? null; },
+    // What CAR peer `uid` sits in on this screen, and in which seat: { car,
+    // seat } or null. `car` is whatever carries the mesh: the peer's own ghost
+    // record for a driver, the local car or the driver's record for a bound
+    // passenger. For js/netcrew.js, which puts the peer into that car's glass.
+    // The object returned is reused by the next call.
+    hostOf(uid) {
+      const r = recs.get(uid);
+      if (!r || r.k !== 'car') return null;
+      const car = r.bind ?? (r.mesh ? r : null);
+      if (!car || car.disposed || !car.mesh || isHeli(car)) return null;
+      _host.car = car; _host.seat = r.seat;
+      return _host;
+    },
     // extras beyond the contract, for HUD/minimap callers that want a pose
     // without walking the internals: pose(uid) and the live count.
     pose, get count() { return recs.size; },
@@ -216,6 +250,27 @@ export function makeGhostCars(vehicles) {
     r.mesh = null; r.wheels = null; r.heli = null;
   }
 
+  // ---- the car a peer DRIVES, as something you can get into -----------------
+  // The boarding state machine (js/player.js) and the door (js/cardoor.js)
+  // want a vehicle: x, z, y, heading, len, wid, kind, mesh, seats. A record is
+  // not one (its pose is rx/rz/rh), so a driver's ghost carries this object
+  // beside it, kept on the DRAWN pose every frame. `proxy` marks it for
+  // main.js (passenger seats only, never the wheel), `uid` is whose car it is,
+  // and `gone` is raised the moment it stops being that car: the driver got
+  // out, left, turned passenger, or is suddenly driving a different kind.
+  // `seats` is local as on every car; who sits where is js/netride.js's book.
+  function proxyOf(r) {
+    const K = kindOf(r.kind);
+    return { proxy: true, uid: r.uid, kind: r.kind, color: r.color, look: r.look,
+      x: r.rx, z: r.rz, y: r.ry, heading: r.rh, speed: 0, len: K.len, wid: K.wid,
+      mesh: r.mesh, seats: [], gone: false, quiet: 0 };
+  }
+  function retire(r) {
+    if (r.veh) { r.veh.gone = true; r.veh = null; }
+  }
+  // somebody local is in it or walking up to it (boardVehicle writes the seat)
+  const ridden = (r) => !!r.veh && r.veh.seats.some(Boolean);
+
   // ---- binding: is this passenger already sitting in something we draw? ----
   function localList() {
     const l = typeof api.localVehicles === 'function' ? api.localVehicles() : api.localVehicles;
@@ -262,6 +317,25 @@ export function makeGhostCars(vehicles) {
     }
     return best;
   }
+  // A CURRENT CLIENT NAMES ITS HOST (veh.ho, the driver's uid), and then there
+  // is nothing to guess. Guessing by distance only ever worked standing still:
+  // the position a passenger reports is the driver's car as it was drawn on
+  // HIS screen, a packet and an ease behind, so at 90 km/h it is eight metres
+  // behind the car we have. That is outside BIND_R, and he got a second car of
+  // his own trailing the first with him alone in its passenger seat.
+  function namedHost(uid, st) {
+    const ho = st.host;
+    if (!ho || ho === uid || st.k !== 'car') return null;
+    if (ho === api.selfUid) {
+      // ours: the car we drive is first in the list main.js hands over
+      for (const v of localList())
+        if (v && !v.proxy && !isHeli(v) && liveHost(v) && Number.isFinite(v.x) && Number.isFinite(v.z)) return v;
+      return null;
+    }
+    const o = recs.get(ho);
+    return o && !o.bind && o.mesh && o.k === 'car' ? o : null;
+  }
+
   // a host is stale once it drifts away, dies, or turns out to be the very
   // ghost we are updating (peer got out and back in as a driver)
   function hostOk(r, st) {
@@ -277,8 +351,12 @@ export function makeGhostCars(vehicles) {
     return Math.hypot(x - st.x, z - st.z) < UNBIND_R;
   }
 
-  // ---- sync(uid, v): one packet in --------------------------------------
-  function sync(uid, v) {
+  // ---- sync(uid, v, age): one packet in ---------------------------------
+  // `age` (optional, seconds) is how long ago the packet ARRIVED. A packet
+  // waits for the next frame before it gets here, anything from nothing to a
+  // whole frame, and at 90 km/h a frame is 0.4 m: treating every packet as
+  // brand new put that much sawtooth on the target ten times a second.
+  function sync(uid, v, age = 0) {
     if (typeof uid !== 'string' || !uid) return;
     const st = readState(v);
     if (!st) { drop(uid); return; }           // on foot, on a train, or garbage
@@ -290,6 +368,7 @@ export function makeGhostCars(vehicles) {
         rx: st.x, rz: st.z, ry: fin(st.y, 0), rh: st.h,
         tx: st.x, tz: st.z, ty: fin(st.y, 0), th: st.h, sp: st.sp,
         spin: 0, steer: 0, roll: 0, age: 0, last: 0,
+        vx: 0, vz: 0, vh: 0, wh: 0, veh: null,
         skinT: 0, skins: 0 };
       recs.set(uid, r);
     }
@@ -301,17 +380,23 @@ export function makeGhostCars(vehicles) {
     // car, so there is nothing here to bind to. A PASSENGER first tries to ride
     // a vehicle already on screen.
     if (st.seat > 0) {
-      if (!hostOk(r, st)) r.bind = findHost(uid, st);
+      const named = namedHost(uid, st);
+      if (named) r.bind = named;
+      else if (!hostOk(r, st)) r.bind = findHost(uid, st);
     } else r.bind = null;
 
-    if (r.bind) { disposeMesh(r); r.k = st.k; r.kind = st.kind; return; }
+    if (r.bind) { retire(r); disposeMesh(r); r.k = st.k; r.kind = st.kind; return; }
 
     // appearance: rebuild only on a real change, and — for a CHANGE, never for
     // the first build — only as often as SKIN_CD / SKIN_MAX allow. A ghost that
     // has spent its budget keeps the paint it is wearing; being one colour
     // wrong is a cosmetic bug, being a texture faucet is everyone's bug.
     const changed = r.k !== st.k || r.kind !== st.kind || r.color !== st.color || (r.look ?? 0) !== (st.look ?? 0);
-    if (!r.mesh || (changed && r.skinT <= 0 && r.skins < SKIN_MAX)) {
+    // (a respray with somebody local aboard waits until they are out: the body
+    // rides in this mesh, and it is the same car. A different KIND is not, and
+    // goes through: retire() below then puts the rider down.)
+    const sameCar = r.k === st.k && r.kind === st.kind;
+    if (!r.mesh || (changed && r.skinT <= 0 && r.skins < SKIN_MAX && !(sameCar && ridden(r)))) {
       buildMesh(r, st);
       // a fresh mesh has no history worth smoothing from
       r.rx = st.x; r.rz = st.z; r.rh = st.h; r.ry = fin(st.y, r.ry);
@@ -322,15 +407,31 @@ export function makeGhostCars(vehicles) {
     // send the ghost sailing across the city through the buildings.
     if (Math.hypot(st.x - r.rx, st.z - r.rz) > SNAP_D) {
       r.rx = st.x; r.rz = st.z; r.rh = st.h; if (st.y !== null) r.ry = st.y;
+      r.vx = r.vz = r.vh = 0;      // (the spring of a ridden proxy starts over with it)
     }
+    // the turn rate between this packet and the last, for the spring's heading
+    // target (only a ridden proxy reads it). r.age is the time since that packet.
+    let dth = st.h - r.th;
+    dth = Math.atan2(Math.sin(dth), Math.cos(dth));
+    const gap = r.age - clamp(fin(age, 0), 0, 0.1);      // between the two ARRIVALS
+    r.wh = gap > 0.03 && gap < 0.5 ? clamp(dth / gap, -YAW_MAX, YAW_MAX) : 0;
     r.tx = st.x; r.tz = st.z; r.th = st.h; r.sp = st.sp;
     if (st.y !== null) r.ty = st.y;
-    r.age = 0;
+    r.age = clamp(fin(age, 0), 0, 0.1);
+
+    // A car somebody DRIVES has passenger seats (js/netride.js). The object is
+    // the same for as long as it is the same car, so a rider's `inCar` holds.
+    if (r.k === 'car' && r.mesh && st.seat === 0) {
+      if (r.veh && r.veh.kind !== r.kind) retire(r);
+      r.veh ??= proxyOf(r);
+      r.veh.mesh = r.mesh; r.veh.color = r.color; r.veh.look = r.look;
+    } else retire(r);
   }
 
   function drop(uid) {
     const r = recs.get(uid);
     if (!r) return;
+    retire(r);
     disposeMesh(r);
     r.disposed = true;
     recs.delete(uid);
@@ -367,13 +468,31 @@ export function makeGhostCars(vehicles) {
       const gx = r.tx + fx * r.sp * ex, gz = r.tz + fz * r.sp * ex;
 
       const px = r.rx, pz = r.rz, ph = r.rh;
-      r.rx += (gx - r.rx) * k;
-      r.rz += (gz - r.rz) * k;
       // heading over the shortest arc — without the wrap a car crossing ±π
       // spins the long way round like a compass needle
       let dh = r.th - r.rh;
       dh = Math.atan2(Math.sin(dh), Math.cos(dh));
-      r.rh += dh * kh;
+      if (ridden(r)) {
+        // SOMEBODY LOCAL RIDES IN THIS ONE, and the camera is rigid to it. The
+        // ease below turns every packet that lands early or late into a step
+        // in the car's velocity; the spring keeps the velocity continuous and
+        // has no lag at a steady speed (js/netride.js follow).
+        const live = r.age < DR_MAX;                 // the target is still being pushed along
+        const tvx = live ? fx * r.sp : 0, tvz = live ? fz * r.sp : 0;
+        _f.x = r.rx; _f.v = r.vx; follow(_f, gx, tvx, RIDE_W, dt); r.rx = _f.x; r.vx = _f.v;
+        _f.x = r.rz; _f.v = r.vz; follow(_f, gz, tvz, RIDE_W, dt); r.rz = _f.x; r.vz = _f.v;
+        const wh = live ? r.wh : 0;
+        _f.x = r.rh; _f.v = r.vh;
+        follow(_f, r.rh + dh + wh * ex, wh, RIDE_WH, dt);
+        r.rh = _f.x; r.vh = _f.v;
+      } else {
+        r.rx += (gx - r.rx) * k;
+        r.rz += (gz - r.rz) * k;
+        r.rh += dh * kh;
+        // the velocity the pose really has, so a spring that takes over on the
+        // next frame (somebody pressed E beside this car) starts from it
+        r.vx = (r.rx - px) / dt; r.vz = (r.rz - pz) / dt; r.vh = (r.rh - ph) / dt;
+      }
 
       // ground: cars are sent without a y (the road under them decides it),
       // so read the local surface — that is what puts a ghost on the bridge
@@ -432,6 +551,15 @@ export function makeGhostCars(vehicles) {
           if (r.heli._disc) r.heli._disc.visible = blur;
         }
         r.heli.x = r.rx; r.heli.y = r.ry; r.heli.z = r.rz; r.heli.heading = r.rh;
+      }
+      // the boardable face of it, on the pose just drawn
+      const v = r.veh;
+      if (v) {
+        v.x = r.rx; v.z = r.rz; v.y = r.ry; v.heading = r.rh;
+        v.quiet = r.age;
+        // (a driver whose packets have stopped is standing still, whatever
+        // speed the last one carried)
+        v.speed = r.age > 1 ? 0 : r.sp;
       }
     }
   }
