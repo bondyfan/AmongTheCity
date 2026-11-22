@@ -246,3 +246,41 @@ test('Mahé to Pardubice: backtrack to 13, take off, turn for Dubai, and come do
   for (t = 0; t < 900 && seq.phase !== 'parked'; t += 1 / 30) seq.update(1 / 30);
   assert.equal(seq.phase, 'parked');
 });
+
+test('the way through the terminal at Mahé: a door on the face that looks at the stand', async () => {
+  const { doorToward } = await import('../js/flight-sez.js');
+  // a 100 x 40 m terminal with the stand 60 m off its north face
+  const ring = [[0, 0], [100, 0], [100, 40], [0, 40]];
+  const d = doorToward(ring, { x: 70, z: -60 }, 3);
+  assert.ok(Math.abs(d.x - 70) < 1e-9 && Math.abs(d.z + 3) < 1e-9, 'three metres out of the north face, opposite the stand');
+  const corner = doorToward(ring, { x: 130, z: -30 }, 3);
+  assert.ok(corner.x > 100 && corner.z < 0, 'off a corner it steps out diagonally');
+});
+
+test('at Mahé the routes follow the mapped taxiways of the real tile, not the grass', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { seychelles } = await import('../js/flight-airports.js');
+  const { makePath } = await import('../js/flight-path.js');
+  const tile = JSON.parse(readFileSync(new URL('../public/data/regions/mahe/tiles/1_-20.json', import.meta.url), 'utf8'));
+  const ways = tile.roads.filter((r) => r.t === 'taxiway' || r.t === 'taxilane' || r.t === 'runway');
+  const { REGIONS } = await import('../js/regions.js');
+  const sez = seychelles(REGIONS.mahe.airport, () => ways);
+  const off = (x, z) => {
+    let best = Infinity;
+    for (const w of ways) for (let i = 1; i < w.p.length; i++) {
+      const [ax, az] = w.p[i - 1], [bx, bz] = w.p[i], L2 = (bx - ax) ** 2 + (bz - az) ** 2;
+      const t = Math.max(0, Math.min(1, ((x - ax) * (bx - ax) + (z - az) * (bz - az)) / L2));
+      best = Math.min(best, Math.hypot(x - ax - (bx - ax) * t, z - az - (bz - az) * t));
+    }
+    return best;
+  };
+  for (const [name, pts, skipHead, skipTail] of [['out', sez.taxiOut, 1, 0], ['in', sez.taxiIn, 0, 2]]) {
+    const path = makePath(pts, 25, 0);
+    // the stand and its lead-in are on the apron, off any line; everything between follows the taxiways
+    const a = makePath(pts.slice(0, skipHead + 1), 25).length + 30, b = path.length - makePath(pts.slice(-skipTail - 1), 25).length - 30;
+    let worst = 0;
+    for (let s = a; s < b; s += 5) { const q = path.at(s); worst = Math.max(worst, off(q.x, q.z)); }
+    assert.ok(worst < 30, name + ': ' + worst.toFixed(0) + ' m off the mapped taxiways');
+    assert.ok(path.length > 300 && path.length < 2600, name + ' is ' + path.length.toFixed(0) + ' m');
+  }
+});

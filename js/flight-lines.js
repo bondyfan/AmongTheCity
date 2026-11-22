@@ -51,8 +51,9 @@ export function guideOf(trip, phase, zone, route) {
     case 'none':
     case 'done':
       if (!zone) return ['', '', ''];
+      if (zone === 'apron') return [place, 'Projdi terminálem ven', 'Dveře terminálu jsou na mapě'];
       return [place, `Let ${route.no} na ${route.toName}`,
-        route.dir === 'home' ? `Letenku domů prodávají u odbavení · ${kc(route.fare)}` : `Letenku koupíš u přepážek 3 a 4 · ${kc(route.fare)}`];
+        route.dir === 'home' ? `Letenku domů koupíš u odbavení před terminálem · ${kc(route.fare)}` : `Letenku koupíš u přepážek 3 a 4 · ${kc(route.fare)}`];
     case 'ticket': return [place, 'Projdi bezpečnostní kontrolou', 'Rámy jsou vpravo za přepážkami'];
     case 'airside': return [place, 'Jdi ke gate ' + trip.gate, 'U pultu nech naskenovat palubní vstupenku'];
     case 'boarding': return [place, 'Nastup do letadla', 'Stojí na odstavné ploše, schůdky u předních dveří'];

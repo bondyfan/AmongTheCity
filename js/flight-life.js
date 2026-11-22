@@ -19,6 +19,8 @@ import { ROUTES, departureMinute, clockText, reached } from './flight-trip.js';
 import { tod } from './worldclock.js';
 import { seychelles } from './flight-airports.js';
 import { sezDesk } from './flight-sezdesk.js';
+import { doorToward } from './flight-sez.js';
+import { CHUNK } from './config.js';
 
 const NEAR = 2500, FAR = 3500;
 
@@ -35,7 +37,7 @@ export function airportLife(o) {
   world.airport.terminal = terminal;
   // where the airport is: the terminal at home, the stand at SEZ
   const centre = czech ? { x: FRAME.x, z: FRAME.z } : region.mahe?.stand ?? null;
-  let flight = null, boardT = 0, boardKey = '', pending = null, desk = null;
+  let flight = null, boardT = 0, boardKey = '', pending = null, desk = null, airside = null, doorT = 0;
   // on Mahé: the counter for the flight home, built when the airport is first near
   const sez = czech ? null : seychelles(region.mahe);
 
@@ -67,6 +69,7 @@ export function airportLife(o) {
 
   return {
     get flight() { return flight; },
+    get airside() { return airside; },
     /** A flight that was in the air when the page switched (enterRegion's carry). */
     resume(carry) { pending = carry ?? null; },
     update(dt, nightK = 0) {
@@ -83,9 +86,33 @@ export function airportLife(o) {
       }
       flight?.update(dt);
       if (sez?.desk && !desk && flight) desk = sezDesk(scene, world, sez.desk);
+      // the terminal's door toward the stand: looked for twice a second until its building is in
+      if (sez && flight && !airside && (doorT -= dt) <= 0) {
+        doorT = 0.5;
+        airside = findAirside(world, sez.stand);
+        if (airside) flight.setAirside(airside);
+      }
+      if (airside && flight) flight.setAirside(airside);
       desk?.update(nightK);
       if (terminal && (boardT -= dt) <= 0) { boardT = 1; boards(); }
     },
     dispose() { drop(); terminal?.dispose(); desk?.dispose(); world.airport = null; },
   };
+}
+
+/** SEZ's terminal (the building named so, nearest the stand) and the door on its face toward the stand. */
+function findAirside(world, stand) {
+  const idx = world.city?.chunkIndex;
+  if (!idx) return null;
+  const cx = Math.floor(stand.x / CHUNK), cz = Math.floor(stand.z / CHUNK);
+  let best = null, bd = 400;
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
+    for (const f of idx.get((cx + dx) + ',' + (cz + dz))?.buildings ?? []) {
+      if (!/terminal/i.test(f.n ?? '') || !f.o?.length) continue;
+      const door = doorToward(f.o, stand, 3);
+      const d = door ? Math.hypot(door.x - stand.x, door.z - stand.z) : Infinity;
+      if (d < bd) { bd = d; best = door; }
+    }
+  }
+  return best;
 }

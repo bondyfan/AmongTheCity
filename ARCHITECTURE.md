@@ -3177,10 +3177,20 @@ letat na Seychelly". Mahé itself and the region system are the other half
   worldclock.overrideTod from the departure hour through the stop in Dubai to
   the far side's local hour, the trip's map on the HUD, T skips. Then the region
   switch (js/regions.js enterRegion, a page reload) with the trip as the carry;
-  the far side resumes the passenger in 14A on final (`airport.resume`). Until
-  regions.js is on main the far end is a labelled placeholder: back down on 27 at
-  Pardubice. The way home starts at a check-in desk inside the SEZ terminal's
-  landside door (`js/flight-sezdesk.js`).
+  the far side resumes the passenger in 14A on final (`airport.resume`, main.js
+  reads `arrival()`); main.js registers Pardubice's spawns ('pce-airport',
+  'pce-arrival') on every page so the one on Mahé can send him home. Without a
+  Mahé description the far end is a labelled placeholder (back down on 27).
+* **At Seychelles International** the terminal is the region's solid building
+  behind the airport fence, so the way through it is a door played as a cut
+  (`js/flight-sez.js`): the check-in desk on the forecourt
+  (`js/flight-sezdesk.js`) sells the ticket home and walks you through to the
+  apron; after a flight in, the door on the terminal's face toward the stand
+  (found from its own OSM ring) lets you out. The taxi routes follow the tile's
+  mapped taxiways (`js/flight-taxiways.js`, Dijkstra over the taxiway and
+  runway lines). Nothing grows on an airfield's paving any more: the canopy
+  scatter of js/meshes.js clears runways, taxiways and aprons as it clears roads
+  (the raster read trees on SEZ's reclaimed land).
 * **Seeing and hearing it**: C between the passenger's eyes and a chase from
   outside (`js/flight-camera.js`); the game's own synthesised jet at an
   airliner's spool, through the cabin filter (audio.js `holdCabin`), the cabin's
@@ -3191,6 +3201,7 @@ letat na Seychelly". Mahé itself and the region system are the other half
 * **Co-op**: each player flies a plane of his own (nothing on the wire); the
   region rule hides a player who is in the other region.
 
-Tests: `tests/flight.test.mjs`, `tests/flight-cabin.test.mjs`,
-`tests/airliner.test.mjs`, `tests/airport-terminal.test.mjs`. `dev/airportprobe.js`
-walks the whole trip from a console for a harness.
+Tests: `tests/flight.test.mjs` (with SEZ's real tile for the taxi routes),
+`tests/flight-cabin.test.mjs`, `tests/airliner.test.mjs`,
+`tests/airport-terminal.test.mjs`. `dev/airportprobe.js` walks the whole trip
+from a console for a harness.

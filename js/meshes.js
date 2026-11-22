@@ -6070,6 +6070,8 @@ function woodedGreen(f) {
 // missing wood. Water. And anything a green polygon already covers, because
 // scatterForest has planted it.
 const CANOPY_MIN = 3.5;                   // m — a hedge, and below that a bush
+// …and nothing grows on an airfield's paving: runways, taxiways, aprons
+const AEROWAYS = new Set(['runway', 'taxiway', 'taxilane']);
 const CANOPY_ROAD = 1.2;                  // m of clearance beyond the kerb
 // …and nothing grows in a railway. The raster reads catenary masts, a standing
 // train and the platform canopies as crowns, so a station yard came out as an
@@ -6112,7 +6114,10 @@ function scatterCanopy(cell, x0, z0, x1, z1, waters, canopy, out) {
   // this the woods would appear only where a chunk happened to be built late.
   if (!canopy.ready(x0 + 1, z0 + 1)) { canopy.missed = true; return; }
   const greens = (cell.green ?? []).filter(woodedGreen);
-  const roads = (cell.roads ?? []).filter((r) => r.d);
+  // (a runway and its taxiways are roads nobody drives, d 0, and the raster of
+  // Mahé reads trees on the reclaimed land under SEZ: they are cleared like roads)
+  const roads = (cell.roads ?? []).filter((r) => r.d || AEROWAYS.has(r.t));
+  const aprons = (cell.paved ?? []).filter((p) => p.t === 'apron' && p.o?.length > 2);
   const [rails, platforms] = railwayOf(cell);
   const gi0 = Math.floor(x0 / FOREST_STEP), gj0 = Math.floor(z0 / FOREST_STEP);
   let n = 0;
@@ -6143,6 +6148,7 @@ function scatterCanopy(cell, x0, z0, x1, z1, waters, canopy, out) {
         if (!ok) break;
       }
       if (ok && inRailway(rails, platforms, x, z)) ok = false;
+      if (ok) for (const a of aprons) if (pointInPolygon(x, z, a.o)) { ok = false; break; }
       if (ok && waters.length && inWater(x, z, waters)) ok = false;
       if (!ok) continue;
       // the measured height IS the tree's height — no more guessing a scale

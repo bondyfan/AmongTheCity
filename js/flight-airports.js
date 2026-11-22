@@ -14,6 +14,7 @@
 
 import { RUNWAY, LINEUP, TAXI_OUT, TAXI_IN, EXIT_27, STAND } from './airport-plan.js';
 import { headingOf } from './flight-path.js';
+import { taxiNetwork, nearestNode, shortest } from './flight-taxiways.js';
 
 const bearing = (deg) => -deg * Math.PI / 180; // compass bearing → heading (ARCHITECTURE.md)
 const [ax, az] = RUNWAY.a, [bx, bz] = RUNWAY.b;
@@ -45,7 +46,7 @@ export const LKPD = {
  * routes drawn here when the region gives none. The way home leaves on about
  * 320 degrees, toward Dubai.
  */
-export function seychelles(desc) {
+export function seychelles(desc, roadsFn = null) {
   const rw = desc?.runway;
   const pa = rw?.ends?.['13'] ? [rw.ends['13'].x, rw.ends['13'].z] : rw?.a;
   const pb = rw?.ends?.['31'] ? [rw.ends['31'].x, rw.ends['31'].z] : rw?.b;
@@ -60,20 +61,47 @@ export function seychelles(desc) {
   // behind the stand along its own heading, where a crew lines up to roll onto it
   const back = [st.x + Math.sin(st.heading) * 45, st.z + Math.cos(st.heading) * 45];
   const lineup = at(150, 0);
-  // the check-in for the way home: six metres in from the landside door, toward the stand
+  // the check-in for the way home: on the forecourt just outside the landside
+  // door (the canopy before it is a solid block in the region's data), the
+  // agent's side toward the terminal, the passenger's toward the street
   let desk = desc.desk ?? null;
   const ls = desc.terminal?.landside;
   if (!desk && ls) {
     const ex = st.x - ls.x, ez = st.z - ls.z, L = Math.hypot(ex, ez) || 1;
-    desk = { x: ls.x + (ex / L) * 6, z: ls.z + (ez / L) * 6, heading: headingOf(ex, ez) };
+    desk = { x: ls.x - (ex / L) * 1.5, z: ls.z - (ez / L) * 1.5, heading: headingOf(ex, ez) };
   }
+  // Without the tile's taxiways (or before they have streamed in): the straight
+  // way from the stand to the runway, a backtrack to the 13 end and the pad.
+  const plain = {
+    out: desc.taxiOut ?? [[st.x, st.z], [st.x + -Math.sin(st.heading) * 30, st.z + -Math.cos(st.heading) * 30],
+      at(ss - 60, side * 20), at(ss - 120, 0), at(90, 0), at(28, side * -14), at(28, side * 14), at(95, side * 2), lineup],
+    in: desc.taxiIn ?? [at(ss + 70, 0), at(ss + 70, se * 0.55), back, [st.x, st.z]],
+  };
+  // With them: out along the mapped taxiway to the 13 end, in from the runway
+  // by whichever mapped link is nearest the rollout (js/flight-taxiways.js).
+  let mapped = null;
+  const routes = () => {
+    if (mapped || desc.taxiOut || !roadsFn) return mapped ?? plain;
+    const roads = roadsFn() ?? [];
+    const net = roads.length ? taxiNetwork(roads) : null;
+    if (!net || !net.nodes.some((n) => n.runway)) return plain;
+    const apron = (n, i) => !n.runway && Math.hypot(n.x - back[0], n.z - back[1]) < 110;
+    const end = at(30, 0), roll = at(1400, 0);
+    const a = nearestNode(net, st.x, st.z, (n) => !n.runway);
+    const goalOut = nearestNode(net, end[0], end[1], (n) => n.runway);
+    const out = a >= 0 && goalOut >= 0 ? shortest(net, a, goalOut) : null;
+    const r = nearestNode(net, roll[0], roll[1], (n) => n.runway);
+    const inn = r >= 0 ? shortest(net, r, (i) => apron(net.nodes[i], i)) : null;
+    if (!out || !inn) return plain;
+    mapped = { out: [[st.x, st.z], ...out, lineup], in: [...inn, back, [st.x, st.z]] };
+    return mapped;
+  };
   return {
     id: 'FSIA', iata: 'SEZ', region: 'mahe', name: 'Mahé',
     depart: { x: lineup[0], z: lineup[1], heading: h13 },
     land: { x: pa[0], z: pa[1], heading: h13 },
-    taxiOut: desc.taxiOut ?? [[st.x, st.z], [st.x + -Math.sin(st.heading) * 30, st.z + -Math.cos(st.heading) * 30],
-      at(ss - 60, side * 20), at(ss - 120, 0), at(90, 0), at(28, side * -14), at(28, side * 14), at(95, side * 2), lineup],
-    taxiIn: desc.taxiIn ?? [at(ss + 70, 0), at(ss + 70, se * 0.55), back, [st.x, st.z]],
+    get taxiOut() { return routes().out; },
+    get taxiIn() { return routes().in; },
     exit: { x: at(ss + 70, 0)[0], z: at(ss + 70, 0)[1] },
     stand: st,
     desk,
@@ -83,8 +111,8 @@ export function seychelles(desc) {
 }
 
 /** The airport at the far end of a route: the real SEZ when the region gives one, else the placeholder. */
-export function destinationOf(route, mahe = null) {
+export function destinationOf(route, mahe = null, roadsFn = null) {
   if (route.to === 'PED') return { airport: LKPD, placeholder: false };
-  const sez = seychelles(mahe);
+  const sez = seychelles(mahe, roadsFn);
   return sez ? { airport: sez, placeholder: false } : { airport: LKPD, placeholder: true };
 }

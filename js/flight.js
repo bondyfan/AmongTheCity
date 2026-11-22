@@ -32,6 +32,7 @@ import { flightSound } from './flight-sound.js';
 import { flightHud } from './flight-hud.js';
 import { lines, phaseText } from './flight-lines.js';
 import { flightPassengers } from './flight-passengers.js';
+import { sezPassage } from './flight-sez.js';
 import { overrideTod, setSoloTime, tod } from './worldclock.js';
 import { DAY_LENGTH } from './config.js';
 import { chunkKey } from './geo.js';
@@ -52,10 +53,25 @@ const EYE_14A = { x: SEAT_14A.x - Math.sign(SEAT_14A.x) * 0.1, y: AIRLINER.floor
 export function createFlight(o) {
   const { scene, world, player, map, wallet } = o;
   const ground = (x, z) => world.heightAt(x, z);
-  const sez = seychelles(o.region?.mahe);
+  // SEZ's taxiways, from the Mahé tile as it streams in (js/flight-taxiways.js finds the routes)
+  const sezRoads = () => {
+    const st = o.region?.mahe?.stand, idx = world.city?.chunkIndex;
+    if (!st || !idx) return null;
+    const seen = new Set(), out = [];
+    for (const c of idx.values()) for (const r of c.roads ?? []) {
+      if (seen.has(r) || (r.t !== 'taxiway' && r.t !== 'taxilane' && r.t !== 'runway')) continue;
+      const p = r.p?.[0];
+      if (!p || Math.hypot(p[0] - st.x, p[1] - st.z) > 2600) continue;
+      seen.add(r); out.push(r);
+    }
+    return out;
+  };
+  const sez = seychelles(o.region?.mahe, sezRoads);
   const homeAirport = o.home === 'SEZ' && sez ? sez : LKPD;
   const hud = flightHud(), cam = flightCamera(), sound = flightSound(), deck = cruiseDeck(scene);
   const steps = terminalSteps();
+  // at Mahé: the desk under the forecourt's canopy and the way through the terminal
+  const sezWay = homeAirport !== LKPD ? sezPassage(player, world, hud, homeAirport) : null;
   const plane = makeAirliner(), stairs = makeAirstairs();
   plane.group.name = 'Let • dopravní letadlo OK-ATC';
   scene.add(plane.group);
@@ -127,24 +143,25 @@ export function createFlight(o) {
       say('Gate ' + trip.gate, lines.boarding, 8);
       return true;
     }
-    // at Mahé the desk sells, checks and boards in one go (a small set by the terminal)
-    if (homeAirport !== LKPD && sez && nearDesk(at)) {
+    // at Mahé the desk sells, checks and boards in one go, and walks you through to the apron
+    if (sezWay && !sezWay.busy && sezWay.nearDesk(at)) {
       const r = buyTicket(trip, wallet, 'home', tod());
       if (r.ok && r.why !== 'have') {
         trip = advance(advance(r.trip, 'security').trip, 'gate').trip; route = ROUTES.home; said.clear();
         if (seq.phase !== 'stand') seq = flightSequence(homeAirport, ground, seq.m);
         say('Odbavení', lines.soldHome(trip), 8);
-      } else if (r.why === 'money') say('Odbavení', lines.noMoney(ROUTES.home.fare), 6);
+        sezWay.through(true);
+      } else if (r.why === 'have') sezWay.through(true);
+      else if (r.why === 'money') say('Odbavení', lines.noMoney(ROUTES.home.fare), 6);
+      return true;
+    }
+    // ...and after a flight in, the terminal's door out to the forecourt
+    if (sezWay && !sezWay.busy && sezWay.nearAirside(at) && !reached(trip, 'aboard')) {
+      sezWay.through(false);
       return true;
     }
     return false;
   }
-  // the passenger's side of the SEZ counter: a metre in front of it, toward the door
-  const nearDesk = (p) => {
-    const d = homeAirport.desk;
-    if (!d) return false;
-    return Math.hypot(p.x - (d.x + Math.sin(d.heading) * 1.1), p.z - (d.z + Math.cos(d.heading) * 1.1)) < 1.6;
-  };
 
   function skip() {
     if (montage) { montage.t = Math.max(montage.t, montageLength() - MONTAGE.out); return; }
@@ -158,7 +175,7 @@ export function createFlight(o) {
   // ---- the montage: ten hours as a minute ---------------------------------------
   function startMontage() {
     depTod = tod();
-    dest = destinationOf(route, o.region?.mahe);
+    dest = destinationOf(route, o.region?.mahe, sezRoads);
     arrTod = skyHour(route, depTod, 1);
     montage = { t: 0, veiled: false };
     hud.veil(true, route.toName, lines.cruise(route), false);
@@ -220,7 +237,7 @@ export function createFlight(o) {
     const t = tripFromCarry(c);
     if (!t) return false;
     trip = t; route = ROUTES[t.dir]; depTod = c.dep; arrTod = c.arr;
-    dest = destinationOf(route, o.region?.mahe);
+    dest = destinationOf(route, o.region?.mahe, sezRoads);
     seq = flightSequence(dest.airport, ground);
     hud.veil(true, route.toName, lines.approach(route, dest), true);
     land(dest.airport);
@@ -245,6 +262,7 @@ export function createFlight(o) {
     // the others board with him: nobody aboard before the gate opens, everybody once he is in
     people.show(cabinOn && reached(trip, 'boarding') && trip.state !== 'done');
     const at = player.pos;
+    sezWay?.update(dt, stairsFoot());
     if (homeAirport === LKPD) {
       const ev = steps.step(at.x, at.z, trip);
       if (ev === 'security') { trip = advance(trip, 'security').trip; say('Bezpečnostní kontrola', lines.cleared, 5); }
@@ -304,18 +322,25 @@ export function createFlight(o) {
     else if (homeAirport === LKPD && steps.counterAt(at.x, at.z)) {
       action = reached(trip, 'ticket') && trip.state !== 'done' ? '' : 'Koupit letenku (' + ROUTES.out.fare.toLocaleString('cs-CZ') + ' Kč)';
     } else if (homeAirport === LKPD && trip.state === 'airside' && steps.deskAt(at.x, at.z, trip.gate)) action = 'Naskenovat palubní vstupenku';
-    else if (homeAirport !== LKPD && nearDesk(at) && !reached(trip, 'ticket')) action = 'Koupit letenku domů (' + ROUTES.home.fare.toLocaleString('cs-CZ') + ' Kč)';
+    else if (sezWay?.nearDesk(at)) action = reached(trip, 'ticket') && trip.state !== 'done' ? 'Projít na plochu' : 'Koupit letenku domů (' + ROUTES.home.fare.toLocaleString('cs-CZ') + ' Kč)';
+    else if (sezWay?.nearAirside(at) && !reached(trip, 'aboard')) action = 'Projít terminálem ven';
     hud.action(action);
     hud.offer(montage ? 'Přeskočit let' : seq.phase === 'taxiOut' || seq.phase === 'taxiIn' ? 'Přeskočit pojíždění' : '');
     if (done > 0) return;
     if (montage) { hud.guide('', '', ''); return; }
-    const g = lines.guide(trip, seq.phase, homeAirport === LKPD ? steps.zone(at.x, at.z) : null, route ?? ROUTES[homeAirport === LKPD ? 'out' : 'home']);
+    // (at Mahé the "zone" is how near the desk or the apron door he is: there are no rooms)
+    const zone = homeAirport === LKPD ? steps.zone(at.x, at.z)
+      : sezWay?.deskFront && Math.hypot(at.x - sezWay.deskFront.x, at.z - sezWay.deskFront.z) < 30 ? 'landside'
+        : sezWay?.airside && Math.hypot(at.x - sezWay.airside.x, at.z - sezWay.airside.z) < 120 ? 'apron' : null;
+    const g = lines.guide(trip, seq.phase, zone, route ?? ROUTES[homeAirport === LKPD ? 'out' : 'home']);
     hud.guide(...g);
     // the waypoint: the counter, the lanes, the gate, then the aircraft
     let target = homeAirport === LKPD ? steps.target(trip, trip.gate) : null;
-    if (!target && (trip.state === 'boarding' || (homeAirport !== LKPD && trip.state === 'boarding'))) target = stairsFoot();
+    if (!target && trip.state === 'boarding') target = stairsFoot();
+    // at Mahé after a flight in: the terminal's door is the way out
+    if (sezWay?.airside && trip.state === 'done' && Math.hypot(at.x - sezWay.airside.x, at.z - sezWay.airside.z) < 160) target = sezWay.airside;
     if (cabin.aboard() || reached(trip, 'aboard')) target = null;
-    if (steps.inside(at.x, at.z) || reached(trip, 'ticket')) map?.setWaypoint?.(target ? target.x : null, target?.z);
+    if (steps.inside(at.x, at.z) || reached(trip, 'ticket') || target) map?.setWaypoint?.(target ? target.x : null, target?.z);
   }
   function stairsFoot() {
     const m = seq.m, c = Math.cos(m.heading), s = Math.sin(m.heading);
@@ -330,6 +355,8 @@ export function createFlight(o) {
 
   return {
     use, skip, update, resume,
+    /** Seychelles: where the terminal's door toward the stand is (js/flight-life.js finds it). */
+    setAirside(p) { sezWay?.setAirside(p); },
     toggleView() { return seq.phase !== 'stand' && cabin.seated ? cam.toggle() : false; },
     get aboard() { return cabin.aboard(); },
     get flying() { return seq.phase !== 'stand' && seq.phase !== 'parked'; },
