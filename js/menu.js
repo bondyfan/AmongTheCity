@@ -35,6 +35,7 @@ import { kc } from './prices.js';
 import { MENU_CSS } from './menustyle.js';
 import { startMenuScene } from './menubg.js';
 import { START_PLACES } from './config.js';
+import { region } from './regions.js';
 import { placeOf, placeById } from './startplace.js';
 
 const el = (tag, cls, html) => {
@@ -214,12 +215,15 @@ export function showMenu(onStart) {
       // a save in the OTHER city than the pill shows keeps its career but
       // starts on this city's square, and the line says so
       const here = sum?.pos ? placeOf(sum.pos.x, sum.pos.z).id : null;
-      const journey = !freeroam && start === 'pardubice' && sum?.prologue && sum.prologue !== 'done';
-      const move = sum && here && here !== start ? ' · nový start ' + placeById(start).at : '';
+      // (another region, js/regions.js: no campaign and no Czech squares there)
+      const czech = region().czech;
+      const journey = czech && !freeroam && start === 'pardubice' && sum?.prologue && sum.prologue !== 'done';
+      const move = czech && sum && here && here !== start ? ' · nový start ' + placeById(start).at : '';
       single.appendChild(el('small', '', undefined)).textContent = sum
         ? journey ? 'Poslední vlak • příběh začíná znovu' : kc(sum.money) + ' · odehráno ' + fmtPlayed(sum.played)
           + (sum.jobs ? ' · zakázek ' + sum.jobs : '') + move
-        : start === 'pardubice' && !freeroam ? 'Příběh • poslední vlak z Kolína' : 'sám ve městě';
+        : !czech ? 'sám ' + region().at
+          : start === 'pardubice' && !freeroam ? 'Příběh • poslední vlak z Kolína' : 'sám ve městě';
       fresh.style.display = sum ? '' : 'none';
     };
     // Pardubice | Praha: a two-option radio group as one pill
@@ -246,6 +250,11 @@ export function showMenu(onStart) {
     const paintPlace = () => opts.forEach((b, i) => b.setAttribute('aria-checked', String(START_PLACES[i].id === start)));
     place.appendChild(pill);
     paintPlace();
+    if (!region().czech) {
+      // the island is the place: the Czech squares do not apply, and the tab says where you are
+      place.style.display = 'none';
+      document.title = 'Among The City: ' + region().name;
+    }
     // dev only: Kampaň | Freeroam, in the same pill as the cities
     const way = el('div', 'atc-place');
     way.appendChild(el('span', 'atc-place-label', 'Režim'));

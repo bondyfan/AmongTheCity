@@ -33,7 +33,7 @@
 // Usage: node scripts/build-region.mjs
 
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
-import { ORIGIN, M_PER_LAT, M_PER_LON, TILE, tileWanted, wantedTiles } from './lib/world-area.mjs';
+import { ORIGIN, OFFSET, M_PER_LAT, M_PER_LON, TILE, tileWanted, wantedTiles, REGION } from './lib/world-area.mjs';
 import { venueKind, venueName, joinVenues } from './lib/venues.mjs';
 // round 5, real data (docs/TILE-FORMAT.md): tree species, kerb parking, roof
 // tags, the roof colour off the aerial photo, and the public transport routes
@@ -42,8 +42,9 @@ import { RoofPhoto } from './lib/roofphoto.mjs';
 import { buildRoutes } from './lib/routes.mjs';
 import { decodePNG } from './lib/png.mjs';
 
-const px = (lon) => +((lon - ORIGIN.lon) * M_PER_LON).toFixed(1);
-const pz = (lat) => +((ORIGIN.lat - lat) * M_PER_LAT).toFixed(1); // south positive
+// (+ the region's false origin, scripts/lib/world-area.mjs: zero in Czechia)
+const px = (lon) => +(OFFSET.x + (lon - ORIGIN.lon) * M_PER_LON).toFixed(1);
+const pz = (lat) => +(OFFSET.z + (ORIGIN.lat - lat) * M_PER_LAT).toFixed(1); // south positive
 
 // The grid is no longer a rectangle (scripts/lib/world-area.mjs owns its shape),
 // so ownership clamps to the nearest WANTED tile rather than to a bounding box:
@@ -584,9 +585,18 @@ const zoneKind = (t) => (/^(railway|industrial|depot|port|quarry)$/.test(t.landu
 const GREEN_LANDUSE = /^(grass|forest|meadow|recreation_ground|cemetery|allotments|village_green|orchard|farmland|flowerbed)$/;
 const GREEN_LEISURE = /^(park|garden|pitch|playground|golf_course|stadium)$/;
 const GREEN_NATURAL = /^(wood|scrub|grassland|shrubbery)$/;
+// another region's own ground (split-extracts.mjs ISLAND_NATURAL): Mahé's
+// beaches, its bare granite slabs and its mangrove swamps
+const ISLAND_NATURAL = /^(beach|sand|bare_rock|scree|rock|wetland|cliff)$/;
 const isGreen = (t) => GREEN_LANDUSE.test(t.landuse ?? '')
   || GREEN_LEISURE.test(t.leisure ?? '') || GREEN_NATURAL.test(t.natural ?? '')
+  || (REGION !== 'cz' && ISLAND_NATURAL.test(t.natural ?? ''))
   || t.barrier === 'hedge';
+const islandKind = (t) => REGION === 'cz' ? null
+  : t.natural === 'beach' || t.natural === 'sand' ? 'beach'
+  : /^(bare_rock|scree|rock|cliff)$/.test(t.natural ?? '') ? 'rock'
+  : t.natural === 'wetland' ? (t.wetland === 'mangrove' ? 'mangrove' : 'grass')
+  : t.natural === 'scrub' ? 'scrub' : null;
 // `bush` is the ornamental class: a clipped hedge, a shrubbery, a flower bed —
 // the greenery that fills a traffic island and the middle of a roundabout. It
 // renders as low shrubs rather than lawn, which is what tells a kept planting
@@ -595,13 +605,13 @@ const isGreen = (t) => GREEN_LANDUSE.test(t.landuse ?? '')
 // green rectangle today, and the tag that tells tennis from football has been
 // sitting in the raw tiles the whole time
 const SPORTS = /^(tennis|soccer|football|basketball|volleyball|beachvolleyball|athletics|handball|hockey|multi)$/;
-const greenKind = (t) =>
-  t.barrier === 'hedge' || t.natural === 'shrubbery' || t.landuse === 'flowerbed' ? 'bush'
+const greenKind = (t) => islandKind(t) ??
+  (t.barrier === 'hedge' || t.natural === 'shrubbery' || t.landuse === 'flowerbed' ? 'bush'
   : t.leisure === 'park' || t.leisure === 'garden' ? 'park'
   : t.landuse === 'forest' || t.natural === 'wood' ? 'wood'
   : t.leisure === 'pitch' || t.leisure === 'playground' || t.leisure === 'stadium' ? 'pitch'
   : t.landuse === 'cemetery' ? 'cemetery'
-  : (t.landuse || t.natural || t.leisure) ? 'grass' : null;
+  : (t.landuse || t.natural || t.leisure) ? 'grass' : null);
 
 // A PLATFORM is the ground in front of a station, and there are 77 of them in
 // the Pardubice tile alone. Measured over a 180 m circle on the main station:
@@ -1016,6 +1026,16 @@ const ONLY = (process.argv.find((a) => a.startsWith('--tiles=')) ?? '')
   .slice(8).split(/\s+/).filter(Boolean);
 const RAW_DIR = process.env.RAW_DIR || 'data/raw-region';
 const OUT_DIR = process.env.OUT_DIR || 'public/data';
+// The URL the game fetches OUT_DIR's files by (a tile's `f`, the routes dir):
+// data/ for the Czech world, data/regions/<id>/ for another (js/regions.js).
+const URL_DIR = process.env.URL_DIR || 'data/';
+// Another region (ATC_REGION) writes into its own folder or not at all: the
+// Czech world in public/data is the deployed game.
+if (REGION !== 'cz' && (!process.env.OUT_DIR || /(^|\/)public\/data\/?$/.test(OUT_DIR)
+    || !process.env.RAW_DIR || !process.env.URL_DIR)) {
+  console.error(`ATC_REGION=${REGION} needs its own RAW_DIR, OUT_DIR and URL_DIR (got ${RAW_DIR}, ${OUT_DIR}, ${URL_DIR})`);
+  process.exit(1);
+}
 mkdirSync(`${OUT_DIR}/tiles`, { recursive: true });
 const manifestTiles = [];
 const totals = { buildings: 0, roads: 0, rails: 0, water: 0, waterways: 0,
@@ -1108,7 +1128,7 @@ const rawTiles = readdirSync(RAW_DIR)
     const json = JSON.stringify(tile);
     writeFileSync(`${OUT_DIR}/tiles/${tx}_${tz}.json`, json);
     const wb = waterBounds(tile.water);
-    manifestTiles.push({ tx, tz, f: `data/tiles/${tx}_${tz}.json`, n, ...(wb ? { wb } : {}) });
+    manifestTiles.push({ tx, tz, f: `${URL_DIR}tiles/${tx}_${tz}.json`, n, ...(wb ? { wb } : {}) });
     bytes += json.length;
     emitted++;
   }
@@ -1122,7 +1142,7 @@ const rawTiles = readdirSync(RAW_DIR)
 // which is how the runtime finds every line near the player from the manifest
 // alone. Always rebuilt whole, also under --tiles: routes do not follow the
 // tile list, and a stale `rt` would point the game at lines that moved.
-const ROUTES_DIR = 'data/routes/';
+const ROUTES_DIR = `${URL_DIR}routes/`;
 let routeStats = null, routesKept = null;
 {
   const rawFile = `${RAW_DIR}/_routes.json`;
@@ -1171,7 +1191,8 @@ let routeStats = null, routesKept = null;
 }
 
 writeFileSync(`${OUT_DIR}/manifest.json`, JSON.stringify({
-  origin: ORIGIN, mPerLat: +M_PER_LAT.toFixed(1), mPerLon: +M_PER_LON.toFixed(1),
+  origin: ORIGIN, ...(REGION !== 'cz' ? { region: REGION, offset: OFFSET } : {}),
+  mPerLat: +M_PER_LAT.toFixed(1), mPerLon: +M_PER_LON.toFixed(1),
   tile: TILE, ...(routeStats ? { routes: ROUTES_DIR } : routesKept ? { routes: routesKept.dir } : {}), tiles: manifestTiles,
 }));
 

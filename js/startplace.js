@@ -18,6 +18,7 @@
 
 import { START_PLACES, HOSPITALS } from './config.js';
 import { sites } from './d11services.js';
+import { region } from './regions.js';
 
 // A death out on the D11 corridor used to wake you in Pardubice or Prague, up
 // to 55 km back (round 8): past FAR_HOSPITAL from either hospital, the
@@ -72,6 +73,9 @@ export function startPoint(pick, saved) {
 
 /** The HOSPITALS entry nearest (x, z). */
 export function nearestHospital(x, z) {
+  // another region has its own hospitals and no D11 (js/regions.js)
+  const own = region().hospitals;
+  if (own?.length) return Number.isFinite(x) && Number.isFinite(z) ? nearestOf(own, x, z) : own[0];
   if (!Number.isFinite(x) || !Number.isFinite(z)) return HOSPITALS[0];
   const h = nearestOf(HOSPITALS, x, z);
   if (Math.hypot(h.x - x, h.z - z) <= FAR_HOSPITAL) return h;

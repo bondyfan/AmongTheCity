@@ -31,6 +31,7 @@
 // what makes it safe to throw an interior away and rebuild it later.
 
 import { polygonArea, distPointToSegment, pointInPolygon } from './geo.js';
+import { region } from './regions.js';
 import { INTERIOR, INTERIOR_PALETTES } from './config.js';
 import { typologyOf, roofOf, facadeRows, litOf } from './typology.js';
 import { praguePlace } from './praguezone.js';
@@ -185,10 +186,13 @@ const BRANDS = [
 // street actually wears, and now that the pipeline keeps OSM's 27 763 named
 // venues, a shop that HAS a name wears its own — which is the overwhelming
 // majority of the retail anyone drives past.
+// (Mahé, js/regions.js, signs its shops in English, the island's language of
+// shopfronts alongside French and Creole)
+const CZ_SIGNS = region().czech;
 const GENERIC_SIGN = {
-  shop: { label: 'OBCHOD', sign: 0x35618c, trim: 0xf2f4f6 },
-  supermarket: { label: 'POTRAVINY', sign: 0x2e6b45, trim: 0xf2f4f6 },
-  restaurant: { label: 'RESTAURACE', sign: 0x7a4326, trim: 0xf6efe4 },
+  shop: { label: CZ_SIGNS ? 'OBCHOD' : 'SHOP', sign: 0x35618c, trim: 0xf2f4f6 },
+  supermarket: { label: CZ_SIGNS ? 'POTRAVINY' : 'SUPERMARKET', sign: 0x2e6b45, trim: 0xf2f4f6 },
+  restaurant: { label: CZ_SIGNS ? 'RESTAURACE' : 'RESTAURANT', sign: 0x7a4326, trim: 0xf6efe4 },
 };
 // `u` is an OSM shop=*/amenity=* value (270 shop values alone) and this is the
 // only question the street asks of it: which of the three fascias does this

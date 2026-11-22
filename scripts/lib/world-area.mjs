@@ -15,21 +15,38 @@
 // invalidate the whole pipeline (and the ortho WMS registration in js/ortho.js,
 // which duplicates these constants on purpose).
 
-export const ORIGIN = { lat: 50.0317084, lon: 15.7560881 };
+// ANOTHER REGION (js/regions.js): ATC_REGION=mahe builds Mahé in its own frame
+// with the same scripts. Unset is the Czech world, byte for byte as before.
+// The numbers are js/regions.js's, repeated here on purpose (a build script
+// must not import the browser's module graph); tests/regions.test.mjs holds
+// the two copies equal.
+export const REGION = process.env.ATC_REGION || 'cz';
+const FRAMES = {
+  cz: { origin: { lat: 50.0317084, lon: 15.7560881 }, offset: { x: 0, z: 0 },
+    envelope: { latS: 49.06, latN: 50.36, lonW: 14.12, lonE: 17.96 } },
+  // Mahé and the islets of the Ste Anne marine park off Victoria; Silhouette,
+  // 20 km to the north-west, is a skyline, not a place you drive to.
+  mahe: { origin: { lat: -4.62, lon: 55.45 }, offset: { x: 0, z: -100000 },
+    envelope: { latS: -4.82, latN: -4.53, lonW: 55.35, lonE: 55.57 } },
+};
+if (!FRAMES[REGION]) throw new Error('ATC_REGION: no region ' + REGION);
+const FRAME = FRAMES[REGION];
+export const ORIGIN = FRAME.origin;
+export const OFFSET = FRAME.offset;
 export const M_PER_LAT = 111132.9 - 559.8 * Math.cos(2 * ORIGIN.lat * Math.PI / 180);
 export const M_PER_LON = 111412.8 * Math.cos(ORIGIN.lat * Math.PI / 180)
   - 93.5 * Math.cos(3 * ORIGIN.lat * Math.PI / 180);
 export const TILE = 4800;
 
-export const xOf = (lon) => (lon - ORIGIN.lon) * M_PER_LON;
-export const zOf = (lat) => (ORIGIN.lat - lat) * M_PER_LAT;   // south positive
-export const lonOf = (x) => ORIGIN.lon + x / M_PER_LON;
-export const latOf = (z) => ORIGIN.lat - z / M_PER_LAT;
+export const xOf = (lon) => OFFSET.x + (lon - ORIGIN.lon) * M_PER_LON;
+export const zOf = (lat) => OFFSET.z + (ORIGIN.lat - lat) * M_PER_LAT;   // south positive
+export const lonOf = (x) => ORIGIN.lon + (x - OFFSET.x) / M_PER_LON;
+export const latOf = (z) => ORIGIN.lat - (z - OFFSET.z) / M_PER_LAT;
 
 // The envelope every node is tested against before it enters the index. Wider
 // than the shapes below by a comfortable margin so a way that leaves the world
 // and comes back still resolves all its nodes.
-export const ENVELOPE = { latS: 49.06, latN: 50.36, lonW: 14.12, lonE: 17.96 };
+export const ENVELOPE = FRAME.envelope;
 
 // ---- the shapes ----------------------------------------------------------
 // The D11 centreline, sampled at its junctions from Prague's eastern edge to
@@ -104,12 +121,12 @@ const boxToRect = (b) => ({
 });
 // Kolín and the line 010 / road II/322 corridor through Týnec to Přelouč.
 const KOLIN_PCE = { latS: 49.992, latN: 50.065, lonW: 15.173, lonE: 15.556 };
-const RECTS = [PRAHA, HOME, ZLIN, KOLIN_PCE].map(boxToRect);
+const RECTS = (REGION === 'cz' ? [PRAHA, HOME, ZLIN, KOLIN_PCE] : [ENVELOPE]).map(boxToRect);
 const toLocal = (pts) => pts.map(([la, lo]) => [xOf(lo), zOf(la)]);
 // Each entry is one polyline plus the half-width it claims, so routes of very
 // different lengths can be given very different bands without the tile test
 // having to know which is which.
-const BANDS = [
+const BANDS = REGION !== 'cz' ? [] : [
   { line: toLocal(D11), half: CORRIDOR_HALF_W },
   { line: toLocal(HK_PCE), half: CORRIDOR_HALF_W },
   { line: toLocal(PCE_ZLIN), half: LONG_HALF_W },
@@ -222,8 +239,8 @@ function mask() {
 /** Is this node close enough to the world to be worth remembering? */
 export function nodeWanted(lat, lon) {
   const m = mask();
-  const i = Math.floor(((lon - ORIGIN.lon) * M_PER_LON) / TILE) - m.txMin;
-  const j = Math.floor(((ORIGIN.lat - lat) * M_PER_LAT) / TILE) - m.tzMin;
+  const i = Math.floor(xOf(lon) / TILE) - m.txMin;
+  const j = Math.floor(zOf(lat) / TILE) - m.tzMin;
   if (i < 0 || i >= m.w || j < 0 || j >= m.h) return false;
   return m.g[j * m.w + i] === 1;
 }
