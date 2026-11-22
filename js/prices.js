@@ -293,6 +293,13 @@ export const PRICE = deepFreeze({
   // at the end of part two of the Last Train. "Dvě stě padesát tisíc."
   story: { briefcase: 250000 },
 
+  // A one-way economy seat Pardubice to Mahé (and back), with the stop on the
+  // way (js/flight-trip.js). A real return to the Seychelles from Prague runs
+  // 25 to 35 thousand korun in late 2025, so a single is about half: four late
+  // missions, or most of a cheap car early. It is the price of a holiday,
+  // and it should feel like one.
+  flight: { mahe: 14900 },
+
   // What the police take when they finally have you: charged per star at the
   // hospital door (js/career.js), where the stars are then cleared. Two stars
   // cost more than the bed does, which is the point.

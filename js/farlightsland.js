@@ -17,6 +17,7 @@
 // open view on.
 
 import * as THREE from 'three';
+import { dataUrl } from './regions.js';
 
 const REACH = 8000;           // m (box) of land whose lights are drawn
 const REBUILD = 1200;         // m the eye moves before the set is made again
@@ -87,7 +88,7 @@ export class FarLandLights {
       const w = new Worker(new URL('./farurbanworker.js', import.meta.url), { type: 'module' });
       w.onmessage = (e) => { if (e.data.boxes) this.boxes = e.data.boxes; w.terminate(); };
       w.onerror = () => w.terminate();
-      w.postMessage({ url: new URL('data/overview.json', document.baseURI).href });
+      w.postMessage({ url: new URL(dataUrl('overview.json'), document.baseURI).href });
     } catch { /* no workers: no far lights */ }
   }
 

@@ -11,6 +11,8 @@ import { praguePlace, inOldTown } from './praguezone.js';
 import { pragueRoof } from './roofgrammar.js';
 import { rnd } from './typologycells.js';
 import { shapeOf, zoneRnd } from './typologyshape.js';
+import { region } from './regions.js';
+const CZ_ROOFS = region().czech;
 
 // ---- roofs -----------------------------------------------------------------
 // Czech roofs: fired clay in every shade between new orange and a century of
@@ -180,6 +182,9 @@ export function roofFurniture(f, typ, roof, storeys) {
     if (typ === 'hall' || typ === 'garage' || typ === 'church' || typ === 'barn') return out;
     // nobody builds a chimney stack through patent glazing or a sedum roof
     if (roof.style === 'glass' || roof.style === 'grass') return out;
+    // …nor on a tin roof at 4 degrees south, where nothing is ever heated
+    // (Mahé, js/regions.js: the kitchen is outside, the stove burns gas)
+    if (!CZ_ROOFS) return out;
     // chimneys: one on a house, a row of them on a tenement, brick or rendered
     const n = typ === 'house' ? (rnd(id, 70) < 0.86 ? 1 : 0)
       : Math.max(1, Math.min(5, Math.round(hl * 2 / 9)));

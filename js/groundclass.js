@@ -19,7 +19,8 @@
 // LAYER_Y.road above its grade), so a road can never be buried again. Storage
 // and fetching mirror canopy.js deliberately; the two read as siblings.
 
-const URL_OF = (tx, tz) => `data/ground/${tx}_${tz}.bin`;
+import { dataUrl } from './regions.js';
+const URL_OF = (tx, tz) => dataUrl(`ground/${tx}_${tz}.bin`);   // the live region's folder
 export const GROUND_RES = 4;             // m per cell — the classifier's own grid
 const TILE = 4800;
 const N = TILE / GROUND_RES;             // 1200 cells a side

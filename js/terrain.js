@@ -26,8 +26,10 @@
 
 import { STAMPS, STAMP_REGIONS, regionHeight } from './terrainstamps.js';
 import { riverbedInto } from './riverbed.js';
+import { dataUrl } from './regions.js';
 
-const TERRAIN_URL = (tx, tz) => `data/terrain/${tx}_${tz}.bin`;
+// (the live region's folder: data/ for the Czech world, data/regions/mahe/ on Mahé)
+const TERRAIN_URL = (tx, tz) => dataUrl(`terrain/${tx}_${tz}.bin`);
 // one box per city's stamps (Pardubice, Prague): the hot path is one compare per box
 const REGIONS = STAMP_REGIONS;
 const REGION_N = REGIONS.length;

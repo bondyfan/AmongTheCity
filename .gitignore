@@ -23,3 +23,7 @@ data/raw-osm/
 data/raw-ipr/
 data/ipr-buildings.json
 data/raw-ortho/
+
+# Another region's raw downloads (scripts/mahe/fetch.mjs): regenerable input,
+# never served. The built tiles in public/data/regions/ ARE committed.
+data/regions/

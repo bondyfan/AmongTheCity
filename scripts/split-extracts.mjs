@@ -32,11 +32,20 @@
 import { readdirSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { RouteCollector } from './lib/route-collect.mjs';
 import { readPbf } from './lib/osmpbf.mjs';
-import { TILE, xOf, zOf, tileWanted, nearestWanted, wantedTiles, nodeWanted } from './lib/world-area.mjs';
+import { TILE, xOf, zOf, tileWanted, nearestWanted, wantedTiles, nodeWanted, REGION } from './lib/world-area.mjs';
 import { isVenue } from './lib/venues.mjs';
 
 const RAW_DIR = process.env.RAW_DIR || 'data/raw-region';  // overridable for dry runs
-const OSM_DIR = 'data/raw-osm';
+const OSM_DIR = process.env.OSM_DIR || 'data/raw-osm';
+// Another region (ATC_REGION, scripts/lib/world-area.mjs) must never empty the
+// Czech raw tiles: this script starts by deleting every .json in RAW_DIR.
+if (REGION !== 'cz' && (!process.env.RAW_DIR || /(^|\/)data\/raw-region\/?$/.test(RAW_DIR))) {
+  console.error(`ATC_REGION=${REGION} needs its own RAW_DIR (not ${RAW_DIR})`);
+  process.exit(1);
+}
+// what another region's ground is made of beyond the Czech kinds: sand,
+// granite, mangrove swamp (build-region.mjs greenKind)
+const ISLAND_NATURAL = /^(beach|sand|bare_rock|scree|rock|wetland|cliff)$/;
 
 // ---- which elements the game wants (mirrors fetch-region.mjs' query) --------
 const GREEN_LANDUSE = /^(grass|forest|meadow|recreation_ground|cemetery|allotments|village_green|orchard|farmland|flowerbed)$/;
@@ -64,6 +73,7 @@ const wantWay = (t) => !!t && (
   || t.natural === 'water' || WATERWAY.test(t.waterway ?? '')
   || GREEN_LANDUSE.test(t.landuse ?? '') || GREEN_LEISURE.test(t.leisure ?? '')
   || GREEN_NATURAL.test(t.natural ?? '')
+  || (REGION !== 'cz' && ISLAND_NATURAL.test(t.natural ?? ''))
   || (t.amenity === 'parking' && !/underground|multi-storey/.test(t.parking ?? ''))
   || t.place === 'square'
   || t.natural === 'tree_row'
@@ -90,6 +100,8 @@ const wantRelation = (t) => !!t && (
   || t.natural === 'water' || t.waterway === 'riverbank'
   || GREEN_LANDUSE.test(t.landuse ?? '') || GREEN_LEISURE.test(t.leisure ?? '')
   || YARD_LANDUSE.test(t.landuse ?? '')
+  // (an island maps its forests, beaches and granite as multipolygons)
+  || (REGION !== 'cz' && (GREEN_NATURAL.test(t.natural ?? '') || ISLAND_NATURAL.test(t.natural ?? '')))
 );
 
 // Everything a Czech street actually has standing on it. Each of these is a

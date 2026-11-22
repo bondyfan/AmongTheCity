@@ -8,6 +8,9 @@
 import * as THREE from 'three';
 import { SPAWN, CITY_DATA_URL, CAR_COLORS, CAR, START_PLACES, FLEET_STRIDE, HOSPITALS } from './config.js';
 import { arriveText, nearestHospital, tilesReady } from './startplace.js';
+import { region, dataUrl, setCarryHook, regionId, REGIONS, enterRegion, arrival, registerSpawns } from './regions.js'; // which world this page is
+import { manifestUrl, legacyFallback, arrivalChoice, regionStartPoint, arriveLine } from './regionboot.js';
+import { Sea } from './mahe/sea.js';                                      // an island's ocean (js/regions.js `sea`)
 import { loadCity, chunkKey, venueAt, forEachChunkInRadius } from './geo.js';
 import { StationPassages } from './station-passages.js';
 import { STORES } from './stores/chains.js';
@@ -119,6 +122,12 @@ import * as career from './career.js';
 import { meetVasek } from './prologue-parking.js';
 import { createHeist } from './heist.js';
 import { fillCampaigns } from './campaignmenu.js';
+// the airport and the flight to the Seychelles (js/flight-life.js says what it owns)
+import { airportLife } from './flight-life.js';
+import { SPAWNS as AIRPORT_SPAWNS } from './airport-plan.js';
+// Pardubice's two spawns for the flight home ('pce-airport', 'pce-arrival'): every page
+// knows them, so the one on Mahé can send the passenger back to final for 27
+registerSpawns('cz', AIRPORT_SPAWNS);
 import { hours as storyHours } from './prologue-route.js';
 import { staminaHud } from './stamina.js';
 import { exitHudText, setExitLine } from './mwhud.js';
@@ -177,6 +186,10 @@ const game = {
 let world = null, player = null, vehicles = null, traffic = null, sky = null, minimap = null;
 let journey = null, meeting = null, vasekCar = null;
 let heist = null;        // part two of the campaign (js/heist.js), after the saved end of part one
+let airport = null;      // js/flight-life.js: the terminal, the airliner and the trip, near an airport
+const flightNow = () => airport?.flight ?? null;
+// the airliner as something the streamer must keep up with (not at cruise: nothing below is seen)
+const airFlier = () => { const f = flightNow(); return f?.flying && f.phase !== 'cruise' ? f.plane : null; };
 let carjack = null;      // the drivers pulled out of their cars (js/carjack.js)
 let arrest = null;       // { veil, t, moved } while the ZATČEN card is up
 let startJourney = null, storyOver = null;
@@ -363,6 +376,8 @@ let clouds = null;                // the sky to fly the machines through
 let lightPools = null;            // what the street lamps do to the street
 let farSkyline = null;            // Prague's tall landmarks beyond the streamed ring (js/landmarksfar.js)
 let farTerrain = null;            // the land beyond it everywhere else (js/farterrain.js)
+let regionSea = null;             // an island region's ocean (js/mahe/sea.js), else null
+let island = null;                // Mahé's landmarks and granite (js/mahe/island.js), else null
 let farLandLights = null;         // …and its towns' lights at night (js/farlightsland.js)
 const _farEdge = [0, 0, 0, 0];
 // (js/openness.js: a sight line over the Prague Vltava, the pools over the lowered bed)
@@ -585,6 +600,15 @@ function updateCamera(dt) {
     _filmed = true;
     return;
   }
+  // seated in the airliner: the passenger's eyes, or the chase from outside (C)
+  const flightShot = flightNow()?.frameCamera(camera, dt, drag);
+  if (flightShot) {
+    fpHideSelf(flightShot === 'inside');
+    camNear = camera.near;
+    camInit = false;
+    _filmed = true;
+    return;
+  }
   // The film has just handed the camera back: the boom starts behind him,
   // looking the way he is turned (towards the station), not where it was left.
   if (_filmed) { _filmed = false; camYaw = player.heading; camInit = false; }
@@ -759,10 +783,11 @@ function updateCamera(dt) {
   // bug. The helicopter was already excluded; the jet was not, and the jet is
   // the one that crosses a block every fifth of a second.
   const flying = !!(game.heli || game.jet);
-  const enclosed = !flying && !game.car && (journey?.aboard || !!trains?.riding || world.stationPassages?.inside(tx, tz, player.y));
+  const enclosed = !flying && !game.car && (journey?.aboard || !!trains?.riding || flightNow()?.aboard || world.stationPassages?.inside(tx, tz, player.y));
   // (a car is only ever under a store's roof in a showroom, and is looked at from inside it too)
   const inShop = !flying && !!world.stores?.covered(tx, tz);
-  const indoors = enclosed || inShop || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
+  const inTerminal = !flying && !game.car && !!world.airport?.covered(tx, tz);
+  const indoors = enclosed || inShop || inTerminal || (!flying && !game.car && (!!world.interiors?.modelAt(tx, tz) || !!world.stationPassages?.covered(tx, tz)));
   if (indoors) dist = Math.min(dist, enclosed ? 0.85 : 3.4);
   const flat = Math.cos(pitch) * dist;
   let px = tx + Math.sin(camYaw) * flat;
@@ -770,7 +795,7 @@ function updateCamera(dt) {
   let py = ty + height * (indoors ? 0.25 : 1) * hk + Math.sin(pitch) * dist;
   // under a station canopy the lens stays under it too (js/station-passages.js lid)
   if (indoors && !enclosed) {
-    const lid = world.stationPassages?.lid(tx, tz) ?? (inShop ? world.stores.lid(tx, tz) : null);
+    const lid = world.stationPassages?.lid(tx, tz) ?? (inShop ? world.stores.lid(tx, tz) : inTerminal ? world.airport.lid(tx, tz) : null);
     if (lid != null && py > lid - 0.35) py = lid - 0.35;
   }
   // …and then it still has to not be inside a wall. March the boom back in
@@ -791,7 +816,8 @@ function updateCamera(dt) {
   // larger one, so a spot that trips the entry test also holds the pull.
   let wantT = 1;
   // (in a chain store the walls are the store's own: js/stores/world.js outside)
-  const camHit = (x, y, z, pad) => world.interiors?.occupied(x, y, z, pad) || (inShop && world.stores.outside(tx, tz, x, z));
+  const camHit = (x, y, z, pad) => world.interiors?.occupied(x, y, z, pad) || (inShop && world.stores.outside(tx, tz, x, z))
+    || (inTerminal && world.airport.outside(tx, tz, x, z));
   if (!flying && camHit(px, py, pz, 0.28)) {
     const bx = px - tx, by = py - ty, bz = pz - tz;
     const MIN_T = 0.2;
@@ -1289,6 +1315,8 @@ function applyParkVisibility() {
 // hour is one real minute, so the ride to Prague is 50 real minutes without it.
 input.onKey('KeyT', () => {
   if (game.mode !== 'play' || document.body.dataset.panelOpen || storyOver) return;
+  // a flight under way outside the campaign: T skips its taxi or its ten hours (js/flight.js)
+  if (!journey && !meeting && !heist && flightNow()?.busy) { flightNow().skip(); return; }
   if (journey) journey.skip(); else (meeting ?? heist)?.skip();
 });
 input.onKey('KeyN', () => {
@@ -1305,6 +1333,8 @@ input.onKey('KeyE', () => {
   if (journey?.use()) return;
   if (meeting?.use(player)) return;
   if (heist?.use()) return;
+  // a counter, the gate, seat 14A, getting up (js/flight.js)
+  if (!game.car && !player.inCar && flightNow()?.use()) return;
   // a shelf, a till, a kiosk, a seat: whatever the store the player is in offers
   if (world.stores?.use({ car: game.car, onFoot: !game.car && !player.inCar })) return;
   let jetNear = null;              // set by the fighter branch's own test
@@ -1693,6 +1723,7 @@ function stepOutOfCar() {
 // re-resolves the seat every frame, so a wreck or an exit drops it on its own.
 input.onKey('KeyC', () => {
   if (game.mode !== 'play') return;
+  if (flightNow()?.toggleView()) return;   // in seat 14A: the cabin or the outside
   const v = fpVehicle();
   if (!v) { ui_hint('Pohled řidiče jen ve voze'); return; }
   fpView = !fpView;
@@ -2255,7 +2286,7 @@ function updateHorizon(dt) {
   const gs = getSettings();
   const base = gs.viewChunks ?? GROUND_CHUNKS;
   // altitude drives the horizon whichever machine is up there
-  const flier = game.heli ?? game.jet;
+  const flier = game.heli ?? game.jet ?? airFlier();
   const alt = aglOf(flier);
   // Altitude is one reason to see further; SPEED is the other, and the jet has
   // it at any height. A Gripen on the deck at Mach 1 crosses the whole 720 m
@@ -2266,7 +2297,7 @@ function updateHorizon(dt) {
   // and it pulls the rings in two directions at once (wider coverage, less
   // detail) which one shared term could never express.
   const speed = game.jet ? game.jet.speed
-    : game.heli ? Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) : 0;
+    : game.heli ? Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) : airFlier()?.speed ?? 0;
   // (a car on the ground has its own rule, js/streamplan.js planCarRings; its
   // speed is eased down so a ring is not dropped and built again at every lift)
   // An open view (js/openness.js) widens the same band and moves the fog out
@@ -2294,8 +2325,9 @@ function updateHorizon(dt) {
   // filling empty cells at the cheapest tier: those cost 0.69 ms each, so the
   // count is what binds rather than the milliseconds, and 16 of them was
   // leaving the frontier short at 555 m/s.
-  world.chunksPerFrame = game.jet ? (speed > 140 ? 48 : 16) : alt > 20 ? 8 : 2;
-  world.buildBudgetMs = game.jet ? (speed > 140 ? 11 : 9) : 7;
+  const jetLike = game.jet || (airFlier()?.speed ?? 0) > 30;
+  world.chunksPerFrame = jetLike ? (speed > 140 ? 48 : 16) : alt > 20 ? 8 : 2;
+  world.buildBudgetMs = jetLike ? (speed > 140 ? 11 : 9) : 7;
   // in the air throughput wins over smoothness — the world must exist under a
   // 200 m/s jet; on the ground a short cooldown between chunk STARTS keeps
   // build work from monopolising every frame (each build is now sliced over
@@ -2324,8 +2356,11 @@ function updateHorizon(dt) {
   // the window's edge dissolves into it instead (sky.js OPEN_*, heightfog.js
   // setFarEdge). Never in the air (its rings are its own) or in Prague, which
   // has its own far skyline and far ground (js/landmarksfar.js).
+  // (an island, js/regions.js, is always open: Morne Seychellois stands over
+  // every street in Victoria, and fogging it out at the edge of town was a
+  // town with no mountain behind it)
   const farK = flier || praha || gs.farLand === false ? 0
-    : Math.min(1, Math.max(0, (open - 0.55) / 0.4));
+    : region().sea ? 1 : Math.min(1, Math.max(0, (open - 0.55) / 0.4));
   // (eased: openness eases by itself, but crossing into Prague's skyline or
   // taking off switches farK at once, and the wall would jump kilometres; a
   // teleport takes the new value at once, there is nothing to ease from)
@@ -2336,7 +2371,7 @@ function updateHorizon(dt) {
   if (Math.abs(fogWant - _fogOpen) < 1e-3) _fogOpen = fogWant;
   sky.fogOpen = _fogOpen;
   const farOn = sky.fogOpen > 0.001;
-  if (farTerrain) farTerrain.photos = gs.ortho !== false;
+  if (farTerrain) farTerrain.photos = gs.ortho !== false && region().ortho;
   farTerrain?.update(eye.x, eye.z, farOn, renderer, fogWant > 0);
   const er = world.edgeR ?? radius;
   _farEdge[0] = world.edgeX ?? eye.x; _farEdge[1] = world.edgeZ ?? eye.z; _farEdge[2] = er - 200; _farEdge[3] = er - 20;
@@ -2499,7 +2534,7 @@ async function initNavigation(city) {
       import('./place.js'), import('./navigation.js'), import('./navline.js'),
     ]);
     placeFinder = new PlaceFinder(city);
-    navigation = new Navigation(city, { overview: 'data/overview.json' });   // (a far pin: js/coarseroute.js)
+    navigation = new Navigation(city, { overview: dataUrl('overview.json') });   // (a far pin: js/coarseroute.js)
     navLine = new NavLine(scene);
   } catch (err) {
     console.warn('navigation unavailable:', err.message);
@@ -3153,17 +3188,22 @@ async function boot() {
   // Where: the save, or the square of the city the menu shows (career.js
   // startPoint). Only THAT place's tiles are asked for, so a Prague game no
   // longer loads (and pins) six Pardubice tiles first.
-  let sp = career.startPoint();
+  // (another region, js/regions.js: its own manifest, the hand-over's pose
+  // after a flight, and no Pardubice to fall back to)
+  let sp = regionStartPoint(career.startPoint);
   const label0 = $id('enter-label');
-  if (label0) label0.textContent = arriveText(sp.place);
-  let city = await loadCity('data/manifest.json').catch(() => null);
+  if (label0) label0.textContent = arriveLine(sp, arriveText);
+  if (!region().czech) document.title = 'Among The City: ' + region().name;
+  let city = await loadCity(manifestUrl()).catch(() => null);
   if (city) {
     await city.ensureTiles(sp.x, sp.z);
     const cell = city.chunkIndex.get(chunkKey(sp.x, sp.z));
     // (a saved spot in open country may have no road in its cell; a start
     // square always has, and is what tells a manifest that is still filling)
-    if (!cell || (!sp.saved && !cell.roads.length)) city = null; // manifest too young: legacy
+    if (legacyFallback() && (!cell || (!sp.saved && !cell.roads.length))) city = null; // manifest too young: legacy
   }
+  if (!city && !legacyFallback())
+    throw new Error('Data ostrova ' + region().name + ' se nepodařilo načíst. Obnov stránku pro další pokus.');
   // the legacy single file is Pardubice: whatever was picked, it starts there
   let legacy = false;
   if (!city && career.activeStory() && career.activeStory() !== 'done')
@@ -3183,6 +3223,13 @@ async function boot() {
   setStoreCity(city);
   world = new CityWorld(scene, city);
   world.stationPassages = new StationPassages(scene,world);
+  // the airport (the terminal near set, the airliner and the trip) answers world.airport
+  // (the region is this page's world; `enter` is the page switch the cruise ends with)
+  airport = airportLife({ scene, world, player: () => player, map: () => worldMap, sky: () => sky, wallet, coop: () => !!net,
+    storyBusy: () => !!(journey || meeting || heist || storyOver),
+    region: { id: regionId(), mahe: REGIONS.mahe.airport, enter: enterRegion } });
+  // a flight that was in the air when the page switched: the passenger is back in 14A on final
+  if (arrival()?.carry?.flight) airport.resume(arrival().carry.flight);
   // the chain stores: glass, doors, fittings, people and shopping near the player
   world.stores = new StoreWorld(scene, world, {
     wallet, vitals, wanted, toast: policeToast, storage: globalThis.localStorage ?? null,
@@ -3205,6 +3252,11 @@ async function boot() {
   lightPools = new LightPools(scene);
   farSkyline = new FarSkyline(scene, world);
   farTerrain = new FarTerrain(scene, world.terrain);
+  // (an island region: the ocean to the horizon, coloured by its lagoon map)
+  regionSea = region().sea ? new Sea(scene) : null;
+  // Mahé's own pieces, loaded only there (a Czech page never fetches this code)
+  if (region().id === 'mahe') import('./mahe/island.js').then((m) => m.initIsland({ scene, world }))
+    .then((i) => { island = i; }).catch((e) => console.warn('[mahe] island extras', e));
   farLandLights = new FarLandLights(scene, world.terrain);
   // The uid is passed EXPLICITLY even though Player defaults to localUid(),
   // because it is the whole identity contract in one line: this same string
@@ -3325,6 +3377,9 @@ async function boot() {
   cyclists = new Cyclists(scene, city, world.footing ?? world.terrain, { peds, traffic, parked,
     playerCar: () => game.car, walker: () => (game.car || game.heli || game.jet ? null : player.pos) });
   cyclists.max = getSettings().peds ?? 34;
+  // (their riding line is drawn at the right-hand kerb; Mahé keeps left and its
+  // hill roads see few bicycles, so another region has none until it is mirrored)
+  if (!region().czech) cyclists.enabled = false;
   // hit sounds ride the ragdoll callbacks: a scream at the point of impact,
   // attenuated by distance like the debris audio. The gender used to be
   // `Math.random() < 0.5` PER SCREAM, so one victim could scream as a man and
@@ -3448,7 +3503,8 @@ async function boot() {
   parkingLots = new ParkingLots(city, vehicles, world, parked);
   input.rpgMode = true;   // right-drag orbits the camera
   input.mouseLook = true; // locked pointer steers it too (settings can disable)
-  orthoMgr = initOrtho(world.terrain);   // the photo lies ON the ground now
+  // (ČÚZK photographs Czechia only: another region's ground is drawn from its classes)
+  orthoMgr = region().ortho ? initOrtho(world.terrain) : null;   // the photo lies ON the ground now
   // initSettings moved to start(): the gear must exist while the MENU is up,
   // before boot ever runs — boot only re-applies the loaded values to the
   // freshly built world.
@@ -3482,7 +3538,7 @@ async function boot() {
         for (let i = 0; i < 6; i++) world.update(1 / 60, player.pos);
         if (label && (warmFrames & 7) === 0) {
           const { built, total } = world.bootProgress(player.pos);
-          label.textContent = `${arriveText(sp.place)} ${Math.min(99, Math.round(built / total * 100))} %`;
+          label.textContent = `${arriveLine(sp, arriveText)} ${Math.min(99, Math.round(built / total * 100))} %`;
         }
         if (world.readyFull(player.pos) || ++warmFrames > 1500) resolve();
         else setTimeout(warm, 0); // setTimeout, not rAF — hidden tabs still boot
@@ -3507,7 +3563,9 @@ async function boot() {
       if (t.includes('Vystupte')) sfxOr('voice_police_out', null, 0.9);   // the one order that is recorded
     },
     onArrest: () => busted(), onTackle: () => tackled() });
-  ambulance = new Ambulance({ traffic, vehicles, city, scene, peds, hospital: HOSPITAL, hospitals: HOSPITALS });
+  // (another region's own hospitals, js/regions.js: Pardubice is 7 800 km from Mahé)
+  ambulance = new Ambulance({ traffic, vehicles, city, scene, peds,
+    hospital: region().hospitals?.[0] ?? HOSPITAL, hospitals: region().hospitals ?? HOSPITALS });
   // Speeding past the police and running a red under their noses: one star
   // (Frank, 21 Nov 2026). It reads the traffic's edges and lights and writes
   // only your own heat.
@@ -3794,6 +3852,7 @@ function stepGame(dt) {
   world.stationPassages.advanceEscalator(dt,player);
   journey?.update(dt, !!(game.car || game.heli || game.jet || trains?.riding), vasekCar);
   if (journey?.finished) { journey.dispose(); journey = null; }
+  airport?.update(dt, sky?.nightK ?? 0);
   pumpStoryOver(dt);
   pumpArrest(dt);
   carjack?.update(dt, player.pos.x, player.pos.z);
@@ -3895,7 +3954,8 @@ function stepGame(dt) {
     // car as it is, in metres per second; nothing here divides by a top speed.
     carDrive(dt, game.car, engineLoad(game.car, gas), gas, input.keys.has('Space'), world.city);
     if (shouldEject(game.car)) ejectDriver(game.car);
-  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt) && !heist?.posePlayer(dt) && !trains?.posePlayer(dt)) {
+  } else if (!journey?.posePlayer(dt) && !meeting?.posePlayer?.(dt) && !heist?.posePlayer(dt) && !trains?.posePlayer(dt)
+      && !flightNow()?.posePlayer(dt)) {
     if (!world.stores?.posePlayer(dt, player)) player.update(dt, { input, camYaw, world });
   }
   {
@@ -3988,6 +4048,8 @@ function stepGame(dt) {
   weapons?.update(dt, { cars: _blastList(), peds });
   updateAim(dt);
   clouds?.update(dt, camera, sky?.sunDir, sky?.nightK ?? 0);
+  regionSea?.update(dt, camera.position, sky, scene.fog);
+  island?.update(dt);
   // …and the water off the same two numbers. One shared material for every
   // river in the world, so this is one assignment a frame, not one per chunk.
   // Without it the shader falls back to the constants it was born with and the
@@ -4315,9 +4377,11 @@ function installEventHandler() {
   // people in the room do not all reply to one arrival with a 15 KB snapshot.
   CityNetWS.onPeer((m) => {
     if (m?.event !== 'join' || CityNetWS.role !== 'host') return;
-    if (world?.hitLog?.length) CityNetWS.sendSnap(world.hitLog);
+    // (the wreckage of the Czech world only: a snapshot carries no region, so
+    // an authority on Mahé keeps its own, and a page on Mahé applies none)
+    if (world?.hitLog?.length && region().czech) CityNetWS.sendSnap(world.hitLog);
   });
-  CityNetWS.onSnap((snap) => { world?.applyHits?.(snap); });
+  CityNetWS.onSnap((snap) => { if (region().czech) world?.applyHits?.(snap); });
 }
 
 function onNetEvent(ev) {
@@ -4407,7 +4471,8 @@ async function start() {
     music.volume = getSettings().volume ?? 0.8;
     music.play().catch(() => {}); // Audio availability never blocks entering the city.
   };
-  const choice = await showMenu(playLoadingMusic);
+  // (a flight from another region lands in play: the menu was answered there)
+  const choice = arrivalChoice() ?? await showMenu(playLoadingMusic);
   ui.setSelf({ name: choice.name || getPlayerName(), uid: localUid() });
   if (choice.mode === 'server') {
     try {
@@ -4455,6 +4520,8 @@ async function start() {
   // co-op: the saved hour was dropped (and overwritten with none) and an owned
   // fleet car came back as a second car on top of the original.
   career.choose({ ...choice, mode: net ? 'server' : 'single' });
+  // what a crossing to another region carries (js/regions.js enterRegion)
+  setCarryHook(() => ({ ...career.live(), name: getPlayerName() }));
   if (net) shareWorld();     // co-op: traffic, crowd and police are everybody's (js/worldsettings.js)
   const chapter = career.activeStory();
   const opening = chapter && chapter !== 'done';
@@ -4538,6 +4605,8 @@ window.__atc = {
   get journey() { return journey; },
   get meeting() { return meeting; },
   get heist() { return heist; },
+  // the terminal, the airliner and the trip (js/flight-life.js)
+  get airport() { return airport; },
   game, input, renderer, scene, camera, stepGame,
   fps: 0, frameMs: 0,
   // `cabin` is the graft's live truth, not a copy of fpView: a harness can

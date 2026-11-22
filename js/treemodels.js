@@ -364,9 +364,84 @@ export function shrubModel(variant) {
   return S.finish(0.6);
 }
 
+// A coconut palm (Mahé, js/regions.js): a long grey stem that bows as it
+// climbs, a knot of green nuts under the crown, and a dozen pinnate fronds
+// arching out and down from the top. The fronds are ribbons, not lobes: a V
+// of leaflets hanging either side of the midrib, two-sided because a palm is
+// mostly seen from under it. They are built on the wood path (Soup.tube's
+// arrays) and handed to the shader as FOLIAGE afterwards, so they take the
+// crown colour and the leaf lighting like any other leaves.
+function palm(variant) {
+  const sp = SP.PALM, rand = rng(7717 + 41 * variant), S = new Soup(-groundOf(sp)), yg = S.yg;
+  const bow = 0.18 + rand() * 0.16, ba = rand() * 6.283;       // where the stem leans
+  const top = [Math.cos(ba) * bow, 0.02, Math.sin(ba) * bow];
+  // the nuts first: they are lobes, and lobes come before anything on the wood path
+  for (let i = 0; i < 5; i++) {
+    const a = rand() * 6.283, d = 0.045 + rand() * 0.03;
+    S.lobe(top[0] + Math.cos(a) * d, -0.16 - rand() * 0.06, top[2] + Math.sin(a) * d, 0.045, 0.10, 0.045, 1, rand, 0.04);
+  }
+  const frondFrom = S.nor.length / 3;
+  const n = 11 + Math.floor(rand() * 3), a0 = rand() * 6.283;
+  for (let f = 0; f < n; f++) {
+    const a = a0 + (f + (rand() - 0.5) * 0.5) / n * 6.283, ca = Math.cos(a), sa = Math.sin(a);
+    const len = 0.92 + rand() * 0.14, rise = 0.25 + rand() * 0.35;   // the young ones stand up
+    const droop = 0.55 + rand() * 0.55, w = 0.10 + rand() * 0.03;
+    const SEG = 8, rows = [];
+    for (let k = 0; k <= SEG; k++) {
+      const t = k / SEG, r = t * len;
+      const y = top[1] + rise * Math.sin(Math.PI * t * 0.8) - droop * t * t;
+      const hw = w * Math.sin(Math.PI * Math.min(1, t * 1.15)) * (1 - 0.3 * t);   // narrow at both ends
+      const cx = top[0] + ca * r, cz = top[2] + sa * r;
+      // leaflets hang either side of the rib: the edges sit lower than the middle
+      rows.push([[cx - sa * hw, y - hw * 0.9, cz + ca * hw], [cx, y, cz], [cx + sa * hw, y - hw * 0.9, cz - ca * hw]]);
+    }
+    const base = S.pos.length / 3;
+    for (let k = 0; k <= SEG; k++) {
+      const p = rows[k], q = rows[Math.min(SEG, k + 1)], o = rows[Math.max(0, k - 1)];
+      const tx = q[1][0] - o[1][0], ty = q[1][1] - o[1][1], tz = q[1][2] - o[1][2];
+      for (let side = 0; side < 2; side++) {      // two faces, each with its own normal
+        for (let c = 0; c < 3; c++) {
+          const v = p[c];
+          const ax = p[2][0] - p[0][0], ay = p[2][1] - p[0][1], az = p[2][2] - p[0][2];
+          let nx = ty * az - tz * ay, ny = tz * ax - tx * az, nz = tx * ay - ty * ax;
+          const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+          if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; }
+          if (side) { nx = -nx; ny = -ny; nz = -nz; }
+          S.pos.push(v[0], v[1], v[2]);
+          S.nor.push(nx, ny, nz); S.geo.push(nx, ny, nz);
+          const shade = side ? 0.62 : 0.92 - 0.25 * (k / SEG);
+          S.col.push(shade, shade, shade);
+          S.uv.push(Math.min(1, 0.35 + 0.65 * k / SEG), 1);
+        }
+      }
+    }
+    for (let k = 0; k < SEG; k++) for (let c = 0; c < 2; c++) {
+      const A = base + k * 6 + c, B = A + 1, C = A + 6, D = C + 1;
+      S.idx.push(A, C, B, B, C, D);                            // upper face
+      S.idx.push(A + 3, B + 3, C + 3, B + 3, D + 3, C + 3);    // under face, the other winding
+    }
+  }
+  const frondTo = S.nor.length / 3;
+  // the stem: ringed grey, thickest at the foot, bowing out under the crown
+  const bark = lin(SPECIES[sp].bark), foot = bark.map((c) => c * 0.82), tau = SPECIES[sp].tau;
+  const pts = [];
+  for (let k = 0; k <= 8; k++) {
+    const t = k / 8, bend = t * t;
+    pts.push([top[0] * bend, yg - 0.05 + (top[1] - 0.12 - yg + 0.05) * t, top[2] * bend,
+      tau * (k === 0 ? 1.6 : 1.15 - 0.35 * t)]);
+  }
+  S.tube(pts, 7, foot, bark);
+  const g = S.finish(0.55);
+  // the fronds back to foliage: leaf lighting, the instance's crown colour
+  const uv = g.getAttribute('uv'), woodAt = g.getAttribute('position').count - S.nor.length / 3;
+  for (let i = frondFrom; i < frondTo; i++) uv.setY(woodAt + i, 1);
+  return g;
+}
+
 /** The near model of a species: 0 or 1 for the two builds of it. Cached by the caller. */
 export function nearModel(sp, variant) {
   if (BROAD[sp]) return broadleaf(sp, variant);
+  if (sp === SP.PALM) return palm(variant);
   if (sp === SP.WILLOW) return willow(variant);
   if (sp === SP.POPLAR) return poplar(variant);
   if (sp === SP.BIRCH) return birch(variant);
