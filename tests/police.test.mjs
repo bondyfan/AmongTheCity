@@ -327,3 +327,50 @@ test('no stars, no police: everything goes away', () => {
   assert.equal(R.pol.units.length, 0);
   assert.equal(R.pol.officers.out.length, 0);
 });
+
+// Review, 25 Nov 2026: a two-man unit parks, one officer is killed (a fist,
+// js/copfists.js, or a car), his partner walks back and gets in. The car used
+// to read that as nobody left to drive: it went silent, `dead`, and stood
+// there with the partner inside until you were far away. The survivor drives
+// off and rejoins, and the next time it stops he gets out again.
+test('a unit that lost one of two men drives off with the other, and puts him out again', async () => {
+  const { CopTargets, copBody } = await import('../js/copfists.js');
+  vitals.reset();
+  const R = rig({ stars: 2, seed: 4 });
+  cruise(R, 12, 30);
+  R.me.speed = 0;
+  const O = R.pol.officers;
+  let u = null;
+  for (let i = 0; i < 60 * 40 && !u; i++) {
+    R.step(0, true);
+    const crew = O.out.filter((r) => r.state !== 'down');
+    if (crew.length >= 2 && crew[0].unit === crew[1].unit) u = crew[0].unit;
+  }
+  assert.ok(u, 'no two-man crew got out');
+  const [a, b] = O.out.filter((r) => r.unit === u);
+  // A is punched dead
+  const cops = new CopTargets(O);
+  cops.hurt(copBody(a), { dmg: 999 });
+  cops.react(copBody(a), 'dead', { hit: 'hitChest' }, R.me.x, R.me.z);
+  // B is called back to the car (as the chase would when you drive off)
+  O.recall(u);
+  let left = false, wentDead = false, siren = true;
+  for (let i = 0; i < 60 * 10 && !left; i++) {
+    R.step(0, true);
+    if (u.dead) wentDead = true;
+    if (u.car && u.car.siren === false) siren = false;
+    if (u.mode !== 'parked') left = true;
+  }
+  assert.equal(b.free, true, 'the partner never got back in');
+  assert.equal(wentDead, false, 'a car with a live man at the wheel was written off');
+  assert.equal(siren, true, 'the siren went quiet with a man still in the car');
+  assert.ok(left, `the car is still standing there (${u.mode})`);
+  // the chase goes on: the next time it stops by a man on foot, he gets out
+  let again = false;
+  for (let i = 0; i < 60 * 60 && !again; i++) {
+    R.step(0, true);
+    again = O.out.some((r) => r.unit === u && r.state !== 'down');
+  }
+  assert.ok(again, 'the survivor never got out again: the dead record blocked the deploy');
+  vitals.reset();
+});
