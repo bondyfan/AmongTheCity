@@ -5,13 +5,16 @@
 //   #limit-sign   the Czech B 20a disc left of the speed number, the limit of
 //                 the road under the wheels (js/roadlaw.js). Hidden on foot,
 //                 off the road for more than a few seconds, in the air.
-//   #speedo       .over while the shown speed is above the limit, .way while
-//                 it is more than 50 % above it (what the police charge).
+//   #speedo       .over (amber) while the shown speed is above the limit,
+//                 .way (red) only above the police threshold for this road,
+//                 the speed a patrol takes a star for (Frank, 25 Nov 2026:
+//                 "ať se to ukazuje červeně ... jenom když to opravdu platí na
+//                 ty policajty"; js/roadlaw.js policeLimit).
 //   #car-model    the model name at the foot of the block, under the fuel.
 //
 // It writes the DOM only when something it shows has changed: the speed class
 // can flip a few times a second, the rest a few times a drive.
-import { speeding } from './roadlaw.js';
+import { policeLimit } from './roadlaw.js';
 
 export function createLawHud(doc = globalThis.document) {
   const sign = doc?.getElementById('limit-sign');
@@ -20,8 +23,12 @@ export function createLawHud(doc = globalThis.document) {
   const model = doc?.getElementById('car-model');
   let lim = -1, tier = -1, name = null;
 
-  /** car: the car you drive or null; limit: km/h or 0; label: its model name. */
-  return function update(car, limit, label) {
+  /**
+   * car: the car you drive or null; limit: km/h or 0; label: its model name;
+   * threshold: km/h the police take a star above (roadLaw.threshold), the
+   * general table for this limit when not given.
+   */
+  return function update(car, limit, label, threshold) {
     const l = car && limit > 0 ? limit : 0;
     if (l !== lim) {
       lim = l;
@@ -32,7 +39,8 @@ export function createLawHud(doc = globalThis.document) {
       }
     }
     const kmh = car ? (car.vGround ?? Math.abs(car.speed ?? 0)) * 3.6 : 0;
-    const t = l <= 0 ? 0 : speeding(kmh, l) ? 2 : Math.round(kmh) > l ? 1 : 0;
+    const red = Number.isFinite(threshold) ? threshold : policeLimit(l);
+    const t = l <= 0 ? 0 : kmh > red ? 2 : Math.round(kmh) > l ? 1 : 0;
     if (t !== tier) {
       tier = t;
       speedo?.classList.toggle('over', t === 1);

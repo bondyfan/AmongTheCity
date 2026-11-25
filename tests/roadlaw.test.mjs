@@ -1,18 +1,20 @@
 // ---- road law: the limit sign, speeding and red lights in front of the police
 // Frank, 21 Nov 2026: the HUD shows the limit of the road, and police within
-// 50 m give one star for driving more than 50 % over it, or through a red.
+// 50 m give one star for speeding or for a red. The speed is his table of
+// 25 Nov 2026 (policeLimit): 30 -> 100, 50 -> 130, 90 -> 160, a motorway 90
+// over, every other limit min(2 x limit, 130).
 // js/roadlaw.js against a fake traffic graph and the real js/wanted.js.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as wanted from '../js/wanted.js';
 import {
-  RoadLaw, limitKmh, speeding, topUp, nearestLane, policeNear, STAR_CAP, WITNESS_R,
+  RoadLaw, limitKmh, speeding, policeLimit, topUp, nearestLane, policeNear, STAR_CAP, WITNESS_R,
 } from '../js/roadlaw.js';
 
 // A street running north from (0, 0) to (0, −200): two directed edges, one each way.
-function street(kmh = 50, w = 7) {
-  const road = { w, t: 'secondary' };
+function street(kmh = 50, w = 7, t = 'secondary') {
+  const road = { w, t };
   const n = { pts: [[0, 0], [0, -100], [0, -200]], speed: kmh / 3.6, road, len: 200, sig: null, sigStop: 0, sigPh: 0 };
   const s = { pts: [[0, -200], [0, -100], [0, 0]], speed: kmh / 3.6, road, len: 200, sig: null, sigStop: 0, sigPh: 0 };
   n.twin = s; s.twin = n;
@@ -44,12 +46,29 @@ test('the limit is the edge speed the AI drivers obey, in km/h', () => {
   assert.equal(limitKmh(null), 0);
 });
 
-test('more than 50 % OVER the limit: 75 in a 50 is not, 76 is', () => {
-  assert.equal(speeding(75, 50), false);
-  assert.equal(speeding(75.5, 50), true);
-  assert.equal(speeding(134, 90), false);
-  assert.equal(speeding(136, 90), true);
-  assert.equal(speeding(200, 0), false, 'no known limit, no offence');
+test('the police threshold is Frank\'s table', () => {
+  // the rows he named
+  assert.equal(policeLimit(30), 100);
+  assert.equal(policeLimit(50), 130);
+  assert.equal(policeLimit(90), 160);
+  // a motorway, read as 90 over its limit
+  assert.equal(policeLimit(130, true), 220);
+  assert.equal(policeLimit(110, true), 200);
+  // every other limit: double, or 130, whichever is less
+  for (const [lim, want] of [[20, 40], [40, 80], [60, 120], [70, 130], [80, 130], [100, 130], [110, 130], [130, 130]])
+    assert.equal(policeLimit(lim), want, `limit ${lim}`);
+  assert.equal(policeLimit(0), Infinity, 'no sign, no offence');
+  // strictly above
+  assert.equal(speeding(120, 50), false, '"Už pojedu 120, tak pořád nic ještě"');
+  assert.equal(speeding(130, 50), false);
+  assert.equal(speeding(131, 50), true);
+  assert.equal(speeding(100, 30), false);
+  assert.equal(speeding(101, 30), true);
+  assert.equal(speeding(160, 90), false);
+  assert.equal(speeding(161, 90), true);
+  assert.equal(speeding(200, 130, true), false);
+  assert.equal(speeding(221, 130, true), true);
+  assert.equal(speeding(500, 0), false);
 });
 
 test('a traffic offence tops the heat up to one star and never past it', () => {
@@ -80,17 +99,17 @@ test('the sign shows the road you are on, and goes once you are off roads for a 
   assert.equal(law.limit, 0, 'on foot there is no sign');
 });
 
-test('speeding past a patrol 40 m away is one star; 60 m away, or 75 in a 50, is none', () => {
+test('135 in a 50 past a patrol 40 m away is one star; 120, or a patrol 60 m away, is none', () => {
   wanted.reset();
   const { n, s } = street(50);
   const tr = world([n, s]);
   const law = new RoadLaw({ traffic: tr, wanted });
   tr.patrols.add({ x: 30, z: -70 });             // ~ off to the side as we pass
-  const fast = car(0, -10, 75);
-  drive(law, fast, 1.5);
-  assert.equal(wanted.stars(), 0, 'exactly 50 % over is not more than 50 % over');
-  const c = car(0, -10, 90);
-  drive(law, c, 1.5);
+  const fast = car(0, -10, 120);
+  drive(law, fast, 1.4);
+  assert.equal(wanted.stars(), 0, '"Už pojedu 120, tak pořád nic ještě"');
+  const c = car(0, -10, 135);
+  drive(law, c, 1.4);
   assert.equal(wanted.stars(), 1);
   assert.equal(wanted.lastCrime(), 'překročení rychlosti');
 
@@ -98,7 +117,7 @@ test('speeding past a patrol 40 m away is one star; 60 m away, or 75 in a 50, is
   const tr2 = world([n, s]);
   tr2.patrols.add({ x: 60, z: -40 });
   const law2 = new RoadLaw({ traffic: tr2, wanted });
-  drive(law2, car(0, -10, 90), 1.5);
+  drive(law2, car(0, -10, 135), 1.4);
   assert.equal(wanted.stars(), 0, 'the patrol is 60 m off: nobody saw it');
 });
 
@@ -108,7 +127,7 @@ test('speeding on and on in front of the police stays one star', () => {
   const tr = world([n, s]);
   const police = { units: [], officers: { out: [] } };
   const law = new RoadLaw({ traffic: tr, police, wanted });
-  const c = car(0, -10, 95);
+  const c = car(0, -10, 140);
   // an officer on foot keeps pace beside us the whole way
   police.officers.out.push({ x: 0, z: -10, state: 'chase' });
   for (let i = 0; i < 12; i++) {
@@ -162,6 +181,30 @@ test('braking late and stopping with the nose on the paint is not running the re
   assert.equal(wanted.stars(), 0);
 });
 
+test('on a motorway the sign knows it, and the threshold is 90 over', () => {
+  wanted.reset();
+  const { n, s } = street(130, 11, 'motorway');
+  const tr = world([n, s]);
+  const law = new RoadLaw({ traffic: tr, wanted });
+  drive(law, car(0, -10, 200), 0.3);
+  assert.equal(law.limit, 130);
+  assert.equal(law.motorway, true);
+  assert.equal(law.threshold, 220);
+  tr.patrols.add({ x: 15, z: -40 });
+  const slow = car(0, -10, 210);
+  drive(law, slow, 1);
+  assert.equal(wanted.stars(), 0, '210 at 130 on a motorway is not a star');
+  const fast = car(0, -10, 230);
+  drive(law, fast, 1);
+  assert.equal(wanted.stars(), 1, '230 at 130 on a motorway is');
+  // the same 130 on an ordinary road is the general rule: 130, so 135 counts
+  const plain = street(130);
+  const law2 = new RoadLaw({ traffic: world([plain.n, plain.s]), wanted });
+  drive(law2, car(0, -10, 100), 0.3);
+  assert.equal(law2.motorway, false);
+  assert.equal(law2.threshold, 130);
+});
+
 test('police near: patrols, pursuit units and officers on foot, not the fallen', () => {
   assert.equal(WITNESS_R, 50);
   assert.equal(policeNear(0, 0, 50, { patrols: new Set([{ x: 49, z: 0 }]) }, null), true);
@@ -169,4 +212,26 @@ test('police near: patrols, pursuit units and officers on foot, not the fallen',
   assert.equal(policeNear(0, 0, 50, null, { units: [{ car: { x: 0, z: 30 } }] }), true);
   assert.equal(policeNear(0, 0, 50, null, { officers: { out: [{ x: 3, z: 3, state: 'down' }] } }), false);
   assert.equal(policeNear(0, 0, 50, null, { officers: { out: [{ x: 3, z: 3, state: 'aim' }] } }), true);
+});
+
+// The HUD's speed goes red only where the police would take a star for it
+// (Frank, 25 Nov 2026: "jenom když to opravdu platí na ty policajty").
+test('the speed turns amber over the limit and red only past the police threshold', async () => {
+  const { createLawHud } = await import('../js/lawhud.js');
+  const el = () => {
+    const set = new Set();
+    return { set, textContent: '', firstElementChild: { textContent: '' },
+      classList: { toggle: (c, on) => (on ? set.add(c) : set.delete(c)) } };
+  };
+  const els = { 'limit-sign': el(), speedo: el(), 'car-model': el() };
+  const hud = createLawHud({ getElementById: (id) => els[id] });
+  const speedo = els.speedo.set;
+  const at = (kmh, limit, threshold) => { hud({ vGround: kmh / 3.6 }, limit, 'Škoda Octavia', threshold); return [...speedo].sort().join(','); };
+  assert.equal(at(45, 50), '');
+  assert.equal(at(80, 50), 'over', 'way over the limit but under the police line is amber');
+  assert.equal(at(120, 50), 'over');
+  assert.equal(at(135, 50), 'way', 'past 130 in a 50 is red');
+  assert.equal(at(210, 130, 220), 'over', 'on a motorway the line is the threshold given');
+  assert.equal(at(225, 130, 220), 'way');
+  assert.equal(els['car-model'].textContent, 'Škoda Octavia');
 });

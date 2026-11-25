@@ -277,7 +277,9 @@ export class Officers {
       r.body.group.rotation.set(-Math.PI / 2 * 0.96, h, 0, 'YXZ');
       r.body.group.position.y = r.y + 0.18;
     }
-    try { this.wanted?.add?.('srazeni'); } catch (e) { /* the HUD is not the street */ }
+    // run down for good: killing a policeman, three stars (js/wanted.js), and
+    // the police are their own witness (js/crimelaw.js `always`)
+    try { this.wanted?.add?.('zabiti_policisty'); } catch (e) { /* the HUD is not the street */ }
   }
 
   _step(r, dt, ctx, tier, car) {

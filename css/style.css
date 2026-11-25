@@ -27,8 +27,9 @@ body { font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-sele
 }
 #speedo #speed-num { font-size: 44px; font-weight: 800; letter-spacing: 1px; }
 #speedo small { font-size: 13px; margin-left: 5px; opacity: 0.75; }
-/* Over the limit the number warms; more than half as fast again (the police
-   take a star for that, js/roadlaw.js) it goes the HUD's red. */
+/* Over the limit the number warms; past the speed the police take a star for
+   on this road (js/roadlaw.js policeLimit, Frank's table of 25 Nov 2026) it
+   goes the HUD's red, and only then. */
 #speedo.over #speed-num { color: var(--sem-warn); }
 #speedo.way #speed-num { color: var(--sem-bad); }
 /* The limit: a Czech B 20a, the red-ringed white disc. No glass panel, like
@@ -628,6 +629,17 @@ html, body { overscroll-behavior: none; touch-action: none; }
 }
 #wanted .wt-star.off { animation: none; }
 #wanted .wt-star.off::after { animation: none; opacity: 0; }
+/* .lost: nobody has you and the search is running (js/wanted.js searching()).
+   The lit stars blink, hard on and off like a beacon rather than a breath, so
+   it can never be mistaken for the hunted throb; a minute of this without a
+   sighting and they go (Frank, 25 Nov 2026: "ať ta hvězdička bliká a do minuty
+   ať se ztratí"). Main.js only toggles the class. */
+#wanted.lost .wt-star.on::before { animation: wtBlink 0.9s steps(1, end) infinite; }
+#wanted.lost .wt-star.on::after { animation: none; opacity: 0; }
+@keyframes wtBlink {
+  0%   { opacity: 1; }
+  55%  { opacity: 0.18; }
+}
 
 /* ---- fuel ----
    Bottom right, one rail under the speedo: how fast you are going and how much
@@ -756,6 +768,9 @@ html, body { overscroll-behavior: none; touch-action: none; }
     animation: none;
     filter: drop-shadow(0 1px 2px rgba(0,0,0,0.9)) drop-shadow(0 0 10px rgba(255,138,122,0.95));
   }
+  /* …and the search without the blink: the lit stars dim and stay dim, so
+     "they have lost you" still reads at a glance. */
+  #wanted.lost .wt-star.on::before { animation: none; opacity: 0.45; }
 }
 @keyframes mnTickStill { 0%, 74% { opacity: 1; } 100% { opacity: 0; } }
 @keyframes wastedStill { from { opacity: 0; } to { opacity: 1; } }

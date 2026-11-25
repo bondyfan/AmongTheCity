@@ -63,6 +63,16 @@
 // from half a kilometre away, and a wanted level you cannot lose is worse than
 // one you lose too easily.
 //
+// SINCE 25 NOV 2026 A UNIT THAT SAYS IS BELIEVED BOTH WAYS. police.js runs a
+// real building test for every pursuit car about 4.5 times a second (its
+// _sight / _los, SEE_R 170 m) and its officers on foot report through their
+// unit. So a unit that publishes a boolean `sees` sees you when it says so
+// (out to LOCK_R) and also when it is within NEAR_R (22 m, police.js SEE_NEAR:
+// that close nothing is hidden), and NOT merely because it is within the
+// street radius: otherwise a car parked round the corner from you would hold
+// your stars solid through a wall, and turning a corner is how you lose them.
+// A unit that publishes nothing is judged by the radius alone, as before.
+//
 // THE COST OF THIS CHOICE, stated rather than hidden: standing inside a shop
 // with a patrol car outside the window counts as seen. The day something
 // publishes "the player is indoors", ctx.inside below turns that from a bug
@@ -101,44 +111,46 @@
 // (which is the truth). 0.4 s is comfortably over main.js's 50 ms step clamp
 // and comfortably under any two things a human does on purpose.
 //
-// ── THE DECAY IS SLOW BECAUSE THE POLICE ARE FAR ───────────────────────────
+// ── THE SEARCH: A STAR THAT BLINKS, AND A MINUTE TO GET AWAY ───────────────
 //
-// Measured on the real graph, patrol density near the player is about ONE slot
-// inside TRAFFIC.spawnR — which is 520 m (config.js:154). A car covering 520 m
-// of town at a realistic 12 m/s through junctions and lights is forty to sixty
-// seconds away from you before it has even been dispatched. So a heat that
-// bleeds off in ten seconds is not a lenient wanted system, it is a wanted
-// system with no police in it: the star clears before the first unit arrives
-// and the entire pursuit is dead code that nobody ever sees run.
+// Frank, 25 Nov 2026: "kdyz mě policajt honí, tak ať je tam ta hvězdička a vidí
+// mě, ale když mě nevidí, tak ať ta hvězdička bliká a do minuty ať se ztratí,
+// pokud do minuty mě ten policajt nenajde od té doby, co bliká ta hvězdička."
 //
-// Hence two separate brakes, and they multiply rather than overlap:
+// So the stars no longer wear off one at a time (the old decay, 28 s of calm
+// and then 34 s of hiding per star, is gone). They hold their level for as
+// long as the police are after you, and the only thing that takes them away is
+// a SEARCH that fails:
 //
-//   CALM = 28 s in which nothing bleeds AT ALL after your last crime. This is
-//   the dispatch window. It alone guarantees the unit has time to get near
-//   enough to latch `seen`, at which point decay stops for as long as it holds
-//   you.
+//   seen       some unit has eyes on you (the latch below, SEEN_HOLD after the
+//              last sighting). The stars are solid.
+//   searching  nobody has had you for SEEN_HOLD. The stars blink (main.js puts
+//              .lost on the HUD row) and the search clock runs from that moment.
+//   lost       LOST_T (60 s) of searching without a single sighting: clear().
+//              Every level the same, one star or five.
 //
-//   T_SHED = 34 s of NOT BEING SEEN per star. The rate is derived, not typed:
-//   each band's rate is (its width / T_SHED), so shedding the fifth star and
-//   shedding the first take about the same wall time even though the fifth band
-//   is nearly four times as wide. A single typed rate would have made five
-//   stars a twenty-minute sentence and one star a rounding error.
+// A sighting at any point makes them solid again and the next search starts
+// from zero. So does a fresh crime: add() is a REPORT (somebody saw it and
+// rang it in), which tells the police where you are just as an eye would, so it
+// holds the stars solid for SEEN_HOLD (`_heardAt`) without pretending a unit is
+// looking at you (seen() stays the eyes alone).
 //
-// What that buys, integrated against this file's own numbers, unseen throughout:
+// THE POLICE CAN STILL GET THERE. The old decay waited 28 s before bleeding at
+// all, because a patrol 520 m away needs 40 to 60 s to arrive. A search is a
+// full minute after the report's hold, which is the same window, and while you
+// are wanted js/police.js keeps drafting the patrols nearest to you: one that
+// turns into your street and sees you ends the search.
 //
-//     one punch (22)              wanted for 41.7 s
-//     one killing (52)            wanted for 90.9 s, two stars for the first 42.9
-//     hit and run (34 + 18)       two stars, 90.9 s
-//     four killings (208)         five stars, 219.3 s — over three minutes hiding
-//
-// Every one of those clears the 40–60 s a patrol needs to arrive, which is the
-// acceptance test that actually matters.
+// THE CLOCK RULES ARE UNCHANGED. Everything is an absolute deadline against
+// _now; the search ends at max(_seenAt, _heardAt) + LOST_T, which needs no
+// counter and cannot be ticked twice by three substeps.
 //
 // ── HYSTERESIS, AND WHAT IT IS REALLY PROTECTING ───────────────────────────
 //
 // A bare threshold makes the star ladder a knife edge, and heat spends most of
-// its life sitting on one: the last crime is what put it there and decay is
-// slow. A player at two stars trading punches sits at 45.4, 45.1, 44.9 → one
+// its life sitting on one: the last crime is what put it there. (Since the
+// search replaced the decay, heat only climbs and then clears, so the downward
+// half is idle; it is kept because the ladder is the one place that knows it.) A player at two stars trading punches sits at 45.4, 45.1, 44.9 → one
 // star, punches → 71 → two stars, decays → one star, over and over.
 //
 // The HUD flicker is the visible half of that and the cheap half. The
@@ -152,10 +164,10 @@
 // that it never reads as the meter being stuck.
 //
 // The same idea guards `seen` from the other direction. It is a LATCH, not an
-// instantaneous test: any qualifying unit stamps _seenAt = now + SEEN_HOLD (6 s),
-// so a patrol car weaving across the edge of SEE_R cannot chatter the decay on
-// and off at frame rate, and "they had eyes on me four seconds ago" correctly
-// still counts as not being clear yet.
+// instantaneous test: any qualifying unit stamps _seenAt = now + SEEN_HOLD (2 s),
+// so a patrol car weaving in and out of sight cannot make the stars flicker
+// between solid and blinking at frame rate, and "they had eyes on me a second
+// ago" correctly still counts as being seen.
 //
 // ── THE CLOCK ──────────────────────────────────────────────────────────────
 //
@@ -169,13 +181,13 @@
 // clock, alt-tabbing for two minutes would clear your wanted level while the
 // pursuit cars sat frozen in a hidden tab, and you would come back clean with
 // three police Octavias parked around you. On a stepped clock a frozen game
-// freezes the calm window, the sight latch and the decay together — the whole
-// state stops being consistent with itself, instead of half of it advancing.
+// freezes the sight latch and the search together: the whole state stops
+// being consistent with itself, instead of half of it advancing.
 //
 // update() is safe called several times per rendered frame (main.js clamps dt to
-// 50 ms and loops): decay is linear in dt so three partial steps integrate to
-// the same heat as one whole one, and every deadline is compared against the
-// same monotonic _now whichever substep asks.
+// 50 ms and loops): every deadline (the latch, the report, the end of the
+// search) is compared against the same monotonic _now whichever substep asks,
+// so three partial steps end the search exactly when one whole one would.
 //
 // ── DETERMINISM: NONE, ON PURPOSE ──────────────────────────────────────────
 //
@@ -247,6 +259,11 @@ const CRIMES = Object.freeze({
   // the caller tops the heat up to its cap rather than adding the full price
   rychlost: Object.freeze({ key: 'rychlost', heat: 26, noun: 'překročení rychlosti' }),
   cervena:  Object.freeze({ key: 'cervena',  heat: 26, noun: 'jízda na červenou' }),
+  // crimes against the police themselves (js/crimelaw.js: they always count,
+  // the police are the witness): two stars for laying hands on one, three for
+  // killing one, as in GTA
+  napadeni_policisty: Object.freeze({ key: 'napadeni_policisty', heat: 46, noun: 'napadení policisty' }),
+  zabiti_policisty:   Object.freeze({ key: 'zabiti_policisty',   heat: 80, noun: 'zabití policisty' }),
 });
 export { CRIMES };
 
@@ -294,16 +311,16 @@ const STAR_AT = Object.freeze([0, 18, 45, 80, 130, 200]);
 const HEAT_MAX = 260;
 
 const HYST = 0.18;        // a star is lost 18 % of its band BELOW where it was won
-const T_SHED = 34;        // s of not being seen to shed one star, any star
-const CALM = 28;          // s after a crime in which nothing decays at all
-const SEEN_HOLD = 6;      // s that one sighting keeps you "seen" for
+const SEEN_HOLD = 2;      // s that one sighting (or one report) keeps the stars solid
+const LOST_T = 60;        // s of searching without a sighting before the stars go
 const COINCIDE = 0.4;     // s — crimes this close together are one incident
 
 const SEE_R_FOOT = 62;    // m — see the street-grid argument in the header
 const SEE_R_CAR = 88;     // m — a car is bigger, louder, and on their road
 const INSIDE_K = 0.35;    // × the radius when ctx.inside says you are indoors
 const LOCK_R = 150;       // m — how far a unit's own `sees` flag is believed
-const SIGHT_HZ = 4;       // scans/s — SEEN_HOLD is 24 samples wide, so this is free
+const NEAR_R = 22;        // m, police.js SEE_NEAR: this close nothing is hidden
+const SIGHT_HZ = 4;       // scans/s: SEEN_HOLD is 8 samples wide, so nothing is missed
 const SIGHT_DT = 1 / SIGHT_HZ;
 
 // A single step is never more than main.js's 50 ms clamp. Anything past 0.25 s
@@ -312,26 +329,17 @@ const SIGHT_DT = 1 / SIGHT_HZ;
 // being an escape route.
 const DT_MAX = 0.25;
 
-// Derived once at load, never at runtime. Typed arrays so the two numbers the
-// per-frame path reads (RATE[_stars], DROP_AT[s]) are unboxed doubles rather
-// than a possibly-holey Array that V8 has to check the shape of every step.
+// Derived once at load, never at runtime: where each star would be lost again,
+// 18 % of its band below where it was won (see HYSTERESIS).
 const DROP_AT = new Float64Array(6);
-const RATE = new Float64Array(6);
-for (let s = 1; s <= 5; s++) {
-  const band = STAR_AT[s] - STAR_AT[s - 1];
-  DROP_AT[s] = STAR_AT[s] - HYST * band;
-  RATE[s] = band / T_SHED;
-}
-// At zero stars there is still residue to bleed; it bleeds at the first band's
-// rate, because that is the band it is in.
-RATE[0] = RATE[1];
+for (let s = 1; s <= 5; s++) DROP_AT[s] = STAR_AT[s] - HYST * (STAR_AT[s] - STAR_AT[s - 1]);
 
 // ---- state ---------------------------------------------------------------
 let _heat = 0;
 let _stars = 0;
 let _now = 0;             // this module's own stepped clock — see THE CLOCK
-let _calmAt = 0;          // deadline: no decay before this
 let _seenAt = 0;          // deadline: they had eyes on you until this
+let _heardAt = 0;         // deadline: a fresh report holds the stars solid until this
 let _scanAt = 0;          // deadline: next sight scan
 let _incAt = 0;           // deadline: the open incident closes at this
 let _incHeat = 0;         // the peak already charged inside the open incident
@@ -429,12 +437,11 @@ function eyes(u, px, pz, r2, lock2) {
   const dx = unitX(u) - px, dz = unitZ(u) - pz;
   const d2 = dx * dx + dz * dz;
   if (!(d2 >= 0)) return false;             // NaN from an unreadable unit
-  return d2 <= (u.sees ? lock2 : r2);
+  // a unit that ran its own sight test is believed (see the header, 25 Nov 2026)
+  if (typeof u.sees === 'boolean') return d2 <= NEAR_R * NEAR_R || (u.sees && d2 <= lock2);
+  return d2 <= r2;
 }
 
-// Scratch for the (amount, noun) pair add() resolves. Two module-level slots
-// rather than a returned object: add() is an event path and could afford the
-// literal, but two scalars are simpler than a record nobody else reads.
 let _rAmt = 0, _rNoun = '';
 
 /**
@@ -508,6 +515,19 @@ export function lastCrime() { return _crime; }
  *  for you, which is also why the scan is skipped in the 99 % case. */
 export function seen() { return _now < _seenAt; }
 
+/** True while you are wanted and nobody has you: the stars blink (main.js puts
+ *  .lost on #wanted) and the search runs out LOST_T after it began. */
+export function searching() {
+  return _stars > 0 && _now >= (_seenAt > _heardAt ? _seenAt : _heardAt);
+}
+
+/** Seconds the current search has left, LOST_T when none is running. */
+export function searchLeft() {
+  if (!searching()) return LOST_T;
+  const left = (_seenAt > _heardAt ? _seenAt : _heardAt) + LOST_T - _now;
+  return left > 0 ? left : 0;
+}
+
 /**
  * Raise the heat. `n` is the amount and `crime` the Czech noun for the HUD —
  * but see resolve(): a crime KEY in either position is looked up in CRIMES, so
@@ -543,9 +563,10 @@ export function add(n, crime) {
 
   _heat += amt;
   if (_heat > HEAT_MAX) _heat = HEAT_MAX;
-  // Every charge re-arms the dispatch window. An absolute deadline: nothing in
-  // this file counts down, so nothing here can rot if a frame is missed.
-  _calmAt = _now + CALM;
+  // Every charge is a REPORT: they know where you are, so the stars hold solid
+  // for SEEN_HOLD and the next search starts from zero after it. An absolute
+  // deadline: nothing in this file counts down, so nothing can rot.
+  _heardAt = _now + SEEN_HOLD;
   relevel();
   return amt;
 }
@@ -569,20 +590,17 @@ export function update(dt, ctx) {
   // SIGHT. Only while wanted: at zero stars there is no pursuit and nobody is
   // looking for you, so this whole branch — the only per-frame work in the
   // module — is skipped for almost the entire session. 4 Hz because SEEN_HOLD
-  // is six seconds wide; a sighting cannot fall between two samples.
+  // is two seconds wide; a sighting cannot fall between two samples.
   if (_stars > 0 && _now >= _scanAt) {
     _scanAt = _now + SIGHT_DT;
     if (anyEyesOn(c)) _seenAt = _now + SEEN_HOLD;
   }
 
-  // DECAY. Two absolute deadlines gate it and both must have passed: the
-  // dispatch window since your last crime, and the memory of the last sighting.
-  // The rate is the current band's own, so every star costs about T_SHED
-  // seconds of successful hiding regardless of which star it is.
-  if (_heat > 0 && _now >= _calmAt && _now >= _seenAt) {
-    _heat -= RATE[_stars] * step;
-    if (_heat < 0) _heat = 0;
-  }
+  // THE SEARCH. Nobody has had you (or heard of you) since max(_seenAt,
+  // _heardAt), the stars have been blinking since then, and LOST_T after it
+  // they have lost you: every star at once. A residue under the first star
+  // goes the same way.
+  if (_heat > 0 && _now >= (_seenAt > _heardAt ? _seenAt : _heardAt) + LOST_T) { clear(); return; }
   relevel();
 }
 
@@ -595,7 +613,7 @@ export function update(dt, ctx) {
 export function clear() {
   _heat = 0;
   _seenAt = 0;
-  _calmAt = 0;
+  _heardAt = 0;
   _incAt = 0;
   _incHeat = 0;
   _crime = '';
@@ -626,4 +644,4 @@ export function onStars(fn) { if (typeof fn === 'function') _starFns.push(fn); }
 // wants an object and `import * as wanted` and `import wanted from` should not be
 // a decision anybody has to get right. Every function above is module-level and
 // closes over nothing, so neither form can lose its binding.
-export default { CRIMES, heat, stars, frac, lastCrime, seen, add, update, clear, reset, onStars };
+export default { CRIMES, heat, stars, frac, lastCrime, seen, searching, searchLeft, add, update, clear, reset, onStars };
