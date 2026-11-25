@@ -2511,6 +2511,17 @@ async function initDev() {
         parked.push(car);
         ui_hint?.('🚗 ' + kind);
       },
+      // Money for testing paid things (the flight to Mahé). An ordinary
+      // earning: the HUD tickers it, the next autosave point keeps it, and in
+      // co-op it is this player's wallet only, as every wallet is. Refused at
+      // the menu, because the save is put into the game on its first step
+      // (career.js apply) and would replace whatever was given before it.
+      addMoney(n) {
+        if (game.mode !== 'play') return null;
+        wallet.earn(n, 'dev');
+        return wallet.money();
+      },
+      money: () => wallet.money(),
     };
     initDevMode(actions);
     // ?tp=x,z[,heading] — stand exactly where a report was filed. Every bug in
