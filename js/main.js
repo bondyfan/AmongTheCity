@@ -56,6 +56,8 @@ import { indexPumps, pumpAt as pumpAtForecourt } from './pumps.js';
 import * as statusbar from './statusbar.js';
 import { PRICE, pumpBrand, pumpPrice, kc2, kc } from './prices.js';
 import { Combat } from './combat.js';
+import { FightFx } from './fightfx.js';
+import { FightHud } from './fighthud.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
 import { RoadLaw } from './roadlaw.js';
@@ -363,12 +365,15 @@ const _vitCtx = { car: null, heli: null, jet: null, player: null, onFoot: true }
 // freezing mid-bounce. js/ejection.js decides when a crash is an ejection.
 let _ejCar = null, _ejT = 0;
 const _ejIdle = { gas: 0, steer: 0, brake: 0 };
-const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null };
+const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null, block: false, down: false };
 const _wntCtx = { x: 0, z: 0, onFoot: true, car: null, police: null };
 const _polCtx = { x: 0, z: 0, car: null, onFoot: true, y: NaN };
 let _stationT = 0;
 
 let combat = null;       // fists, and what falls out of people — js/combat.js
+let fightFx = null;      // a few drops of blood in the air (js/fightfx.js)
+let fightHud = null;     // the health bar over whoever you fight (js/fighthud.js)
+let _fightTold = false;  // the controls are named once, the first time the fists go up
 let police = null;       // the patrol that wants you — js/police.js
 let ambulance = null;    // and the one that comes for the body — js/ambulance.js
 let roadLaw = null;      // the limit of your road and the police who watch it: js/roadlaw.js
@@ -1923,8 +1928,20 @@ function combatInput(dt) {
   const onFoot = !game.car && !game.heli && !game.jet && !player.inCar && !trains?.riding;
   const pressed = input.takeLeftPressed();
   if (!onFoot) return;
-  if (pressed) combat.strike();
+  if (pressed) combat.strike('light');
+  // the first time the fists go up, say what the keys are (Czech: it is UI)
+  if (!_fightTold && combat.stance) {
+    _fightTold = true;
+    ui_hint('Boj: levé tlačítko úder (3× = kombinace), Q silný úder, V kryt, Shift konec');
+  }
 }
+// Q: the heavy punch, the hook straight away (GTA's alternate attack). An edge,
+// not a hold, so it rides input.onKey like the other one-shot keys.
+input.onKey('KeyQ', () => {
+  if (game.mode !== 'play' || !combat) return;
+  if (game.car || game.heli || game.jet || player.inCar || trains?.riding) return;
+  combat.strike('heavy');
+});
 
 // ---------- the stars ----------
 // Driven from here rather than from statusbar.js because the wanted level
@@ -3565,10 +3582,18 @@ async function boot() {
   });
 
   // ---- fists, and the people who mind ----
-  combat = new Combat({ peds, chatter, wallet, audio: { sfxAt } });
+  fightFx = new FightFx(scene);
+  fightHud = new FightHud(document);
+  // Every source a fist can find somebody in: the crowd, and the driver thrown
+  // out of a jacked car (each needs nearest() and hurt(); one without them is
+  // skipped). Blows on the player come back through vitals.damage.
+  combat = new Combat({ peds, targets: [peds, carjack], chatter, wallet, audio: { sfxAt },
+    vitals, fx: fightFx, hud: fightHud });
+  // the other players see your punches: the move goes to the room
+  combat.onSwing((m) => { if (net) queueEvent('fist', { m }); });
   // A landed punch and a killing one are two different crimes, and combat.js
   // is the only thing that can tell them apart.
-  combat.onCrime((kind, x, z) => {
+  combat.onCrime((kind, x, z, victim) => {
     wanted.add(kind);
     // Everyone nearby saw it. peds.panic is chained into chatter.bang in this
     // file already, so the shouting comes for free.
@@ -3803,6 +3828,7 @@ function tick(src) {
     } else {
       renderer.render(scene, camera);
     }
+    fightHud?.update(camera, combat?.now ?? 0, !!combat?.stance);
     if (window.__atc) {
       const ms = performance.now() - r0;
       window.__atc.frameMs += (ms - window.__atc.frameMs) * 0.1;
@@ -4169,7 +4195,11 @@ function stepGame(dt) {
   // should already know about when it runs two lines below.
   _cbtCtx.player = player; _cbtCtx.onFoot = _vitCtx.onFoot && !player.ragdoll;
   _cbtCtx.camYaw = camYaw; _cbtCtx.input = input;
+  // V (or the touch block button) holds the guard up; Ctrl is not used, Ctrl+W closes the tab
+  _cbtCtx.block = input.keys.has('KeyV') || !!input.touchBlock;
+  _cbtCtx.down = vitals.down();
   combat?.update(dt, _cbtCtx);
+  fightFx?.update(dt);
   const _eyes = game.car ?? player.pos;
   _wntCtx.x = _eyes.x; _wntCtx.z = _eyes.z;
   _wntCtx.onFoot = _vitCtx.onFoot; _wntCtx.car = game.car; _wntCtx.police = police;
@@ -4237,7 +4267,7 @@ function stepGame(dt) {
       }
     }
     net.update(dt, { scene, player, game, weapons, world, camera, trains,
-      cars: _crashList(), peds });
+      cars: _crashList(), peds, combat });
   }
 }
 
@@ -4651,6 +4681,8 @@ window.__atc = {
   // only ever two copies of the same module disagreeing.
   vitals, wallet, fuel, statusbar, wanted,
   get combat() { return combat; },
+  get fightFx() { return fightFx; },
+  get fightHud() { return fightHud; },
   get police() { return police; },
   get roadWorks() { return roadWorks; },
   get ambulance() { return ambulance; },

@@ -2587,10 +2587,10 @@ frame with the lofted figures and 5.2 ms with people; Václavské náměstí 7.4
 and 5.6. A showroom crowd of 24 costs 1.45 ms near and 0.69 ms far.
 
 Not done: the driver drawn behind a car's glass is still the shader's own
-(`js/carglass.js`); nobody's lips move when they speak; the Quaternius
-Universal Animation Library (CC0, downloaded with the sources) is not wired
-in, so jumping, punching, aiming and getting up are still the game's own poses
-carried onto the new bodies.
+(`js/carglass.js`); nobody's lips move when they speak. Of the Quaternius
+Universal Animation Library (CC0, downloaded with the sources) only the fight
+is wired in (`fight.bin`, see the fist fights below); jumping, aiming and the
+ragdoll's getting up are still the game's own poses carried onto the new bodies.
 
 ## Chain stores and fast food as they stand in Czechia (js/stores/, Nov 2026)
 
@@ -3268,3 +3268,70 @@ Frank: "na každej vlak si musím koupit lístek ... vytáhnu mobil a tam si to 
   `reloadLast()`. The ride being ridden is not saved.
 * Harness: `__atc.tickets`, `__atc.phone`, `__atc.ticketScreen`. Tests:
   `tests/tickets.test.mjs`.
+
+## Fist fights like GTA 5 (js/combat.js, js/fight*.js, 25 Nov 2026)
+
+Frank, 25 Nov 2026: a left click "strčí, ale nebouchne to jako pěstí"; he
+wants GTA 5's fighting: a fight stance, real punches, sounds made with
+ElevenLabs, a little blood, and the health of the person you hit.
+
+* **The punches are recordings.** `scripts/people/bake-fight.mjs` writes nine
+  clips of the Quaternius UAL 1 and 2 (CC0) into `public/assets/people/fight.bin`
+  (64 kB, the clips.bin format, skeleton family `ual`): Punch_Jab, Punch_Cross,
+  Melee_Hook and its recovery, Hit_Head, Hit_Chest, Hit_Knockback (the
+  knock-down), Death01 and LayToIdle (getting up). The manifest names the
+  file (`fightFile`) and the roles (`fightJab`, `hitBack`, `getUp`...);
+  `avatars.js` retargets each onto a Rocketbox body the first time it plays.
+  A baked clip now also keeps its travel as a vector (`tx`, `tz`).
+* **A layer, not a base** (`js/characters/actlayer.js`). `human.js act(role, t,
+  w, mask)` lays a one-off recording over whatever the body is doing, for the
+  next frame drawn (it lets go a quarter second after the last call unless
+  held): 'upper' (trunk, arms, head; the legs stay the walk's), 'full', or a
+  number, the legs' share. The mix is in FIGURE space: taking a punch's local
+  spine angle onto the walk's pelvis bent the trunk forward, and on a Biped the
+  thighs hang from the spine. `fist(w)` closes the hands (`fist.js`: every
+  finger chain curled toward the side the thumb is on, measured from the bind
+  pose); a fist was what made a shove into a punch.
+* **The moves** (`js/fightmoves.js`, pure): jab 12, cross 16, hook 32; three
+  presses in rhythm (within 0.45 s of the last swing ending, or pressed while
+  the fist is still out) are jab, cross, hook, and Q is the hook at once. The
+  damage window of each is the clip's own seconds, measured off the fist on a
+  Rocketbox body. The hook floors, so does any blow to 25 HP or less; nothing
+  left is death. A healthy man takes two knock-downs and dies on the sixth
+  punch of the rhythm.
+* **The player** (`js/combat.js`, `js/fightpose.js`): a swing is absolute
+  deadlines on the module's clock as before. Hitting, being hit or holding V
+  (block) puts the fists up for 4.5 s: the guard (first frame of the jab, the
+  recording's legs when standing), the body to the camera (`player.aimLock`).
+  Shift drops it. A block facing the punch takes 80 % of it. Targets come from
+  every source in `targets` (the crowd and `carjack`), each with nearest() and
+  hurt(); `onCrime(kind, x, z, victim)` names who was hit.
+* **The crowd** (`js/fightpeds.js`, `js/pedestrians.js`): a flinch is a recorded
+  snap over a walker who stays the crowd's. A blow with `ko: true` that floors a
+  modelled body makes pedestrians.js hand it over upright as `'ko'` (not a
+  ragdoll): the fall, two to four seconds on the ground, getting up, then away
+  or back at you; a death is laid out (`peds.corpse`, the recording held). Who
+  fights back is a pure function of pid and archetype (`fightsBack`: half the
+  men of thirty, few women, never the oldest); they become `'brawl'` (out of
+  the schedule, like `'held'`), square up, throw jabs and crosses (5 and 7) and
+  carry `p.brawl = true` (self-defence for the wanted rules). They give up when
+  hurt to 30, when you walk off, when you are gone, or ten seconds after you
+  last hit them. pedestrians.js has `takeOver`, `handBack`, `corpse`, `bloodAt`.
+* **Blood and bars**: `js/fightfx.js` is one Points object of 64 drops in the
+  air; the stains are pedestrians.js's (a blow may say `blood`: none for a
+  jab). `js/fighthud.js` floats a health bar over whoever you hit or who hits
+  you (fades 4 s after the last blow) and enlarges `#vitals` while the fists
+  are up.
+* **Sound**: twelve recordings by `scripts/gen-fight-audio.mjs` (ElevenLabs,
+  86 credits): `fight_swing_*`, `fight_punch_*`, `fight_punch_heavy`,
+  `fight_block`, `fight_grunt_m_*`, `fight_grunt_f_*`, through sfxAt, so the
+  game's volume applies (`js/fightsfx.js`).
+* **Co-op**: who you hit stays local (as being run over is). The room sees the
+  swing: `combat.onSwing` queues a `fist` event with the move, and `fs: 1` in
+  the state blob is the guard; `netcity.js` plays both on the peer's avatar.
+* Checked in game, muted: stance, jab, cross, hook knock-down with blood, the
+  lying body, the health bar over a brawler, his punch and the player's flinch,
+  the block (`.claude/boj-shots/` in the worktree, not in the repository).
+* Not done: kicking somebody on the ground, a dodge, police officers on foot as
+  targets, and the peer's punch moving the crowd on the other screens.
+
