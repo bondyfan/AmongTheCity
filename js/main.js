@@ -51,6 +51,8 @@ import { shouldEject, launchDamage, impactDamage } from './ejection.js';
 import { sameLevel } from './levelsep.js';
 import * as fuel from './fuel.js';
 import { retry, setHome, parkHome } from './story-retry.js';
+import { overCard, dueMove, dueLift, deathGoesTo } from './story-over.js';
+import { arrestCard, arrestStep, arrestLift, heldPose } from './arrest-card.js';
 import { straighten } from './garage.js';
 import { indexPumps, pumpAt as pumpAtForecourt } from './pumps.js';
 import * as statusbar from './statusbar.js';
@@ -265,18 +267,20 @@ async function journeyFactory() {
 // same black card and the same move a failure makes, to the start of the part
 // he chose. js/career.js keeps the save as it was until the replay's own end.
 async function replayCampaign(part) {
-  if (game.mode !== 'play' || net || storyOver || journey || meeting || heist || vitals.down()) return false;
+  // (not in handcuffs either: the arrest steps back to the last save, and would
+  // take the replay's money, tickets and jobs back with it a moment before it starts)
+  if (game.mode !== 'play' || net || storyOver || arrest || journey || meeting || heist || vitals.down()) return false;
   if (!career.canReplay(part)) return false;
   if (game.heli || game.jet) { ui_hint('Nejdřív přistaň a vystup'); return false; }
   if (part === 'part1') await journeyFactory();
-  if (storyOver || !career.canReplay(part)) return false;
+  if (storyOver || arrest || vitals.down() || !career.canReplay(part)) return false;
   const veil = document.createElement('div');
   veil.className = 'story-over';
   veil.innerHTML = '<div><strong></strong><span>Kampaň začíná znovu</span></div>';
   veil.querySelector('strong').textContent = part === 'part1' ? 'Poslední vlak · část 1' : 'Poslední vlak · část 2';
   document.body.append(veil);
   requestAnimationFrame(() => veil.classList.add('on'));
-  storyOver = { veil, t: 0, moved: false, replay: part };
+  storyOver = overCard({ veil, replay: part });
   return true;
 }
 window.addEventListener('atc:campaigns', (e) => {
@@ -302,14 +306,14 @@ function failStory(why) {
   document.body.append(veil);
   requestAnimationFrame(() => veil.classList.add('on'));
   retry.mark();            // he has seen its films: from now on T skips them
-  storyOver = { veil, t: 0, moved: false };
+  storyOver = overCard({ veil });
 }
 function pumpStoryOver(dt) {
   const o = storyOver;
   if (!o) return;
-  o.t += dt;
-  if (!o.moved && o.t > 1.4) {
-    o.moved = true;
+  // (js/story-over.js keeps the card's clock: a death UNDER the card, while the
+  // start is still being built, makes this move and its revive due again)
+  if (dueMove(o, dt, vitals.down())) {
     // part two has its own way back, and its own start when it is replayed
     const two = heist || o.replay === 'part2';
     if (!two) { journey?.dispose(); journey = null; meeting?.close?.(); meeting = null; }
@@ -332,7 +336,8 @@ function pumpStoryOver(dt) {
     crimeLaw?.clear();
     let at;
     if (heist) at = heist.rewind();
-    else if (o.replay) at = career.beginReplay(o.replay) ?? { x: player.pos.x, z: player.pos.z };
+    // (a replay begins once: a second move of the same card goes where the first went)
+    else if (o.replay) at = o.at ??= career.beginReplay(o.replay) ?? { x: player.pos.x, z: player.pos.z };
     else { career.restartStory(); at = career.startPoint(); }
     if (Number.isFinite(at.h) && (heist || o.replay === 'part2')) player.heading = at.h;
     player.pos.x = at.x; player.pos.z = at.z;
@@ -343,7 +348,7 @@ function pumpStoryOver(dt) {
   }
   // wait for the street to exist again (he may have died in Pardubice)
   const ready = o.moved && world.terrain.ready(player.pos.x, player.pos.z) && world.built.has(chunkKey(player.pos.x, player.pos.z));
-  if (o.moved && (heist || !journey) && (ready && o.t > 3.4 || o.t > 30)) {
+  if ((heist || !journey) && dueLift(o, ready)) {
     // (a replayed part two is made by the loop below, as it is after part one)
     if (!heist && o.replay !== 'part2' && career.activeStory() === 'bridge') journey = startJourney('bridge');
     o.veil.classList.remove('on');
@@ -1677,30 +1682,38 @@ function busted() {
   veil.className = 'busted-card';
   veil.innerHTML = '<div><strong>ZATČEN</strong><span></span></div>';
   document.body.append(veil);
-  arrest = { veil, t: 0, moved: false, shown: false };
+  arrest = arrestCard({ veil });
+}
+// Let go of him and take the card away: the campaign's restart, or a death on
+// his knees, owns the body from here.
+function dropArrest() {
+  if (!arrest) return;
+  arrest.veil.remove();
+  arrest = null;
+  player.held = null;
 }
 function pumpArrest(dt) {
   const o = arrest;
   if (!o) return;
-  o.t += dt;
-  if (!o.moved) player.held = Math.min(1, o.t / 0.9);
-  if (!o.shown && o.t > 1.0) { o.shown = true; o.veil.classList.add('on'); }
-  if (!o.moved && o.t > 3.4) {
-    o.moved = true;
-    const story = career.activeStory();
-    if ((story && story !== 'done') || heist) {
-      // the campaign has no save to go back to: it starts again
-      o.veil.remove(); arrest = null;
-      if (player.ragdoll) player.endRagdoll();
-      player.held = null;
-      failStory('busted');
-      return;
-    }
+  // (js/arrest-card.js keeps the card's clock, and lets go of a body that is
+  // down: SEJMUT overrides ZATČEN, the death handler owns him from there)
+  const story = career.activeStory();
+  const due = arrestStep(o, dt, { down: vitals.down(), story: !!((story && story !== 'done') || heist), card: !!storyOver });
+  if (due.drop) { dropArrest(); return; }
+  if (!o.moved) player.held = heldPose(o);
+  if (due.show) o.veil.classList.add('on');
+  if (due.restart) {
+    // the campaign has no save to go back to: it starts again
+    dropArrest();
+    if (player.ragdoll) player.endRagdoll();
+    failStory('busted');
+    return;
+  }
+  if (due.out) {
     o.veil.classList.add('out');
     o.veil.querySelector('span').textContent = 'Pokračuješ od posledního uložení';
   }
-  if (o.moved && !o.back && o.t > 4.3) {
-    o.back = true;
+  if (due.back) {
     if (player.ragdoll) player.endRagdoll();
     player.held = null;
     const at = career.reloadLast();
@@ -1714,7 +1727,7 @@ function pumpArrest(dt) {
   }
   if (!o.back) return;
   const ready = world.terrain.ready(player.pos.x, player.pos.z) && world.built.has(chunkKey(player.pos.x, player.pos.z));
-  if ((ready && o.t > 5.2) || o.t > 30) {
+  if (arrestLift(o, ready)) {
     o.veil.classList.remove('on', 'out');
     setTimeout(() => o.veil.remove(), 900);
     arrest = null;
@@ -1945,9 +1958,12 @@ function updateStationCars(x, z) {
 // or a story film that has the camera and the body. The campaign's journey,
 // meeting and heist objects live for the whole chapter, so it is the film
 // itself that is asked (their `filming`), never whether a story exists.
+// Seat 14A too: seated in the airliner, or shuffling to or from it, the
+// player has no car, heli or jet and reads as on foot (flight.js cabinBusy).
 // The hands are the UI's (fistsBusy): the big map or any panel owns the mouse.
 function fistsTaken() {
-  return !!(vitals.down() || arrest || storyOver || journey?.filming || meeting?.filming || heist?.filming);
+  return !!(vitals.down() || arrest || storyOver || journey?.filming || meeting?.filming || heist?.filming
+    || flightNow()?.cabinBusy);
 }
 function fistsBusy() {
   return !!(worldMap?.open || document.body.dataset.panelOpen);
@@ -3720,6 +3736,10 @@ async function boot() {
   // world keeps running underneath it and only INPUT is taken away.
   vitals.onDown((cause) => {
     statusbar.banner('SEJMUT', 'wasted');
+    // Shot on his knees: the death owns him, not the arrest (js/arrest-card.js).
+    // Else the arrest would step the down body back to the last save, and the
+    // hospital below would carry it off again and bill it on top.
+    dropArrest();
     // Let go of whatever you were in first. Writing player.pos while inCar is
     // still set is undone on the next frame — player.js mirrors the vehicle's
     // position onto you every step — and the car would go on being driven.
@@ -3756,12 +3776,19 @@ async function boot() {
     $id('speedo').classList.add('hidden');
     hideCarName();
     // In the campaign there is no hospital to wake up in: it starts again.
-    if ((startJourney && career.activeStory() && career.activeStory() !== 'done') || heist) {
-      setTimeout(() => { if (game.mode === 'play') failStory('death'); }, 2200);
+    // (js/story-over.js deathGoesTo: a replay's black card is the campaign too,
+    // though the save still says 'done' and part two is not made before it lifts)
+    const inStory = () => deathGoesTo({ chapter: career.activeStory(), journeys: !!startJourney, heist: !!heist, card: !!storyOver }) === 'story';
+    if (inStory()) {
+      // (still down: a death under the black card is already undone by then,
+      // and must not start the campaign over a second time once the card lifts)
+      setTimeout(() => { if (game.mode === 'play' && vitals.down()) failStory('death'); }, 2200);
       return;
     }
     setTimeout(() => {
       if (game.mode !== 'play') return;
+      // a campaign that came up meanwhile has its own way back: no bed, no fee
+      if (inStory()) { if (vitals.down()) failStory('death'); return; }
       player.endRagdoll();
       // the hospital of the city you fell in (config.js HOSPITALS)
       const hosp = nearestHospital(player.pos.x, player.pos.z);

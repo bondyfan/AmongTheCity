@@ -2191,6 +2191,25 @@ save has part one and not part two. Like part one it is played in one sitting:
 * **Failing** goes through main.js `failStory`: with a heist it shows
   `heist.failText(why)`, stands the player where `heist.rewind()` says (the
   villa's gate once reached, else Vašek's street) and plays on.
+* **The black card's clock** is `js/story-over.js` (`overCard`, `dueMove`,
+  `dueLift`; main.js `pumpStoryOver` only does what the move does). The body
+  goes back at 1.4 s, the card lifts once the start is built and 3.4 s have
+  passed, or after 30 s. `dueMove` is given `vitals.down()` every frame: a
+  death UNDER the card (he stands alive at the start while it is still being
+  built) puts the card back before its move, so he is moved and revived again
+  1 s later. Before 25 Nov 2026 that second death was dropped (`failStory`
+  returns while a card is up) and he stayed down until a reload. The death
+  handler's 2.2 s timer asks `vitals.down()` too, so a death the card already
+  undid starts nothing once the card has lifted. `tests/story-over.test.mjs`.
+* **Where a death goes** is `deathGoesTo` in the same file: `'story'` (the
+  2.2 s timer and `failStory`) for an unfinished chapter of part one, a
+  running part two, or a card that is up; else `'hospital'` (4 s, the fee).
+  The card counts on its own because a replay's card stands over a save that
+  still says `'done'`: part one's chapter begins at the card's move and part
+  two is made only after the lift, so a death there used to be carried to a
+  hospital and billed while the card had him alive at the start. The hospital
+  timer asks the rule again before it moves or bills him, and
+  `replayCampaign` does not raise a card over a body that is down.
 * **The balaclava** (`js/heist-mask.js`) hangs on `parts.headS`, a head socket
   added to the modelled human beside the two hand sockets.
 * **Sound**: `scripts/gen-heist-audio.mjs` (ElevenLabs, run only when asked).
@@ -2323,6 +2342,17 @@ hora) has something to stand on. Small modules round `js/player.js`:
   still (`onArrest`). main.js `busted()` kneels the player (`player.held`),
   shows ZATČEN and steps back to the last save (`career.reloadLast`); in the
   campaign, which is not saved, it is the campaign's own restart.
+  The card's clock is `js/arrest-card.js` (`arrestCard`, `arrestStep`,
+  `arrestLift`; `pumpArrest` only does what each step does). **SEJMUT
+  overrides ZATČEN**: a death on his knees (police gunfire does not ask about
+  handcuffs) drops the arrest at once, in the death handler (`dropArrest`) and
+  again in the clock, so the death owns the body: the hospital in free roam,
+  the restart in the campaign. Before 25 Nov 2026 the arrest ran on, stepped
+  the down body back to the last save, and the hospital then moved it again
+  and stacked its fee on the reset. A campaign replay is not raised during an
+  arrest (`replayCampaign` asks `arrest` before and after its await), and the
+  clock lets go if a campaign card is up in free roam all the same.
+  `tests/arrest-card.test.mjs`.
 * **Sounds**: `scripts/gen-move-audio.mjs` (ElevenLabs, run only when asked).
   Until the files exist `audio.sfxOr` plays the old door pair instead.
 * **Looking at it**: `dev/moves.html` stages one car and the player on a flat
@@ -3599,11 +3629,18 @@ ElevenLabs, a little blood, and the health of the person you hit.
   the arrest (below three stars) or the pistol. With no health left he is laid
   out as `'down'`, like a man run over. His record carries `hp`, `fist` and a
   `gen` (the pool hands the record to the next officer as a new man).
+  `policecops.js` remembers how many men each unit's car carries (`_crew`):
+  `allDown(u)` is the whole crew dead, not "every record still held is down"
+  (a partner back in the car is freed from the records, and that used to
+  write off a car with a live man at the wheel), `count(u)` is the live men
+  out, and `deploy()` puts out only the survivors. `police.js _maybeDeploy`
+  parks a unit only when somebody actually got out.
 * **When the fists stay down**: `ctx.down` (combat.js) is a player nobody can
   fight, and main.js's `fistsTaken()` sets it for SEJMUT, the ZATČEN card, the
-  chapter card and a story film (`journey/meeting/heist.filming`: those
-  objects live for the whole chapter, so it is the film that is asked);
-  brawlers let go. `ctx.hold` is hands that belong to the UI (`fistsBusy()`:
+  chapter card, a story film (`journey/meeting/heist.filming`: those
+  objects live for the whole chapter, so it is the film that is asked) and
+  seat 14A of the airliner (`flight.cabinBusy`: seated or on the way along
+  the row, the player has no car and read as on foot); brawlers let go. `ctx.hold` is hands that belong to the UI (`fistsBusy()`:
   the big map, any panel): no swing starts and no press is kept, but the street
   goes on. Left click and Q are both gated.
 * A brawler the fight lets go of loses `p.brawl` on every path out (getting up

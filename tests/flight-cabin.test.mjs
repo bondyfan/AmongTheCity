@@ -85,3 +85,36 @@ test('the crew stand in the door for somebody without a boarding pass, and let a
   const lx2 = (ok.x - pose.x) * c - (ok.z - pose.z) * s;
   assert.ok(lx2 > DOOR_L1.x - 0.3, 'a passenger walks in');
 });
+
+// Review, 25 Nov 2026: seated in 14A, or on the way along the row, the player
+// has no car, heli or jet, so main.js read him as on foot and a left click
+// threw a punch from the seat (and sent it to the other players). The cabin's
+// `busy` is what keeps the fists down (flight.js cabinBusy, main.js fistsTaken):
+// it has to hold from the first step along the row to the last one back.
+test('the seat has the body from the first shuffle to the aisle again, and the fists know it', async () => {
+  const seat = seatAt(14, 'A');
+  const aisle = world(-0.1, seat.z - 0.35);
+  const p = stubPlayer(aisle.x, aisle.z);
+  p.y = pose.y + AIRLINER.floorY;
+  const cab = cabinPassenger(p, '14A');
+  cab.setPose(pose, true, true, null, true);
+  assert.equal(cab.busy, false, 'standing in the aisle is not the seat');
+  assert.ok(cab.sit());
+  assert.equal(cab.busy, true, 'the shuffle along the row is free to punch from');
+  let free = 0;
+  for (let t = 0; t < 6 && !cab.seated; t += 1 / 30) { cab.posePlayer(1 / 30); if (!cab.busy) free++; }
+  assert.ok(cab.seated);
+  assert.equal(free, 0, 'a frame of the sit-down left the fists free');
+  assert.ok(cab.rise());
+  let steps = 0;
+  for (let t = 0; t < 8 && cab.busy; t += 1 / 30) { cab.posePlayer(1 / 30); steps++; }
+  assert.ok(steps > 3, 'standing up was over at once');
+  assert.equal(cab.busy, false, 'back in the aisle the fists stay down');
+  // the wiring: flight.js hands the cabin's state on, main.js reads it
+  const { readFileSync } = await import('node:fs');
+  const flight = readFileSync(new URL('../js/flight.js', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+  assert.match(flight, /get cabinBusy\(\)\s*\{\s*return cabin\.busy;/, 'flight.js does not expose the seat');
+  const gate = main.slice(main.indexOf('function fistsTaken()'), main.indexOf('function fistsBusy()'));
+  assert.match(gate, /flightNow\(\)\?\.cabinBusy/, 'main.js fistsTaken() does not ask about the seat');
+});
