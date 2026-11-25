@@ -2569,6 +2569,9 @@ async function initNavigation(city) {
     placeFinder = new PlaceFinder(city);
     navigation = new Navigation(city, { overview: dataUrl('overview.json') });   // (a far pin: js/coarseroute.js)
     navLine = new NavLine(scene);
+    // the two maps draw the same route, read from the same tracker
+    minimap?.setRoute?.(navigation);
+    worldMap?.setRoute?.(navigation);
   } catch (err) {
     console.warn('navigation unavailable:', err.message);
   }
@@ -2605,7 +2608,7 @@ function updateNavigation(dt) {
   // the line belongs on the road under a CAR — on foot it would just be litter
   if (navLine) {
     if (game.car && navigation.route) {
-      navLine.set(navigation.route);
+      navLine.set(navigation.route, navigation.routeOff);
       navLine.update(dt, player.pos.x, player.pos.z, world);
     } else navLine.clear();
   }
@@ -2989,9 +2992,18 @@ function updateHud(dt) {
         ? (d / 1000).toFixed(1) + ' km' : Math.round(d) + ' m';
     } else wpEl.classList.add('hidden');
   }
+  // the disc turns with the camera; the arrow shows the body (or the car)
+  // against it, and the zoom follows the speed
+  const ride = game.car ?? game.heli ?? null;
+  _mmOpts.body = ride ? ride.heading : player.heading;
+  _mmOpts.speed = game.car ? Math.abs(game.car.speed ?? 0)
+    : game.heli ? Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) : 0;
   minimap?.update(player.pos.x, player.pos.z, camYaw,
-    traffic ? [...traffic.cars] : [], peers);
+    traffic ? [...traffic.cars] : [], peers, _mmOpts);
 }
+
+// One reused options record for minimap.update (no per-frame allocation).
+const _mmOpts = { body: 0, speed: 0 };
 
 // The closest peer, as a waypoint-shaped {x, z}, or null. Returns a FRESH
 // object only when the target actually moved: minimap.setWaypoint keeps the
@@ -4724,6 +4736,7 @@ window.__atc = {
   get parked() { return parked; }, get peds() { return peds; }, get life() { return streetLife; },
   get cyclists() { return cyclists; },
   get trains() { return trains; }, get worldMap() { return worldMap; },
+  get navigation() { return navigation; }, get navLine() { return navLine; }, get minimap() { return minimap; },
   get tickets() { return tickets; }, get phone() { return phone; }, get ticketScreen() { return ticketScreen; },
   // multiplayer session (null in single player). net.onRemoteVehicle is wired
   // to the ghost fleet: a harness asserting "my friend is in a car" should ask

@@ -24,20 +24,39 @@ import { register } from 'node:module';
 
 register(new URL('./three-alias.mjs', import.meta.url));
 
-// navline needs a canvas for its flow texture and nothing else from the DOM,
-// and it wants it at import time.
+// navline paints its line texture on a canvas and needs nothing else from the
+// DOM: a context that accepts every call and draws nothing is enough.
+const ctx2d = new Proxy({}, {
+  get: (o, k) => (k in o ? o[k] : (o[k] = () => ({ addColorStop() {} }))),
+  set: (o, k, v) => { o[k] = v; return true; },
+});
 globalThis.document ??= {
-  createElement: () => ({
-    width: 0, height: 0,
-    getContext: () => ({
-      createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
-      putImageData() {},
-    }),
-  }),
+  createElement: () => ({ width: 0, height: 0, getContext: () => ctx2d }),
 };
 
 const { Navigation } = await import('../js/navigation.js');
 const { NavLine } = await import('../js/navline.js');
+const { navCut } = await import('../js/navribbon.js');
+
+// Every point of the ribbon the SHADER would light, sampled along each quad
+// the way the rasteriser interpolates (arclength and position are linear
+// across it), so a cut that only held at the vertices would be caught.
+function litPoints(nl, each) {
+  const a = nl._uA.value, b = nl._uB.value;
+  const A = [a.x, a.y, a.z, a.w], B = [b.x, b.y, b.z, b.w];
+  const pos = nl._pos, aS = nl._aS;
+  for (let k = 0; k < nl._m - 1; k++) {
+    for (let q = 0; q <= 10; q++) {
+      const t = q / 10;
+      const s = aS[k * 2] + (aS[k * 2 + 2] - aS[k * 2]) * t;
+      // the centre of the ribbon: the mean of its two edge vertices
+      const x0 = (pos[k * 6] + pos[k * 6 + 3]) / 2, z0 = (pos[k * 6 + 2] + pos[k * 6 + 5]) / 2;
+      const x1 = (pos[k * 6 + 6] + pos[k * 6 + 9]) / 2, z1 = (pos[k * 6 + 8] + pos[k * 6 + 11]) / 2;
+      const x = x0 + (x1 - x0) * t, z = z0 + (z1 - z0) * t;
+      if (navCut(s, x, z, A, B) > 0.02) each(x, z);
+    }
+  }
+}
 
 // ---- a oneway roundabout with the real defect in it ----------------------
 const N = 16, R = 12;
@@ -134,13 +153,9 @@ test('a route that doubles back never draws itself behind the car', () => {
   // creep along the OUTBOUND leg; the returning leg is the trap
   for (let x = 5; x <= 590; x += 5) {
     nl.update(0.016, x, 0, null);
-    worstJump = Math.max(worstJump, Math.abs(nl._s - x));
-    for (let k = 0; k < nl._m; k++) {
-      if (nl._col[k * 8 + 3] <= 0.02) continue;      // not lit
-      // travel is +x here, so anything with a smaller x is behind the car
-      const behind = x - nl._spx[k];
-      if (behind > worstBehind) worstBehind = behind;
-    }
+    worstJump = Math.max(worstJump, Math.abs(nl._st.s - x));
+    // travel is +x here, so anything with a smaller x is behind the car
+    litPoints(nl, (px) => { if (x - px > worstBehind) worstBehind = x - px; });
   }
   assert.ok(worstJump < 25, `tracker drifted ${worstJump.toFixed(0)} m from the car`);
   // NEAR_KEEP metres of route are deliberately never cut, whatever their
@@ -152,20 +167,34 @@ test('a route that doubles back never draws itself behind the car', () => {
 });
 
 test('the ribbon starts at the car, not at the window it was cut from', () => {
-  // the window is only re-cut every REBUILD metres; between cuts the alphas
-  // have to walk forward on their own, or the car drives past its own line
+  // the window is only re-cut every REBUILD metres; between cuts the cut has
+  // to ride the car on its own, or the car drives past its own line
   const route = [];
   for (let x = 0; x <= 1000; x += 10) route.push([x, 0]);
   const nl = new NavLine(null);
   nl.set(route);
   nl.setVisible(true);
-  let worstBehind = 0;
+  let worstBehind = -1e9;
   for (let x = 5; x <= 500; x += 1) {
     nl.update(0.016, x, 0, null);
-    for (let k = 0; k < nl._m; k++) {
-      if (nl._col[k * 8 + 3] <= 0.02) continue;
-      if (x - nl._spx[k] > worstBehind) worstBehind = x - nl._spx[k];
-    }
+    litPoints(nl, (px) => { if (x - px > worstBehind) worstBehind = x - px; });
   }
+  assert.ok(worstBehind <= 0.01, `${worstBehind.toFixed(1)} m of line behind the car`);
+});
+
+test('a straight street with vertices 200 m apart is not lit behind the car', () => {
+  // Frank's bug: OSM draws a straight street with few vertices, the old line
+  // faded per VERTEX, and the fade was smeared across the car, so the road
+  // behind it glowed. Per pixel, the vertex spacing cannot matter.
+  const route = [[0, 0], [200, 0], [400, 0], [600, 0]];
+  const nl = new NavLine(null);
+  nl.set(route);
+  nl.setVisible(true);
+  let worstBehind = -1e9, lit = 0;
+  for (let x = 3; x <= 420; x += 1.7) {
+    nl.update(0.016, x, 0, null);
+    litPoints(nl, (px) => { lit++; if (x - px > worstBehind) worstBehind = x - px; });
+  }
+  assert.ok(lit > 0, 'the line is drawn at all');
   assert.ok(worstBehind <= 0.01, `${worstBehind.toFixed(1)} m of line behind the car`);
 });

@@ -1,142 +1,105 @@
-// ---- NavLine: the GPS line painted on the road (v7) ----
-// The route from navigation.js is a polyline that can be sixty kilometres
-// long. Drawing all of it would be a quarter of a million triangles of ribbon
-// that nobody can see past the next corner, so this module draws a WINDOW: the
-// next ~400 m, rebuilt only once the car has eaten into it. A 40 km route and
-// a 400 m route therefore cost exactly the same to render, and the rebuild —
-// two hundred points of trigonometry — happens roughly once every two seconds
-// at motorway speed.
+// ---- NavLine: the satnav line painted on the road ---------------------------------
+// The route from navigation.js can be sixty kilometres long; what a driver
+// needs is the next few hundred metres, in his lane, starting at his bonnet.
+// So this draws a WINDOW of the route as a ribbon (js/navribbon.js does the
+// geometry) and rebuilds it only when the car has eaten into it.
 //
-// Nothing here allocates after construction. The buffers are cut once at their
-// maximum size and every rebuild overwrites them in place, moving the draw
-// range instead of making new geometry; the only per-frame work is one texture
-// offset and a windowed nearest-point scan.
+// What changed (Frank, 25 Nov 2026: "modrá, velká, tlustá čára, která si
+// zobrazuje trošku i za mnou"):
+//   · nothing behind the car, ever. The old line faded its near end per
+//     VERTEX, and OSM puts the vertices of a straight street up to a hundred
+//     metres apart, so the fade was smeared across the car and the line lit
+//     the road behind it. The cut is now per PIXEL: every vertex carries its
+//     arclength, the fragment shader compares it with the car's (a uniform
+//     written each frame), and the line begins a metre ahead of the car's
+//     centre with a short ramp. No buffer is touched between rebuilds.
+//   · in the lane, out of the car. The ribbon sits on the half of the road
+//     you drive on (navigation.routeOff, signed by the region's side) and its
+//     head bends onto where the car actually is.
+//   · thinner and quieter: 0.8 m instead of 1.8, a dark edge, a lit blue core
+//     and small chevrons flowing forward, with just enough over 1.0 for the
+//     bloom to give it a soft edge instead of a glare.
+//   · a returning leg (a route doubling back past you) is still cut once it
+//     is a different piece of road, now per pixel too.
 //
-// It sits at LAYER_Y.marking + 0.02 — above the tarmac AND above the painted
-// lane dashes, which is the whole vertical budget it gets. On a bridge the
-// deck is 0.85 m up, so the height comes from `world.surfaceY()` when the
-// caller passes a world: sampled per ribbon point at BUILD time, which is what
-// keeps the line on the Labe bridges instead of inside them.
+// Nothing allocates after construction: buffers are cut once at their maximum
+// size and rewritten in place; per frame it is a windowed nearest-point scan
+// and two uniforms.
 
 import * as THREE from 'three';
 import { LAYER_Y } from './config.js';
+import { laneSide } from './regions.js';
+import { routeCum, trackRoute, sliceAhead, offsetAt, pointAt } from './routeahead.js';
+import { buildRibbon, NAV_CUT_GLSL, BLEND_MAX } from './navribbon.js';
 
-const HALF = 0.9;             // ribbon half-width (m). The texture's soft rim eats
-                              // the outer ~0.15 m, so the painted line reads ~1.6 m
-                              // — a lane's worth, the way a real satnav overlay does
-const WINDOW = 400;           // m of route turned into geometry at a time
-const BEHIND = 8;             // …starting this far behind the car, so the ribbon
-                              // emerges from under it rather than at its bumper
-const REBUILD = 45;           // m of progress before the window is rebuilt. 400 m of
-                              // window minus 45 m of drift still leaves 350 m of line
-                              // ahead, which is further than the camera can see
-const MAX_PTS = 224;          // ribbon spine points (2 vertices each)
-const MIN_STEP = 3;           // m — OSM polylines can carry a point every 30 cm on a
-                              // curve; at 3 m a 1.8 m ribbon is still perfectly smooth
-const FADE_IN = 9;            // m of alpha ramp at the near end…
-const FADE_OUT = 55;          // …and at the far end, so the window's cut is invisible
-// The near end is measured from the CAR, not from the window, and it is
-// re-shaded every frame. The geometry can only afford to move once every
-// REBUILD metres, so a near-end fade baked in at build time meant the line
-// stayed put while the car drove into and then past it — up to 45 m of route
-// painted BEHIND the driver, which reads as "the satnav is showing me where I
-// have already been". Alpha is the one thing cheap enough to move per frame
-// (two floats per spine point, ~450 of them), so the line's head rides the car
-// while its geometry stays still.
-const SHADE_STEP = 0.4;       // m of travel before the alphas are rewritten
-// …and the second way a line ends up behind you, which has nothing to do with
-// the window moving. A route that doubles back — out of a dead end, round a
-// block, off and back on a dual carriageway — puts its RETURNING leg beside the
-// one you are on. That leg is ahead of you in driving terms and squarely behind
-// you in space, and 400 m of window is enough to draw a lot of it: measured
-// over five real cross-town routes, the ribbon was lit a median of 96 m behind
-// the car and as much as 272 m.
-//
-// So a vertex is also cut when it is physically behind — but ONLY once it is
-// far enough ahead along the route to be a different leg. Without that second
-// condition the rule would eat the near geometry it must never touch: on a
-// roundabout the far side of the ring is a few metres "behind" you the whole
-// way round, and that is the one place the line has to be legible.
-const NEAR_KEEP = 40;         // m of route that is never cut, whatever its bearing
-const BEHIND_FADE = 6;        // …then a returning leg fades out over this
-// Matching by nearest point alone cannot answer "where am I on this route" when
-// the route drives the SAME tarmac twice — up a street and back down it, out to
-// a roundabout and home again. Both passes lie on one centreline, so the car is
-// zero metres from each, and the tie went to whichever the loop happened to
-// reach last. Measured: at 982 m along a real route the tracker reported 1512 m,
-// a 530 m jump, and the ribbon then drew "the road ahead" of a place half a
-// kilometre away — which is how 215 m of line ended up behind the car.
-//
-// Continuity breaks the tie. A candidate pays for how far it sits from where we
-// were a frame ago, so the pass we are actually on wins by default and the other
-// one has to be dramatically nearer to take over. The penalty is capped, or a
-// genuine re-match after a teleport or a re-route could never happen.
-const CONT_K = 0.05;          // metres of penalty per metre of discontinuity
-const CONT_MAX = 600;         // …counted no further than this
-const TILE_V = 6;             // m of route per texture repeat
-const SCROLL = 0.55;          // repeats per second — the flow toward the destination
-const LIFT = LAYER_Y.marking - LAYER_Y.road + 0.02;   // above the road DECK
-const FLAT_Y = LAYER_Y.marking + 0.02;                // …when there is no world to ask
-const COLOR = 0x25d0ff;
-const GLOW = 1.6;             // >1 on purpose: with toneMapped:false the fragment
-                              // leaves the shader over linear 1.0, which is exactly
-                              // what the bloom pass thresholds on
+const HALF = 0.4;             // ribbon half width (m): a 0.8 m line in a 3 m lane
+const WINDOW = 320;           // m of route turned into geometry at a time
+const BEHIND = 6;             // …starting this far behind the car (the cut hides it)
+const REBUILD = 30;           // m of progress before the window is rebuilt
+const MAX_PTS = 256;          // ribbon spine points (2 vertices each)
+const MIN_STEP = 2.5;         // m between spine points, at least…
+const MAX_STEP = 5;           // …and at most: the ground under a long straight is sampled
+const START = 1.0;            // m ahead of the car's centre where the line begins…
+const FADE_IN = 6;            // …ramping in over this
+const FADE_OUT = 50;          // m of fade at a window end that is not the destination
+const BLEND = 24;             // m over which the head bends from the car onto the lane
+const OFF_SMOOTH = 14;        // m either side the lane offset is averaged over
+const DRIFT = 1.1;            // m the car may drift off the head before a rebuild
+const DRIFT_DT = 0.25;        // …at most this often
+const TILE_V = 4;             // m of route per texture repeat (one chevron)
+const SCROLL = 0.5;           // repeats per second: the flow toward the destination
+// Height above the road DECK. Ground height is sampled at the spine points
+// only, and a crowned or rolling road rises up to ~8 cm above the straight
+// chord between two samples 5 m apart (measured along a Pardubice route): at
+// the old 5 cm the line dipped under the tarmac there and showed as dashes.
+// 14 cm clears it, and from a chase camera it still reads as painted on.
+const LIFT = LAYER_Y.marking - LAYER_Y.road + 0.11;
+const FLAT_Y = LAYER_Y.marking + 0.11;                // …when there is no world to ask
+const GLOW = 1.12;            // just over 1: the bloom softens the edge, no glare
 
-// ---- scratch: neither the update nor the rebuild path allocates ----
-const _cp = { x: 0, z: 0, t: 0 };
-const _tmp = { x: 0, z: 0 };
-// the ribbon spine: one record per possible point, cut once and refilled
-const _spine = [];
-for (let i = 0; i < MAX_PTS; i++) _spine.push({ x: 0, z: 0, s: 0 });
-
-// distance from a point to a segment, plus the parametric position along it.
-// (geo.js has this, but navline is a pure-render module and the import would be
-// its only reason to know about the city data layer.)
-function segT(px, pz, ax, az, bx, bz, out) {
-  const dx = bx - ax, dz = bz - az;
-  const L2 = dx * dx + dz * dz;
-  const t = L2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / L2)) : 0;
-  const cx = ax + dx * t, cz = az + dz * t;
-  out.t = t;
-  return Math.sqrt((px - cx) * (px - cx) + (pz - cz) * (pz - cz));
-}
-
-// ONE texture for every nav line ever drawn, built on first use so that merely
-// importing this module (headless tests) touches no DOM. White RGB with the
-// pattern in ALPHA: the cyan comes from material.color, so the tint can change
-// without repainting a pixel.
+// ---- the texture: edge, core, chevron, in real colours --------------------------
+// u runs across the ribbon, v along it (one repeat = TILE_V m). With flipY the
+// canvas top is v = 1, and forward along the route is +v, so a chevron whose
+// apex is at the top points toward the destination. Built on first use so a
+// headless import touches no DOM.
 let _tex = null;
-function flowTexture() {
+function lineTexture() {
   if (_tex) return _tex;
-  const W = 32, H = 64;
+  const W = 64, H = 128;
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
-  const ctx = c.getContext('2d');
-  const img = ctx.createImageData(W, H);
-  for (let y = 0; y < H; y++) {
-    const v = (y + 0.5) / H;
-    // one smooth pulse per repeat, biased bright: the line must read as a solid
-    // painted lane first and as MOTION second — a hard dash pattern flickers at
-    // speed and looks like a lane marking, which is what it must NOT be
-    let p = 0.5 + 0.5 * Math.cos(2 * Math.PI * v);
-    p = p * p * (3 - 2 * p);
-    const flow = 0.42 + 0.58 * p;
-    for (let x = 0; x < W; x++) {
-      const u = (x + 0.5) / W;
-      // soft rim: this is the "glow", and it costs nothing because it is the
-      // same texture fetch that carries the flow
-      let e = Math.min(1, Math.max(0, (0.5 - Math.abs(u - 0.5)) / 0.17));
-      e = e * e * (3 - 2 * e);
-      const i = (y * W + x) * 4;
-      img.data[i] = 255; img.data[i + 1] = 255; img.data[i + 2] = 255;
-      img.data[i + 3] = Math.round(255 * e * flow);
-    }
-  }
-  ctx.putImageData(img, 0, 0);
+  const g = c.getContext('2d');
+  const gr = g.createLinearGradient(0, 0, W, 0);
+  gr.addColorStop(0.00, 'rgba(8, 36, 82, 0)');
+  gr.addColorStop(0.05, 'rgba(8, 36, 82, 0.92)');
+  gr.addColorStop(0.17, 'rgba(10, 46, 102, 0.95)');
+  gr.addColorStop(0.22, 'rgba(40, 132, 255, 0.95)');
+  gr.addColorStop(0.50, 'rgba(98, 172, 255, 0.97)');
+  gr.addColorStop(0.78, 'rgba(40, 132, 255, 0.95)');
+  gr.addColorStop(0.83, 'rgba(10, 46, 102, 0.95)');
+  gr.addColorStop(0.95, 'rgba(8, 36, 82, 0.92)');
+  gr.addColorStop(1.00, 'rgba(8, 36, 82, 0)');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, W, H);
+  // the chevron, drawn in metres: 0.8 m across, TILE_V m along
+  g.save();
+  g.scale(W / (HALF * 2), H / TILE_V);
+  g.lineJoin = 'round';
+  g.lineCap = 'round';
+  g.strokeStyle = 'rgba(235, 246, 255, 0.82)';
+  g.lineWidth = 0.075;
+  const mid = TILE_V / 2, cx = HALF;
+  g.beginPath();
+  g.moveTo(cx - 0.2, mid + 0.16);
+  g.lineTo(cx, mid - 0.12);
+  g.lineTo(cx + 0.2, mid + 0.16);
+  g.stroke();
+  g.restore();
   _tex = new THREE.CanvasTexture(c);
   _tex.wrapS = THREE.ClampToEdgeWrapping;
-  _tex.wrapT = THREE.RepeatWrapping;          // v runs along the route, for kilometres
+  _tex.wrapT = THREE.RepeatWrapping;
   _tex.colorSpace = THREE.SRGBColorSpace;
+  _tex.anisotropy = 4;
   return _tex;
 }
 
@@ -146,82 +109,85 @@ export class NavLine {
     this.group = new THREE.Group();
     this.group.visible = false;
     scene?.add(this.group);
-
-    this.mesh = null;                 // built on the first set() — see flowTexture
-    this._route = null;
-    this._cum = null;                 // arclength at every route point
-    this._i = 0; this._s = 0;         // where the car is along the route
-    this._builtAt = -1e9;             // the _s the current window was cut at
-    this._visible = true;             // the caller's on/off (driving or not)
-    this._bd = 0; this._bi = 0; this._bs = 0;   // _scan results, kept off the stack
-    this._bscore = 0;
-    // the built window, kept so _shade can re-fade it without rebuilding
-    this._sp = new Float32Array(MAX_PTS);       // arclength of every spine point
-    this._spx = new Float32Array(MAX_PTS);      // …and where it is, for the bearing test
-    this._spz = new Float32Array(MAX_PTS);
-    this._m = 0; this._s1 = 0; this._fadeEnd = false;
-    this._shadedAt = -1e9;
+    this.mesh = null;                 // built on first need (see lineTexture)
+    this._route = null; this._off = null; this._cum = null;
+    this._st = { i: 0, s: 0, d: 0 };  // where the car is along the route
+    this._builtAt = -1e9;
+    this._builtT = 0;
+    this._visible = true;
+    this._vBase = 0; this._s1 = 0; this._fadeEnd = false; this._m = 0;
+    this._sl = { x: new Float64Array(MAX_PTS), z: new Float64Array(MAX_PTS), s: new Float64Array(MAX_PTS) };
+    this._offs = new Float64Array(MAX_PTS);
+    this._ctr = { x: new Float64Array(MAX_PTS), z: new Float64Array(MAX_PTS) };
+    this._car = { x: 0, z: 0, s: 0 };
+    this._p = { x: 0, z: 0, dx: 0, dz: 0 };
+    this._uA = { value: new THREE.Vector4(0, FADE_IN, 0, 0) };   // carS, fadeIn, endS, fadeOut
+    this._uB = { value: new THREE.Vector4(0, 0, 0, -1) };        // car x, z, forward x, z
+    this._clock = 0;
   }
 
-  // ---- geometry, cut once at maximum size ----
   _ensureMesh() {
     if (this.mesh) return;
     const g = new THREE.BufferGeometry();
     const V = MAX_PTS * 2;
     this._pos = new Float32Array(V * 3);
+    this._aS = new Float32Array(V);
     this._uv = new Float32Array(V * 2);
-    this._col = new Float32Array(V * 4);        // RGBA — alpha is the fade
     const idx = new Uint16Array((MAX_PTS - 1) * 6);
     for (let k = 0; k < MAX_PTS - 1; k++) {
       const o = k * 6, a = k * 2;
-      // wound so the face normal is +y: left, right, next-left / right, next-right,
-      // next-left. (Left of travel is (dz,−dx) in this frame — see the offsets below.)
+      // wound so the face normal is +y (left, right, next-left / right, next-right, next-left)
       idx[o] = a; idx[o + 1] = a + 1; idx[o + 2] = a + 2;
       idx[o + 3] = a + 1; idx[o + 4] = a + 3; idx[o + 5] = a + 2;
     }
     g.setAttribute('position', new THREE.BufferAttribute(this._pos, 3));
     g.setAttribute('uv', new THREE.BufferAttribute(this._uv, 2));
-    g.setAttribute('color', new THREE.BufferAttribute(this._col, 4));
+    g.setAttribute('aS', new THREE.BufferAttribute(this._aS, 1));
     g.setIndex(new THREE.BufferAttribute(idx, 1));
     g.setDrawRange(0, 0);
     const mat = new THREE.MeshBasicMaterial({
-      map: flowTexture(), vertexColors: true, transparent: true,
-      depthWrite: false,          // it is a decal: it must never occlude anything…
-      toneMapped: false,          // …and it must survive ACES to reach the bloom pass
-      side: THREE.DoubleSide,     // a nav line seen from a helicopter underneath a
-                                  // flyover is still a nav line
+      map: lineTexture(), transparent: true,
+      depthWrite: false,          // a decal: it never occludes anything…
+      toneMapped: false,          // …and it reaches the bloom pass untouched
+      side: THREE.DoubleSide,
+      // and a nudge toward the camera, for the last centimetres of a kerb
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -8,
     });
-    mat.color.setHex(COLOR).multiplyScalar(GLOW);
+    mat.color.setScalar(GLOW);
+    const uA = this._uA, uB = this._uB;
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uNavA = uA;
+      sh.uniforms.uNavB = uB;
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float aS;\nvarying float vNavS;\nvarying vec2 vNavXZ;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvNavS = aS;\nvNavXZ = position.xz;');
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform vec4 uNavA;\nuniform vec4 uNavB;\nvarying float vNavS;\nvarying vec2 vNavXZ;')
+        .replace('#include <map_fragment>', '#include <map_fragment>\n' + NAV_CUT_GLSL);
+    };
+    mat.customProgramCacheKey = () => 'navline-cut-1';
     this.mesh = new THREE.Mesh(g, mat);
-    this.mesh.frustumCulled = false;   // the window follows the camera by definition;
-                                       // a bounding sphere would be recomputed for
-                                       // nothing on every rebuild
+    this.mesh.frustumCulled = false;   // the window follows the camera by definition
     this.mesh.renderOrder = 3;         // after the opaque city, before the sky dome
     this.group.add(this.mesh);
   }
 
-  // Hand it navigation.route (or null). Re-setting the SAME array is free, so a
-  // caller may call this every frame without thinking about it.
-  set(route) {
-    if (route === this._route) return;
+  /**
+   * Hand it navigation.route and navigation.routeOff (or null). Re-setting the
+   * SAME array is free, so a caller may call this every frame.
+   */
+  set(route, off = null) {
+    if (route === this._route) { this._off = off; return; }
     this._route = (route && route.length >= 2) ? route : null;
+    this._off = off;
     this._builtAt = -1e9;
-    this._shadedAt = -1e9; this._m = 0;
-    this._i = 0; this._s = 0;
+    this._st.i = 0; this._st.s = 0; this._st.d = 0;
     if (!this._route) { this.group.visible = false; this._cum = null; return; }
-    const n = this._route.length;
-    const cum = this._cum = new Float64Array(n);
-    for (let i = 1; i < n; i++) {
-      const dx = this._route[i][0] - this._route[i - 1][0];
-      const dz = this._route[i][1] - this._route[i - 1][1];
-      cum[i] = cum[i - 1] + Math.sqrt(dx * dx + dz * dz);
-    }
+    this._cum = routeCum(this._route);
   }
 
   clear() { this.set(null); }
 
-  // The caller's own switch — the line is hidden on foot and in the air, and
-  // that is main.js's judgement, not ours.
   setVisible(v) {
     this._visible = !!v;
     if (!v) this.group.visible = false;
@@ -229,181 +195,78 @@ export class NavLine {
 
   update(dt, x, z, world) {
     if (!this._route || !this._visible) { this.group.visible = false; return; }
-    this._track(x, z);
-    // rebuild when the car has eaten into the window (or on a new route, where
-    // _builtAt is −∞). Driving BACKWARDS past the window start counts too.
-    if (this._s - this._builtAt > REBUILD || this._s < this._builtAt) this._rebuild(world);
-    // …and between rebuilds, walk the head of the line forward with the car so
-    // nothing is ever painted behind it
-    else if (this._m > 1 && Math.abs(this._s - this._shadedAt) > SHADE_STEP) this._shade();
-    // the flow: offset DOWN, because a feature sits where uv = (T − offset), so
-    // a shrinking offset carries the pattern toward the destination
-    const t = flowTexture();
+    this._clock += dt;
+    const st = trackRoute(this._route, this._cum, x, z, this._st);
+    const s = st.s;
+    const drift = this._m > 1 ? this._headDrift(x, z, s) : 0;
+    if (s - this._builtAt > REBUILD || s < this._builtAt - 2
+      || (drift > DRIFT && drift < BLEND_MAX + 1 && this._clock - this._builtT > DRIFT_DT)) this._rebuild(world, x, z, s);
+    if (this._m < 2) { this.group.visible = false; return; }
+    // the cut rides the car every frame: two uniforms, no buffers
+    pointAt(this._route, this._cum, s, this._p, st.i);
+    this._uA.value.set(s - this._vBase + START, FADE_IN, this._s1 - this._vBase, this._fadeEnd ? FADE_OUT : 0);
+    this._uB.value.set(this._p.x, this._p.z, this._p.dx, this._p.dz);
+    // the flow: a shrinking offset carries the chevrons toward the destination
+    const t = lineTexture();
     t.offset.y = (t.offset.y - dt * SCROLL) % 1;
-  }
-
-  // Nearest point on route segments [from, to) — into fields, not an object.
-  // Ranked by distance PLUS a continuity penalty (see CONT_K), so a route that
-  // doubles back over itself cannot hand the car the wrong pass. _bd keeps the
-  // true distance: it is what the off-route test reads.
-  _scan(x, z, from, to) {
-    const r = this._route, cum = this._cum, prev = this._s;
-    for (let i = from; i < to; i++) {
-      const a = r[i], b = r[i + 1];
-      const d = segT(x, z, a[0], a[1], b[0], b[1], _cp);
-      const s = cum[i] + _cp.t * (cum[i + 1] - cum[i]);
-      const score = d + CONT_K * Math.min(Math.abs(s - prev), CONT_MAX);
-      if (score >= this._bscore) continue;
-      this._bscore = score; this._bd = d; this._bi = i; this._bs = s;
-    }
-  }
-
-  // Where along the route is the car? A window around the last answer covers a
-  // driver following the line; anything wilder (a re-route arriving, a teleport,
-  // a lap of a roundabout) falls back to the whole polyline, which is a few
-  // thousand segments once and then never again.
-  _track(x, z) {
-    const n = this._route.length;
-    this._bd = Infinity; this._bscore = Infinity; this._bi = 0; this._bs = 0;
-    this._scan(x, z, Math.max(0, this._i - 6), Math.min(n - 1, this._i + 80));
-    if (this._bd > 40) {
-      this._bd = Infinity; this._bscore = Infinity;
-      this._scan(x, z, 0, n - 1);
-    }
-    this._i = this._bi; this._s = this._bs;
-  }
-
-  // Cut the next WINDOW metres of route into ribbon. Everything is written into
-  // the pre-cut buffers; only the draw range and the `needsUpdate` flags change.
-  _rebuild(world) {
-    this._ensureMesh();
-    const r = this._route, cum = this._cum, n = r.length;
-    const total = cum[n - 1];
-    const s0 = Math.max(0, this._s - BEHIND);
-    const s1 = Math.min(total, s0 + WINDOW);
-    this._builtAt = this._s;
-    if (s1 - s0 < 0.5) { this._m = 0; this.group.visible = false; return; }
-    // …the far end only fades if the route CONTINUES past the window; a route
-    // that ends here ends at the destination and should stop crisply
-    const fadeEnd = s1 < total - 0.5;
-    // v is measured from a WHOLE number of texture repeats before the window, not
-    // from the route's origin: 60 km of arclength is 10 000 repeats, where float32
-    // uv has visibly less precision than the pattern, and rebasing on a repeat
-    // boundary keeps the flow phase-continuous across a rebuild
-    const vBase = Math.floor(s0 / TILE_V) * TILE_V;
-
-    // --- spine: interpolated start, the route's own points, interpolated end ---
-    const P = _spine;
-    let m = 0;
-    let i = this._i;
-    while (i > 0 && cum[i] > s0) i--;
-    while (i < n - 2 && cum[i + 1] < s0) i++;
-    const put = (px, pz, s) => {
-      if (m >= MAX_PTS) return;
-      // drop points the ribbon cannot resolve, but never the last one
-      if (m > 0 && s - P[m - 1].s < MIN_STEP) return;
-      const p = P[m++];
-      p.x = px; p.z = pz; p.s = s;
-    };
-    const at = (s, out) => {                       // point at arclength s
-      let k = i;
-      while (k < n - 2 && cum[k + 1] < s) k++;
-      const L = (cum[k + 1] - cum[k]) || 1e-6, t = (s - cum[k]) / L;
-      out.x = r[k][0] + (r[k + 1][0] - r[k][0]) * t;
-      out.z = r[k][1] + (r[k + 1][1] - r[k][1]) * t;
-    };
-    at(s0, _tmp);
-    put(_tmp.x, _tmp.z, s0);
-    for (let k = i + 1; k < n && cum[k] < s1; k++) put(r[k][0], r[k][1], cum[k]);
-    at(s1, _tmp);
-    // the end point is mandatory: overwrite the last spine point if it crowds it
-    if (m >= MAX_PTS || (m > 1 && s1 - P[m - 1].s < MIN_STEP)) m--;
-    const last = P[m++];
-    last.x = _tmp.x; last.z = _tmp.z; last.s = s1;
-    if (m < 2) { this._m = 0; this.group.visible = false; return; }
-
-    // --- ribbon: two vertices per spine point, mitred at the corners ---
-    const pos = this._pos, uv = this._uv, sp = this._sp, spx = this._spx, spz = this._spz;
-    for (let k = 0; k < m; k++) {
-      const p = P[k];
-      // tangents either side of the point; the ends have only one
-      let ix = 0, iz = 0, ox = 0, oz = 0;
-      if (k > 0) {
-        ix = p.x - P[k - 1].x; iz = p.z - P[k - 1].z;
-        const L = Math.hypot(ix, iz) || 1; ix /= L; iz /= L;
-      }
-      if (k < m - 1) {
-        ox = P[k + 1].x - p.x; oz = P[k + 1].z - p.z;
-        const L = Math.hypot(ox, oz) || 1; ox /= L; oz /= L;
-      }
-      if (k === 0) { ix = ox; iz = oz; }
-      if (k === m - 1) { ox = ix; oz = iz; }
-      // left of travel is (dz, −dx); the bisector of the two lefts is the mitre
-      let nx = iz + oz, nz = -(ix + ox);
-      const L = Math.hypot(nx, nz) || 1;
-      nx /= L; nz /= L;
-      // widen the mitre by 1/cos(θ/2) so the ribbon keeps its width through a
-      // corner, but never past 2.4× — a hairpin would otherwise fire a spike
-      const cos = nx * iz + nz * -ix;
-      const w = HALF / Math.max(0.42, Math.abs(cos));
-      const y = (world && world.surfaceY) ? world.surfaceY(p.x, p.z).y + LIFT : FLAT_Y;
-      const v3 = k * 6, v2 = k * 4;
-      pos[v3] = p.x + nx * w; pos[v3 + 1] = y; pos[v3 + 2] = p.z + nz * w;
-      pos[v3 + 3] = p.x - nx * w; pos[v3 + 4] = y; pos[v3 + 5] = p.z - nz * w;
-      const v = (p.s - vBase) / TILE_V;
-      uv[v2] = 0; uv[v2 + 1] = v; uv[v2 + 2] = 1; uv[v2 + 3] = v;
-      sp[k] = p.s; spx[k] = p.x; spz[k] = p.z;
-    }
-    this._m = m; this._s1 = s1; this._fadeEnd = fadeEnd;
-    const g = this.mesh.geometry;
-    g.attributes.position.needsUpdate = true;
-    g.attributes.uv.needsUpdate = true;
-    g.setDrawRange(0, (m - 1) * 6);
-    this._shade();
     this.group.visible = true;
   }
 
-  // Alpha only, for the window that is already built. The near end is cut at
-  // the CAR's own arclength — everything behind it goes to zero and the first
-  // FADE_IN metres ahead ramp in, so the line grows out from under the bumper
-  // and never trails behind. The far end still dissolves into the window's cut
-  // the way it always did, and both are the same smoothstep.
-  _shade() {
-    if (!this.mesh || this._m < 2) return;
-    const col = this._col, sp = this._sp, spx = this._spx, spz = this._spz, m = this._m;
-    const sCar = this._s, s1 = this._s1, fadeEnd = this._fadeEnd;
-    // Where the car sits on the line, and which way the line goes there. The
-    // ROUTE's own tangent is the right "forward" here, not the car's heading:
-    // the question each vertex has to answer is "is this still in front of me
-    // as I follow this line", and a driver mid-lane-change is not the authority
-    // on that. It also costs nothing — the matched segment is already known.
-    const r = this._route, cum = this._cum;
-    const i = Math.min(this._i, r.length - 2);
-    const L = (cum[i + 1] - cum[i]) || 1e-6;
-    const t = Math.max(0, Math.min(1, (sCar - cum[i]) / L));
-    const cx = r[i][0] + (r[i + 1][0] - r[i][0]) * t;
-    const cz = r[i][1] + (r[i + 1][1] - r[i][1]) * t;
-    let fx = r[i + 1][0] - r[i][0], fz = r[i + 1][1] - r[i][1];
-    const F = Math.hypot(fx, fz) || 1;
-    fx /= F; fz /= F;
+  // How far the car is from the ribbon's head (its centre line at the car's
+  // arclength): a lane change since the last rebuild shows up here.
+  _headDrift(x, z, s) {
+    const S = this._sl.s, m = this._m;
+    let k = 0;
+    while (k < m - 2 && S[k + 1] < s) k++;
+    const L = (S[k + 1] - S[k]) || 1e-9;
+    const t = Math.max(0, Math.min(1, (s - S[k]) / L));
+    const cx = this._ctr.x[k] + (this._ctr.x[k + 1] - this._ctr.x[k]) * t;
+    const cz = this._ctr.z[k] + (this._ctr.z[k + 1] - this._ctr.z[k]) * t;
+    return Math.hypot(x - cx, z - cz);
+  }
+
+  _rebuild(world, x, z, s) {
+    this._ensureMesh();
+    const r = this._route, cum = this._cum, total = cum[r.length - 1];
+    const s0 = Math.max(0, s - BEHIND);
+    this._builtAt = s;
+    this._builtT = this._clock;
+    const sl = this._sl;
+    const m = sliceAhead(r, cum, s0, WINDOW, sl, MAX_PTS, MIN_STEP, this._st.i, MAX_STEP);
+    if (m < 2) { this._m = 0; return; }
+    // The lane offset changes where one way meets the next (a two-way street
+    // onto a oneway carriageway: 3 m to 0), and following that literally
+    // makes the line jog sideways in a few metres. Averaged over ±OFF_SMOOTH
+    // metres of route it eases across instead, the way a driver would.
+    const side = laneSide(), off = this._off;
     for (let k = 0; k < m; k++) {
-      const ds = sp[k] - sCar;
-      let a = ds / FADE_IN;
-      if (fadeEnd) a = Math.min(a, (s1 - sp[k]) / FADE_OUT);
-      // a returning leg: far enough ahead to be a different piece of road, and
-      // pointing the wrong way out of the windscreen
-      if (ds > NEAR_KEEP) {
-        const rel = (spx[k] - cx) * fx + (spz[k] - cz) * fz;
-        a = Math.min(a, (rel + BEHIND_FADE) / BEHIND_FADE);
-      }
-      a = Math.max(0, Math.min(1, a));
-      a = a * a * (3 - 2 * a);
-      const v4 = k * 8;
-      col[v4] = 1; col[v4 + 1] = 1; col[v4 + 2] = 1; col[v4 + 3] = a;
-      col[v4 + 4] = 1; col[v4 + 5] = 1; col[v4 + 6] = 1; col[v4 + 7] = a;
+      if (!off) { this._offs[k] = 0; continue; }
+      let sum = 0;
+      for (let q = -2; q <= 2; q++) sum += offsetAt(off, cum, sl.s[k] + q * OFF_SMOOTH / 2, this._st.i);
+      this._offs[k] = side * sum / 5;
     }
-    this._shadedAt = sCar;
-    this.mesh.geometry.attributes.color.needsUpdate = true;
+    // v is rebased on a whole number of texture repeats: 60 km of arclength in
+    // float32 uv would wobble, and a rebased flow stays phase-continuous
+    const vBase = this._vBase = Math.floor(s0 / TILE_V) * TILE_V;
+    const car = this._car;
+    car.x = x; car.z = z; car.s = s;
+    const yAt = world && world.surfaceY ? (px, pz) => world.surfaceY(px, pz).y + LIFT : null;
+    buildRibbon(sl, m, this._offs, HALF, this._pos, this._aS, vBase, yAt, FLAT_Y, car, BLEND, this._ctr);
+    const uv = this._uv;
+    for (let k = 0; k < m; k++) {
+      const v = (sl.s[k] - vBase) / TILE_V;
+      uv[k * 4] = 0; uv[k * 4 + 1] = v; uv[k * 4 + 2] = 1; uv[k * 4 + 3] = v;
+    }
+    this._m = m;
+    this._s1 = sl.s[m - 1];
+    // the far end fades only if the route goes on past the window; a route
+    // that ends here ends at the destination and stops crisply
+    this._fadeEnd = this._s1 < total - 0.5;
+    const g = this.mesh.geometry;
+    g.attributes.position.needsUpdate = true;
+    g.attributes.uv.needsUpdate = true;
+    g.attributes.aS.needsUpdate = true;
+    g.setDrawRange(0, (m - 1) * 6);
   }
 
   dispose() {
