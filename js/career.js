@@ -354,7 +354,10 @@ export function attach(host) {
     // found the ground by then
     // (no height: the hospital is stood on its own floor, see js/savespot.js)
     if (lastSafe && h?.player) { lastSafe.x = h.player.pos.x; lastSafe.z = h.player.pos.z; lastSafe.y = NaN; }
-    if (stars <= 0) return;
+    // under the first star there is nothing to fine, but the residue goes
+    // too: as in GTA, you wake up with a clean sheet (the pending calls were
+    // hung up at the death itself, js/crimelaw.js)
+    if (stars <= 0) { if (wanted.heat() > 0) wanted.clear(); return; }
     const fine = payFine(stars);
     wanted.clear();
     toast('Pokuta ' + kc(fine), { icon: '🚓', kind: 'warn', sub: 'Hledanost smazána' });

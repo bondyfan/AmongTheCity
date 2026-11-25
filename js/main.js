@@ -3673,6 +3673,7 @@ async function boot() {
   const isCar = (w) => w && w.len !== undefined && w.wid !== undefined && typeof w.heading === 'number';
   crimeLaw = new CrimeLaw({
     wanted,
+    vitals,                 // SEJMUT hangs up every pending call (the hospital settles the stars)
     toast: policeToast,
     policeAt: (x, z, r) => policeNear(x, z, r, traffic, police),
     alive: (w) => !!w && !w.dead && (isCar(w) ? !!w.ai : true),

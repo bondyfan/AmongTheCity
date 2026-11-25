@@ -10,8 +10,11 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 register(new URL('./three-alias.mjs', import.meta.url));
 
+import fs from 'node:fs';
+
 const THREE = await import('../libs/three.module.js');
 const wanted = await import('../js/wanted.js');
+const vitals = await import('../js/vitals.js');
 const { CrimeLaw, RULES, verdict, CALL_T, POLICE_R, CALLER_R } = await import('../js/crimelaw.js');
 const { Carjack } = await import('../js/carjack.js');
 
@@ -130,6 +133,42 @@ test('an arrest or a death hangs up every pending call', () => {
   run(L, CALL_T + 1);
   assert.equal(wanted.stars(), 0);
   assert.equal(L.nextCall(), Infinity);
+});
+
+// A review finding of 25 Nov 2026 (fixed on Frank's "Ano, oprav"): a call
+// queued before a free-roam death went through after the hospital, because
+// only the story restart and the arrest card hung up. In GTA being wasted
+// clears the record and nothing reported earlier comes back.
+test('SEJMUT hangs up every call: nothing rung in before the death comes back after the hospital', () => {
+  wanted.reset(); vitals.reset();
+  const passer = { dead: false };
+  const L = new CrimeLaw({ wanted, vitals, policeAt: () => false, witnesses: () => [passer] });
+  assert.equal(L.report('prepadeni', 0, 0, { dead: false }), 'call', 'the jacked driver rings');
+  assert.equal(L.report('srazeni', 5, 0, { dead: false }), 'call', 'and so does a man knocked down');
+  run(L, 2);
+  vitals.damage(1e6, 'test');
+  assert.equal(vitals.down(), true);
+  assert.equal(L.calls.length, 0, 'a call survived the death');
+  assert.equal(L.nextCall(), Infinity);
+  assert.equal(L.report('srazeni', 0, 0, { dead: false }), 'none', 'the car you died in, rolling on into somebody');
+  run(L, 4);                       // the death card: main.js wakes you after 4 s
+  vitals.revive();
+  run(L, CALL_T * 2);
+  assert.equal(wanted.stars(), 0, 'woke up at the hospital wanted for a call made before the death');
+  assert.equal(wanted.heat(), 0);
+  // …and on your feet again the law works as before
+  assert.equal(L.report('prepadeni', 0, 0, { dead: false }), 'call');
+  run(L, CALL_T + 1);
+  assert.equal(wanted.stars(), 2);
+  wanted.reset(); vitals.reset();
+});
+
+test('the game builds its crime law with the body, so a death reaches it', () => {
+  const main = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+  const at = main.indexOf('new CrimeLaw({');
+  assert.ok(at > 0, 'main.js no longer builds a CrimeLaw');
+  const args = main.slice(at, main.indexOf('\n  });', at));
+  assert.match(args, /^\s*vitals,/m, 'CrimeLaw is built without vitals: a death would not hang up the calls');
 });
 
 // ---- the thrown-out driver as a body ----------------------------------------
