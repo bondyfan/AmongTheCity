@@ -42,3 +42,14 @@ export function dueMove(o, dt, down) {
 
 /** May the card lift? Only after the move, so never over a body that is down. */
 export const dueLift = (o, ready) => o.moved && ((ready && o.t > LIFT_AT) || o.t > GIVE_UP);
+
+// WHERE A DEATH GOES. In the campaign there is no hospital: it starts again
+// ('story'). The campaign is a chapter of part one that is not over, part two
+// running, or a CARD that is up. The card has to count on its own, because a
+// replay's card (the Kampaně tab) is up over a save that still says 'done':
+// part one's chapter only begins at the card's move, and part two is not made
+// before the card lifts. A death in that window used to take the hospital's
+// timer: the card revived him at the start, and 4 s after the death he was
+// carried to a hospital, billed, and the replay was gone (review, 25 Nov 2026).
+export const deathGoesTo = ({ chapter, journeys, heist, card }) =>
+  (journeys && !!chapter && chapter !== 'done') || heist || card ? 'story' : 'hospital';

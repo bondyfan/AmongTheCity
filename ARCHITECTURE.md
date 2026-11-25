@@ -2201,6 +2201,15 @@ save has part one and not part two. Like part one it is played in one sitting:
   returns while a card is up) and he stayed down until a reload. The death
   handler's 2.2 s timer asks `vitals.down()` too, so a death the card already
   undid starts nothing once the card has lifted. `tests/story-over.test.mjs`.
+* **Where a death goes** is `deathGoesTo` in the same file: `'story'` (the
+  2.2 s timer and `failStory`) for an unfinished chapter of part one, a
+  running part two, or a card that is up; else `'hospital'` (4 s, the fee).
+  The card counts on its own because a replay's card stands over a save that
+  still says `'done'`: part one's chapter begins at the card's move and part
+  two is made only after the lift, so a death there used to be carried to a
+  hospital and billed while the card had him alive at the start. The hospital
+  timer asks the rule again before it moves or bills him, and
+  `replayCampaign` does not raise a card over a body that is down.
 * **The balaclava** (`js/heist-mask.js`) hangs on `parts.headS`, a head socket
   added to the modelled human beside the two hand sockets.
 * **Sound**: `scripts/gen-heist-audio.mjs` (ElevenLabs, run only when asked).

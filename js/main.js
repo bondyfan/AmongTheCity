@@ -51,7 +51,7 @@ import { shouldEject, launchDamage, impactDamage } from './ejection.js';
 import { sameLevel } from './levelsep.js';
 import * as fuel from './fuel.js';
 import { retry, setHome, parkHome } from './story-retry.js';
-import { overCard, dueMove, dueLift } from './story-over.js';
+import { overCard, dueMove, dueLift, deathGoesTo } from './story-over.js';
 import { straighten } from './garage.js';
 import { indexPumps, pumpAt as pumpAtForecourt } from './pumps.js';
 import * as statusbar from './statusbar.js';
@@ -270,7 +270,7 @@ async function replayCampaign(part) {
   if (!career.canReplay(part)) return false;
   if (game.heli || game.jet) { ui_hint('Nejdřív přistaň a vystup'); return false; }
   if (part === 'part1') await journeyFactory();
-  if (storyOver || !career.canReplay(part)) return false;
+  if (storyOver || vitals.down() || !career.canReplay(part)) return false;
   const veil = document.createElement('div');
   veil.className = 'story-over';
   veil.innerHTML = '<div><strong></strong><span>Kampaň začíná znovu</span></div>';
@@ -3758,7 +3758,10 @@ async function boot() {
     $id('speedo').classList.add('hidden');
     hideCarName();
     // In the campaign there is no hospital to wake up in: it starts again.
-    if ((startJourney && career.activeStory() && career.activeStory() !== 'done') || heist) {
+    // (js/story-over.js deathGoesTo: a replay's black card is the campaign too,
+    // though the save still says 'done' and part two is not made before it lifts)
+    const inStory = () => deathGoesTo({ chapter: career.activeStory(), journeys: !!startJourney, heist: !!heist, card: !!storyOver }) === 'story';
+    if (inStory()) {
       // (still down: a death under the black card is already undone by then,
       // and must not start the campaign over a second time once the card lifts)
       setTimeout(() => { if (game.mode === 'play' && vitals.down()) failStory('death'); }, 2200);
@@ -3766,6 +3769,8 @@ async function boot() {
     }
     setTimeout(() => {
       if (game.mode !== 'play') return;
+      // a campaign that came up meanwhile has its own way back: no bed, no fee
+      if (inStory()) { if (vitals.down()) failStory('death'); return; }
       player.endRagdoll();
       // the hospital of the city you fell in (config.js HOSPITALS)
       const hosp = nearestHospital(player.pos.x, player.pos.z);
