@@ -3473,8 +3473,9 @@ ElevenLabs, a little blood, and the health of the person you hit.
   (block) puts the fists up for 4.5 s: the guard (first frame of the jab, the
   recording's legs when standing), the body to the camera (`player.aimLock`).
   Shift drops it. A block facing the punch takes 80 % of it. Targets come from
-  every source in `targets` (the crowd and `carjack`), each with nearest() and
-  hurt(); `onCrime(kind, x, z, victim)` names who was hit.
+  every source in `targets` (the crowd, `carjack` and the police officers),
+  each with nearest() and hurt(); `onCrime(kind, x, z, victim)` names who was
+  hit.
 * **The crowd** (`js/fightpeds.js`, `js/pedestrians.js`): a flinch is a recorded
   snap over a walker who stays the crowd's. A blow with `ko: true` that floors a
   modelled body makes pedestrians.js hand it over upright as `'ko'` (not a
@@ -3501,6 +3502,27 @@ ElevenLabs, a little blood, and the health of the person you hit.
 * Checked in game, muted: stance, jab, cross, hook knock-down with blood, the
   lying body, the health bar over a brawler, his punch and the player's flinch,
   the block (`.claude/boj-shots/` in the worktree, not in the repository).
-* Not done: kicking somebody on the ground, a dodge, police officers on foot as
-  targets, and the peer's punch moving the crowd on the other screens.
+* **Policemen** (`js/copfists.js`, review of 25 Nov 2026): the officers out of
+  a patrol car (`js/policecops.js`) are a target source too, `CopTargets`, with
+  its own crimes (`crimes`: a blow is `napadeni_policisty`, two stars at once,
+  a kill `zabiti_policisty`) and no pocket (`noPocket`). A jab or a cross makes
+  him reel for half a second and let go of your collar; the hook or a blow to
+  25 HP floors him, and he gets up after about three seconds and goes back to
+  the arrest (below three stars) or the pistol. With no health left he is laid
+  out as `'down'`, like a man run over. His record carries `hp`, `fist` and a
+  `gen` (the pool hands the record to the next officer as a new man).
+* **When the fists stay down**: `ctx.down` (combat.js) is a player nobody can
+  fight, and main.js's `fistsTaken()` sets it for SEJMUT, the ZATČEN card, the
+  chapter card and a story film (`journey/meeting/heist.filming`: those
+  objects live for the whole chapter, so it is the film that is asked);
+  brawlers let go. `ctx.hold` is hands that belong to the UI (`fistsBusy()`:
+  the big map, any panel): no swing starts and no press is kept, but the street
+  goes on. Left click and Q are both gated.
+* A brawler the fight lets go of loses `p.brawl` on every path out (getting up
+  too hurt to go on was the one that kept it), so hitting him later is a crime.
+  A thrown-out driver has a `pid` (the car's schedule seed, `driverPid`), so
+  his pocket is his own and not the same 94 Kc as every other driver's.
+* Not done: kicking somebody on the ground, a dodge, an officer punching back
+  (he arrests or shoots instead), and the peer's punch moving the crowd on the
+  other screens.
 

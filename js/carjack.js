@@ -48,6 +48,16 @@ const _feet = { x: 0, y: 0, z: 0 };
 const _q = { x: 0, z: 0 };
 const _o = { interior: true, yLo: 0, yHi: 0, aboveY: 0 };
 
+// Who the driver is, for what is in his pocket (js/pocket.js pocketOf, paid
+// once by js/combat.js on a killing blow). Without a pid every driver carried
+// the same 94 Kc (review, 25 Nov 2026). The car's own schedule seed, kept by
+// main.js before traffic.steal() drops car.ai, makes it a pure function of
+// which car it was; a car with no schedule gets a stranger.
+export function driverPid(car) {
+  const k = car?._driverPid ?? car?.ai?.seed;
+  return Number.isInteger(k) ? k : (Math.random() * 0x7fffffff) | 0;
+}
+
 export class Carjack {
   /** { scene, world, makeBody }: makeBody is for tests; the default is a citizen. */
   constructor(opts = {}) {
@@ -84,7 +94,7 @@ export class Carjack {
     body.group.rotation.order = 'YXZ';
     body.ragdollPose();
     const r = { body, st, t: 0, phase: 'thrown', x: st.x, z: st.z, y: st.gy, heading: st.yaw, walkT: 0, lay: null,
-      hp: HP, dead: false, state: 'rag', mesh: body.group };
+      hp: HP, dead: false, state: 'rag', mesh: body.group, pid: driverPid(car), arch: body.arch?.key ?? 'm30' };
     this.out.push(r);
     this._place(r);
     return r;

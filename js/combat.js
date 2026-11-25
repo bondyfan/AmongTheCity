@@ -162,6 +162,7 @@ export class Combat {
 
     this._player = null;
     this._ready = false;
+    this._hold = false;      // the hands are the UI's this step (ctx.hold)
     this._camYaw = 0;
     this._hasYaw = false;
     this._lockedAim = false;
@@ -193,7 +194,12 @@ export class Combat {
   // ---------------------------------------------------------------- frame ----
 
   /**
-   * One physics step. ctx = { player, onFoot, camYaw, input, block, down }.
+   * One physics step. ctx = { player, onFoot, camYaw, input, block, down, hold }.
+   * down: the player cannot be fought (SEJMUT, ZATČEN, a story film, the
+   * chapter card): no swing, and anybody fighting him lets go. hold: the
+   * mouse and keys belong to something else for now (the big map, a panel):
+   * no new swing starts and no press is kept for later, but the fight around
+   * him goes on, because the city does not pause under the map.
    * MUST be called every step, on foot or not: it is the only thing that
    * advances the clock and what cancels a swing the moment the player can no
    * longer throw one.
@@ -215,6 +221,7 @@ export class Combat {
 
     const onFoot = c.onFoot !== undefined ? !!c.onFoot : !!player && !player.inCar;
     this._ready = this._able(player, onFoot) && !c.down;
+    this._hold = !!c.hold;
     this._speed = Number.isFinite(player?.speed) ? player.speed : 0;
     this._blocking = this._ready && !!c.block && !this._live;
     if (!this._ready) {
@@ -238,6 +245,7 @@ export class Combat {
     }
 
     // a buffered press: as soon as the swing may be cut, or right away if none
+    if (this._hold) this._queued = null;
     if (this._queued && this._now > this._queueAt) this._queued = null;
     if (this._queued && (!this._live || this._now >= this._chainAt) && this._now >= this._hurtAt + STUN_T) {
       const kind = this._queued;
@@ -246,7 +254,7 @@ export class Combat {
       // move continues the chain instead of reading as a cold start
       if (this._live) this._end(player);
       this._begin(player, kind);
-    } else if (!this._live && c.input && c.input.attackHeld && this._now >= this._repeatAt && this._now >= this._hurtAt + STUN_T) {
+    } else if (!this._live && !this._hold && c.input && c.input.attackHeld && this._now >= this._repeatAt && this._now >= this._hurtAt + STUN_T) {
       this._begin(player, 'light');
     }
 
@@ -267,6 +275,7 @@ export class Combat {
    */
   strike(kind = 'light') {
     const k = kind === 'heavy' ? 'heavy' : 'light';
+    if (this._hold) return false;
     if (this._live) {
       // a press right at the start of a swing is a double-tap, not a combo
       if (this._now - this._t0 > 0.06) this._queue(k);
@@ -471,17 +480,20 @@ export class Combat {
     this.fx?.blood?.(x, gy + (move.key === 'hook' ? 1.15 : 1.5), z, this._dx, this._dz, move.blood > 0 ? 1 : 0.5);
     this.hud?.foe?.(p, this._now);
 
-    // the pocket, once, stamped on the body (a Set would pin every corpse)
-    if (killed && !p._robbed) {
+    // the pocket, once, stamped on the body (a Set would pin every corpse);
+    // a source can say its people carry none (a policeman: js/copfists.js)
+    if (killed && !p._robbed && !bsrc.noPocket) {
       p._robbed = 1;
       const kc = pocketOf(p.pid);
       if (kc > 0) this.wallet?.earn?.(kc, LOOT_LABEL);
     }
-    this._crime(killed ? CRIME_KILL : CRIME_FIGHT, x, z, p);
+    // which crime: the source may name its own (hitting a policeman is not a brawl)
+    const kinds = bsrc.crimes;
+    this._crime(killed ? (kinds?.kill ?? CRIME_KILL) : (kinds?.fight ?? CRIME_FIGHT), x, z, p);
 
     // what the body does about it: the crowd's own, or the source's
     if (bsrc === this.peds) this.crowd.react(p, killed ? 'dead' : rx, move, this._sx, this._sz);
-    else bsrc.react?.(p, killed ? 'dead' : rx, move);
+    else bsrc.react?.(p, killed ? 'dead' : rx, move, this._sx, this._sz);
   }
 
   // The `want` predicate: "nearest" means "nearest one I can actually hit".

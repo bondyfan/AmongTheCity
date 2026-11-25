@@ -140,7 +140,7 @@ export class FightPeds {
     for (let i = list.length - 1; i >= 0; i--) {
       const r = list[i], p = r.p;
       // the crowd took the body back (swept, thrown, disposed)
-      if (!this._alive(p)) { list.splice(i, 1); continue; }
+      if (!this._alive(p)) { p.brawl = false; list.splice(i, 1); continue; }
       let keep = true;
       switch (r.mode) {
         case 'flinch': keep = this._flinch(r); break;
@@ -150,7 +150,9 @@ export class FightPeds {
         case 'getup': keep = this._getUp(r); break;
         default: keep = false;
       }
-      if (!keep) list.splice(i, 1);
+      // whoever the fight lets go of is no longer fighting: the self-defence
+      // flag goes with the record, or a later attack on him reads as a brawl
+      if (!keep) { p.brawl = false; list.splice(i, 1); }
     }
   }
 
@@ -212,6 +214,7 @@ export class FightPeds {
     if (t < dur) { body.act('getUp', t, 1, 'full', 0.15); return true; }
     // on their feet: back at you, or away
     if (r.fighter && p.hp > 30 && this.peds?.takeOver?.(p, 'brawl')) { this._brawl(r); return true; }
+    p.brawl = false;
     this.peds?.handBack?.(p, true);
     return false;
   }
@@ -296,6 +299,7 @@ export class FightPeds {
   }
 
   _drop(r) {
+    r.p.brawl = false;
     const i = this.list.indexOf(r);
     if (i >= 0) this.list.splice(i, 1);
   }

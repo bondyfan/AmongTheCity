@@ -58,6 +58,7 @@ import { PRICE, pumpBrand, pumpPrice, kc2, kc } from './prices.js';
 import { Combat } from './combat.js';
 import { FightFx } from './fightfx.js';
 import { FightHud } from './fighthud.js';
+import { CopTargets } from './copfists.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
 import { RoadLaw, policeNear } from './roadlaw.js';
@@ -370,7 +371,7 @@ const _vitCtx = { car: null, heli: null, jet: null, player: null, onFoot: true }
 // freezing mid-bounce. js/ejection.js decides when a crash is an ejection.
 let _ejCar = null, _ejT = 0;
 const _ejIdle = { gas: 0, steer: 0, brake: 0 };
-const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null, block: false, down: false };
+const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null, block: false, down: false, hold: false };
 const _wntCtx = { x: 0, z: 0, onFoot: true, car: null, police: null };
 const _polCtx = { x: 0, z: 0, car: null, onFoot: true, y: NaN };
 let _stationT = 0;
@@ -1495,6 +1496,8 @@ input.onKey('KeyE', () => {
       // the next generation's car that wears the same slot string. An older
       // client does not know 'steal_g' and ignores it.
       const ref = traffic.stealRef(car);
+      // who sits at the wheel, for his pocket (js/carjack.js driverPid): steal() drops car.ai
+      if (Number.isInteger(car.ai?.seed)) car._driverPid = car.ai.seed;
       traffic.steal(car);                // stops driving while we walk up
       if (net && ref) queueEvent(ref.ghost ? 'steal_g' : 'steal', { key: ref.key, gen: ref.gen });
     }
@@ -1934,11 +1937,24 @@ function updateStationCars(x, z) {
 // It is guarded on being on foot rather than on !game.car alone, because a
 // PASSENGER has no game.car and punching from the seat would be a man
 // windmilling through the roof.
+//
+// Two more reasons the fists stay down (review, 25 Nov 2026). The player is
+// not his own (fistsTaken): lying SEJMUT, the ZATČEN card, the chapter card,
+// or a story film that has the camera and the body. The campaign's journey,
+// meeting and heist objects live for the whole chapter, so it is the film
+// itself that is asked (their `filming`), never whether a story exists.
+// The hands are the UI's (fistsBusy): the big map or any panel owns the mouse.
+function fistsTaken() {
+  return !!(vitals.down() || arrest || storyOver || journey?.filming || meeting?.filming || heist?.filming);
+}
+function fistsBusy() {
+  return !!(worldMap?.open || document.body.dataset.panelOpen);
+}
 function combatInput(dt) {
   if (game.mode !== 'play' || !combat) return;
   const onFoot = !game.car && !game.heli && !game.jet && !player.inCar && !trains?.riding;
   const pressed = input.takeLeftPressed();
-  if (!onFoot) return;
+  if (!onFoot || fistsTaken() || fistsBusy()) return;
   if (pressed) combat.strike('light');
   // the first time the fists go up, say what the keys are (Czech: it is UI)
   if (!_fightTold && combat.stance) {
@@ -1951,6 +1967,7 @@ function combatInput(dt) {
 input.onKey('KeyQ', () => {
   if (game.mode !== 'play' || !combat) return;
   if (game.car || game.heli || game.jet || player.inCar || trains?.riding) return;
+  if (fistsTaken() || fistsBusy()) return;
   combat.strike('heavy');
 });
 
@@ -3617,8 +3634,11 @@ async function boot() {
   // Every source a fist can find somebody in: the crowd, and the driver thrown
   // out of a jacked car (each needs nearest() and hurt(); one without them is
   // skipped). Blows on the player come back through vitals.damage.
-  combat = new Combat({ peds, targets: [peds, carjack], chatter, wallet, audio: { sfxAt },
-    vitals, fx: fightFx, hud: fightHud });
+  // …and the officers out of a patrol car (js/copfists.js: hitting one is
+  // 'napadeni_policisty', killing one 'zabiti_policisty'; police is built
+  // just below, so the source asks for it when a fist looks)
+  combat = new Combat({ peds, targets: [peds, carjack, new CopTargets(() => police?.officers)], chatter, wallet,
+    audio: { sfxAt }, vitals, fx: fightFx, hud: fightHud });
   // the other players see your punches: the move goes to the room
   combat.onSwing((m) => { if (net) queueEvent('fist', { m }); });
   // A landed punch and a killing one are two different crimes, and combat.js
@@ -4258,7 +4278,8 @@ function stepGame(dt) {
   _cbtCtx.camYaw = camYaw; _cbtCtx.input = input;
   // V (or the touch block button) holds the guard up; Ctrl is not used, Ctrl+W closes the tab
   _cbtCtx.block = input.keys.has('KeyV') || !!input.touchBlock;
-  _cbtCtx.down = vitals.down();
+  _cbtCtx.down = fistsTaken();
+  _cbtCtx.hold = fistsBusy();
   combat?.update(dt, _cbtCtx);
   fightFx?.update(dt);
   const _eyes = game.car ?? player.pos;

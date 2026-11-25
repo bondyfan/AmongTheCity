@@ -218,6 +218,10 @@ export function meetVasek(car, scene, world, map, complete, player) {
     posePlayer(dt) {
       return film?.running ? film.pose(dt) : false;
     },
+    // a film has the camera and the body (js/main.js: no fists meanwhile)
+    get filming() {
+      return !!film?.running;
+    },
     get seated() {
       return false;
     },

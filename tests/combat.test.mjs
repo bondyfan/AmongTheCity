@@ -1339,3 +1339,93 @@ test('a brawler who is never hit back makes his point and walks off', () => {
   assert.equal(b.state, 'walk', 'he kept beating a man who never hit back');
   assert.ok(taken > 0 && taken < 60, `standing still cost the player ${taken} before he gave up`);
 });
+
+// Review, 25 Nov 2026: a brawler floored by the hook who gets up too hurt to
+// go on walked off still carrying p.brawl, the self-defence flag, so the next
+// beating anybody gave him was free under the wanted rules (js/crimelaw.js).
+// Whoever the fight lets go of is no longer fighting.
+test('a brawler who gets up and walks away is no longer fighting, and hitting him again is a crime', () => {
+  const T = town();
+  const victim = arena(personWho(T, true));
+  victim.cit = modelled();
+  const cb = new Combat({ peds: T.peds, wallet: purse(), vitals: { damage() {} } });
+  const crimes = [];
+  cb.onCrime((k, x, z, who) => crimes.push({ k, brawl: !!who?.brawl }));
+  const ctx = facing(victim);
+  land(cb, ctx);
+  assert.equal(victim.state, 'brawl');
+  assert.equal(victim.brawl, true);
+  // hurt enough that the hook floors him and he will not come back at you
+  softened(T, victim, 45);
+  const r = cb.crowd.list.find((x) => x.p === victim);
+  r.nextPunch = Infinity; r.swing = null;
+  idle(cb, ctx, 0.5);
+  arena(victim, ctx.player.pos.x, ctx.player.pos.z - RING);
+  cb.update(1 / 60, ctx);
+  assert.equal(cb.strike('heavy'), true);
+  let rose = false;
+  for (let i = 0; i < 60 * 10 && !rose; i++) {
+    cb.update(1 / 60, ctx); ctx.player.combatPose?.();
+    rose = victim.state === 'walk';
+  }
+  assert.ok(rose, `he never got up: still '${victim.state}'`);
+  assert.ok(victim.hp > 0 && victim.hp <= 30, `the setup missed: he got up with ${victim.hp}`);
+  assert.equal(victim.brawl, false, 'he walked off still flagged as fighting you');
+  assert.equal(cb.crowd.list.some((x) => x.p === victim), false, 'the fight kept a record of him');
+  // and the next punch on him is charged as a brawl the player started
+  const before = crimes.length;
+  arena(victim, ctx.player.pos.x, ctx.player.pos.z - RING);
+  idle(cb, ctx, 1);
+  arena(victim, ctx.player.pos.x, ctx.player.pos.z - RING);
+  land(cb, ctx);
+  assert.equal(crimes.length, before + 1, 'the punch was not a crime at all');
+  assert.equal(crimes[crimes.length - 1].brawl, false, 'a later attack on him read as self-defence');
+});
+
+// Review, 25 Nov 2026: the left button and Q punched through a story film, the
+// ZATČEN and chapter cards and the open big map. main.js decides WHY (its
+// fistsTaken and fistsBusy); combat.js owns what the two flags mean, and that
+// is what is pinned here: `down` is a player nobody can fight, `hold` is hands
+// that belong to the UI for now while the street goes on around him.
+test('no swing starts while the player is not his own or his hands are the UI\'s', () => {
+  for (const flag of ['down', 'hold']) {
+    const T = town();
+    const victim = arena(T.walker());
+    const hooks = watchHooks(T.peds);
+    const cb = new Combat({ peds: T.peds, wallet: purse() });
+    const ctx = facing(victim);
+    const swings = [];
+    cb.onSwing((m) => swings.push(m));
+    cb.update(1 / 120, ctx);
+    ctx[flag] = true;
+    cb.update(1 / 120, ctx);
+    assert.equal(cb.strike('light'), false, `${flag}: the left button punched`);
+    assert.equal(cb.strike('heavy'), false, `${flag}: Q punched`);
+    ctx.input = { keys: new Set(), attackHeld: true };      // the button held down
+    stepFight(cb, ctx, 1, 1 / 120);
+    assert.deepEqual(swings, [], `${flag}: a held button punched`);
+    assert.equal(hooks.hit.length, 0);
+    // and nothing pressed meanwhile is thrown the moment the hands come back
+    ctx[flag] = false;
+    ctx.input = { keys: new Set(), attackHeld: false };
+    stepFight(cb, ctx, 0.5, 1 / 120);
+    assert.deepEqual(swings, [], `${flag}: a press from under the ${flag} was kept for later`);
+    assert.equal(land(cb, ctx), true, `${flag}: the fists never came back`);
+    assert.deepEqual(swings, ['jab']);
+  }
+});
+
+test('a brawler keeps at a player looking at the map, and lets go of one who is not his own', () => {
+  for (const [flag, stays] of [['hold', true], ['down', false]]) {
+    const T = town();
+    const b = arena(personWho(T, true));
+    b.cit = modelled();
+    const cb = new Combat({ peds: T.peds, wallet: purse(), vitals: { damage() {} } });
+    const ctx = facing(b);
+    land(cb, ctx);
+    assert.equal(b.state, 'brawl');
+    ctx[flag] = true;
+    stepFight(cb, ctx, 1);
+    assert.equal(b.state === 'brawl', stays, `${flag}: the brawler ${stays ? 'gave up' : 'kept fighting'}`);
+  }
+});

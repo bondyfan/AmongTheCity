@@ -353,6 +353,10 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     get film() {
       return film;
     },
+    // a film has the camera and the body (js/main.js: no fists meanwhile)
+    get filming() {
+      return !!film?.running && !driving;
+    },
     // The film owns the camera; afterwards it is the game's own again, seated or not.
     frameCamera(camera, dt) {
       if (film?.running && !driving) return film.camera(camera, dt);
