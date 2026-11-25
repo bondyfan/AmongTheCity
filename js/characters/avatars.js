@@ -304,7 +304,7 @@ export function clipFor(av, name) {
       bk = raw;
     } else if (raw) {
       const k = (av.rig.dims.thigh + av.rig.dims.shin) / (rep.rig.dims.thigh + rep.rig.dims.shin);
-      bk = { ...raw, hip: raw.hip.map((v) => v * k), travel: raw.travel * k };
+      bk = { ...raw, hip: raw.hip.map((v) => v * k), travel: raw.travel * k, tx: (raw.tx ?? 0) * k, tz: (raw.tz ?? 0) * k };
       // undo the class body's own grounding before this body gets its own
       const dy = (raw.grounded ?? 0) * k;
       for (let f = 0; f < bk.frames; f++) bk.hip[f * 3 + 1] -= dy;

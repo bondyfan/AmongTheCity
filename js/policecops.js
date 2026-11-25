@@ -30,6 +30,9 @@
 //           and you are under arrest (onArrest).
 //   down    run one over and he goes down for good (ragdoll pose, flat on the
 //           road), and that is the crime of running down a person.
+//   fists   punch one (js/combat.js through js/copfists.js) and he reels, is
+//           knocked flat and gets up again, or dies of it: copFistStep owns
+//           his body while that lasts, and his duty above waits.
 //
 // BODIES. Real citizen bodies from js/citizen.js in the Czech police uniform
 // (wardrobe.js ROLES.police: navy fatigues, the yellow reflective vest, the
@@ -44,6 +47,7 @@ import * as THREE from 'three';
 import { makeCitizen } from './citizen.js';
 import { FIRE_R } from './policetune.js';
 import { sameLevel } from './levelsep.js';
+import { COP_HP, copFistStep, copFistClear } from './copfists.js';
 
 const POOL_N = 10;              // 5 units × 2 officers, the most there can be
 const EXIT_T = 0.6;
@@ -137,6 +141,7 @@ export class Officers {
       free: true, unit: null, body: null, slot: 0, x: 0, z: 0, y: 0, heading: 0,
       state: '', stAt: 0, aimK: 0, nextShot: 0, burst: 0, walkT: 0, speed: 0,
       cx: 0, cz: 0, coverAt: 0, sightAt: 0, sees: false, cuffT: 0, tackleAt: 0,
+      hp: COP_HP, fist: null, gen: 0,
     };
   }
 
@@ -183,6 +188,7 @@ export class Officers {
       r.heading = h; r.state = 'exit'; r.stAt = this._t + EXIT_T + k * 0.25;
       r.aimK = 0; r.nextShot = 0; r.burst = 0; r.speed = 0; r.walkT = this.rnd() * 6;
       r.coverAt = 0; r.sightAt = 0; r.sees = false; r.cuffT = 0; r.tackleAt = 0;
+      r.hp = COP_HP; r.fist = null; r.gen++;     // a new man in a pooled record
       r.body = this._takeBody();
       this._pose(r, 0);
       made++;
@@ -210,6 +216,7 @@ export class Officers {
   }
 
   _free(r) {
+    copFistClear(r);
     if (r.body) {
       r.body.group.visible = false;
       r.body.standPose?.();
@@ -254,9 +261,12 @@ export class Officers {
       const u = r.unit, car = u?.car;
       if (!car) { this._free(r); continue; }
       this.out.push(r);
+      // a man the player's fists put down falls and is laid out by copfists.js
+      if (r.fist?.dead) { copFistStep(r, this._t, dt, ctx); continue; }
       if (r.state === 'down') continue;
       this._runOver(r, ctx);
-      if (r.state === 'down') continue;
+      if (r.state === 'down') { copFistClear(r); continue; }   // the car wins over a fist
+      if (r.fist && copFistStep(r, this._t, dt, ctx, (x, z) => this._blocked(x, z))) continue;
       this._step(r, dt, ctx, tier, car);
     }
   }
@@ -277,7 +287,9 @@ export class Officers {
       r.body.group.rotation.set(-Math.PI / 2 * 0.96, h, 0, 'YXZ');
       r.body.group.position.y = r.y + 0.18;
     }
-    try { this.wanted?.add?.('srazeni'); } catch (e) { /* the HUD is not the street */ }
+    // run down for good: killing a policeman, three stars (js/wanted.js), and
+    // the police are their own witness (js/crimelaw.js `always`)
+    try { this.wanted?.add?.('zabiti_policisty'); } catch (e) { /* the HUD is not the street */ }
   }
 
   _step(r, dt, ctx, tier, car) {

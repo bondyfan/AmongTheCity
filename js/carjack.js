@@ -12,8 +12,15 @@
 //   running  away from whoever did it, and gone once they are far enough off
 //
 // and the question the law asks about it: did anybody SEE. witnessed() is the
-// rule in Frank's words: a person within a hundred metres, or a building with
-// a light on within a hundred metres.
+// old rule (Frank, 18 Nov 2026: a person or a lit window within 100 m); since
+// 25 Nov 2026 the law is js/crimelaw.js, where the driver himself rings the
+// police unless he is dead before the call goes through.
+//
+// So the driver is a body you can hurt (25 Nov 2026): hp, run down by the
+// player's car (update's `car`), and hittable by fists through nearest() and
+// hurt(), the shape js/combat.js asks every target source for (x, z, state
+// 'walk' while running, dead, mesh). A dead one stays on the road for DEAD_T.
+// onRunOver(r, killed) tells main.js a car did it, so the law hears of it.
 //
 // At most MAX bodies at once; an older one makes way. Local, like the crowd's
 // own ragdolls: nothing here is on the wire.
@@ -32,10 +39,24 @@ const MAX = 3;
 const RUN_V = 4.8;              // m/s away from you
 const GONE_R = 55, GONE_T = 16; // m, s: out of the story
 export const WITNESS_R = 100;   // m
+const HP = 100;
+const DEAD_T = 40;              // s a body lies on the road before it is cleared
+const HIT_V = 2.5;              // m/s of the player's car that knocks somebody down
+const KILL_V = 7;               // …and that kills (a pedestrian's casualty line is 6)
 
 const _feet = { x: 0, y: 0, z: 0 };
 const _q = { x: 0, z: 0 };
 const _o = { interior: true, yLo: 0, yHi: 0, aboveY: 0 };
+
+// Who the driver is, for what is in his pocket (js/pocket.js pocketOf, paid
+// once by js/combat.js on a killing blow). Without a pid every driver carried
+// the same 94 Kc (review, 25 Nov 2026). The car's own schedule seed, kept by
+// main.js before traffic.steal() drops car.ai, makes it a pure function of
+// which car it was; a car with no schedule gets a stranger.
+export function driverPid(car) {
+  const k = car?._driverPid ?? car?.ai?.seed;
+  return Number.isInteger(k) ? k : (Math.random() * 0x7fffffff) | 0;
+}
 
 export class Carjack {
   /** { scene, world, makeBody }: makeBody is for tests; the default is a citizen. */
@@ -47,6 +68,7 @@ export class Carjack {
     this.makeBody = opts.makeBody ?? ((car) => makeCitizen({ archetype: DRIVERS[(Math.random() * DRIVERS.length) | 0],
       avatar: whoIs(stockDriverOf(car))?.body }));
     this.out = [];
+    this.onRunOver = null;        // (r, killed): the player's car hit a thrown-out driver
   }
 
   /**
@@ -71,7 +93,8 @@ export class Carjack {
     st.gy = car.y ?? 0;
     body.group.rotation.order = 'YXZ';
     body.ragdollPose();
-    const r = { body, st, t: 0, phase: 'thrown', x: st.x, z: st.z, y: st.gy, heading: st.yaw, walkT: 0, lay: null };
+    const r = { body, st, t: 0, phase: 'thrown', x: st.x, z: st.z, y: st.gy, heading: st.yaw, walkT: 0, lay: null,
+      hp: HP, dead: false, state: 'rag', mesh: body.group, pid: driverPid(car), arch: body.arch?.key ?? 'm30' };
     this.out.push(r);
     this._place(r);
     return r;
@@ -93,11 +116,16 @@ export class Carjack {
     car._victim = body;
   }
 
-  /** px, pz: who they are running from. */
-  update(dt, px, pz) {
+  /**
+   * px, pz: who they are running from. car: the car the player drives, or
+   * null; it knocks down (and above KILL_V kills) whoever it drives into.
+   */
+  update(dt, px, pz, car = null) {
     for (let i = this.out.length - 1; i >= 0; i--) {
       const r = this.out[i];
       r.t += dt;
+      if (r.dead) { if (r.t > DEAD_T) this._drop(i); continue; }
+      if (car && this._struck(r, car)) continue;
       if (r.phase !== 'run') {
         const going = stepBody(r.st, dt, this.world ?? FLAT, null);
         this._place(r);
@@ -107,7 +135,7 @@ export class Carjack {
           getUpPose(r.body.parts, r.st.rise ?? 0, r.st.faceUp, r.lay);
         }
         if (!going) {
-          r.phase = 'run'; r.t = 0;
+          r.phase = 'run'; r.t = 0; r.state = 'walk';
           r.x = r.st.x; r.z = r.st.z; r.y = r.st.gy; r.heading = r.st.yaw;
           r.body.group.rotation.order = 'XYZ';
           r.body.group.rotation.set(0, r.heading, 0);
@@ -136,6 +164,65 @@ export class Carjack {
       r.body.group.rotation.y = r.heading;
       r.body.walk(r.walkT, Math.min(1.25, v / 5.6), v > 3.5 ? 0.6 : 0, v);
     }
+  }
+
+  /** The nearest live driver within rad that want(r) accepts (js/combat.js's target contract). */
+  nearest(x, z, rad, want = null) {
+    let best = null, bd = rad * rad;
+    for (const r of this.out) {
+      if (r.dead) continue;
+      if (want ? !want(r) : r.state !== 'walk') continue;
+      const dx = r.x - x, dz = r.z - z, d2 = dx * dx + dz * dz;
+      if (d2 <= bd) { bd = d2; best = r; }
+    }
+    return best;
+  }
+
+  /** A blow { dmg, vx, vz, ... }: hp comes off, and at zero they are dead. */
+  hurt(r, blow) {
+    if (!r || r.dead || !blow) return false;
+    const dmg = blow.dmg > 0 ? blow.dmg : 0;
+    r.hp -= dmg;
+    if (!(r.hp > 0)) this._kill(r);
+    return true;
+  }
+
+  // The player's car against one driver: inside its footprint and moving,
+  // they go down; fast enough, for good. Returns true if they were hit.
+  _struck(r, car) {
+    const v = Math.abs(car.speed ?? 0);
+    if (v < HIT_V) return false;
+    const h = car.heading ?? 0, fx = -Math.sin(h), fz = -Math.cos(h);
+    const x = r.phase === 'run' ? r.x : r.st.x, z = r.phase === 'run' ? r.z : r.st.z;
+    const dx = x - car.x, dz = z - car.z;
+    const a = dx * fx + dz * fz, b = dx * -fz + dz * fx;
+    if (Math.abs(a) > (car.len ?? 4.4) / 2 + 0.35 || Math.abs(b) > (car.wid ?? 1.8) / 2 + 0.3) return false;
+    const killed = v >= KILL_V;
+    if (killed) this._kill(r);
+    else {
+      r.hp -= v * 12;
+      if (!(r.hp > 0)) this._kill(r);
+      else {
+        // knocked over: thrown again, the way they came out of the door
+        const st = launchBody({ x, z, y: r.y ?? 0, heading: h, impactVx: fx * v, impactVz: fz * v },
+          { x: 0, y: 0.6, z: 0 }, 0.92 * PLAYER_SCALE);
+        st.car = null; st.gy = r.y ?? 0;
+        r.st = st; r.phase = 'thrown'; r.state = 'rag'; r.lay = null; r.t = 0;
+        r.body.group.rotation.order = 'YXZ';
+        r.body.ragdollPose();
+      }
+    }
+    try { this.onRunOver?.(r, r.dead); } catch (e) { console.warn('[carjack] onRunOver:', e); }
+    return true;
+  }
+
+  // Dead: flat on the road where they fell, and not getting up.
+  _kill(r) {
+    if (r.phase !== 'run' && r.st) { r.x = r.st.x; r.z = r.st.z; r.y = r.st.gy ?? r.y; }
+    r.dead = true; r.hp = 0; r.state = 'dead'; r.phase = 'dead'; r.t = 0;
+    r.body.ragdollPose?.();
+    r.body.group.rotation.set(-Math.PI / 2 * 0.96, r.heading ?? 0, 0, 'YXZ');
+    r.body.group.position.set(r.x, (r.y ?? 0) + 0.18, r.z);
   }
 
   _place(r) {

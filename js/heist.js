@@ -341,6 +341,10 @@ export function createHeist({ scene, world, player, map, input, traffic, host, c
     posePlayer(dt) {
       return film?.running ? film.pose(dt) : false;
     },
+    // a film has the camera and the body (js/main.js: no fists meanwhile)
+    get filming() {
+      return !!film?.running;
+    },
     // --- failing: main.js shows the card, asks where to stand him, then resumes
     get lastFail() {
       return lastFail;

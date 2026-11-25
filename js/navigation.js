@@ -225,6 +225,8 @@ export class Navigation {
     this.destination = null;    // {x,z} | null
     this.partial = false;       // true when the route stops short of the pin
     this.offRoute = 0;          // m from the player to the line (0 with no route)
+    this.routeOff = null;       // per route point: m from the centreline to the
+                                // driven half (laneHalf), for js/navline.js
     // diagnostics, not contract. `edges` counts SEGMENTS — split way pieces —
     // of which a two-way street is one, walked in either direction.
     this.stats = { nodes: 0, edges: 0, expanded: 0, ms: 0, partial: false, capped: false };
@@ -712,11 +714,15 @@ export class Navigation {
   _emit(out, spd, e, s0, s1) {
     const seg = e.seg, pts = seg.pts, v = seg.speed;
     const f0 = e.rev ? seg.len - s0 : s0, f1 = e.rev ? seg.len - s1 : s1;
+    // the lane this piece is driven in, for the line painted on the road
+    // (js/navline.js): one value per point actually pushed, so the array
+    // stays aligned with `out` through pushPt's de-duplication
+    const lane = laneHalf(seg.road), off = this._offB;
     fwdPoint(seg, f0, _pa); fwdPoint(seg, f1, _pb);
-    pushPt(out, spd, _pa.x, _pa.z, v);
-    if (f1 >= f0) for (let i = _pa.i + 1; i <= _pb.i; i++) pushPt(out, spd, pts[i][0], pts[i][1], v);
-    else for (let i = _pa.i; i > _pb.i; i--) pushPt(out, spd, pts[i][0], pts[i][1], v);
-    pushPt(out, spd, _pb.x, _pb.z, v);
+    if (pushPt(out, spd, _pa.x, _pa.z, v)) off?.push(lane);
+    if (f1 >= f0) { for (let i = _pa.i + 1; i <= _pb.i; i++) if (pushPt(out, spd, pts[i][0], pts[i][1], v)) off?.push(lane); }
+    else for (let i = _pa.i; i > _pb.i; i--) if (pushPt(out, spd, pts[i][0], pts[i][1], v)) off?.push(lane);
+    if (pushPt(out, spd, _pb.x, _pb.z, v)) off?.push(lane);
   }
 
   // Turn instruction at a junction: the angle from the arriving tangent to the
@@ -738,11 +744,12 @@ export class Navigation {
   // travel order: partial start segment, whole edges, partial end segment.
   _build(A, res) {
     const out = [], spd = [], joints = [];
+    const off = this._offB = [];
     if (res.direct) {                            // same segment, pin straight ahead
       const e = res.direct, c = res.directCand;
       const sIn = e.rev ? A.seg.len - A.s : A.s, tIn = e.rev ? c.seg.len - c.s : c.s;
       this._emit(out, spd, e, sIn, tIn);
-      return { pts: out, spd, joints, complete: true };
+      return { pts: out, spd, off, joints, complete: true };
     }
     const end = res.goalNode >= 0 ? res.goalNode : res.bestNode;
     if (end < 0) return null;
@@ -783,21 +790,27 @@ export class Navigation {
       if (dir) joints.push({ idx: out.length - 1, dir, street: f.seg.name });
       this._emit(out, spd, f, 0, tIn);
     }
-    return { pts: out, spd, joints, complete };
+    return { pts: out, spd, off, joints, complete };
   }
 
   // ======================= public API ======================================
 
+  // Read-only views for the painters (js/minimap.js, js/navline.js, the
+  // world map): the arclength table of `route`, and where the player is on it.
+  get routeCum() { return this._cum; }
+  get routeS() { return this._s; }
+  get routeI() { return this._i; }
+
   setDestination(x, z) {
     this.destination = { x, z };
-    this.route = null; this.remainingM = null; this.etaS = null; this.nextTurn = null;
+    this.route = null; this.routeOff = null; this.remainingM = null; this.etaS = null; this.nextTurn = null;
     this._since = 1e9;                           // route on the very next update
     this._retryIn = PARTIAL_RETRY;
   }
 
   clear() {
     this.destination = null;
-    this.route = null; this.remainingM = null; this.etaS = null; this.nextTurn = null;
+    this.route = null; this.routeOff = null; this.remainingM = null; this.etaS = null; this.nextTurn = null;
     this.partial = false; this.offRoute = 0; this.stats.partial = false;
     this._joints.length = 0; this._cum = null; this._cumT = null;
     this._i = 0; this._s = 0; this._ji = 0;
@@ -825,6 +838,7 @@ export class Navigation {
     this.coarseFrom = -1;
     if (!built.complete) this._coarseTail(built, dest);
     this.route = built.pts;
+    this.routeOff = built.off ?? null;
     this.partial = !built.complete;
     this.stats.partial = this.partial;
     this._retryIn = this.partial ? Math.min(PARTIAL_MAX, this._retryIn * 2) : PARTIAL_RETRY;
@@ -881,6 +895,7 @@ export class Navigation {
       if (Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) < 0.5) continue;
       built.pts.push(p);
       built.spd.push(far.speeds[i] || far.speeds[1] || MIN_V);
+      built.off?.push(0);                        // no lanes known out there
     }
   }
 
@@ -1060,8 +1075,20 @@ function pushPt(out, spd, x, z, v) {
   const n = out.length;
   if (n) {
     const p = out[n - 1];
-    if (Math.abs(p[0] - x) < 1e-3 && Math.abs(p[1] - z) < 1e-3) return;
+    if (Math.abs(p[0] - x) < 1e-3 && Math.abs(p[1] - z) < 1e-3) return false;
   }
   out.push([x, z]);
   spd.push(v);
+  return true;
+}
+
+// Distance from a way's centreline to the middle of the half you drive on:
+// a quarter of its width on a two-way road, nothing on a oneway (one
+// carriageway of a dual road, a slip, a roundabout) where the centreline IS
+// the carriageway. Unsigned: which side is the region's (js/regions.js
+// laneSide), applied by whoever paints it.
+export function laneHalf(road) {
+  if (!road || road.ow) return 0;
+  const w = road.w > 0 ? road.w : 6;
+  return Math.min(4, Math.max(1, w / 4));
 }

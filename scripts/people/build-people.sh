@@ -4,7 +4,7 @@
 # Needs Blender (headless), Python 3 with Pillow, and node.
 #   1. every person of scripts/people/people.json: FBX -> avatars/<id>.glb
 #   2. every animation that was fetched: FBX -> a clip .glb (kept with the sources)
-#   3. the clips baked into one file: clips.bin
+#   3. the clips baked into one file: clips.bin, and the fighting clips: fight.bin
 #   4. the atlases, the far atlas and manifest.json
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; REPO="$(cd "$HERE/../.." && pwd)"
@@ -32,6 +32,13 @@ if [ "$step" = all ] || [ "$step" = anims ]; then
 fi
 if [ "$step" = all ] || [ "$step" = clips ]; then
   nice -n 10 node "$HERE/bake-clips.mjs" "$SRC/out/anims" "$OUT/clips.bin" "$HERE/people.json"
+fi
+if [ "$step" = all ] || [ "$step" = fight ]; then
+  # punches, hit reactions, the fall and getting up: Quaternius UAL 1 and 2 (CC0)
+  UAL="$SRC/quaternius"
+  nice -n 10 node "$HERE/bake-fight.mjs" "$OUT/fight.bin" \
+    "$UAL/ual1/Universal Animation Library[Standard]/Unreal-Godot/UAL1_Standard.glb" \
+    "$UAL/ual2/Universal Animation Library 2[Standard]/Unreal-Godot/UAL2_Standard.glb"
 fi
 if [ "$step" = all ] || [ "$step" = atlas ]; then
   nice -n 10 python3 "$HERE/build-atlas.py" "$SRC/rocketbox/Assets/Avatars" "$OUT" "$HERE/people.json" "$SRC/out/meta"

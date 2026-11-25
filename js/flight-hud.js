@@ -76,20 +76,22 @@ export function flightHud() {
     },
     /**
      * The boarding pass, or null to put it away. `state` is the line under
-     * it (what this passenger is to do next).
+     * it (what this passenger is to do next); `when` { board, dep } the
+     * countdowns of js/flight-schedule.js, else the times of t.depMin.
      */
-    pass(t, route, state = '') {
+    pass(t, route, state = '', when = null) {
       pass.hidden = !t;
       if (!t) { passKey = ''; return; }
-      const key = [t.no, t.seat, t.gate, t.depMin, state].join('|');
+      const key = [t.no, t.seat, t.gate, t.depMin, state, when?.board, when?.dep].join('|');
       if (key === passKey) return;
       passKey = key;
-      const board = t.depMin == null ? '' : clockText(t.depMin - 20);
+      const board = when ? when.board : t.depMin == null ? '' : clockText(t.depMin - 20);
+      const dep = when ? when.dep : t.depMin == null ? '' : clockText(t.depMin);
       pass.innerHTML = `<header><span>Palubní vstupenka</span><span>${t.no}</span></header>
         <div class="route"><b>${route.from}</b><i>✈</i><b>${route.to}</b></div>
         <div class="names"><span>${route.fromName}</span><span>přes ${route.via}</span><span>${route.toName}</span></div>
         <dl><dt>Gate</dt><dt>Nástup</dt><dt>Odlet</dt><dt>Sedadlo</dt>
-        <dd>${t.gate}</dd><dd>${board}</dd><dd>${t.depMin == null ? '' : clockText(t.depMin)}</dd><dd>${t.seat}</dd></dl>
+        <dd>${t.gate}</dd><dd>${board}</dd><dd>${dep}</dd><dd>${t.seat}</dd></dl>
         <div class="state"></div>`;
       pass.querySelector('.state').textContent = state;
     },

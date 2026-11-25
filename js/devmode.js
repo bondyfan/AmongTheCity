@@ -28,9 +28,12 @@ export const isDevMode = () => /(^|[?&])devmode(=|&|$)/.test(location.search);
 export const DEV_PLACES = [
   { n: 'Pardubice hl. nádraží', x: 25, z: -122, h: Math.PI },
   { n: 'Pardubice, most přes Labe', x: -802, z: -995, h: 0 },
-  { n: 'Pardubice letiště', x: -1257, z: 2032, h: 0 },
+  // on the forecourt of Terminál Jana Kašpara, facing its doors (js/airport-plan.js
+  // SPAWNS 'pce-airport'): the flight is sold inside, at counters 3 and 4
+  { n: 'Pardubice letiště', x: -2229.4, z: 1530.5, h: Math.PI },
   { n: 'Praha, Václavské nám.', x: -95270, z: -5517, h: Math.PI },
-  { n: 'Praha, letiště', x: -107193, z: -7688, h: 0 },
+  // before the check-in in front of Terminal 1, facing it (js/flight-lkpr.js 'prg-airport')
+  { n: 'Praha, letiště', x: -106657.2, z: -8362.8, h: 0.976 },
   // …and the east. Zlín is 163 km from the spawn, which is four minutes in the
   // Gripen and two hours in an Octavia, so it needs a door of its own.
   { n: 'Olomouc, Horní nám.', x: 107101, z: 48709, h: Math.PI },

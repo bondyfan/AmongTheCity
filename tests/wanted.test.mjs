@@ -24,18 +24,18 @@
 //      edge a dozen times — and js/police.js spawns a pursuit on that edge, so
 //      twelve toggles is twelve sets of cars appearing and vanishing at the end
 //      of the street. The HUD flicker is the cheap half of that bug.
-//   3. DECAY THAT RUNS WHILE THEY HAVE YOU. If heat bleeds while a patrol is
-//      sat on your bumper, hiding is not a mechanic and the doorway off
-//      Sladkovského is scenery. The condition is the feature.
+//   3. A SEARCH THAT RUNS WHILE THEY HAVE YOU. Since 25 Nov 2026 the stars do
+//      not bleed: they blink while nobody has you and all go after LOST_T of
+//      that (Frank: "do minuty ať se ztratí"). If that clock ran while a
+//      patrol is sat on your bumper, hiding is not a mechanic and the doorway
+//      off Sladkovského is scenery. The condition is the feature.
 //   4. A WANTED LEVEL THE POLICE CANNOT REACH. This is the silent one and it is
 //      the reason for the timing band below. Patrol density near the player is
 //      about one slot inside TRAFFIC.spawnR (520 m), which is forty to sixty
-//      seconds of driving. Halve CALM or T_SHED "for feel" and the star clears
+//      seconds of driving. Shorten LOST_T "for feel" and the star clears
 //      before the first unit arrives: the pursuit becomes dead code, every test
 //      still passes, and the symptom is that the police never turn up. So the
-//      time from one star to clear is asserted against a stated band, and the
-//      four escapes wanted.js's own header publishes are re-derived here from
-//      the file's own constants and checked against what the code does.
+//      time from a report to clear is asserted against a stated band.
 //   5. A POISONED SCALAR. One NaN in `heat` and every comparison in the ladder
 //      answers false forever: no stars, no decay, no way back inside a session.
 //   6. A COUNTDOWN NOBODY TICKS. Every deadline in wanted.js is absolute
@@ -51,13 +51,13 @@
 // must install their own listener (the throwing one, the ignore-junk one) are
 // written to be inert for every test after them.
 //
-// A NOTE ON THE NUMBERS. STAR_AT, HYST, T_SHED and the rest are private to
+// A NOTE ON THE NUMBERS. STAR_AT, HYST, LOST_T and the rest are private to
 // wanted.js — correctly, nothing outside a debug overlay should read them — so
 // this file PARSES them out of the source the way tests/economy.test.mjs parses
 // CAR_KINDS out of vehicles.js. The parse asserts its own success first, so a
 // renamed constant fails loudly instead of quietly testing zero. Everything
-// derived below (the drop lines, the per-band rates, the reference integrator)
-// is computed from those numbers rather than typed, so re-tuning the ladder
+// derived below (the drop lines, the length of a search) is computed from
+// those numbers rather than typed, so re-tuning the ladder
 // re-tunes the expectations with it and only the DESIGN bands — the ones that
 // say the police must be reachable — are written down as literals.
 
@@ -87,9 +87,9 @@ const STAR_AT = (() => {
 
 const HEAT_MAX = konst('HEAT_MAX');
 const HYST = konst('HYST');
-const T_SHED = konst('T_SHED');
-const CALM = konst('CALM');
 const SEEN_HOLD = konst('SEEN_HOLD');
+const LOST_T = konst('LOST_T');
+const NEAR_R = konst('NEAR_R');
 const COINCIDE = konst('COINCIDE');
 const SEE_R_FOOT = konst('SEE_R_FOOT');
 const SEE_R_CAR = konst('SEE_R_CAR');
@@ -99,18 +99,14 @@ const SIGHT_HZ = konst('SIGHT_HZ');
 const DT_MAX = konst('DT_MAX');
 const UNKNOWN_HEAT = W.CRIMES.rvacka.heat;   // wanted.js derives it the same way
 
-// The two derived tables, derived here the way the module derives them. If
-// these two loops and the module's two loops ever disagree, every timing
-// assertion in this file is measuring the test rather than the code — which is
-// why the drop lines are ALSO recovered from observed behaviour further down.
+// The drop lines, derived here the way the module derives them (the ladder's
+// downward half; the search never lowers heat, it clears it).
 const DROP_AT = new Float64Array(6);
-const RATE = new Float64Array(6);
-for (let s = 1; s <= 5; s++) {
-  const band = STAR_AT[s] - STAR_AT[s - 1];
-  DROP_AT[s] = STAR_AT[s] - HYST * band;
-  RATE[s] = band / T_SHED;
-}
-RATE[0] = RATE[1];
+for (let s = 1; s <= 5; s++) DROP_AT[s] = STAR_AT[s] - HYST * (STAR_AT[s] - STAR_AT[s - 1]);
+
+// From a report with nobody looking: SEEN_HOLD of solid stars, then LOST_T of
+// blinking, then nothing. The same for every level (Frank, 25 Nov 2026).
+const SEARCH = SEEN_HOLD + LOST_T;
 
 // ---------------------------------------------------------------- harness ----
 
@@ -153,6 +149,8 @@ function timeUntil(pred, ctx = null, cap = 900, step = STEP) {
 // wanted.js supports both: a car directly, or a record that wraps one.
 function cop(x, z, sees = false) { return { x, z, sees }; }
 function copCar(x, z, sees = false) { return { car: { x, z }, sees }; }
+// …and a unit that publishes no `sees` of its own, judged by the street radius
+function bare(x, z) { return { x, z }; }
 
 // One reusable ctx per test, mutated rather than replaced — the same discipline
 // the per-frame path in the module keeps, and it means these tests exercise the
@@ -161,26 +159,12 @@ function scene(units, onFoot = true) {
   return { x: 0, z: 0, onFoot, car: null, police: { units } };
 }
 
-// ---- the reference the timing band is measured against ---------------------
-// An independent integration of the same model: from `h` heat at the moment of
-// the charge, unseen for ever after, how long until stars() reads `to`. Written
-// out rather than reusing the module so that a change to the module's loop
-// cannot silently move the expectation with it.
-function ladderOf(h) {
-  let s = 0;
-  while (s < 5 && h >= STAR_AT[s + 1]) s++;
-  return s;
-}
-function hideTime(h, to = 0) {
-  let s = ladderOf(h), t = CALM;
-  while (s > to) { t += (h - DROP_AT[s]) / RATE[s]; h = DROP_AT[s]; s--; }
-  return t;
-}
-function zeroTime(h) { return hideTime(h, 0) + DROP_AT[1] / RATE[0]; }
+// ---- the reference ----------------------------------------------------------
+// The search is a deadline, so there is nothing to integrate: a report, unseen
+// for ever after, clears at SEARCH whatever the level. See SEARCH above.
 
-// One step's worth of decay, which is the measurement granularity of every
-// timing assertion below, plus the half-step the calm window is detected early
-// by (decay applies on the first step whose END is past the deadline).
+// One step plus a sight scan, the measurement granularity of every timing
+// assertion below.
 const SLOP = 0.25;
 
 // ==========================================================================
@@ -197,8 +181,8 @@ test('the module still stands up alone, and the ladder is a ladder', () => {
     // no hysteresis at all, only a threshold with extra arithmetic.
     assert.ok(DROP_AT[s] < STAR_AT[s], `star ${s} is lost exactly where it is won`);
     assert.ok(DROP_AT[s] > STAR_AT[s - 1], `star ${s} is lost below the band it lives in`);
-    assert.ok(RATE[s] > 0, `star ${s} sheds at ${RATE[s]}/s`);
   }
+  assert.equal(LOST_T, 60, 'Frank asked for a minute: "do minuty ať se ztratí"');
   assert.equal(STAR_AT[0], 0);
   assert.ok(HEAT_MAX > STAR_AT[5], 'the cap is under the five-star line, so five stars is unreachable');
   assert.ok(COINCIDE > DT_MAX, 'the incident window is narrower than one clamped step');
@@ -239,21 +223,22 @@ test('a star is won exactly at its threshold and not a point before', () => {
   assert.equal(W.stars(), 5);
 });
 
-// The drop lines RECOVERED from behaviour rather than read off the constants,
-// so the derived table at the top of this file cannot quietly agree with itself
-// while disagreeing with the module.
-test('a star is lost well below where it was won, one at a time', () => {
+// Frank, 25 Nov 2026: a star that blinks and, a minute later, is gone. Not one
+// rung at a time: every level holds through the search and goes at once, with
+// one edge down.
+test('stars do not wear off one by one: unseen, they hold, then all go at once', () => {
   for (let s = 1; s <= 5; s++) {
     fresh();
     W.add(STAR_AT[s] + 0.5);
-    assert.equal(W.stars(), s);
-    let t = 0;
-    while (W.stars() === s && t < 600) { W.update(STEP, null); t += STEP; }
-    assert.equal(W.stars(), s - 1, `star ${s} fell to ${W.stars()} — two rungs in one step`);
-    // Below the line by at most one step's decay, and never above it.
-    assert.ok(W.heat() < DROP_AT[s] + 1e-9, `star ${s} was lost at ${W.heat()}, above its drop line ${DROP_AT[s]}`);
-    assert.ok(DROP_AT[s] - W.heat() < RATE[s] * STEP + 1e-9,
-      `star ${s} was lost at ${W.heat()}, well under its drop line ${DROP_AT[s]}`);
+    const h = W.heat();
+    advance(SEARCH - 1);
+    assert.equal(W.stars(), s, `${s} stars wore down to ${W.stars()} during the search`);
+    assert.equal(W.heat(), h, 'heat bled during the search');
+    assert.equal(W.searching(), true, 'the stars were not blinking a second before they went');
+    const t = timeUntil(() => W.stars() === 0, null, 10);
+    assert.ok(t <= 1 + SLOP, `${s} stars outlived the search by ${(t - 1).toFixed(2)} s`);
+    assert.equal(W.heat(), 0);
+    assert.deepEqual(LOG, [[s, 0], [0, s]], 'the end of the search was not one edge down');
   }
 });
 
@@ -369,38 +354,21 @@ test('two people a second apart are two crimes, and the window never stretches',
 // HYSTERESIS — the star that must not flicker
 // ==========================================================================
 
-// js/police.js spawns and despawns a pursuit on this edge. A star that toggles
-// on a wobble is cars appearing and vanishing at the end of the street, which
-// reads as the world being broken rather than as a HUD glitch. So the test
-// counts EDGES, not frames: drive heat back and forth across STAR_AT[2] ten
-// times and exactly one edge — the one that got you there — may exist.
-test('heat wobbling on a threshold does not flicker the star', () => {
-  const LINE = STAR_AT[2];
+// A fresh crime is a report: whoever rang it in told the police where you are,
+// so the stars go solid again and the minute starts over from the end of the
+// report's hold. Edges: none, the star never moved.
+test('a fresh crime during the search is a new report, and the minute starts over', () => {
   fresh();
-  W.add(LINE + 1);
-  assert.equal(W.stars(), 2);
-  assert.deepEqual(LOG, [[2, 0]]);
-
-  for (let i = 0; i < 10; i++) {
-    // Past the dispatch window and a little way into the decay: heat crosses
-    // BELOW the line it was won at…
-    advance(CALM + 2.6);
-    assert.ok(W.heat() < LINE, `cycle ${i}: heat ${W.heat()} never got below the threshold, so nothing was tested`);
-    assert.equal(W.stars(), 2, `cycle ${i}: the star fell the moment heat dipped under ${LINE}`);
-    // …and a punch puts it back above.
-    W.add(2.2);
-    assert.ok(W.heat() > LINE, `cycle ${i}: heat ${W.heat()} did not get back above the threshold`);
-    assert.equal(W.stars(), 2);
-  }
-  assert.equal(LOG.length, 1, `the star toggled ${LOG.length - 1} extra times — that is ${LOG.length - 1} pursuits`);
-
-  // …and it is not merely stuck: driven properly down it does fall, once, and
-  // it announces the fall.
-  const t = timeUntil(() => W.stars() === 1);
-  assert.ok(Number.isFinite(t), 'the star never came down at all — it is stuck, not hysteretic');
-  assert.deepEqual(LOG, [[2, 0], [1, 2]], 'the way down was announced wrong');
-  assert.ok(W.heat() < DROP_AT[2], 'the star fell above its own drop line');
-  assert.ok(W.heat() > STAR_AT[1], 'the star fell straight past the band below it');
+  W.add('zabiti');
+  advance(SEEN_HOLD + 40);
+  assert.equal(W.searching(), true);
+  assert.ok(Math.abs(W.searchLeft() - (LOST_T - 40)) < SLOP, `${W.searchLeft()} s left of the search`);
+  W.add(0.5, 'výtržnictví');
+  assert.equal(W.searching(), false, 'a report did not make the stars solid');
+  assert.equal(W.seen(), false, 'a report pretended a unit was looking at you');
+  const t = timeUntil(() => W.stars() === 0);
+  assert.ok(Math.abs(t - SEARCH) < SLOP, `after the second report the stars went in ${t.toFixed(2)} s, not ${SEARCH}`);
+  assert.deepEqual(LOG, [[2, 0], [0, 2]]);
 });
 
 // A rampage that crosses two thresholds in one lump is ONE event as far as a
@@ -411,21 +379,20 @@ test('a lump that crosses two thresholds is a single edge', () => {
   assert.equal(W.stars(), 3);
   assert.deepEqual(LOG, [[3, 0]], 'three stars in one charge was announced as three events');
 
-  // and the same on the way down: a step never skips a rung, so five stars
-  // coming home is five edges in order, no more and no less.
+  // and the same on the way down: a failed search clears five stars in one
+  // edge, which is what the pursuit spawner wants to hear (stand down, once).
   fresh();
   W.add(STAR_AT[5]);
   LOG.length = 0;
   timeUntil(() => W.stars() === 0, null, 900);
-  assert.deepEqual(LOG, [[4, 5], [3, 4], [2, 3], [1, 2], [0, 1]],
-    'the descent from five stars did not announce every rung exactly once');
+  assert.deepEqual(LOG, [[0, 5]], 'five stars coming home was not one edge');
 });
 
 // ==========================================================================
 // SEEING, AND NOT SEEING
 // ==========================================================================
 
-test('nothing decays while they can see you, however long you sit there', () => {
+test('nothing clears while they can see you, however long you sit there', () => {
   fresh();
   W.add('zabiti');
   const h = W.heat();
@@ -434,44 +401,59 @@ test('nothing decays while they can see you, however long you sit there', () => 
   assert.equal(W.heat(), h, `ten minutes under a patrol's nose bled ${(h - W.heat()).toFixed(2)} heat`);
   assert.equal(W.stars(), 2);
   assert.equal(W.seen(), true, 'a car five metres away is not looking at you');
+  assert.equal(W.searching(), false, 'the stars blink with a patrol alongside');
   assert.deepEqual(LOG, [[2, 0]], 'the star moved while the police had eyes on');
 });
 
-test('nothing decays inside the dispatch window either, seen or not', () => {
+test('a report holds the stars solid for its hold, then the search runs its minute', () => {
   fresh();
   W.add('zabiti');
-  const h = W.heat();
-  advance(CALM - 1);
-  assert.equal(W.heat(), h, `heat bled ${(h - W.heat()).toFixed(2)} before the dispatch window closed`);
-  advance(3);
-  assert.ok(W.heat() < h, 'the dispatch window never closed — heat is undecayable');
-  // …and every fresh crime re-arms it, so a player under continuous provocation
-  // never bleeds at all.
+  advance(SEEN_HOLD - 0.2);
+  assert.equal(W.searching(), false, 'the stars blinked the moment the crime was reported');
+  advance(0.4);
+  assert.equal(W.searching(), true, 'the search never started');
+  advance(LOST_T - 1);
+  assert.equal(W.stars(), 2, 'the search ended early');
+  advance(2);
+  assert.equal(W.stars(), 0, 'the search never ended: a wanted level you cannot lose');
+  // …and every fresh crime restarts it, so a player under continuous
+  // provocation is never forgotten.
   fresh();
   W.add('rvacka');
-  for (let i = 0; i < 12; i++) { advance(CALM - 2); W.add(0.0001); }
-  assert.ok(W.heat() >= W.CRIMES.rvacka.heat, 'the calm window did not re-arm on a fresh charge');
+  for (let i = 0; i < 12; i++) { advance(SEARCH - 2); W.add(0.0001); }
+  assert.equal(W.stars(), 1, 'a fresh report did not restart the search');
 });
 
-// The latch is what stops a car weaving across the edge of SEE_R from
-// chattering the decay on and off at frame rate. "They had eyes on me four
-// seconds ago" is correctly still not clear.
-test('the sighting is a latch, not an instant, and it lets go after its hold', () => {
+// The latch is what stops a car weaving in and out of sight from flicking the
+// stars between solid and blinking at frame rate. "They had eyes on me a
+// second ago" is correctly still being seen.
+test('the sighting is a latch, not an instant, and finding you again stops the search', () => {
   fresh();
   W.add('zabiti');
-  const h = W.heat();
   const near = cop(5, 5);
   const ctx = scene([near]);
-  advance(CALM + 5, ctx);
-  assert.equal(W.heat(), h, 'heat bled while a patrol was alongside');
+  advance(SEEN_HOLD + 5, ctx);
+  assert.equal(W.searching(), false, 'the stars blinked with a patrol alongside');
 
   near.x = 5000; near.z = 5000;             // they lose you
-  let t = 0;
-  while (W.heat() >= h && t < 30) { W.update(STEP, ctx); t += STEP; }
-  assert.ok(t > 1, `decay restarted ${t.toFixed(2)} s after they lost you — the latch is not a latch`);
+  const t = timeUntil(() => W.searching(), ctx, 30);
+  assert.ok(t > 1, `the stars blinked ${t.toFixed(2)} s after they lost you: the latch is not a latch`);
   assert.ok(Math.abs(t - SEEN_HOLD) < 0.5 + 1 / SIGHT_HZ,
-    `decay restarted after ${t.toFixed(2)} s, not the ${SEEN_HOLD} s the latch promises`);
+    `the stars blinked after ${t.toFixed(2)} s, not the ${SEEN_HOLD} s the latch promises`);
   assert.equal(W.seen(), false);
+
+  // a minute's search nearly run out, and a unit turns into your street
+  advance(LOST_T - 5, ctx);
+  assert.equal(W.stars(), 2);
+  near.x = 5; near.z = 5;
+  advance(0.5, ctx);
+  assert.equal(W.searching(), false, 'being found did not make the stars solid again');
+  assert.equal(W.searchLeft(), LOST_T, 'being found did not reset the search');
+  near.x = 5000; near.z = 5000;
+  advance(SEARCH - 1, ctx);
+  assert.equal(W.stars(), 2, 'the next search did not start from zero');
+  advance(2, ctx);
+  assert.equal(W.stars(), 0);
 });
 
 test('heat stops at zero and never goes under it', () => {
@@ -484,46 +466,45 @@ test('heat stops at zero and never goes under it', () => {
   advance(600);
   assert.equal(W.heat(), 0, 'heat went under the floor once it was there');
   assert.equal(W.frac(), 0);
-  assert.deepEqual(LOG, [[2, 0], [1, 2], [0, 1]], 'the way down was not announced rung by rung');
+  assert.deepEqual(LOG, [[2, 0], [0, 2]], 'the end of the search was not one edge');
 });
 
-// The radius IS the abstraction — wanted.js's header spends thirty lines saying
-// why it is not a raycast — so the two radii and the lock distance are the
-// whole of "they can see you" and are worth pinning at their boundaries.
-test('they see further from a car than from the pavement, and only so far on a lock', () => {
-  const at = (d, patch) => {
+// Two kinds of unit. One that publishes nothing is judged by the street radius
+// (wanted.js's header spends thirty lines saying why it is not a raycast). One
+// that publishes `sees` ran police.js's own building test, so it is believed
+// both ways: seen when it says so (out to LOCK_R), and otherwise only inside
+// NEAR_R, where nothing is hidden (25 Nov 2026).
+test('they see further from a car than from the pavement, and a unit that looked is believed', () => {
+  const at = (u, patch) => {
     fresh();
     W.add('zabiti');
-    const ctx = scene([cop(d, 0)]);
+    const ctx = scene([u]);
     Object.assign(ctx, patch);
     advance(1, ctx);
     return W.seen();
   };
-  assert.equal(at(SEE_R_FOOT - 0.5, {}), true, `a unit ${SEE_R_FOOT - 0.5} m away cannot see you on foot`);
-  assert.equal(at(SEE_R_FOOT + 0.5, {}), false, `a unit ${SEE_R_FOOT + 0.5} m away sees you on foot`);
+  assert.equal(at(bare(SEE_R_FOOT - 0.5, 0), {}), true, `a unit ${SEE_R_FOOT - 0.5} m away cannot see you on foot`);
+  assert.equal(at(bare(SEE_R_FOOT + 0.5, 0), {}), false, `a unit ${SEE_R_FOOT + 0.5} m away sees you on foot`);
   // In a car you are four metres long, painted, and making a noise.
-  assert.equal(at(SEE_R_CAR - 0.5, { onFoot: false }), true);
-  assert.equal(at(SEE_R_CAR + 0.5, { onFoot: false }), false);
+  assert.equal(at(bare(SEE_R_CAR - 0.5, 0), { onFoot: false }), true);
+  assert.equal(at(bare(SEE_R_CAR + 0.5, 0), { onFoot: false }), false);
   assert.ok(SEE_R_CAR > SEE_R_FOOT, 'a car is no more conspicuous than a pedestrian');
 
-  // A unit's own `sees` flag is real information — police.js knows whether it
-  // has locked on — but believed only inside LOCK_R, or a module that set the
-  // flag at spawn would make heat undecayable from half a kilometre.
-  const lock = (d) => {
-    fresh();
-    W.add('zabiti');
-    advance(1, scene([cop(d, 0, true)]));
-    return W.seen();
-  };
-  assert.equal(lock(LOCK_R - 5), true, `a locked-on unit at ${LOCK_R - 5} m is not believed`);
-  assert.equal(lock(LOCK_R + 5), false, `a locked-on unit at ${LOCK_R + 5} m is believed — a wanted level you cannot lose`);
+  // A unit that looked and could not see you (a wall between) does not see
+  // you just because it is in the street radius…
+  assert.equal(at(cop(40, 0, false), { onFoot: false }), false, 'a unit round the corner sees you through the wall');
+  // …except right up close, where nothing is hidden,
+  assert.equal(at(cop(NEAR_R - 0.5, 0, false), {}), true, `a unit ${NEAR_R - 0.5} m away cannot see you`);
+  // …and one that says it has you is believed out to LOCK_R, never further.
+  assert.equal(at(cop(LOCK_R - 5, 0, true), {}), true, `a locked-on unit at ${LOCK_R - 5} m is not believed`);
+  assert.equal(at(cop(LOCK_R + 5, 0, true), {}), false, `a locked-on unit at ${LOCK_R + 5} m is believed: a wanted level you cannot lose`);
   assert.ok(LOCK_R > SEE_R_CAR, 'the lock is shorter than plain sight, so the flag can never matter');
 
   // ctx.inside is the one acknowledged cost of the range model turning into a
   // mechanic. Nobody sets it today, which is exactly why it rots silently.
   fresh();
   W.add('zabiti');
-  advance(1, Object.assign(scene([cop(SEE_R_FOOT * 0.6, 0)]), { inside: true }));
+  advance(1, Object.assign(scene([bare(SEE_R_FOOT * 0.6, 0)]), { inside: true }));
   assert.equal(W.seen(), false, 'standing indoors did not shrink the radius at all');
   assert.ok(INSIDE_K > 0 && INSIDE_K < 1, 'the indoor multiplier is not a discount');
 });
@@ -566,8 +547,8 @@ test('every police shape main.js can hand over is read, and junk in it is skippe
 
 // At zero stars nobody is looking for you: the scan is skipped, which is the
 // only per-frame work in the module and is skipped for almost the whole
-// session. The visible consequence is that residue clears even with a patrol
-// parked on your bumper, and that is intended rather than tolerated.
+// session. The visible consequence is that residue clears at the end of its
+// search even with a patrol parked on your bumper, and that is intended.
 test('nobody is looking for you at zero stars, so the residue still clears', () => {
   fresh();
   W.add(STAR_AT[1] - 1);                    // heat, but not a star
@@ -575,7 +556,7 @@ test('nobody is looking for you at zero stars, so the residue still clears', () 
   const ctx = scene([cop(0, 0)]);
   advance(2, ctx);
   assert.equal(W.seen(), false, 'a patrol was watching a man with a clean record');
-  advance(CALM + STAR_AT[1] / RATE[0] + 5, ctx);
+  advance(SEARCH + 1, ctx);
   assert.equal(W.heat(), 0, `the residue never cleared under a parked patrol: ${W.heat()}`);
 });
 
@@ -586,133 +567,38 @@ test('nobody is looking for you at zero stars, so the residue still clears', () 
 // THE ASSERTION THIS FILE EXISTS FOR. Patrol density near the player is about
 // one slot inside TRAFFIC.spawnR (520 m, config.js:154); a car covering that at
 // a realistic 12 m/s through junctions is forty to sixty seconds away before it
-// is even dispatched. Halve CALM or T_SHED for feel and the star clears before
-// the first unit arrives — the pursuit becomes dead code, nothing throws, and
-// the only symptom is that the police never turn up. These bands are stated in
+// is even dispatched. Shorten LOST_T for feel and the star clears before the
+// first unit arrives: the pursuit becomes dead code, nothing throws, and the
+// only symptom is that the police never turn up. These bands are stated in
 // seconds of play, deliberately, so that they fail HERE instead of in play.
 const PATROL_MIN = 40;      // s — the soonest a dispatched unit can be on you
 const PATROL_MAX = 60;      // s — the latest
 
-test('one star outlives the drive the police have to make, and does not become a sentence', () => {
-  fresh();
-  W.add('rvacka');
-  assert.equal(W.stars(), 1);
-  const t = timeUntil(() => W.stars() === 0);
-
-  assert.ok(t >= PATROL_MIN,
-    `a single punch is over in ${t.toFixed(1)} s — a patrol needs ${PATROL_MIN}-${PATROL_MAX} s to arrive, so nobody ever comes`);
-  assert.ok(t <= 75,
-    `a single punch keeps you wanted for ${t.toFixed(1)} s — a scuffle is not a manhunt`);
-  // …and the same figure against the model, so a change that keeps the band but
-  // gets there by a different route is still visible.
-  assert.ok(Math.abs(t - hideTime(W.CRIMES.rvacka.heat)) < SLOP,
-    `one star cleared in ${t.toFixed(2)} s, not the ${hideTime(W.CRIMES.rvacka.heat).toFixed(2)} the model says`);
-
-  // The heat behind the star takes longer still: the record is not clean the
-  // moment the icon goes out, which is what stops a second punch being free.
-  fresh();
-  W.add('rvacka');
-  const tz = timeUntil(() => W.heat() === 0);
-  assert.ok(tz > t, 'the scalar hit zero with the star, so there is no residue at all');
-  assert.ok(Math.abs(tz - zeroTime(W.CRIMES.rvacka.heat)) < SLOP,
-    `the residue cleared in ${tz.toFixed(2)} s, not ${zeroTime(W.CRIMES.rvacka.heat).toFixed(2)}`);
-});
-
-// The four escapes wanted.js's header publishes, integrated against the file's
-// own constants and checked against what the code actually does.
-//
-// The header claims all four "clear the 40-60 s a patrol needs to arrive", and
-// three of them clear it with room. THE PUNCH DOES NOT: 22 heat is 41.7 s, which
-// clears the FAST end of the dispatch band and nothing more, so a punch thrown
-// with no unit already nearby is a wanted level that expires while the nearest
-// car is still at a junction. That is defensible — a scuffle is meant to be
-// something you can walk away from, and 22 was picked so two punches stay under
-// two stars — but it is not what the header says, and it is one heat point of
-// re-tuning away from being flatly wrong. So the band is asserted per case at
-// the honest figure: everything must clear PATROL_MIN, and everything the
-// design actually wants a pursuit for must clear PATROL_MAX.
-test('the escapes the header publishes are the escapes the code performs', () => {
+test('a report outlives the drive the police have to make, and does not become a sentence', () => {
   const CASES = [
-    ['jedna rvačka', ['rvacka'], PATROL_MIN],
-    ['jedno zabití', ['zabiti'], PATROL_MAX],
-    ['srazil a ujel', ['srazeni', 'ujeti'], PATROL_MAX],
-    ['čtyři zabití', ['zabiti', 'zabiti', 'zabiti', 'zabiti'], PATROL_MAX],
+    ['jedna rvačka', ['rvacka']],
+    ['jedno zabití', ['zabiti']],
+    ['srazil a ujel', ['srazeni', 'ujeti']],
+    ['čtyři zabití', ['zabiti', 'zabiti', 'zabiti', 'zabiti']],
   ];
-  for (const [name, crimes, floor] of CASES) {
-    fresh();
-    for (let i = 0; i < crimes.length; i++) {
-      W.add(crimes[i]);
-      if (i < crimes.length - 1) advance(COINCIDE * 2);
-    }
-    const h = W.heat();
-    const want = hideTime(h);
-    const got = timeUntil(() => W.stars() === 0, null, 900);
-    assert.ok(Math.abs(got - want) < SLOP,
-      `${name}: ${h} heat cleared in ${got.toFixed(2)} s, not the ${want.toFixed(2)} the model says`);
-    assert.ok(got > floor,
-      `${name}: wanted for only ${got.toFixed(1)} s — the pursuit it is supposed to survive is still driving`);
-  }
-  // …and the ladder of escapes is itself monotone: a worse crime is never a
-  // shorter sentence, which a badly chosen HYST or a per-band rate could break
-  // without moving any single figure out of its own band. Non-strict, because
-  // 34 + 18 is exactly 52 by construction — driving away from a man you knocked
-  // down is DESIGNED to cost precisely what killing him costs, which is the
-  // whole reason the 'ujeti' row is worth 18 and not some rounder number.
-  let prev = 0;
   for (const [name, crimes] of CASES) {
     fresh();
     for (let i = 0; i < crimes.length; i++) {
       W.add(crimes[i]);
       if (i < crimes.length - 1) advance(COINCIDE * 2);
     }
-    const got = timeUntil(() => W.stars() === 0, null, 900);
-    assert.ok(got >= prev, `${name} is a shorter sentence than the crime below it`);
-    prev = got;
+    const t = timeUntil(() => W.stars() === 0, null, 900);
+    assert.ok(t >= PATROL_MAX,
+      `${name}: over in ${t.toFixed(1)} s, a patrol needs ${PATROL_MIN}-${PATROL_MAX} s to arrive, so nobody ever comes`);
+    assert.ok(t <= 75, `${name}: wanted for ${t.toFixed(1)} s with nobody looking: a manhunt nobody runs`);
+    assert.ok(Math.abs(t - SEARCH) < SLOP + COINCIDE * 2 * (crimes.length - 1),
+      `${name}: cleared in ${t.toFixed(2)} s, not the ${SEARCH} s from its last report`);
   }
-  // …and that identity, said directly rather than inferred from two timings.
+  // …and the identities the crime table was built on still hold.
   assert.equal(W.CRIMES.srazeni.heat + W.CRIMES.ujeti.heat, W.CRIMES.zabiti.heat,
     'hit-and-run no longer costs exactly what a killing costs — stop or drive away is not a decision any more');
   assert.ok(W.CRIMES.srazeni.heat < STAR_AT[2],
     'stopping after you knock a man down already costs two stars, so there is nothing to gain by stopping');
-
-  // Two stars specifically, because that is the rung a pursuit is worth
-  // spawning for and the one the killing figure is quoted against.
-  fresh();
-  W.add('zabiti');
-  const twoStar = timeUntil(() => W.stars() === 1);
-  assert.ok(twoStar >= PATROL_MIN,
-    `two stars lasted ${twoStar.toFixed(1)} s — the second unit never gets there`);
-  assert.ok(Math.abs(twoStar - hideTime(W.CRIMES.zabiti.heat, 1)) < SLOP);
-
-  // THE POINT OF DERIVING THE RATE FROM THE BAND WIDTH. Each band bleeds at
-  // (its width / T_SHED), so a star costs the same wall time to shed whichever
-  // star it is, even though the fifth band is nearly four times as wide as the
-  // first. Measured from the rung's own threshold — which is where a crime that
-  // just won you that rung leaves you — losing it again costs HYST × T_SHED
-  // seconds of successful hiding, and that figure is a constant of the model.
-  const SHED = HYST * T_SHED;
-  for (let s = 1; s <= 5; s++) {
-    fresh();
-    W.add(STAR_AT[s]);
-    assert.equal(W.stars(), s);
-    const shed = timeUntil(() => W.stars() === s - 1) - CALM;
-    assert.ok(Math.abs(shed - SHED) < 0.2,
-      `shedding star ${s} took ${shed.toFixed(2)} s of hiding, not ${SHED.toFixed(2)} — the bands no longer cost the same`);
-    assert.ok(Math.abs(RATE[s] * T_SHED - (STAR_AT[s] - STAR_AT[s - 1])) < 1e-9,
-      `band ${s} does not bleed its own width in ${T_SHED} s`);
-  }
-
-  // …and the consequence, which is the reason it was worth deriving: a single
-  // typed rate — the first band's, applied everywhere — would make the maximum
-  // sentence 208/RATE[1] + CALM, seven minutes of sitting in a doorway. The
-  // whole ladder has to stay a handful of one-star sentences long.
-  fresh();
-  for (let i = 0; i < 4; i++) { W.add('zabiti'); advance(COINCIDE * 2); }
-  const flat = CALM + W.heat() / RATE[1];
-  const worst = timeUntil(() => W.stars() === 0, null, 900);
-  assert.ok(worst < flat * 0.6,
-    `five stars is ${worst.toFixed(0)} s against ${flat.toFixed(0)} s flat — the rate is barely derived at all`);
-  assert.ok(worst < 300, `five stars is a ${(worst / 60).toFixed(1)}-minute sentence`);
 });
 
 // ==========================================================================
@@ -742,7 +628,7 @@ test('nothing that is not money-shaped can poison the scalar', () => {
       assert.ok(Number.isFinite(W.heat()) && W.heat() >= 0 && W.heat() <= HEAT_MAX);
       assert.ok(Number.isInteger(W.stars()) && W.stars() >= 0 && W.stars() <= 5);
       assert.equal(typeof W.lastCrime(), 'string');
-      // …and whatever it did, the module still steps and still decays.
+      // …and whatever it did, the module still steps and its search still ends.
       advance(400);
       assert.equal(W.heat(), 0, `add(${String(bad)}) left ${W.heat()} that will not bleed off`);
     }
@@ -912,51 +798,38 @@ test('frac fills the current star and never runs backwards', () => {
   W.add(STAR_AT[5]);
   assert.equal(W.frac(), 1, 'there is something above five stars to fill towards');
 
-  // The hysteresis case: two stars, but heat has fallen back UNDER the line the
-  // second star was won at. The bar pins at empty rather than going negative.
+  // Through the search the bar holds still: heat does not bleed any more, so
+  // nothing can run backwards until the whole record clears.
   fresh();
-  W.add(STAR_AT[2] + 1);
-  timeUntil(() => W.heat() < STAR_AT[2]);
-  assert.equal(W.stars(), 2);
-  assert.equal(W.frac(), 0, `a bar below its own band start reads ${W.frac()}`);
+  W.add(STAR_AT[2] + 10);
+  const f0 = W.frac();
+  advance(SEARCH - 1);
+  assert.equal(W.frac(), f0, `the bar moved during the search: ${f0} -> ${W.frac()}`);
 });
 
 // ==========================================================================
 // THE SUBSTEP LOOP — main.js clamps to 50 ms and runs stepGame several times
 // ==========================================================================
 
-// Decay is linear in dt, so three partial steps must integrate to exactly what
-// one whole step does. A rate that were applied per CALL rather than per second
-// would triple under a substep loop and nothing would look wrong on screen.
-test('three substeps in one frame integrate to one whole step', () => {
+// The search is a deadline on the module's own clock, so three partial steps
+// must end it exactly when one whole step does, and announce it once. A clock
+// advanced per CALL rather than per second would end it three times as fast
+// under a substep loop and nothing would look wrong on screen.
+test('three substeps in one frame end the search when one whole step does', () => {
   const run = (sub) => {
     fresh();
     W.add('zabiti');
-    advance(CALM + 7);                      // a common prelude on a common grid
-    const h0 = W.heat();
-    for (let f = 0; f < 100; f++) for (let k = 0; k < sub; k++) W.update(0.048 / sub, null);
-    return { h0, h: W.heat(), s: W.stars(), edges: LOG.length };
+    let t = 0;
+    while (W.stars() > 0 && t < 200) { for (let k = 0; k < sub; k++) W.update(0.048 / sub, null); t += 0.048; }
+    return { t, edges: LOG.map((e) => e.join('>')).join(',') };
   };
   const one = run(1), three = run(3), five = run(5);
-  assert.equal(one.h0, three.h0, 'the prelude itself was not reproducible');
-  assert.ok(Math.abs(one.h - three.h) < 1e-9,
-    `one 48 ms step left ${one.h}, three 16 ms substeps left ${three.h}`);
-  assert.ok(Math.abs(one.h - five.h) < 1e-9);
-  assert.equal(one.s, three.s);
-  assert.equal(one.edges, three.edges);
-  assert.ok(one.h < one.h0, 'the window under test contained no decay at all, so nothing was compared');
-
-  // …and the EDGES are the same sequence whatever the substep count. A drop
-  // detected inside a substep must not be announced once per substep.
-  const edgeRun = (sub) => {
-    fresh();
-    W.add('zabiti');
-    for (let f = 0; f < 3000; f++) for (let k = 0; k < sub; k++) W.update(STEP / sub, null);
-    return LOG.map((e) => e.join('>')).join(',');
-  };
-  assert.equal(edgeRun(1), '2>0,1>2,0>1');
-  assert.equal(edgeRun(3), edgeRun(1), 'a substepped frame announced the descent differently');
-  assert.equal(edgeRun(5), edgeRun(1));
+  assert.ok(Math.abs(one.t - SEARCH) < 0.1, `one 48 ms step ended the search at ${one.t.toFixed(3)} s`);
+  assert.ok(Math.abs(one.t - three.t) < 0.049, `one step ended it at ${one.t}, three substeps at ${three.t}`);
+  assert.ok(Math.abs(one.t - five.t) < 0.049);
+  assert.equal(one.edges, '2>0,0>2');
+  assert.equal(three.edges, one.edges, 'a substepped frame announced the end differently');
+  assert.equal(five.edges, one.edges);
 });
 
 // The de-duplication window has to survive being measured by a substepped
@@ -985,11 +858,10 @@ test('a corrupt dt neither jumps the clock nor freezes it', () => {
     W.update(bad, null);
     assert.equal(W.heat(), h, `update(${String(bad)}) moved the scalar`);
   }
-  advance(CALM - 2);
-  assert.equal(W.heat(), h, 'a corrupt dt jumped the clock past the dispatch window');
-  advance(30);
-  assert.ok(W.heat() < h, 'a corrupt dt froze the clock — nothing will ever decay again');
-  assert.ok(Number.isFinite(W.heat()));
+  advance(SEARCH - 2);
+  assert.equal(W.heat(), h, 'a corrupt dt jumped the clock past the end of the search');
+  advance(4);
+  assert.equal(W.heat(), 0, 'a corrupt dt froze the clock: the search will never end');
 });
 
 // THE HIDDEN TAB. A wall clock would let two minutes of alt-tab clear your
@@ -1000,13 +872,12 @@ test('alt-tabbing is not an escape route', () => {
   fresh();
   W.add('rvacka');
   const h = W.heat();
-  const frames = Math.floor((CALM / DT_MAX) - 4);
+  const frames = Math.floor((SEARCH / DT_MAX) - 4);
   for (let i = 0; i < frames; i++) W.update(1e6, null);
   assert.equal(W.heat(), h,
-    `${frames} hidden frames bled ${(h - W.heat()).toFixed(2)} heat — a hidden tab escaped the police`);
+    `${frames} hidden frames ended the search: a hidden tab escaped the police`);
   for (let i = 0; i < 200; i++) W.update(1e6, null);
-  assert.ok(W.heat() < h, 'the clamp is so tight that time stopped passing altogether');
-  assert.ok(W.heat() >= 0);
+  assert.equal(W.heat(), 0, 'the clamp is so tight that time stopped passing altogether');
 });
 
 // ==========================================================================
@@ -1050,7 +921,7 @@ test('the ladder invariant, the monotonicity and the edges survive a long shuffl
       const f = W.frac();
       assert.ok(f >= 0 && f <= 1, `step ${i}: frac ${f}`);
 
-      // Monotone in heat: a charge never lowers the star, decay never raises it.
+      // Monotone in heat: a charge never lowers the star, a clear never raises it.
       if (h > lastHeat) assert.ok(s >= lastStars, `step ${i}: heat rose to ${h} and the star fell to ${s}`);
       if (h < lastHeat) assert.ok(s <= lastStars, `step ${i}: heat fell to ${h} and the star rose to ${s}`);
 
@@ -1094,10 +965,10 @@ test('a listener that throws does not take the wanted system with it', () => {
     advance(400);
     assert.equal(W.heat(), 0);
     assert.equal(W.stars(), 0);
-    // 2>0 on the way up, then 1>2 and 0>1 on the way down: three edges, three
+    // 2>0 on the way up, then 0>2 when the search ends: two edges, two
     // deliveries, none of them eaten by the thrower standing in front.
-    assert.equal(AFTER, 3, `the descent reached the far listener ${AFTER} times`);
-    assert.deepEqual(LOG, [[2, 0], [1, 2], [0, 1]]);
+    assert.equal(AFTER, 2, `the end of the search reached the far listener ${AFTER - 1} times`);
+    assert.deepEqual(LOG, [[2, 0], [0, 2]]);
   } finally {
     BOOM = false;                            // inert for every test after this one
     console.warn = warn;
@@ -1113,8 +984,8 @@ test('a non-function subscription is ignored rather than stored', () => {
 });
 
 test('the default export and the named exports are the same bindings', () => {
-  for (const k of ['CRIMES', 'heat', 'stars', 'frac', 'lastCrime', 'seen', 'add',
-    'update', 'clear', 'reset', 'onStars']) {
+  for (const k of ['CRIMES', 'heat', 'stars', 'frac', 'lastCrime', 'seen', 'searching',
+    'searchLeft', 'add', 'update', 'clear', 'reset', 'onStars']) {
     assert.ok(k in wanted, `the bundled default is missing ${k}`);
     assert.equal(wanted[k], W[k], `wanted.${k} is not the named export`);
   }

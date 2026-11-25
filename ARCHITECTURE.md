@@ -851,6 +851,75 @@ export class PlaceFinder {
 A HUD readout bottom-left showing town + street, and the destination handed to
 Navigation whenever the world map's waypoint changes.
 
+## The satnav, redone (25 Nov 2026)
+
+Frank: "Minimapa je teďka taková rozmazaná, hnusná" and the route was "modrá,
+velká, tlustá čára, která si zobrazuje trošku i za mnou". Both had one cause
+each, and both are fixed at the cause.
+
+- **The disc was blurry** because the whole 4.9 km window was painted into one
+  2048 px bitmap (0.42 px/m) and stretched about five times on a Retina
+  screen. Now the map comes from `js/maptiles.js`: one small canvas per 120 m
+  chunk cell, painted at the disc's own device px/m (`mapstyle.tilePpm`),
+  nearest first, inside a per-frame budget (0.9 ms, 6 ms only while the disc
+  would show a hole). A tile gathers its 3×3 neighbourhood and covers a whole
+  number of pixels past its edge (`bleedPx`), so neighbours overlap with
+  identical pixels. `city.onTileLoaded` cells make only the tiles over them
+  stale; a stale tile is shown until its fresh copy is ready. 64 tiles cached.
+- **Two layers, so the frame does not pay for it.** Drawing a dozen tiles into
+  a disc that turns every frame cost ~1.5 ms of frame time (A/B in one drive),
+  and the outlined street names drawn at a new angle every frame cost about
+  as much again (the glyph cache is keyed by angle). So `js/mapwindow.js`
+  copies the 5×5 tiles around the player 1:1 onto whole pixels of ONE canvas,
+  north up, inside `#minimap-map` (a div `js/minimap.js` injects under the
+  canvas), and moves it with a CSS transform: translate, rotate, scale. The
+  compositor turns and zooms it; the picture changes only on a new cell
+  (~every 120 m) or a newly painted tile. `#minimap` is now a transparent
+  canvas (backing store = CSS size × device pixel ratio, hence the explicit
+  CSS size) with only what moves: the route, traffic, marks, friends, the
+  arrow, the rim, and the names as pre-rendered sprites that are only turned
+  (`minimaplabels.js`). `minimap.snapshot()` composes both for screenshots;
+  never `toDataURL` the live canvas, a readback can push it off the GPU path.
+  Measured A/B in one drive (Pardubice, 25 Nov 2026): frame median 8.9 ms
+  with the disc drawn, 8.9 ms with it skipped (the old disc: 7.9 vs 8.1).
+- **The look** is `js/mapstyle.js`: a night-satnav palette of its own (dark
+  ground, roads graded by class: motorway amber, primary pale yellow, side
+  streets grey, all with a dark casing, drawn casings-first and fills by rank,
+  bridges last), water, parks, buildings with a hairline edge.
+- **The disc turns with the camera** (heading-up): `update(px, pz, camYaw,
+  cars, peers, { body, speed })`. The arrow shows the body or car against the
+  camera, the N badge rides the rim, street labels are flipped upright
+  (`minimaplabels.uprightAngle`). The view radius follows speed between 95 m
+  and 190 m (`mapstyle.viewRadiusFor`), eased.
+- **The route** is drawn on the disc and on the region map from ONE tracker:
+  `navigation.routeCum`, `routeS`, `routeI` (read-only getters) and
+  `js/routeahead.js` (`sliceAhead` writes nothing behind the car's arclength;
+  `blendStart` bends the first metres out of the player's arrow).
+  `js/maproute.js` strokes it: glow, dark edge, blue, pale core, and a white
+  manoeuvre arrow at the next left/right turn. The region map draws the
+  whole remaining route and keeps the dashed thread only where no road goes
+  (no route, or past the end of a partial one).
+- **The line on the road** (`js/navline.js` + `js/navribbon.js`): the old
+  near-end fade was per VERTEX, and a straight OSM street has vertices up to
+  a hundred metres apart, so the fade was smeared across the car and the road
+  behind it glowed. Each vertex now carries its arclength (`aS`) and the
+  fragment shader cuts per pixel against the car's (uniforms written every
+  frame, no buffer upload between rebuilds; `navribbon.NAV_CUT_GLSL` and its
+  JS twin `navCut` for the tests). It is 0.8 m wide instead of 1.8, sits in
+  the driven half of the road (`navigation.routeOff` per route point:
+  `laneHalf(road)` = a quarter of the width on a two-way road, 0 on a oneway;
+  signed by `regions.laneSide()`, so it keeps left on Mahé), bends out of the
+  car over 24 m and is rebuilt when the car drifts more than 1.1 m off its
+  head. 14 cm over the deck with a polygon offset: at 5 cm a rolling road rose
+  over the chord between samples and the line showed as dashes.
+
+Tests: `tests/routeahead.test.mjs`, `tests/navribbon.test.mjs`,
+`tests/minimap-tiles.test.mjs` (tiles, the window's whole-pixel copies and its
+CSS transform, the disc headless), and the NavLine cases in
+`tests/navigation-roundabout.test.mjs` now sample the shader's cut along every
+quad. Dev harness: `dev/navprobe.js` (seat a car, pin, drive the route, time
+the minimap, post shots to a local sink).
+
 ## Chunks are meshed off the main thread — js/meshworker.js + js/meshpool.js
 A dense Pardubice chunk is 30–330 ms of geometry. Slicing the builder against a
 frame budget spread that cost out; it never removed any of it. Now the work
@@ -2587,10 +2656,10 @@ frame with the lofted figures and 5.2 ms with people; Václavské náměstí 7.4
 and 5.6. A showroom crowd of 24 costs 1.45 ms near and 0.69 ms far.
 
 Not done: the driver drawn behind a car's glass is still the shader's own
-(`js/carglass.js`); nobody's lips move when they speak; the Quaternius
-Universal Animation Library (CC0, downloaded with the sources) is not wired
-in, so jumping, punching, aiming and getting up are still the game's own poses
-carried onto the new bodies.
+(`js/carglass.js`); nobody's lips move when they speak. Of the Quaternius
+Universal Animation Library (CC0, downloaded with the sources) only the fight
+is wired in (`fight.bin`, see the fist fights below); jumping, aiming and the
+ragdoll's getting up are still the game's own poses carried onto the new bodies.
 
 ## Chain stores and fast food as they stand in Czechia (js/stores/, Nov 2026)
 
@@ -2885,15 +2954,50 @@ the sign lasts 3 s. `#limit-sign` is a Czech B 20a disc left of the number in `#
 (`.over` above the limit, `.way` more than 50 % above it), `#car-model` the model under
 `#fuel` (`vehicles.carLabel`). Only while you drive.
 
-**One star in front of the police.** "Víc než 50 %" is read as more than 50 % OVER the limit
-(over 75 in a 50). Held for 0.6 s with a patrol car, a pursuit unit or an officer on foot
-within 50 m: `wanted.add` of `rychlost`. A red light: the approach you drive is WATCHED from
+**One star in front of the police.** The speed is Frank's table of 25 Nov 2026,
+`roadlaw.js policeLimit(limit, motorway)`: 30 -> 100, 50 -> 130, 90 -> 160, a motorway (road
+class `motorway`) 90 over its limit, every other limit min(2 x limit, 130); strictly above it.
+(The first rule, 21 Nov, was 50 % over.) Held for 0.6 s with a patrol car, a pursuit unit or
+an officer on foot within 50 m: `wanted.add` of `rychlost`. The HUD speed is amber over the
+limit and red only above that threshold (`roadLaw.threshold`, `lawhud.js`). A red light: the approach you drive is WATCHED from
 before its hold point (`traffic.js sigStop`, the point the AI stops at, a couple of metres
 short of the paint); 3 m past it at over 2 m/s while `traffic.lightOf(e)` is 2 (the AI's own
 phase on the shared clock), with police within 50 m: `cervena`. A traffic offence tops the
 heat up to 30, inside the first star (18 to 45), never past it, so it is one star however
 often, kept fresh, and nobody shoots below three (`policetune.js`). An 8 s cooldown per
 offence. Local state like the rest of the wanted level.
+
+**The search** (`js/wanted.js`, 25 Nov 2026, Frank: "když mě nevidí, tak ať ta hvězdička bliká
+a do minuty ať se ztratí"). Stars no longer wear off one at a time. While a unit sees you
+(its own `sees` from police.js's building test out to 150 m, or anything within 22 m; a unit
+that publishes no `sees` by the old street radius) they are solid. `SEEN_HOLD` (2 s) after the
+last sighting or the last crime (a crime is a report) they blink (`searching()`, `#wanted.lost`,
+a hard beacon blink; dimmed under reduced motion), and `LOST_T` (60 s) of that clears every
+star at once with one edge down. A sighting makes them solid and the next search starts from
+zero. No new sight tests: wanted.js reads the units' flags at 4 Hz.
+
+**Who saw it** (`js/crimelaw.js`, 25 Nov 2026, Frank: "aby to fungovalo jako v GTAčku"). Every
+crime the player commits is reported here, not to `wanted.add` directly: the fists
+(`combat.onCrime(kind, x, z, victim)`), a pedestrian hit or killed by the player's car, the
+driver pulled out of his car (`jackDriver`), a thrown-out driver run down, a parked car
+somebody left open being taken (`kradez`). `RULES` says per crime who has to see it: with
+police within 50 m (`policeNear`: patrols, pursuit units, officers on foot) it is charged at
+once; otherwise, if the rule allows a call, the victim (a jacked driver, a man knocked down)
+or a bystander within 40 m (pedestrians drawn near the player, drivers of cars around) rings
+the police and it is charged `CALL_T` (9 s) later, unless by then every caller is dead. A
+punch is police only, and free against somebody fighting back (`p.brawl`, the fight
+session's flag). Crimes against the police (`naraz`, `napadeni_policisty` 2 stars,
+`zabiti_policisty` 3 stars) always count; `policecops.js` charges running an officer down as
+`zabiti_policisty`. The old lit-window witness (`carjack.witnessed`) is no longer asked. The
+thrown-out driver is a body (`js/carjack.js`): hp, killed by the player's car above 7 m/s and
+knocked over below, `nearest` / `hurt` so Combat's `targets: [peds, carjack]` can hit him, and a
+corpse that lies for 40 s. Kill him before his call goes through with nobody else there and
+there are no stars. Dying is a clean sheet, as being wasted is in GTA: `CrimeLaw` is built
+with `vitals`, so `vitals.onDown` hangs up every pending call and nothing is reported while
+the player is down; the story restart and the arrest card hang up too (`crimeLaw.clear()`).
+The stars themselves are settled when the free-roam respawn revives you at the hospital
+(`career.js` `vitals.onRevive`: a fine per star, then `wanted.clear()`, a residue under the
+first star included).
 
 **No walking on the rails** (`js/railbarrier.js`, called from `city.js collide()` for
 walkers, `opts.interior`: the player and anybody else moved that way, the thrown-out
@@ -3184,8 +3288,9 @@ letat na Seychelly". Mahé itself and the region system are the other half
 * **The trip** (`js/flight-trip.js`): none, ticket, airside, boarding, aboard,
   seated, flying, arrived, done; each step needs the one before (no gate before
   the security arch, no seat without a scanned pass: the crew turn back anybody
-  who walked round the terminal). The fare is `PRICE.flight.mahe`, 14 900 Kč one
-  way, through js/wallet.js. The carrier is invented: flights ATC 740 and 741.
+  who walked round the terminal). The fare is `PRICE.flight.mahe`, 20 000 Kč one
+  way, through js/wallet.js. The carrier is invented: flights ATC 740 (Pardubice),
+  750 (Prague) and the ways home 741 and 751.
 * **The aircraft's sequence** (`js/flight-sequence.js`, pure): stand, doors,
   taxi out (`js/flight-path.js`: fillets, a crew's speeds), take-off and climb
   and the landing (`js/flight-profile.js`: VR 72 m/s, lift-off after 1.4 to 1.8
@@ -3229,10 +3334,51 @@ letat na Seychelly". Mahé itself and the region system are the other half
 * **Co-op**: each player flies a plane of his own (nothing on the wire); the
   region rule hides a player who is in the other region.
 
+### Choosing where to fly, five real minutes, Prague (25 Nov 2026)
+
+Frank, 25 Nov 2026: in Pardubice he saw no way of flying. Three reasons: the
+flight was only made outside the campaign (and a career is in the campaign
+until part two is done), nothing on the map said where the airport is, and the
+dev teleport put you in the middle of the runway. Now:
+
+* **The flight exists during the campaign too**; the desks then sell nothing
+  and say why (`lines.storyFirst`): the region switch reloads the page and the
+  campaign is not saved before its end, so a flight would throw it away.
+* **The airports are on both maps** (`js/airport-marks.js`, the 'airport' glyph
+  of js/mapmarks.js, named on the big map), added to js/career.js's marks.
+* **"Kam letíme?"** (`js/flight-booking.js` on js/panel.js, the list from
+  `js/flight-destinations.js`): every desk shows real places; only those with a
+  route in js/flight-trip.js can be bought, today Mahé from Pardubice and
+  Prague, and Pardubice or Prague from Mahé. The rest say "Připravujeme".
+* **Five real minutes** (`js/flight-schedule.js`, pure; Frank: "do 5 minut jako
+  reálného času, ne herního"): boarding opens 20 s after the ticket, last call at
+  3:30, the gate closes at 4:30, the departure is due at 5:00, counted in frame
+  seconds (a game hour is a real minute, so the world clock could not do it).
+  Sitting down in 14A sooner closes the doors at once. One past the gate is
+  waited for; one who never reached it is put on the next flight, free. The
+  boards and the boarding pass show the countdown.
+* **The desks** (`js/flight-checkin.js`): Pardubice's counters, arch and gate
+  agent, and the desk-and-passage of the airports whose terminal is a solid OSM
+  building, with the schedule and its announcements; js/flight.js keeps the
+  aircraft and the cabin.
+* **Announcements** (`js/flight-announce.js`, `js/flight-announce-lines.js`,
+  `scripts/gen-flight-audio.mjs`, ElevenLabs as Frank asked, files in
+  `public/assets/flight/`): the gate's boarding, last call and closing for each
+  flight (Czech then English at home, English first on Mahé), and in the cabin
+  the crew's welcome, the doors, the captain before take-off and on the descent,
+  the welcome on arrival. Queued, never two at once, heard in the hall and less
+  on the apron, the cabin ones only aboard; subtitles on the HUD.
+* **Prague, Václav Havel (LKPR)** (`js/flight-lkpr.js`, `js/flight-prgdesk.js`):
+  the check-in set in front of Terminal 1, the passage through it to a remote
+  stand by the non-Schengen pier, the mapped taxiways to runway 24, departures
+  and arrivals on 24; spawns 'prg-airport' and 'prg-arrival'.
+  `js/flight-life.js` keeps one flight for the nearest of the page's airports.
+
 Tests: `tests/flight.test.mjs` (with SEZ's real tile for the taxi routes),
 `tests/flight-cabin.test.mjs`, `tests/airliner.test.mjs`,
-`tests/airport-terminal.test.mjs`. `dev/airportprobe.js` walks the whole trip
-from a console for a harness.
+`tests/airport-terminal.test.mjs`, `tests/flight-schedule.test.mjs`,
+`tests/flight-announce.test.mjs`, `tests/flight-lkpr.test.mjs`.
+`dev/airportprobe.js` walks the whole trip from a console for a harness.
 
 ## A ticket for every train, bought on the phone (22 Nov 2026)
 
@@ -3268,3 +3414,120 @@ Frank: "na každej vlak si musím koupit lístek ... vytáhnu mobil a tam si to 
   `reloadLast()`. The ride being ridden is not saved.
 * Harness: `__atc.tickets`, `__atc.phone`, `__atc.ticketScreen`. Tests:
   `tests/tickets.test.mjs`.
+
+## The start of the campaign: light, a real step, a quieter station, no helicopters (25 Nov 2026)
+
+Frank: helicopters by the house ("to je úplná blbost"), the surroundings of the start should be
+a wow, the station announcement is far too loud from far away, and stepping onto the edge of the
+roof must be a real step ("teďka tam jako tak jako přehupsne bez animace").
+
+* **The helicopters were a bug of the roof's own guard.** `roofWalk().collide` (js/prologue-ladder.js)
+  clamped ANY point the world asked about into the roof's rectangle, from anywhere; the machines
+  parked at the airports ask `world.collide` every frame, so they were carried to the roof in Kolín
+  and dropped beside the house. It now answers only for a walker (`opts.interior`) who is within
+  1.5 m of the deck and at its height.
+* **The story's light runs ahead of its clock** (js/prologue-clock.js `skyHours`, js/worldclock.js
+  `overrideSky` / `skyTod`). The sky's sun sets at nine, so eight o'clock was flat daylight. The
+  campaign shows the sky a later hour than its clock reads: the street in the last low sun, the
+  roof in the afterglow with windows and lamps coming on, the run for the train in the blue hour.
+  Only `updateSky` takes `skyTod()`; everything lit follows the sky's `nightK`. The HUD clock,
+  the departure board and every `tod()` consumer still read 20:00. Part two's hours are unchanged.
+* **The step onto the coping** (js/prologue-stepup.js, pure `stepUp(k)`): two short paces to the
+  wall with the walk cycle, the right foot lifted and set on the coping, the weight over it as the
+  leg straightens, the left foot brought up. `rooftop().pose` moves `step` at a fixed pace
+  (`UP_TIME`, `DOWN_TIME`) instead of easing a slide with a hop; down is the same played back.
+  The film's `step` shot is from the felt behind him so the legs are in frame (from in front of
+  the wall the wall hid them).
+* **The loudspeakers** (js/prologue-voice.js `paLevel`, `hear(metres)`): an announcement is full
+  within 55 m of the hall or the platform and gone 120 m further out, and its recording follows
+  him while it plays (`storyRecording().set`). prologue.js feeds the distance every frame.
+* Tests: `tests/prologue-opening.test.mjs`.
+
+## Fist fights like GTA 5 (js/combat.js, js/fight*.js, 25 Nov 2026)
+
+Frank, 25 Nov 2026: a left click "strčí, ale nebouchne to jako pěstí"; he
+wants GTA 5's fighting: a fight stance, real punches, sounds made with
+ElevenLabs, a little blood, and the health of the person you hit.
+
+* **The punches are recordings.** `scripts/people/bake-fight.mjs` writes nine
+  clips of the Quaternius UAL 1 and 2 (CC0) into `public/assets/people/fight.bin`
+  (64 kB, the clips.bin format, skeleton family `ual`): Punch_Jab, Punch_Cross,
+  Melee_Hook and its recovery, Hit_Head, Hit_Chest, Hit_Knockback (the
+  knock-down), Death01 and LayToIdle (getting up). The manifest names the
+  file (`fightFile`) and the roles (`fightJab`, `hitBack`, `getUp`...);
+  `avatars.js` retargets each onto a Rocketbox body the first time it plays.
+  A baked clip now also keeps its travel as a vector (`tx`, `tz`).
+* **A layer, not a base** (`js/characters/actlayer.js`). `human.js act(role, t,
+  w, mask)` lays a one-off recording over whatever the body is doing, for the
+  next frame drawn (it lets go a quarter second after the last call unless
+  held): 'upper' (trunk, arms, head; the legs stay the walk's), 'full', or a
+  number, the legs' share. The mix is in FIGURE space: taking a punch's local
+  spine angle onto the walk's pelvis bent the trunk forward, and on a Biped the
+  thighs hang from the spine. `fist(w)` closes the hands (`fist.js`: every
+  finger chain curled toward the side the thumb is on, measured from the bind
+  pose); a fist was what made a shove into a punch.
+* **The moves** (`js/fightmoves.js`, pure): jab 12, cross 16, hook 32; three
+  presses in rhythm (within 0.45 s of the last swing ending, or pressed while
+  the fist is still out) are jab, cross, hook, and Q is the hook at once. The
+  damage window of each is the clip's own seconds, measured off the fist on a
+  Rocketbox body. The hook floors, so does any blow to 25 HP or less; nothing
+  left is death. A healthy man takes two knock-downs and dies on the sixth
+  punch of the rhythm.
+* **The player** (`js/combat.js`, `js/fightpose.js`): a swing is absolute
+  deadlines on the module's clock as before. Hitting, being hit or holding V
+  (block) puts the fists up for 4.5 s: the guard (first frame of the jab, the
+  recording's legs when standing), the body to the camera (`player.aimLock`).
+  Shift drops it. A block facing the punch takes 80 % of it. Targets come from
+  every source in `targets` (the crowd, `carjack` and the police officers),
+  each with nearest() and hurt(); `onCrime(kind, x, z, victim)` names who was
+  hit.
+* **The crowd** (`js/fightpeds.js`, `js/pedestrians.js`): a flinch is a recorded
+  snap over a walker who stays the crowd's. A blow with `ko: true` that floors a
+  modelled body makes pedestrians.js hand it over upright as `'ko'` (not a
+  ragdoll): the fall, two to four seconds on the ground, getting up, then away
+  or back at you; a death is laid out (`peds.corpse`, the recording held). Who
+  fights back is a pure function of pid and archetype (`fightsBack`: half the
+  men of thirty, few women, never the oldest); they become `'brawl'` (out of
+  the schedule, like `'held'`), square up, throw jabs and crosses (5 and 7) and
+  carry `p.brawl = true` (self-defence for the wanted rules). They give up when
+  hurt to 30, when you walk off, when you are gone, or ten seconds after you
+  last hit them. pedestrians.js has `takeOver`, `handBack`, `corpse`, `bloodAt`.
+* **Blood and bars**: `js/fightfx.js` is one Points object of 64 drops in the
+  air; the stains are pedestrians.js's (a blow may say `blood`: none for a
+  jab). `js/fighthud.js` floats a health bar over whoever you hit or who hits
+  you (fades 4 s after the last blow) and enlarges `#vitals` while the fists
+  are up.
+* **Sound**: twelve recordings by `scripts/gen-fight-audio.mjs` (ElevenLabs,
+  86 credits): `fight_swing_*`, `fight_punch_*`, `fight_punch_heavy`,
+  `fight_block`, `fight_grunt_m_*`, `fight_grunt_f_*`, through sfxAt, so the
+  game's volume applies (`js/fightsfx.js`).
+* **Co-op**: who you hit stays local (as being run over is). The room sees the
+  swing: `combat.onSwing` queues a `fist` event with the move, and `fs: 1` in
+  the state blob is the guard; `netcity.js` plays both on the peer's avatar.
+* Checked in game, muted: stance, jab, cross, hook knock-down with blood, the
+  lying body, the health bar over a brawler, his punch and the player's flinch,
+  the block (`.claude/boj-shots/` in the worktree, not in the repository).
+* **Policemen** (`js/copfists.js`, review of 25 Nov 2026): the officers out of
+  a patrol car (`js/policecops.js`) are a target source too, `CopTargets`, with
+  its own crimes (`crimes`: a blow is `napadeni_policisty`, two stars at once,
+  a kill `zabiti_policisty`) and no pocket (`noPocket`). A jab or a cross makes
+  him reel for half a second and let go of your collar; the hook or a blow to
+  25 HP floors him, and he gets up after about three seconds and goes back to
+  the arrest (below three stars) or the pistol. With no health left he is laid
+  out as `'down'`, like a man run over. His record carries `hp`, `fist` and a
+  `gen` (the pool hands the record to the next officer as a new man).
+* **When the fists stay down**: `ctx.down` (combat.js) is a player nobody can
+  fight, and main.js's `fistsTaken()` sets it for SEJMUT, the ZATČEN card, the
+  chapter card and a story film (`journey/meeting/heist.filming`: those
+  objects live for the whole chapter, so it is the film that is asked);
+  brawlers let go. `ctx.hold` is hands that belong to the UI (`fistsBusy()`:
+  the big map, any panel): no swing starts and no press is kept, but the street
+  goes on. Left click and Q are both gated.
+* A brawler the fight lets go of loses `p.brawl` on every path out (getting up
+  too hurt to go on was the one that kept it), so hitting him later is a crime.
+  A thrown-out driver has a `pid` (the car's schedule seed, `driverPid`), so
+  his pocket is his own and not the same 94 Kc as every other driver's.
+* Not done: kicking somebody on the ground, a dodge, an officer punching back
+  (he arrests or shoots instead), and the peer's punch moving the crowd on the
+  other screens.
+

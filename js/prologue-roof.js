@@ -4,6 +4,7 @@ import { roofFrame, stationEntry } from './prologue-route.js';
 import { groundFor } from './terrain.js';
 import { chunkKey, pointInPolygon } from './geo.js';
 import { dressRoof, dressDoor, dressLadder } from './prologue-roofset.js';
+import { stepUp, UP_TIME, DOWN_TIME } from './prologue-stepup.js';
 
 // The roof scene. He stands a step back from the edge of the end wall, four
 // storeys over the pavement; when the bank says no he climbs onto the coping.
@@ -31,7 +32,10 @@ const shots = {
   est: { cam: [3.6, 3.3, -11.5], to: [2.5, 2.1, -7.2], look: [-0.3, -1.3, 6], fov: 40, rate: 0.22 },
   drop: { cam: [0.34, 0.75, 0.1], to: [0.3, 0.95, 0.16], look: [0.02, -9, 1.5], fov: 52, rate: 0.3 },
   sms: { cam: [-0.5, -0.22, 1.5], to: [-0.4, -0.18, 1.2], look: [0.03, -0.05, 0], fov: 33 },
-  step: { cam: [4.6, -0.3, 2.6], to: [4.0, -0.2, 2.2], look: [0, -0.5, 0.3], fov: 36 },
+  // from the felt behind him, low: the whole of the step up onto the coping
+  // is in the frame (from in front of the wall the wall hid his legs)
+  // (from his right: the chair and the crate stand on the other side)
+  step: { cam: [2.1, -0.95, -3.5], to: [1.6, -0.9, -2.9], look: [-0.25, -0.55, 2.5], fov: 40, rate: 0.5 },
   ring: { cam: [5.6, 0.5, 1.6], to: [4.6, 0.35, 1.2], look: [0, -0.35, 0], fov: 34 },
   f0: { cam: [0.78, 0.3, -1.4], to: [0.64, 0.26, -1.12], look: [-0.5, -1.3, 14], fov: 40 },
   f1: { cam: [0.3, 0.02, 1.1], to: [0.22, 0.03, 0.84], look: [0.02, -0.03, 0], fov: 33 },
@@ -91,20 +95,33 @@ export function rooftop(scene, world, player, act, lights) {
     // gesture, emotion, speech as the actor takes them; `down` steps him off
     // the coping and `face` turns him to the station.
     pose(dt, { gesture = null, emotion = false, speech = 0, down = false, face = false } = {}) {
-      step += ((down ? 1 : 0) - step) * Math.min(1, dt * 2.4);
+      // up onto the coping and back down as a real step (js/prologue-stepup.js):
+      // `step` is 0 on the ledge, 1 down on the roof, and moves at walking pace
+      step = down ? Math.min(1, step + dt / DOWN_TIME) : Math.max(0, step - dt / UP_TIME);
       turn += ((face ? 1 : 0) - turn) * Math.min(1, dt * 1.8);
-      const top = group.position.y;
-      // down off the ledge, then (leaving) across the felt to the lit door
-      const x = lerp(LEDGE.x, DECK.x, step),
-        z = lerp(LEDGE.z, DECK.z, step),
+      const top = group.position.y,
+        m = stepUp(1 - step),
+        j = act.cit.parts;
+      const x = lerp(DECK.x, LEDGE.x, m.forward),
+        z = lerp(DECK.z, LEDGE.z, m.forward),
         heading = roofFrame.h + (toStation - roofFrame.h) * turn;
-      const hop = Math.sin(Math.min(1, step) * Math.PI) * 0.12;
-      const y = top + lerp(LEDGE.up, DECK.up, step * step) + hop;
+      const y = top + lerp(DECK.up, LEDGE.up, m.up) + m.dip;
       const p = world2(x, z);
       act.place(p.x, y, p.z, heading);
-      player._stand();
+      if (m.walk !== null && m.walk > 0 && m.walk < 1) {
+        // two short paces to the wall (backwards when he comes down from it)
+        act.cit.walk(m.walk * Math.PI * 2, 0.16, 0, 0.9);
+      } else {
+        player._stand();
+        j.legR.rotation.x = m.hipR;
+        j.kneeR.rotation.x = m.kneeR;
+        j.legL.rotation.x = m.hipL;
+        j.kneeL.rotation.x = m.kneeL;
+        j.torso.rotation.x += m.lean;
+        j.armL.rotation.x += m.arm;
+      }
       // a man on a ledge leans a little into the air and back
-      if (step < 0.5) act.cit.parts.torso.rotation.x += 0.035 * Math.sin(act.age * 0.7) - 0.03;
+      if (step < 0.02) j.torso.rotation.x += 0.035 * Math.sin(act.age * 0.7) - 0.03;
       act.perform(dt, { gesture, emotion, speech, light: 1, bow: gesture ? 0 : 0.3 * (1 - step) });
       lamp.color.setHex(0xffb873);
       lamp.distance = 9;

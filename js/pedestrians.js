@@ -146,6 +146,13 @@
 // intuition about being hit by a car — so the car's blow carries either the
 // whole health bar or none of it, and never a fraction.
 //
+// 'brawl' and 'ko' (Nov 2026) are the fight's (js/fightpeds.js): somebody who
+// put their fists up and is fighting you, and somebody a fist knocked flat
+// whose fall, lying there and getting up are RECORDINGS on a modelled body
+// rather than this file's ragdoll. Like 'held', this file does not drive them
+// at all; the fight moves them, poses them and hands them back (handBack) or
+// lays them out (corpse). A blow says it wants that by carrying `ko: true`.
+//
 // 'held' — a citizen standing still with their hands up, because somebody is
 // robbing them. It is a STATE and not a flag, and that is not tidiness:
 // freezing the schedule arc alone is not enough, because _schedStep passes
@@ -1610,6 +1617,10 @@ export class Pedestrians {
       // 'held' before everything, because it is the one state this file does
       // NOT drive: no arc, no facing, no animate. See hold().
       if (p.state === 'held') { this._heldStep(p); continue; }
+      // the fight's (js/fightpeds.js): placed where it put them, nothing more;
+      // somebody flat on the tarmac is still something a driver stops for
+      if (p.state === 'brawl') { this._heldStep(p); continue; }
+      if (p.state === 'ko') { this._heldStep(p); this._noteBody(p); continue; }
       if (p.state === 'board') { this._boardStep(p, dt); continue; }
       if (p.state !== 'walk') {
         this._ragStep(p, dt);
@@ -2244,7 +2255,7 @@ export class Pedestrians {
       // scheduled one.
       // through the bus door: the one place a citizen may vanish in plain sight
       if (p.state === 'board') { if (p.boardDone) this._drop(i); continue; }
-      if (p.state !== 'walk' && p.state !== 'held') continue;
+      if (p.state !== 'walk' && p.state !== 'held' && p.state !== 'brawl' && p.state !== 'ko') continue;
       // A ghost owns no slot, so nothing shared is waiting on it and it may go
       // the instant nobody can see it go — which is what the header has always
       // promised ("they run until they are out of sight and then quietly stop
@@ -2347,7 +2358,7 @@ export class Pedestrians {
     // REQUEST to the owner of citizen.js: makeCitizen({ rnd }) taking an
     // optional () => 0..1, and this wrapper disappears.
     const real = Math.random;
-    let n = 0, c, prop;
+    let n = 0, c, prop, arch;
     try {
       Math.random = () => rnd01(hash32(s.seed, 0xc17, n++));
       // WHICH BODY is not part of the wardrobe draw and must not ride on it:
@@ -2358,7 +2369,7 @@ export class Pedestrians {
       // choosing her voice reach the same conclusion from the seed alone.
       // …and what their hands are busy with (js/pedprops.js): a bag, a phone,
       // a pram, a dog. Off the same seed through its own salt, like the body.
-      const arch = archetypeAt(rnd01(hash32(s.seed, ARCH_SALT))).key;
+      arch = archetypeAt(rnd01(hash32(s.seed, ARCH_SALT))).key;
       prop = propFor(s.seed, arch);
       // `seed` is the citizen's shared identity: a modelled body (js/characters/cast.js)
       // is picked from it alone, so every co-op screen sees the same person
@@ -2379,6 +2390,9 @@ export class Pedestrians {
     const p = {
       mesh: c.group, animate: c.walk, sitPose: c.sitPose,
       talk: c.talk ?? null,                // a modelled body moves its mouth for a line (js/chatter.js)
+      // the whole body, for the fight's recorded punches and falls (act, fist:
+      // js/characters/human.js), and who they are, for who hits back
+      cit: c, arch,
       ragdollPose: c.ragdollPose, standPose: c.standPose, dispose: c.dispose,
       sch: s, free: 0, look: c.look,
       // The PERSON, as opposed to the slot. s.seed is already the shared
@@ -2552,7 +2566,7 @@ export class Pedestrians {
     // A held citizen is on their feet with their hands up, so they are a
     // standing circle and not a capsule — being robbed does not make you
     // easier to run over lengthways.
-    const lying = p.state !== 'walk' && p.state !== 'held' && p.state !== 'board';
+    const lying = p.state !== 'walk' && p.state !== 'held' && p.state !== 'board' && p.state !== 'brawl';
     let hit = rectCircle(dx * fx + dz * fz, dx * rx + dz * rz,
       hl, hw, lying ? LIE_R : PED_R);
     if (!hit && lying) {                         // head/feet ends of the capsule
@@ -2650,19 +2664,27 @@ export class Pedestrians {
     p.by = blow.by ?? null;
 
     const vx = blow.vx || 0, vy = blow.vy || 0, vz = blow.vz || 0;
-    if (p.dead || blow.launch === true) {
+    // A fist that floors somebody with a modelled body: the fight plays the
+    // fall from a recording (js/fightpeds.js), so the body is taken out of the
+    // crowd's hands here, upright, instead of being thrown.
+    if (blow.ko === true && (p.dead || blow.down === true) && blow.launch !== true && p.state !== 'rag' && p.state !== 'dead') {
+      this._knockOut(p);
+      p.hitCd = HIT_COOLDOWN;
+    } else if (p.dead || blow.launch === true) {
       // Lethal, or the caller insisted. Off their feet they go.
       const spin = Number.isFinite(blow.spin)
         ? blow.spin
         : Math.min(9, 2 + Math.sqrt(vx * vx + vz * vz) * 0.6);
       this._throw(p, vx, vy, vz, spin);
       p.hitCd = HIT_COOLDOWN;
-    } else if (p.state === 'walk') {
+    } else if (p.state === 'walk' || p.state === 'brawl') {
       // THE FLINCH, and the whole point of this branch is what it does NOT do:
       // it never touches p.state. They rock, they bleed, they run — and they
       // are still standing there in 'walk' for the next punch of the combo.
+      // A blow may say how much it bleeds (a jab: nothing on the pavement).
       p.hitCd = FLINCH_CD;
-      if (dmg > 0) this._spawnBlood(p.x, p.z, FLINCH_BLOOD);
+      const bl = Number.isFinite(blow.blood) ? blow.blood : FLINCH_BLOOD;
+      if (dmg > 0 && bl > 0) this._spawnBlood(p.x, p.z, bl);
     }
 
     // SOUND: body thud (+ scream if fatal) belongs here — subscribe to onPedHit
@@ -2703,6 +2725,7 @@ export class Pedestrians {
     p.avz = s * (Math.random() * 1.4 - 0.7);
     p.state = 'rag';
     p.bounced = false;
+    p.cit?.actStop?.();                          // a recorded fall the fight left on it
     p.ragdollPose();
   }
 
@@ -2843,22 +2866,85 @@ export class Pedestrians {
     p.vx = p.vz = p.avx = p.avz = 0;
     p.mesh.position.set(p.x, this._gy(p.x, p.z) + p.lieY, p.z);
     if (p.dead) {
-      p.state = 'dead';
-      p.deadT = CORPSE_TIME;
-      this._spawnBlood(p.x, p.z, 1.0 + Math.random() * 0.4);
-      // corpse budget: past CORPSE_MAX the oldest one starts sinking now
-      let n = 0, oldest = null;
-      for (const q of this.peds) if (q.state === 'dead') {
-        n++;
-        if (!oldest || q.deadT < oldest.deadT) oldest = q;
-      }
-      if (n > CORPSE_MAX && oldest && oldest.deadT > CORPSE_FADE) oldest.deadT = CORPSE_FADE;
+      this._corpse(p, p.x, p.z);
     } else {
       p.state = 'down';
       p.downT = DOWN_TIME[0] + Math.random() * (DOWN_TIME[1] - DOWN_TIME[0]);
       if (p.hurtS > 5) this._spawnBlood(p.x, p.z, 0.8);  // hurt but alive
     }
   }
+
+  // A corpse: the state, the time it lies there, the stain and the budget.
+  // (bx, bz) is where the stain goes: under the body for a ragdoll, under the
+  // head for a recorded fall.
+  _corpse(p, bx, bz) {
+    p.state = 'dead';
+    p.deadT = CORPSE_TIME;
+    this._spawnBlood(bx, bz, 1.0 + Math.random() * 0.4);
+    // corpse budget: past CORPSE_MAX the oldest one starts sinking now
+    let n = 0, oldest = null;
+    for (const q of this.peds) if (q.state === 'dead') {
+      n++;
+      if (!oldest || q.deadT < oldest.deadT) oldest = q;
+    }
+    if (n > CORPSE_MAX && oldest && oldest.deadT > CORPSE_FADE) oldest.deadT = CORPSE_FADE;
+  }
+
+  // Off their feet by a fist: out of the schedule (a hit body is this tab's,
+  // the same as one a car threw), upright, still. js/fightpeds.js takes it
+  // from here.
+  _knockOut(p) {
+    if (p.state === 'held') this.hold(p, false);
+    this._release(p);
+    p.state = 'ko';
+    p.speed = 0; p.vx = p.vy = p.vz = 0; p.y = 0; p.lieY = 0;
+    p.mesh.rotation.set(0, p.heading, 0);
+  }
+
+  // ---- for the fight (js/fightpeds.js) ----
+
+  /** Take somebody on their feet out of the crowd's hands: 'brawl' (fighting
+   *  you) or 'ko'. Returns true if they are the fight's now. */
+  takeOver(p, state) {
+    if (!p || !p.mesh || (state !== 'brawl' && state !== 'ko')) return false;
+    if (p.state === 'held') this.hold(p, false);
+    if (p.state !== 'walk' && p.state !== 'brawl' && p.state !== 'ko') return false;
+    if (state === 'ko') { this._knockOut(p); return true; }
+    this._release(p);
+    p.state = 'brawl';
+    p.speed = 0;
+    return true;
+  }
+
+  /** Give a body the fight is done with back to the crowd, on its feet:
+   *  running (flee) or walking on. */
+  handBack(p, flee = true) {
+    if (!p || !p.mesh || (p.state !== 'brawl' && p.state !== 'ko') || p.dead) return false;
+    p.state = 'walk';
+    p.mesh.rotation.set(0, p.heading, 0);
+    p.y = 0; p.lieY = 0;
+    this._rejoin(p);
+    if (flee) { p.speed = 4.2; p.calm = CALM_T[0]; } else { p.speed = SPEED_MIN + SPEED_VAR * 0.5; p.calm = 0; }
+    return true;
+  }
+
+  /** Lay a body the fight killed out as a corpse where it fell; the stain
+   *  goes at (bx, bz), under the head. */
+  corpse(p, bx = p?.x, bz = p?.z) {
+    if (!p || !p.mesh) return false;
+    p.dead = true; p.hp = 0;
+    p.mesh.rotation.set(0, p.heading, 0);
+    p.y = 0; p.lieY = 0;
+    p.mesh.position.set(p.x, this._gy(p.x, p.z), p.z);
+    this._corpse(p, bx, bz);
+    return true;
+  }
+
+  /** A stain on the ground at (x, z), `size` metres (a split lip is 0.45). */
+  bloodAt(x, z, size) { this._spawnBlood(x, z, size); }
+
+  /** The ground under (x, z), for the fight's own placing. */
+  groundAt(x, z) { return this._gy(x, z); }
 
   // a survivor picks themself up and legs it — they are a free body from here
   // on, so they run until they are out of sight and then quietly stop existing
@@ -2867,6 +2953,13 @@ export class Pedestrians {
     p.standPose();
     p.mesh.rotation.set(0, p.heading, 0);
     p.y = 0; p.lieY = 0;
+    this._rejoin(p);
+    p.speed = 4.2;                               // flee!
+    p.calm = CALM_T[0];
+  }
+
+  // a free body back onto the beat it was walking
+  _rejoin(p) {
     // re-anchor to the nearest point of the beat they were walking; the slide
     // left them off the pavement, and `blend` covers the leftover gap
     let best = 0, bd = Infinity;
@@ -2878,8 +2971,6 @@ export class Pedestrians {
     }
     p.fArc = best;
     p.bx = p.x; p.bz = p.z; p.blend = 1;
-    p.speed = 4.2;                               // flee!
-    p.calm = CALM_T[0];
   }
 
   // --------------------------------------------------------------- blood ----

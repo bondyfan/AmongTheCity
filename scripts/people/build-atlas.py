@@ -118,6 +118,9 @@ doc["avatars"] = avatars
 doc["far"] = {"file": "far.webp", "w": far.size[0], "h": far.size[1]}
 if os.path.exists(os.path.join(out, "clips.bin")):
     doc["clipFile"] = "clips.bin"
+# the fighting clips of the Quaternius library (scripts/people/bake-fight.mjs)
+if os.path.exists(os.path.join(out, "fight.bin")):
+    doc["fightFile"] = "fight.bin"
 else:
     doc["anims"] = [{"file": "anims/" + os.path.basename(f), "name": os.path.basename(f)[:-4]}
                     for f in sorted(glob.glob(os.path.join(out, "anims", "*.glb")))]

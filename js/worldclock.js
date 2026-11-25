@@ -196,6 +196,19 @@ export function overrideTod(tod01) {
   _todOverride = Number.isFinite(tod01) ? tod01 - Math.floor(tod01) : null;
 }
 
+// THE STORY'S OWN LIGHT. The campaign's clock says eight in the evening, and
+// under Pardubice's long summer day that is flat daylight; its opening wants
+// the low sun and the dusk after it (js/prologue-clock.js). So the sky alone
+// may be told another hour than the clock shows: main.js hands skyTod() to
+// updateSky, and everything lit follows the sky (its nightK), not the clock.
+let _skyOverride = null;
+export function overrideSky(tod01) {
+  _skyOverride = Number.isFinite(tod01) ? tod01 - Math.floor(tod01) : null;
+}
+export function skyTod() {
+  return _skyOverride !== null ? _skyOverride : tod();
+}
+
 // Time of day, 0..1 with 0 = midnight — what sky.js, the HUD clock and the
 // traffic-density curve consume. START_TOD is the phase at WORLD_EPOCH_MS,
 // so the world reads 10:30 at every real UTC midnight rather than at the
