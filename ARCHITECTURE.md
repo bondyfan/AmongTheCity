@@ -2992,7 +2992,12 @@ session's flag). Crimes against the police (`naraz`, `napadeni_policisty` 2 star
 thrown-out driver is a body (`js/carjack.js`): hp, killed by the player's car above 7 m/s and
 knocked over below, `nearest` / `hurt` so Combat's `targets: [peds, carjack]` can hit him, and a
 corpse that lies for 40 s. Kill him before his call goes through with nobody else there and
-there are no stars.
+there are no stars. Dying is a clean sheet, as being wasted is in GTA: `CrimeLaw` is built
+with `vitals`, so `vitals.onDown` hangs up every pending call and nothing is reported while
+the player is down; the story restart and the arrest card hang up too (`crimeLaw.clear()`).
+The stars themselves are settled when the free-roam respawn revives you at the hospital
+(`career.js` `vitals.onRevive`: a fine per star, then `wanted.clear()`, a residue under the
+first star included).
 
 **No walking on the rails** (`js/railbarrier.js`, called from `city.js collide()` for
 walkers, `opts.interior`: the player and anybody else moved that way, the thrown-out

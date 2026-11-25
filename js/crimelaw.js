@@ -83,15 +83,22 @@ export class CrimeLaw {
    *            victim excluded (peds, drivers); [] when nobody
    * alive      (who) -> can this one still phone
    * toast      (text, opts), optional
+   * vitals     js/vitals.js's namespace (onDown, down), optional: dying hangs
+   *            up every call, as being wasted does in GTA. Without it a call
+   *            queued just before the death went through after the hospital
+   *            had already settled the stars, and the player woke up wanted
+   *            for something the death had paid for.
    */
-  constructor({ wanted = null, policeAt = null, witnesses = null, alive = null, toast = null } = {}) {
+  constructor({ wanted = null, policeAt = null, witnesses = null, alive = null, toast = null, vitals = null } = {}) {
     this.wanted = wanted;
     this.policeAt = policeAt ?? (() => false);
     this.witnesses = witnesses ?? (() => []);
     this.alive = alive ?? ((w) => !!w && !w.dead);
     this.toast = toast;
+    this.vitals = vitals;
     this.calls = [];          // { kind, due, callers }
     this._t = 0;
+    vitals?.onDown?.(() => this.clear());
   }
 
   /**
@@ -100,6 +107,9 @@ export class CrimeLaw {
    * it went: 'now', 'call', 'none' or 'free' (self-defence).
    */
   report(kind, x, z, victim = null) {
+    // the dead commit no crimes: the car you died in rolling on into somebody
+    // is not a call that should wait for you at the hospital
+    if (this.vitals?.down?.()) return 'none';
     const rule = RULES[kind] ?? DEFAULT_RULE;
     if (kind === 'rvacka' && victim?.brawl) return 'free';
     const saw = !rule.always && rule.police ? !!this.policeAt(x, z, POLICE_R) : false;
@@ -135,7 +145,8 @@ export class CrimeLaw {
     }
   }
 
-  /** A new game, an arrest or a death: nobody is on the phone any more. */
+  /** A new game, an arrest or a death (through vitals.onDown, see the
+   *  constructor): nobody is on the phone any more. */
   clear() { this.calls.length = 0; }
 
   /** Seconds until the next call goes through, Infinity when none is pending. */

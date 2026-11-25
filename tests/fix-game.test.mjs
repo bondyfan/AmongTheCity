@@ -330,6 +330,32 @@ test('the wanted level outlives the tab at an autosave point, and going down wri
   }
 });
 
+// SEJMUT in free roam (main.js wakes you at the hospital with vitals.revive()):
+// the stars are fined and the record cleared, a residue under the first star
+// with it, because in GTA being wasted is a clean sheet.
+test('waking up at the hospital: the stars are fined and cleared, and so is a residue under the first star', async () => {
+  disk.clear();
+  const { c } = await reload();
+  wallet.setMoney(5000);
+  wanted.update(1, {}); wanted.add('zabiti');
+  const stars = wanted.stars();
+  assert.ok(stars >= 1, 'the test did not get itself wanted');
+  vitals.damage(9999, 'test');
+  vitals.revive();
+  assert.equal(wanted.stars(), 0);
+  assert.equal(wanted.heat(), 0);
+  const fined = 5000 - stars * PRICE.fine.perStar;
+  assert.equal(wallet.money(), fined);
+  wanted.update(5, {}); wanted.add(10, 'rvačka');
+  assert.equal(wanted.stars(), 0);
+  assert.ok(wanted.heat() > 0, 'the test left no residue');
+  vitals.damage(9999, 'test');
+  vitals.revive();
+  assert.equal(wanted.heat(), 0, 'a residue under the first star outlived the death');
+  assert.equal(wallet.money(), fined, 'a fine for no star');
+  c.update(1 / 60);
+});
+
 test('a browser that keeps nothing is said out loud, once', async () => {
   disk.clear();
   const ls = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
