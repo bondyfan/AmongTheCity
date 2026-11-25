@@ -3573,11 +3573,18 @@ ElevenLabs, a little blood, and the health of the person you hit.
   the arrest (below three stars) or the pistol. With no health left he is laid
   out as `'down'`, like a man run over. His record carries `hp`, `fist` and a
   `gen` (the pool hands the record to the next officer as a new man).
+  `policecops.js` remembers how many men each unit's car carries (`_crew`):
+  `allDown(u)` is the whole crew dead, not "every record still held is down"
+  (a partner back in the car is freed from the records, and that used to
+  write off a car with a live man at the wheel), `count(u)` is the live men
+  out, and `deploy()` puts out only the survivors. `police.js _maybeDeploy`
+  parks a unit only when somebody actually got out.
 * **When the fists stay down**: `ctx.down` (combat.js) is a player nobody can
   fight, and main.js's `fistsTaken()` sets it for SEJMUT, the ZATČEN card, the
-  chapter card and a story film (`journey/meeting/heist.filming`: those
-  objects live for the whole chapter, so it is the film that is asked);
-  brawlers let go. `ctx.hold` is hands that belong to the UI (`fistsBusy()`:
+  chapter card, a story film (`journey/meeting/heist.filming`: those
+  objects live for the whole chapter, so it is the film that is asked) and
+  seat 14A of the airliner (`flight.cabinBusy`: seated or on the way along
+  the row, the player has no car and read as on foot); brawlers let go. `ctx.hold` is hands that belong to the UI (`fistsBusy()`:
   the big map, any panel): no swing starts and no press is kept, but the street
   goes on. Left click and Q are both gated.
 * A brawler the fight lets go of loses `p.brawl` on every path out (getting up

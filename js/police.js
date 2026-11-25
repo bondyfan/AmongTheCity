@@ -1197,10 +1197,12 @@ export class Police {
     if (Math.abs(u.speed) > 0.7) return;
     if (!P.car && !P.onFoot) return;
     if (dist(u.x - P.x, u.z - P.z) > (u.stall ? FOOT_DEPLOY_R : DEPLOY_R)) return;
+    // parked only when somebody actually got out: a unit with nobody left to
+    // put on the street (or a full pool) keeps driving instead of standing
+    if (!this.officers.deploy(u, tier.cops)) return;
     u.mode = 'parked'; u.sub = ''; u.parkedAt = this._t; u.warned = false;
     u.speed = 0;
     if (u.car) { u.car.speed = 0; u.car._lat = 0; }
-    this.officers.deploy(u, tier.cops);
     this.stats.deploys++;
   }
 

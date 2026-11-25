@@ -198,3 +198,57 @@ test('a thrown-out driver carries his own pocket, the one his car was born with'
   assert.ok(pockets.size > 20, `40 drivers carried only ${pockets.size} different sums`);
   assert.ok(Number.isInteger(driverPid(null)));
 });
+
+// Review, 25 Nov 2026: a two-man unit whose driver was punched dead read as a
+// car with nobody left in it once the partner walked back and was freed from
+// the records (allDown looked only at the records still held), and the dead
+// man's record, held until the unit is dropped, made count() refuse every
+// later deploy of that unit.
+test('a two-man crew with one man dead still has a driver, and can put him out again', () => {
+  const O = new Officers({ makeBody: copBodyStub, rnd: () => 0.5 });
+  const unit = { car: { x: X, z: Z, y: 0, heading: 0, wid: 1.8, len: 4.4 } };
+  assert.equal(O.deploy(unit, 2), 2);
+  const [a, b] = O._rec.filter((q) => !q.free && q.unit === unit);
+  const cops = new CopTargets(O);
+  // A is punched dead
+  cops.hurt(copBody(a), { dmg: 999 });
+  cops.react(copBody(a), 'dead', MOVES.hook, X, Z + 5);
+  assert.equal(a.state, 'down');
+  assert.equal(O.allDown(unit), false, 'one dead of two is a car with nobody in it');
+  assert.equal(O.allIn(unit), false, 'B is still out');
+  // B walks back to the car and gets in
+  O.recall(unit);
+  const cc = { t: 0, px: X + 40, pz: Z, py: 0, pcar: null, onFoot: true, pspeed: 0, tier: SEIZE, down: false };
+  for (let i = 0; i < 600 && !b.free; i++) { cc.t += 1 / 60; O.update(1 / 60, cc); }
+  assert.equal(b.free, true, 'the partner never got back in');
+  assert.equal(O.allIn(unit), true);
+  assert.equal(O.allDown(unit), false, 'a man at the wheel read as nobody left');
+  assert.equal(O.count(unit), 0, 'a dead man counted as an officer on the street');
+  assert.equal(O.dead(unit), 1);
+  // the unit stops again: the survivor gets out, alone
+  assert.equal(O.deploy(unit, 2), 1, 'the dead record blocked the next deploy');
+  assert.equal(O.count(unit), 1);
+  assert.equal(O.deploy(unit, 2), 0, 'a second deploy while he is out');
+  // and when he dies too, nobody is left to drive it
+  const c = O._rec.find((q) => !q.free && q.unit === unit && q.state !== 'down');
+  cops.hurt(copBody(c), { dmg: 999 });
+  assert.equal(O.allDown(unit), true, 'a car whose whole crew is dead still has a driver');
+  assert.equal(O.deploy(unit, 2), 0, 'a dead crew got out again');
+  // dropping the unit forgets it: the pooled record is a new car next time
+  O.dropUnit(unit);
+  assert.equal(O.allDown(unit), false);
+  assert.equal(O.deploy(unit, 1), 1);
+  // a one-man car whose man is dead does not grow a partner when the stars rise
+  const lone = O._rec.find((q) => !q.free && q.unit === unit);
+  cops.hurt(copBody(lone), { dmg: 999 });
+  assert.equal(O.allDown(unit), true);
+  assert.equal(O.deploy(unit, 2), 0, 'three stars raised a dead man\'s car a new crew');
+  // while nobody is lost, more stars do bring the partner out
+  const u2 = { car: { x: X + 20, z: Z, y: 0, heading: 0 } };
+  assert.equal(O.deploy(u2, 1), 1);
+  O.recall(u2);
+  const cc2 = { t: 100, px: X + 60, pz: Z, py: 0, pcar: null, onFoot: true, pspeed: 0, tier: SEIZE, down: false };
+  for (let i = 0; i < 600 && O.count(u2); i++) { cc2.t += 1 / 60; O.update(1 / 60, cc2); }
+  assert.equal(O.count(u2), 0);
+  assert.equal(O.deploy(u2, 2), 2, 'a whole crew at three stars put out one man');
+});
