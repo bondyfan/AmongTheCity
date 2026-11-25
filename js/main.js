@@ -26,7 +26,7 @@ import { CityWorld } from './city.js';
 import { planRings, planCarRings } from './streamplan.js';
 import { input } from './input.js';
 import { Player, worldSeatAnchor, localSeatAnchor } from './player.js';
-import { Carjack, witnessed } from './carjack.js';
+import { Carjack } from './carjack.js';
 import { setDriver, setPassenger } from './cardoor.js';
 import { isLocked, unlock } from './carlocks.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
@@ -56,9 +56,13 @@ import { indexPumps, pumpAt as pumpAtForecourt } from './pumps.js';
 import * as statusbar from './statusbar.js';
 import { PRICE, pumpBrand, pumpPrice, kc2, kc } from './prices.js';
 import { Combat } from './combat.js';
+import { FightFx } from './fightfx.js';
+import { FightHud } from './fighthud.js';
+import { CopTargets } from './copfists.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
-import { RoadLaw } from './roadlaw.js';
+import { RoadLaw, policeNear } from './roadlaw.js';
+import { CrimeLaw } from './crimelaw.js';
 import { createLawHud } from './lawhud.js';
 import { toast as policeToast } from './toasts.js';
 import { Ambulance } from './ambulance.js';
@@ -106,7 +110,7 @@ import { closeNotice, connectNotice } from './netnotice.js';
 // netvehicles: PROXY cars for the peers, the only honest answer to "which car
 //   is he in" — see F8 below.
 // netui:      the HUD that can say "you are alone now" out loud.
-import { tod, setEpoch, setSoloTime } from './worldclock.js';
+import { tod, skyTod, setEpoch, setSoloTime } from './worldclock.js';
 import { ParkingLots } from './parkinglots.js';
 import { wireCityLife } from './citylife.js';
 import { StreetLife } from './streetlife.js';           // birds, dogs on leads, prams
@@ -130,9 +134,12 @@ import { fillCampaigns } from './campaignmenu.js';
 import { airportLife } from './flight-life.js';
 import { AirportLights } from './airport-lights.js';   // runway, approach and taxiway lights after dark
 import { SPAWNS as AIRPORT_SPAWNS } from './airport-plan.js';
-// Pardubice's two spawns for the flight home ('pce-airport', 'pce-arrival'): every page
-// knows them, so the one on Mahé can send the passenger back to final for 27
+import { PRG_SPAWNS } from './flight-lkpr.js';
+// Pardubice's two spawns for the flight home ('pce-airport', 'pce-arrival') and
+// Prague's ('prg-airport', 'prg-arrival'): every page knows them, so the one on
+// Mahé can send the passenger back to final for 27 or for 24
 registerSpawns('cz', AIRPORT_SPAWNS);
+registerSpawns('cz', PRG_SPAWNS);
 import { hours as storyHours } from './prologue-route.js';
 import { staminaHud } from './stamina.js';
 import { exitHudText, setExitLine } from './mwhud.js';
@@ -322,6 +329,7 @@ function pumpStoryOver(dt) {
     vitals.revive();
     statusbar.hideBanner();
     wanted.clear?.();
+    crimeLaw?.clear();
     let at;
     if (heist) at = heist.rewind();
     else if (o.replay) at = career.beginReplay(o.replay) ?? { x: player.pos.x, z: player.pos.z };
@@ -365,16 +373,20 @@ const _vitCtx = { car: null, heli: null, jet: null, player: null, onFoot: true }
 // freezing mid-bounce. js/ejection.js decides when a crash is an ejection.
 let _ejCar = null, _ejT = 0;
 const _ejIdle = { gas: 0, steer: 0, brake: 0 };
-const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null };
+const _cbtCtx = { player: null, onFoot: true, camYaw: 0, input: null, block: false, down: false, hold: false };
 const _wntCtx = { x: 0, z: 0, onFoot: true, car: null, police: null };
 const _polCtx = { x: 0, z: 0, car: null, onFoot: true, y: NaN };
 let _stationT = 0;
 
 let combat = null;       // fists, and what falls out of people — js/combat.js
+let fightFx = null;      // a few drops of blood in the air (js/fightfx.js)
+let fightHud = null;     // the health bar over whoever you fight (js/fighthud.js)
+let _fightTold = false;  // the controls are named once, the first time the fists go up
 let police = null;       // the patrol that wants you — js/police.js
 let ambulance = null;    // and the one that comes for the body — js/ambulance.js
 let roadLaw = null;      // the limit of your road and the police who watch it: js/roadlaw.js
 let lawHud = null;       // the limit disc and the model line on the HUD: js/lawhud.js
+let crimeLaw = null;     // who saw it, who rings it in, and when: js/crimelaw.js
 let chatter = null;      // who says what, and when — js/chatter.js
 let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
@@ -1486,6 +1498,8 @@ input.onKey('KeyE', () => {
       // the next generation's car that wears the same slot string. An older
       // client does not know 'steal_g' and ignores it.
       const ref = traffic.stealRef(car);
+      // who sits at the wheel, for his pocket (js/carjack.js driverPid): steal() drops car.ai
+      if (Number.isInteger(car.ai?.seed)) car._driverPid = car.ai.seed;
       traffic.steal(car);                // stops driving while we walk up
       if (net && ref) queueEvent(ref.ghost ? 'steal_g' : 'steal', { key: ref.key, gen: ref.gen });
     }
@@ -1496,6 +1510,9 @@ input.onKey('KeyE', () => {
     // same, the hand goes out, and it does not give. A car with a peer at the
     // wheel is open: they are sitting in it.
     const locked = !inTraffic && !holder && isLocked(car);
+    // a parked car that is nobody's to take (not yours, not the story's, not
+    // one you have sat in): taking it is theft, a star if police see it
+    const theft = !inTraffic && !holder && !car.owned && !car.unlocked && !car.story;
     player.boardVehicle(car, seat, {
       locked,
       jack: !!car._driverIn && seat === 0,
@@ -1529,6 +1546,7 @@ input.onKey('KeyE', () => {
         camDist = CAM_DIST_MIN;
         if (s !== 0) return;             // passenger seat: no engine, no speedo
         game.car = car;
+        if (theft) crimeLaw?.report('kradez', car.x, car.z);
         if (meeting?.driving(car)) fpView = true;
         // Claimed from onSeated for the same reason the helicopter is: the
         // walk-up is cancellable, and taking a car off everybody else's street
@@ -1626,10 +1644,10 @@ function jackDriver(car) {
   sfxOr(String(thrown?.body?.arch?.key ?? 'm').startsWith('f') ? 'voice_carjack_f' : 'voice_carjack_m', null, 0.9);
   setTimeout(() => sfxOr('body_fall', null, 0.8), 420);
   try { peds?.panic?.(car.x, car.z, 16); } catch { /* the crowd is not the point */ }
-  const others = [];
-  if (traffic) for (const c of traffic.cars) if (c !== car) others.push(c);
-  const saw = witnessed(car.x, car.z, { peds, cars: others, city: world?.city, night: sky?.nightK ?? 0 });
-  if (saw) wanted.add('prepadeni');
+  // The driver rings the police himself (Frank, 25 Nov 2026): two stars when
+  // the call goes through, unless he is dead by then and nobody else saw it;
+  // at once if a patrol is watching. js/crimelaw.js.
+  crimeLaw?.report('prepadeni', car.x, car.z, thrown ?? null);
 }
 
 // A runner with a policeman on him goes down (js/policecops.js onTackle).
@@ -1687,6 +1705,7 @@ function pumpArrest(dt) {
     player.held = null;
     const at = career.reloadLast();
     wanted.clear();
+    crimeLaw?.clear();
     if (at) {
       world.city.ensureTiles?.(at.x, at.z)?.catch?.(() => {});
       world.terrain.ensure?.(at.x, at.z);
@@ -1920,20 +1939,46 @@ function updateStationCars(x, z) {
 // It is guarded on being on foot rather than on !game.car alone, because a
 // PASSENGER has no game.car and punching from the seat would be a man
 // windmilling through the roof.
+//
+// Two more reasons the fists stay down (review, 25 Nov 2026). The player is
+// not his own (fistsTaken): lying SEJMUT, the ZATČEN card, the chapter card,
+// or a story film that has the camera and the body. The campaign's journey,
+// meeting and heist objects live for the whole chapter, so it is the film
+// itself that is asked (their `filming`), never whether a story exists.
+// The hands are the UI's (fistsBusy): the big map or any panel owns the mouse.
+function fistsTaken() {
+  return !!(vitals.down() || arrest || storyOver || journey?.filming || meeting?.filming || heist?.filming);
+}
+function fistsBusy() {
+  return !!(worldMap?.open || document.body.dataset.panelOpen);
+}
 function combatInput(dt) {
   if (game.mode !== 'play' || !combat) return;
   const onFoot = !game.car && !game.heli && !game.jet && !player.inCar && !trains?.riding;
   const pressed = input.takeLeftPressed();
-  if (!onFoot) return;
-  if (pressed) combat.strike();
+  if (!onFoot || fistsTaken() || fistsBusy()) return;
+  if (pressed) combat.strike('light');
+  // the first time the fists go up, say what the keys are (Czech: it is UI)
+  if (!_fightTold && combat.stance) {
+    _fightTold = true;
+    ui_hint('Boj: levé tlačítko úder (3× = kombinace), Q silný úder, V kryt, Shift konec');
+  }
 }
+// Q: the heavy punch, the hook straight away (GTA's alternate attack). An edge,
+// not a hold, so it rides input.onKey like the other one-shot keys.
+input.onKey('KeyQ', () => {
+  if (game.mode !== 'play' || !combat) return;
+  if (game.car || game.heli || game.jet || player.inCar || trains?.riding) return;
+  if (fistsTaken() || fistsBusy()) return;
+  combat.strike('heavy');
+});
 
 // ---------- the stars ----------
 // Driven from here rather than from statusbar.js because the wanted level
 // arrived a slice later than that module did, and reaching into it from
 // outside would have been worse than the six lines below. DOM writes only on
 // CHANGE — this runs inside stepGame, which can go three times a frame.
-let _starsShown = -1, _huntedShown = null;
+let _starsShown = -1, _huntedShown = null, _lostShown = false;
 function updateStars() {
   const el = $id('wanted');
   if (!el) return;
@@ -1959,6 +2004,13 @@ function updateStars() {
   if (hunted !== _huntedShown) {
     _huntedShown = hunted;
     el.classList.toggle('hunted', hunted);
+  }
+  // Nobody has you: the stars blink while the minute's search runs out
+  // (Frank, 25 Nov 2026), solid again the moment a unit sees you.
+  const lost = wanted.searching();
+  if (lost !== _lostShown) {
+    _lostShown = lost;
+    el.classList.toggle('lost', lost);
   }
 }
 
@@ -2553,6 +2605,9 @@ async function initNavigation(city) {
     placeFinder = new PlaceFinder(city);
     navigation = new Navigation(city, { overview: dataUrl('overview.json') });   // (a far pin: js/coarseroute.js)
     navLine = new NavLine(scene);
+    // the two maps draw the same route, read from the same tracker
+    minimap?.setRoute?.(navigation);
+    worldMap?.setRoute?.(navigation);
   } catch (err) {
     console.warn('navigation unavailable:', err.message);
   }
@@ -2589,7 +2644,7 @@ function updateNavigation(dt) {
   // the line belongs on the road under a CAR — on foot it would just be litter
   if (navLine) {
     if (game.car && navigation.route) {
-      navLine.set(navigation.route);
+      navLine.set(navigation.route, navigation.routeOff);
       navLine.update(dt, player.pos.x, player.pos.z, world);
     } else navLine.clear();
   }
@@ -2790,7 +2845,7 @@ function updateHud(dt) {
     $id('speed-unit').textContent = `km/h · ${Math.round(game.heli.y)} m`;
   }
   // the limit of this road beside the speed, the model under the fuel
-  lawHud?.(game.car, roadLaw?.limit ?? 0, game.car ? carLabel(game.car) : '');
+  lawHud?.(game.car, roadLaw?.limit ?? 0, game.car ? carLabel(game.car) : '', roadLaw?.threshold);
   // vehicle name card: counted down per frame, not on the 0.2 s hint tick, so
   // three seconds is three seconds and not "three seconds rounded to a tick"
   if (_carNameHold > 0) {
@@ -2973,9 +3028,18 @@ function updateHud(dt) {
         ? (d / 1000).toFixed(1) + ' km' : Math.round(d) + ' m';
     } else wpEl.classList.add('hidden');
   }
+  // the disc turns with the camera; the arrow shows the body (or the car)
+  // against it, and the zoom follows the speed
+  const ride = game.car ?? game.heli ?? null;
+  _mmOpts.body = ride ? ride.heading : player.heading;
+  _mmOpts.speed = game.car ? Math.abs(game.car.speed ?? 0)
+    : game.heli ? Math.hypot(game.heli.vx ?? 0, game.heli.vz ?? 0) : 0;
   minimap?.update(player.pos.x, player.pos.z, camYaw,
-    traffic ? [...traffic.cars] : [], peers);
+    traffic ? [...traffic.cars] : [], peers, _mmOpts);
 }
+
+// One reused options record for minimap.update (no per-frame allocation).
+const _mmOpts = { body: 0, speed: 0 };
 
 // The closest peer, as a waypoint-shaped {x, z}, or null. Returns a FRESH
 // object only when the target actually moved: minimap.setWaypoint keeps the
@@ -3424,7 +3488,7 @@ async function boot() {
     // …and only when it was YOUR car. p.by is the vehicle the blow came from,
     // so an AI Octavia mowing somebody down two streets away no longer hands
     // the player a star for an accident they were not part of.
-    if (p.by && p.by === game.car) wanted.add('srazeni');
+    if (p.by && p.by === game.car) crimeLaw?.report('srazeni', p.x, p.z, p);
     // Somebody is on the tarmac. Above 6 m/s they are not getting up on their
     // own, which is the line js/ambulance.js draws between a fright and a
     // casualty — and it comes for the PLACE, not the body, because
@@ -3438,7 +3502,7 @@ async function boot() {
     // or if you did it with your hands — and in that second case combat.js has
     // already raised 'zabiti' through onCrime, so charging again here would be
     // the double bill this hook was just fixed for.
-    if (p.by && p.by === game.car) wanted.add('zabiti');
+    if (p.by && p.by === game.car) crimeLaw?.report('zabiti', p.x, p.z, p);
     ambulance?.call(p.x, p.z);
   };
 
@@ -3569,11 +3633,25 @@ async function boot() {
   });
 
   // ---- fists, and the people who mind ----
-  combat = new Combat({ peds, chatter, wallet, audio: { sfxAt } });
+  fightFx = new FightFx(scene);
+  fightHud = new FightHud(document);
+  // Every source a fist can find somebody in: the crowd, and the driver thrown
+  // out of a jacked car (each needs nearest() and hurt(); one without them is
+  // skipped). Blows on the player come back through vitals.damage.
+  // …and the officers out of a patrol car (js/copfists.js: hitting one is
+  // 'napadeni_policisty', killing one 'zabiti_policisty'; police is built
+  // just below, so the source asks for it when a fist looks)
+  combat = new Combat({ peds, targets: [peds, carjack, new CopTargets(() => police?.officers)], chatter, wallet,
+    audio: { sfxAt }, vitals, fx: fightFx, hud: fightHud });
+  // the other players see your punches: the move goes to the room
+  combat.onSwing((m) => { if (net) queueEvent('fist', { m }); });
   // A landed punch and a killing one are two different crimes, and combat.js
-  // is the only thing that can tell them apart.
-  combat.onCrime((kind, x, z) => {
-    wanted.add(kind);
+  // is the only thing that can tell them apart. Whether anybody minds is
+  // js/crimelaw.js's: a punch only when police see it, a killing when they
+  // see it or a witness rings in. `victim` says who it was, so he is never his
+  // own witness, and a brawler who hits back (fightpeds p.brawl) is self-defence.
+  combat.onCrime((kind, x, z, victim) => {
+    crimeLaw?.report(kind, x, z, victim ?? null);
     // Everyone nearby saw it. peds.panic is chained into chatter.bang in this
     // file already, so the shouting comes for free.
     peds.panic(x, z, 18);
@@ -3592,6 +3670,35 @@ async function boot() {
   // only your own heat.
   roadLaw = new RoadLaw({ traffic, police, wanted, toast: policeToast });
   lawHud = createLawHud(document);
+  // …and every other crime: who saw it, who can phone (Frank, 25 Nov 2026,
+  // "aby to fungovalo jako v GTAčku"). Witnesses are the pedestrians drawn
+  // near the player and the drivers of cars around; a car's driver can still
+  // phone while it has one (ai), anybody else while they are alive.
+  const isCar = (w) => w && w.len !== undefined && w.wid !== undefined && typeof w.heading === 'number';
+  crimeLaw = new CrimeLaw({
+    wanted,
+    vitals,                 // SEJMUT hangs up every pending call (the hospital settles the stars)
+    toast: policeToast,
+    policeAt: (x, z, r) => policeNear(x, z, r, traffic, police),
+    alive: (w) => !!w && !w.dead && (isCar(w) ? !!w.ai : true),
+    witnesses: (x, z, r, victim) => {
+      const out = [], r2 = r * r;
+      for (const p of peds?.peds ?? []) {
+        if (p === victim || p.dead) continue;
+        const dx = p.x - x, dz = p.z - z;
+        if (dx * dx + dz * dz <= r2) out.push(p);
+      }
+      if (traffic) for (const c of traffic.cars) {
+        if (!c.ai || c === game.car) continue;
+        const dx = c.x - x, dz = c.z - z;
+        if (dx * dx + dz * dz <= r2) out.push(c);
+      }
+      return out;
+    },
+  });
+  // The thrown-out driver run down by the car he was thrown out of: a crime
+  // like any other, and if he is dead his own call never goes through.
+  if (carjack) carjack.onRunOver = (r, killed) => crimeLaw?.report(killed ? 'zabiti' : 'srazeni', r.x, r.z, r);
 
   // ---- the body, the wallet and the tank ----
   statusbar.init();
@@ -3807,6 +3914,7 @@ function tick(src) {
     } else {
       renderer.render(scene, camera);
     }
+    fightHud?.update(camera, combat?.now ?? 0, !!combat?.stance);
     if (window.__atc) {
       const ms = performance.now() - r0;
       window.__atc.frameMs += (ms - window.__atc.frameMs) * 0.1;
@@ -3876,7 +3984,7 @@ function stepGame(dt) {
   airport?.update(dt, sky?.nightK ?? 0);
   pumpStoryOver(dt);
   pumpArrest(dt);
-  carjack?.update(dt, player.pos.x, player.pos.z);
+  carjack?.update(dt, player.pos.x, player.pos.z, game.car);
   if (meeting?.finished) { meeting.close(); meeting = null; }
   const focus = game.car ?? player.pos;
   // STREAM WHERE YOU WILL BE, NOT WHERE YOU ARE. Everything downstream of this
@@ -4156,7 +4264,7 @@ function stepGame(dt) {
   // the shadow rig parks on the camera, but its HEIGHTS must be anchored to
   // the real ground — this world lives at absolute elevation (~220 m ASL),
   // and the default y≈0 anchor put the whole shadow frustum underground
-  updateSky(sky, tod(), camera, scene,
+  updateSky(sky, skyTod(), camera, scene,
     world?.terrain?.heightAt?.(camera.position.x, camera.position.z) ?? (camera.position.y - 6));
   lightPools?.update(dt, camera, world, sky, renderer.domElement.height, traffic?.cars, game.car, getSettings().flare !== false);
   airportLights?.update(dt, camera, world, sky, renderer.domElement.height, airFlier());
@@ -4174,10 +4282,16 @@ function stepGame(dt) {
   // should already know about when it runs two lines below.
   _cbtCtx.player = player; _cbtCtx.onFoot = _vitCtx.onFoot && !player.ragdoll;
   _cbtCtx.camYaw = camYaw; _cbtCtx.input = input;
+  // V (or the touch block button) holds the guard up; Ctrl is not used, Ctrl+W closes the tab
+  _cbtCtx.block = input.keys.has('KeyV') || !!input.touchBlock;
+  _cbtCtx.down = fistsTaken();
+  _cbtCtx.hold = fistsBusy();
   combat?.update(dt, _cbtCtx);
+  fightFx?.update(dt);
   const _eyes = game.car ?? player.pos;
   _wntCtx.x = _eyes.x; _wntCtx.z = _eyes.z;
   _wntCtx.onFoot = _vitCtx.onFoot; _wntCtx.car = game.car; _wntCtx.police = police;
+  crimeLaw?.update(dt);             // calls that are due go through first
   wanted.update(dt, _wntCtx);
   _polCtx.x = _eyes.x; _polCtx.z = _eyes.z; _polCtx.car = game.car;
   _polCtx.onFoot = _vitCtx.onFoot; _polCtx.y = game.car ? NaN : player.y;
@@ -4242,7 +4356,7 @@ function stepGame(dt) {
       }
     }
     net.update(dt, { scene, player, game, weapons, world, camera, trains,
-      cars: _crashList(), peds });
+      cars: _crashList(), peds, combat });
   }
 }
 
@@ -4656,10 +4770,14 @@ window.__atc = {
   // only ever two copies of the same module disagreeing.
   vitals, wallet, fuel, statusbar, wanted,
   get combat() { return combat; },
+  get fightFx() { return fightFx; },
+  get fightHud() { return fightHud; },
   get police() { return police; },
   get roadWorks() { return roadWorks; },
   get ambulance() { return ambulance; },
   get roadLaw() { return roadLaw; },
+  get crimeLaw() { return crimeLaw; },
+  get carjack() { return carjack; },
   get traffic() { return traffic; },
   said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
   get interiors() { return world?.interiors; },
@@ -4676,6 +4794,7 @@ window.__atc = {
   get parked() { return parked; }, get peds() { return peds; }, get life() { return streetLife; },
   get cyclists() { return cyclists; },
   get trains() { return trains; }, get worldMap() { return worldMap; },
+  get navigation() { return navigation; }, get navLine() { return navLine; }, get minimap() { return minimap; },
   get tickets() { return tickets; }, get phone() { return phone; }, get ticketScreen() { return ticketScreen; },
   // multiplayer session (null in single player). net.onRemoteVehicle is wired
   // to the ghost fleet: a harness asserting "my friend is in a car" should ask

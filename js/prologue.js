@@ -3,7 +3,7 @@ import { storyRecording } from './audio.js';
 import { trainBody, doorX, carriageAt } from './prologue-coach.js';
 import { trainDeck, inside } from './prologue-deck.js';
 import { storyHud } from './prologue-hud.js';
-import { stationEntry, stationExit, DEPARTS_IN, wayOut } from './prologue-route.js';
+import { stationEntry, stationExit, DEPARTS_IN, wayOut, kolinPlatform, pardubicePlatform } from './prologue-route.js';
 import { routeFor, localAt, worldAt } from './story-rail.js';
 import { departureBoard } from './prologue-board.js';
 import { railbed } from './prologue-railbed.js';
@@ -158,7 +158,7 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
   const deck = {
     carrying: (x, z) => roofCtl.carrying(x, z) || coachDeck.carrying(x, z),
     support: (x, z, limit) => (roofCtl.carrying(x, z) ? roofCtl.support() : coachDeck.support(x, z, limit)),
-    collide: (pos, r, opts) => roofCtl.collide(pos, r) || coachDeck.collide(pos, r, opts),
+    collide: (pos, r, opts) => roofCtl.collide(pos, r, opts) || coachDeck.collide(pos, r, opts),
     // the step between the platform edge and the coach door is over the track
     // strip js/railbarrier.js keeps walkers off: this is the one way in
     boarding: (x, z) => atTrain(x, z),
@@ -353,6 +353,10 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
     get film() {
       return film;
     },
+    // a film has the camera and the body (js/main.js: no fists meanwhile)
+    get filming() {
+      return !!film?.running && !driving;
+    },
     // The film owns the camera; afterwards it is the game's own again, seated or not.
     frameCamera(camera, dt) {
       if (film?.running && !driving) return film.camera(camera, dt);
@@ -409,6 +413,11 @@ export function createPrologue({ chapter, scene, world, player, map, trip, train
       }
       // its sound: idle at the platform, the ride inside, the montage of a skip
       sound.update(aboard, distance(pose), skipped ? 31 : speed);
+      // the station that is speaking is heard by how near he is to its hall
+      // and platforms: Kolín until the ride is over, Pardubice after it
+      sound.hear(phase === 'arrival' || phase === 'forecourt'
+        ? Math.min(distance(stationExit), distance(pardubicePlatform))
+        : Math.min(distance(stationEntry), distance(kolinPlatform)));
       if (skipped) {
         skipped.elapsed += dt;
         if (skipped.elapsed > 0.55 && !skipped.moved) {

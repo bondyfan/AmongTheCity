@@ -5,7 +5,7 @@
 // drawn by one function, and each map only decides WHERE.
 //
 // A mark is { x, z, kind, rim? }:
-//   kind  'courier' | 'taxi' | 'car' | 'fuel' | 'goal'
+//   kind  'courier' | 'taxi' | 'car' | 'fuel' | 'goal' | 'airport'
 //   rim   true = when it is off the minimap window, pin a chevron to the rim
 //         on its bearing (your own car wants this, forty job offers do not)
 //
@@ -22,10 +22,12 @@ export const MARK_COLOR = {
   car: '#8fe3a0',
   fuel: '#7fb6ff',
   goal: '#cfe0ff',
+  airport: '#b9a4ff',
 };
 
 /** Draw one mark centred on (sx, sy). `s` is its half-size in canvas pixels. */
 export function drawMark(g, kind, sx, sy, s) {
+  if (kind === 'airport') return drawPlane(g, sx, sy, s * 1.25);
   g.fillStyle = MARK_COLOR[kind] ?? '#ffffff';
   g.strokeStyle = DARK;
   // the pump's drop is the smallest shape here: a full-weight outline eats it
@@ -80,4 +82,39 @@ export function drawRimMark(g, kind, dx, dz, R, a) {
   g.fill();
   g.stroke();
   g.restore();
+}
+
+// An airport: a lavender disc with a dark aircraft on it, nose up (north).
+function drawPlane(g, sx, sy, s) {
+  g.beginPath();
+  g.arc(sx, sy, s, 0, TAU);
+  g.fillStyle = MARK_COLOR.airport;
+  g.strokeStyle = DARK;
+  g.lineWidth = Math.max(1, s * 0.16);
+  g.fill();
+  g.stroke();
+  const u = s * 0.78;
+  g.beginPath();
+  // fuselage, wings swept back, tailplane
+  g.moveTo(sx, sy - u);
+  g.lineTo(sx + u * 0.12, sy - u * 0.62);
+  g.lineTo(sx + u * 0.12, sy - u * 0.18);
+  g.lineTo(sx + u * 0.86, sy + u * 0.22);
+  g.lineTo(sx + u * 0.86, sy + u * 0.4);
+  g.lineTo(sx + u * 0.12, sy + u * 0.2);
+  g.lineTo(sx + u * 0.1, sy + u * 0.62);
+  g.lineTo(sx + u * 0.36, sy + u * 0.82);
+  g.lineTo(sx + u * 0.36, sy + u * 0.94);
+  g.lineTo(sx, sy + u * 0.84);
+  g.lineTo(sx - u * 0.36, sy + u * 0.94);
+  g.lineTo(sx - u * 0.36, sy + u * 0.82);
+  g.lineTo(sx - u * 0.1, sy + u * 0.62);
+  g.lineTo(sx - u * 0.12, sy + u * 0.2);
+  g.lineTo(sx - u * 0.86, sy + u * 0.4);
+  g.lineTo(sx - u * 0.86, sy + u * 0.22);
+  g.lineTo(sx - u * 0.12, sy - u * 0.18);
+  g.lineTo(sx - u * 0.12, sy - u * 0.62);
+  g.closePath();
+  g.fillStyle = DARK;
+  g.fill();
 }

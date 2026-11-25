@@ -14,9 +14,16 @@
 // pointing the way you face: the two directions of a street are two edges, and
 // at a junction the crossing street is just as near but points across you.
 //
-// "MORE THAN 50 %" is read as more than 50 % OVER the limit: past 75 km/h in a
-// 50, past 135 in a 90. The literal reading ("faster than half the limit")
-// would make 26 km/h in a 50 a crime, which nobody would believe.
+// HOW FAST IS A STAR. The first rule (21 Nov 2026) was more than 50 % over the
+// limit. Frank changed it on 25 Nov 2026: "když je 50 povolená maximální, tak
+// mě chytne až nad 130 a vejš. Už pojedu 120, tak pořád nic ještě. Na dálnici
+// to bude zase na... to 90 a vejš. [...] kde je maximální 90, tak tam nad 160
+// no, bude platit. [...] jinak všechny ostatní rychlosti bude platit jako
+// dvojnásobná. Nebo 130, záleží, co je míň. Ale když je někde maximálně 30, tak
+// tam bude platit nad 100 už." So policeLimit() is his table: 30 -> 100,
+// 50 -> 130, 90 -> 160, a motorway 90 over its limit (read so; 220 at 130),
+// and any other limit min(2 x limit, 130). A star only strictly ABOVE it, and
+// the HUD's speed turns red only there too (js/lawhud.js).
 //
 // THE WITNESS is the police and nobody else: a patrol car in the traffic, a
 // pursuit unit, or an officer on foot within WITNESS_R (50 m). No police, no
@@ -42,7 +49,6 @@
 const LANE_DT = 0.1;          // s between lane lookups; the stop line is watched every step
 const REACH = 3;              // m past a carriageway's half width that still counts as on it
 const ALIGN = 0.35;           // cos: within about 70° of the lane's own direction
-const OVER = 1.5;             // more than 50 % over the limit
 const OVER_HOLD = 0.6;        // s it has to last (a bump over a crest is not speeding)
 export const WITNESS_R = 50;  // m: police nearer than this saw it
 const EYES_DT = 0.25;         // s between police scans while speeding
@@ -69,9 +75,25 @@ export function limitKmh(e) {
   return v > 0 ? Math.round(v * 3.6) : 0;
 }
 
-/** Strictly more than 50 % over the limit. */
-export function speeding(kmh, limit) {
-  return limit > 0 && kmh > limit * OVER;
+// Frank's named rows (25 Nov 2026); everything else is the general rule
+const NAMED = Object.freeze({ 30: 100, 50: 130, 90: 160 });
+const MOTORWAY_OVER = 90;     // km/h over a motorway's limit ("to 90 a vejš", as read)
+const OTHER_CAP = 130;        // "dvojnásobná. Nebo 130, záleží, co je míň"
+
+/**
+ * The speed (km/h) above which police who see you give a star, for a road
+ * with this limit. `motorway` is the road class (traffic edge road.t).
+ * Infinity with no known limit: no sign, no offence.
+ */
+export function policeLimit(limit, motorway = false) {
+  if (!(limit > 0)) return Infinity;
+  if (motorway) return limit + MOTORWAY_OVER;
+  return NAMED[limit] ?? Math.min(2 * limit, OTHER_CAP);
+}
+
+/** Strictly above the police threshold for this road. */
+export function speeding(kmh, limit, motorway = false) {
+  return kmh > policeLimit(limit, motorway);
 }
 
 /** What a traffic offence adds to `heat`: up to STAR_CAP, never more than its own price. */
@@ -180,6 +202,8 @@ export class RoadLaw {
     this.wanted = wanted;
     this.toast = toast;
     this.limit = 0;           // km/h on the sign, 0 = no sign
+    this.motorway = false;    // …and whether that road is a motorway (its threshold)
+    this._key = 0;            // limit and class as one number for the hold
     this._t = 0;
     this._laneAt = 0;
     this._laneT = -1e9;       // when we last stood on a road
@@ -195,7 +219,7 @@ export class RoadLaw {
     const step = dt > 0 ? dt : 0;
     this._t += step;
     if (!car || !this.traffic?.edgesNear) {
-      this.limit = 0; this._watch = null; this._overT = 0; this._cand = 0;
+      this._set(0, false); this._watch = null; this._overT = 0;
       return;
     }
     const fx = -Math.sin(car.heading ?? 0), fz = -Math.cos(car.heading ?? 0);
@@ -204,10 +228,10 @@ export class RoadLaw {
       const lane = nearestLane(this._near, car.x, car.z, fx, fz, _lane);
       if (lane) {
         this._laneT = this._t;
-        this._sign(limitKmh(lane.e));
+        this._sign(limitKmh(lane.e), lane.e.road?.t === 'motorway');
         const e = lane.e;
         if (lane.aligned && e.sig && lane.s < e.sigStop && this._watch !== e) this._watch = e;
-      } else if (this._t - this._laneT > LIMIT_KEEP) { this.limit = 0; this._cand = 0; }
+      } else if (this._t - this._laneT > LIMIT_KEEP) this._set(0, false);
     }
 
     // ---- the stop line of a watched approach ----
@@ -221,9 +245,9 @@ export class RoadLaw {
       }
     }
 
-    // ---- more than 50 % over the limit ----
+    // ---- above the police threshold for this road ----
     const kmh = (car.vGround ?? Math.abs(car.speed ?? 0)) * 3.6;
-    if (speeding(kmh, this.limit)) this._overT += step;
+    if (speeding(kmh, this.limit, this.motorway)) this._overT += step;
     else this._overT = 0;
     if (this._overT >= OVER_HOLD && this._t >= this._eyesAt) {
       this._eyesAt = this._t + EYES_DT;
@@ -231,12 +255,21 @@ export class RoadLaw {
     }
   }
 
-  // the sign changes only once a new limit has lasted LIMIT_HOLD (the first at once)
-  _sign(lim) {
-    if (lim === this.limit) { this._cand = 0; return; }
-    if (this.limit === 0) { this.limit = lim; this._cand = 0; return; }
-    if (this._cand !== lim) { this._cand = lim; this._candT = this._t; return; }
-    if (this._t - this._candT >= LIMIT_HOLD) { this.limit = lim; this._cand = 0; }
+  /** km/h above which the police give a star on the road under the sign. */
+  get threshold() { return policeLimit(this.limit, this.motorway); }
+
+  // the sign changes only once a new limit (or road class) has lasted
+  // LIMIT_HOLD, the first one at once
+  _sign(lim, mw) {
+    const key = mw ? -lim : lim;
+    if (key === this._key) { this._cand = 0; return; }
+    if (this.limit === 0) { this._set(lim, mw); return; }
+    if (this._cand !== key) { this._cand = key; this._candT = this._t; return; }
+    if (this._t - this._candT >= LIMIT_HOLD) this._set(lim, mw);
+  }
+  _set(lim, mw) {
+    this.limit = lim; this.motorway = lim > 0 && mw;
+    this._key = this.motorway ? -lim : lim; this._cand = 0;
   }
 
   /** Charge one offence if the police are there to see it. Returns the heat added. */

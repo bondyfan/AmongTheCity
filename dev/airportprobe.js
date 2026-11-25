@@ -1,6 +1,6 @@
 // dev/airportprobe.js: drive the airport and the flight from the console.
 //   const P = await import('/dev/airportprobe.js');
-//   P.money(50000); P.at('counter'); P.press('KeyE'); P.walk('lane'); P.ff(20);
+//   P.money(50000); P.at('counter'); P.press('KeyE'); P.buy(); P.walk('lane'); P.ff(20);
 //   P.view([x, y, z], [tx, ty, tz]) renders the live scene from a throwaway
 //   camera into an overlay (for a screenshot); P.unview() takes it away.
 // Development only: nothing in the game imports it.
@@ -29,6 +29,13 @@ export function at(name) {
   return p;
 }
 export const press = (code) => A().input.keyHandlers.get(code)?.();
+/** Click the first enabled Koupit in the open destination list. → its row's title, or null. */
+export function buy() {
+  const b = [...document.querySelectorAll('.atc-pn-back .atc-btn')].find((x) => !x.disabled && x.offsetParent);
+  if (!b) return null;
+  b.click();
+  return b.closest('.atc-pn-row')?.querySelector('.pr-title')?.textContent ?? '';
+}
 /** Run the whole game synchronously for `s` seconds of sim time. */
 export function ff(s, dt = 1 / 30) { for (let t = 0; t < s; t += dt) A().stepGame(dt); }
 /** Walk the real player along straight legs to a named place or [x, z]; → 'ok' or 'STUCK x,z'. */
@@ -136,10 +143,12 @@ export function cockpit(ahead = 2000, down = 3.2) {
 export function toSeat() {
   const log = [];
   money(50000);
-  at('counter'); ff(0.3); press('KeyE'); ff(0.2); log.push(flight().trip.state);
+  // E opens "Kam letíme?"; its first live Koupit is Mahé (js/flight-booking.js)
+  at('counter'); ff(0.3); press('KeyE'); ff(0.2); buy(); ff(0.2); log.push(flight().trip.state);
   const a = toWorld(10, 1);
   walk([a.x, a.z]); walk('lane'); walk('pastLane'); log.push(flight().trip.state);
-  walk('gate'); ff(0.3); press('KeyE'); ff(0.5); log.push(flight().trip.state);
+  // boarding opens twenty seconds after the ticket (js/flight-schedule.js)
+  walk('gate'); ff(Math.max(0, flight().schedule?.toBoarding ?? 0) + 0.3); press('KeyE'); ff(0.5); log.push(flight().trip.state);
   log.push(board().join(','));
   ff(0.3); log.push(flight().trip.state);
   press('KeyE'); ff(3); log.push(flight().trip.state + '/' + flight().phase);

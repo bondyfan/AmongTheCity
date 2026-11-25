@@ -96,16 +96,19 @@ async function run(base) {
       } catch (err) { console.warn('[people] clip file ' + a.file + ' skipped:', err?.message ?? err); }
     });
   }
-  // every clip of the bank in one file (scripts/people/bake-clips.mjs)
-  if (m.clipFile) {
+  // every clip of the bank in one file (scripts/people/bake-clips.mjs), and
+  // the fighting clips recorded on another skeleton (bake-fight.mjs), which
+  // avatars.js retargets onto each body the first time one is played
+  for (const cf of [m.clipFile, m.fightFile]) {
+    if (!cf) continue;
     jobs.push(async () => {
       try {
-        const r = await fetch(base + m.clipFile);
+        const r = await fetch(base + cf);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const file = readClipFile(await r.arrayBuffer());
         addClipSource({ family: file.family, scene: file.scene, clips: file.clips, faces: file.faces, moved: file.moved });
         _stats.clips += file.clips.size;
-      } catch (err) { console.warn('[people] ' + m.clipFile + ' did not load:', err?.message ?? err); }
+      } catch (err) { console.warn('[people] ' + cf + ' did not load:', err?.message ?? err); }
     });
   }
   const got = [];

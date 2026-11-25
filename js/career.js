@@ -55,6 +55,7 @@ import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, 
 import { start as heistStart } from './heist-route.js';
 import { retry } from './story-retry.js';
 import { region, regionId, arrival } from './regions.js';
+import { airportMarks } from './airport-marks.js';
 
 const store = browserStore();
 
@@ -353,7 +354,10 @@ export function attach(host) {
     // found the ground by then
     // (no height: the hospital is stood on its own floor, see js/savespot.js)
     if (lastSafe && h?.player) { lastSafe.x = h.player.pos.x; lastSafe.z = h.player.pos.z; lastSafe.y = NaN; }
-    if (stars <= 0) return;
+    // under the first star there is nothing to fine, but the residue goes
+    // too: as in GTA, you wake up with a clean sheet (the pending calls were
+    // hung up at the death itself, js/crimelaw.js)
+    if (stars <= 0) { if (wanted.heat() > 0) wanted.clear(); return; }
     const fine = payFine(stars);
     wanted.clear();
     toast('Pokuta ' + kc(fine), { icon: '🚓', kind: 'warn', sub: 'Hledanost smazána' });
@@ -747,6 +751,8 @@ function rebuildMarks(x, z) {
   for (const p of pumps) if (Math.abs(p.x - x) < 6000 && Math.abs(p.z - z) < 6000)
     marks.push({ x: p.x, z: p.z, kind: 'fuel', rim: false });
   jobs.marks(marks);
+  // the airports the flight leaves from (js/airport-marks.js)
+  for (const m of airportMarks()) marks.push(m);
   const c = garage.car;
   if (c && h.game.car !== c) marks.push({ x: c.x, z: c.z, kind: 'car', rim: true });
 }

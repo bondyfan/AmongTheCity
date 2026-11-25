@@ -69,6 +69,7 @@ register(new URL('./three-alias.mjs', import.meta.url));
 
 const { Pedestrians, PED_HP } = await import('../js/pedestrians.js');
 const { Combat, pocketOf } = await import('../js/combat.js');
+const { fightsBack } = await import('../js/fightmoves.js');
 const { PRICE } = await import('../js/prices.js');
 
 // ---------------------------------------------------------------- fixtures ----
@@ -213,7 +214,7 @@ function speaker() {
 // runs several times per rendered frame and every assertion in this file has to
 // hold when it does. player.combatPose is called after every step because that
 // is js/player.js's contract: the pose runs at the END of the player's update.
-function land(cb, ctx, { dt = 1 / 120, steps = 60 } = {}) {
+function land(cb, ctx, { dt = 1 / 120, steps = 130 } = {}) {
   cb.update(dt, ctx);
   ctx.player.combatPose?.();
   const began = cb.strike();
@@ -245,6 +246,51 @@ function standUp(T, p, x, z, limit = 25) {
   assert.fail(`a stunned citizen never got up — still in '${p.state}'`);
 }
 
+// Presses IN RHYTHM, the way a combo is played: each one the moment the last
+// swing has come home, well inside fightmoves.js CHAIN_GAP. Returns the moves
+// thrown, in order, as combat.js reported them through onSwing.
+function rhythm(cb, ctx, n, kind = 'light', dt = 1 / 120) {
+  const moves = [];
+  const log = (m) => moves.push(m);
+  cb.onSwing(log);
+  cb.update(dt, ctx);
+  for (let i = 0; i < n; i++) {
+    cb.strike(kind);
+    for (let k = 0; k < 400 && (cb.busy || k < 2); k++) { cb.update(dt, ctx); ctx.player.combatPose?.(); }
+    for (let k = 0; k < 6; k++) { cb.update(dt, ctx); ctx.player.combatPose?.(); }   // 50 ms of daylight
+  }
+  cb._swingFns.splice(cb._swingFns.indexOf(log), 1);
+  return moves;
+}
+
+// A modelled body as far as the fight can tell: recordings by role, with the
+// lengths of the real ones (fight.bin on a Rocketbox body), and a log of what
+// was played. Hung on a pedestrian as `cit` it makes the crowd's KO path run.
+function modelled() {
+  const DUR = { fightJab: 0.87, fightCross: 1.0, fightHook: 0.47, fightHookRec: 0.6,
+    hitHead: 0.43, hitChest: 0.33, hitBack: 0.83, getUp: 1.53, fallDown: 2.4 };
+  const log = [];
+  return {
+    log, fists: 0, stopped: 0,
+    act(role, t, w = 1, mask = 'upper', fade = 0.08, hold = false) {
+      const d = DUR[role] ?? 0;
+      if (d) log.push({ role, t, w, mask, hold });
+      return d;
+    },
+    actDur(role) { return DUR[role] ?? 0; },
+    fist(w) { this.fists++; },
+    actStop() { this.stopped++; },
+    roles() { const out = []; for (const e of log) if (out[out.length - 1] !== e.role) out.push(e.role); return out; },
+  };
+}
+
+// Kill somebody the quick way: the door takes them to `left` HP (no crime, no
+// panic), so the next fist is the one that ends it.
+function softened(T, p, left) {
+  T.peds.hurt(p, fist(p.hp - left, { panic: 0 }));
+  return p;
+}
+
 // Time passing with nobody throwing anything.
 function idle(cb, ctx, secs, dt = 1 / 60) {
   for (let i = 0, n = Math.round(secs / dt); i < n; i++) cb.update(dt, ctx);
@@ -273,18 +319,17 @@ function fist(dmg, extra = null) {
 // 1. THE COMBO — the bug that shipped, stated as the property it violates
 // ==========================================================================
 
-// THE ONE THAT MATTERS. Three blows, one victim, and the third is the one that
-// ends it. Every clause here is load-bearing:
+// THE ONE THAT MATTERS. Three presses in rhythm, one victim, and the third is
+// the one that floors him (since the GTA rebuild of 25 Nov 2026: jab, cross,
+// hook; js/fightmoves.js). Every clause here is load-bearing:
 //
-//   · all three land AT ALL — the shipped bug dropped #2 and #3 on the floor
+//   · all three land AT ALL: the shipped bug dropped #2 and #3 on the floor
 //     because #1 had already put the body in 'rag', which both hit passes skip;
-//   · all three land ON THE SAME BODY — a ladder that counted button presses
-//     instead of blows to one victim would pass a weaker version of this;
-//   · the first two leave somebody STANDING — that is the mugging that does not
-//     become a killing, and it is the common case;
-//   · the third is a KICK and it kills — read off the pose, because which rung
-//     a swing is is fixed when the swing starts and is exposed nowhere else.
-test('three punches all land on the same man, and the third is the one that ends him', () => {
+//   · all three land ON THE SAME BODY;
+//   · the first two leave somebody STANDING, in the crowd, walking;
+//   · the third is the HOOK and it floors without killing: one combo is a
+//     beating, not a funeral.
+test('three presses in rhythm are jab, cross, hook, all on the same man, and the hook floors him', () => {
   const T = town();
   const victim = arena(T.walker());
   const hooks = watchHooks(T.peds);
@@ -293,45 +338,38 @@ test('three punches all land on the same man, and the third is the one that ends
   const cb = new Combat({ peds: T.peds, wallet: money, audio: speaker() });
 
   const hp = [];
+  const moves = [];
+  cb.onSwing((m) => { moves.push(m); });
+  cb.update(1 / 120, ctx);
   for (let i = 0; i < 3; i++) {
-    assert.equal(land(cb, ctx), true, `swing ${i + 1} was refused`);
+    cb.strike();
+    for (let k = 0; k < 400 && (cb.busy || k < 2); k++) { cb.update(1 / 120, ctx); ctx.player.combatPose?.(); }
     hp.push(victim.hp);
     if (i < 2) {
       assert.equal(victim.state, 'walk',
-        `punch ${i + 1} took the victim out of 'walk' — hits ${i + 2}+ can never land`);
-      assert.equal(victim.dead, false, `punch ${i + 1} was fatal`);
+        `punch ${i + 1} took the victim out of 'walk': hits ${i + 2}+ can never land`);
     }
+    for (let k = 0; k < 6; k++) cb.update(1 / 120, ctx);
   }
-
-  assert.equal(hooks.hit.length, 3,
-    `${hooks.hit.length} of 3 blows reached the door — the combo is unreachable`);
-  for (const h of hooks.hit) {
-    assert.equal(h.p, victim, 'a blow landed on somebody else');
-  }
-
-  // The first two cost the same and leave him up; the third is the finisher.
-  assert.equal(PED_HP - hp[0], hp[0] - hp[1], 'the two flinches are not the same blow');
-  assert.ok(hp[1] > 0 && hp[1] < PED_HP, `two punches left ${hp[1]} HP — that is not a mugging`);
-  assert.equal(victim.dead, true, 'three blows did not put him down');
-  assert.equal(victim.hp, 0);
-  assert.equal(hooks.killed.length, 1, `onPedKilled fired ${hooks.killed.length} times`);
-
-  // …and it is a kick, thrown with the other fist each time before it.
-  assert.deepEqual(ctx.cit.swings(), ['punch1', 'punch0', 'kick'],
-    'the ladder does not read as a combo');
-  // The finisher THROWS: a launched body is off its feet, which is the one
-  // state change a blow is allowed to make.
-  assert.equal(victim.state, 'rag', 'the finisher left the corpse standing up');
+  assert.deepEqual(moves, ['jab', 'cross', 'hook'], 'three presses in rhythm are not the combo');
+  assert.equal(hooks.hit.length, 3, `${hooks.hit.length} of 3 blows reached the door`);
+  for (const h of hooks.hit) assert.equal(h.p, victim, 'a blow landed on somebody else');
+  assert.deepEqual(hp, [PED_HP - 12, PED_HP - 28, PED_HP - 60], 'the ladder is not 12, 16, 32');
+  // floored, not dead: the hook is a knock-down, the crowd keeps a man who can get up
+  assert.equal(victim.dead, false, 'one combo killed a healthy man');
+  assert.equal(victim.state, 'rag', 'the hook left him on his feet');
+  assert.equal(hooks.killed.length, 0);
+  assert.equal(money.paid.length, 0, 'a man on the ground was robbed while alive');
+  // the lofted figure still gets its arm poses: left, right, right
+  assert.deepEqual(ctx.cit.swings(), ['punch0', 'punch1', 'punch1'], 'the arms do not read as a combo');
 });
 
-// The ladder belongs to the FIGHT, not to the button. Without that, punching two
-// people once each and a third person once would kill the third with a single
-// kick — which is not a combo, it is a bug that looks like a feature until
-// somebody notices. The rung of a swing is fixed when it STARTS, so a finisher
-// aimed at a man who steps aside really does kick whoever caught it; what must
-// not happen is that the stranger dies of it, and what must still be true
-// afterwards is that three blows and a body is where every path ends up.
-test('a finisher that lands on a stranger kicks the stranger without killing them', () => {
+// The chain belongs to the RHYTHM of the presses (GTA's way), and a move is
+// fixed when it STARTS, so a hook aimed at a man who steps aside really does
+// land on whoever caught it. What must not happen is that the stranger dies of
+// one hook: the damage and the knock-down rules are about HIS health, not
+// about the button.
+test('a hook that lands on a stranger floors the stranger without killing them', () => {
   const T = town();
   const first = arena(T.walker(), FAR_X, FAR_Z);
   const second = arena(T.peds.peds.find((p) => p !== first && p.state === 'walk'),
@@ -339,77 +377,70 @@ test('a finisher that lands on a stranger kicks the stranger without killing the
   assert.ok(second, 'the fixture only produced one citizen');
   const hooks = watchHooks(T.peds);
   const cb = new Combat({ peds: T.peds, wallet: purse() });
-
   const ctx = facing(first);
-  land(cb, ctx);
-  land(cb, ctx);
+  // the chain belongs to the rhythm: two on the first man, and he steps away
+  // just as the third goes out
+  assert.deepEqual(rhythm(cb, ctx, 2), ['jab', 'cross']);
   assert.equal(first.state, 'walk', 'two punches were not two flinches');
-
-  // He walks off; the third swing catches the man behind him.
   arena(first, FAR_X + 800, FAR_Z);
   ctx.player.pos.x = second.x;
   ctx.player.pos.z = second.z + RING;
-  land(cb, ctx);
-  const kicked = hooks.hit.filter((h) => h.p === second);
-  assert.equal(kicked.length, 1, 'the kick found nobody');
-  assert.equal(second.dead, false,
-    'one kick killed a stranger — the ladder is counting presses, not blows');
-  // A kick throws whoever catches it, lethal or not, so their own ladder has to
-  // wait for them to pick themselves up. That is the honest cost of aiming a
-  // finisher at somebody who has not been softened up.
-  assert.equal(second.state, 'rag', 'a kick left the stranger on their feet');
-  standUp(T, second);
-
-  arena(second, FAR_X + 400, FAR_Z);
-  ctx.player.pos.x = second.x;
-  ctx.player.pos.z = second.z + RING;
-  land(cb, ctx);
-  assert.equal(second.dead, false, 'the stranger died on their second blow');
-  land(cb, ctx);
-  assert.equal(second.dead, true, 'the stranger survived three blows');
-  assert.equal(hooks.hit.filter((h) => h.p === second).length, 3,
-    'the stranger went down on some other number of blows than three');
-  assert.equal(hooks.killed.length, 1);
+  assert.deepEqual(rhythm(cb, ctx, 1), ['hook'], 'the third press in rhythm was not the hook');
+  assert.equal(hooks.hit.filter((h) => h.p === second).length, 1, 'the hook found nobody');
+  assert.equal(second.dead, false, 'one hook killed a stranger');
+  assert.equal(second.hp, PED_HP - 32);
+  assert.equal(second.state, 'rag', 'a hook left the stranger on their feet');
   assert.equal(first.dead, false, 'the man who walked away died anyway');
 });
 
-// A fight you walk away from is over. COMBO_T is an absolute deadline against
-// combat.js's own clock, so the failure mode of getting it wrong is not a
-// crash — it is a kick thrown at somebody you have not touched for a minute.
-// The damage cannot show it (rungs 1 and 2 cost the same), so the pose does.
-test('walk away for a second and the ladder starts again at the first punch', () => {
+// Out of rhythm the chain starts again: CHAIN_GAP is an absolute deadline on
+// combat.js's own clock, and getting it wrong is not a crash, it is a hook
+// thrown at somebody you tapped a minute ago.
+test('presses slower than the rhythm are all jabs, and Q is the hook at once', () => {
   const T = town();
   const victim = arena(T.walker());
   const cb = new Combat({ peds: T.peds, wallet: purse() });
   const ctx = facing(victim);
-
+  const moves = [];
+  cb.onSwing((m) => { moves.push(m); });
   land(cb, ctx);
+  idle(cb, ctx, 0.6);                       // longer than CHAIN_GAP after the swing
   land(cb, ctx);
-  idle(cb, ctx, 1.5);                       // longer than COMBO_T (1.10 s)
+  idle(cb, ctx, 0.6);
   land(cb, ctx);
-  assert.deepEqual(ctx.cit.swings(), ['punch1', 'punch0', 'punch1'],
-    'a cold fight still had a finisher queued up in it');
-  assert.equal(victim.state, 'rag', 'three blows is three blows, however they are spaced');
+  assert.deepEqual(moves, ['jab', 'jab', 'jab'], 'a cold chain still threw the cross and the hook');
+  assert.equal(victim.state, 'walk', 'three jabs floored a healthy man');
+  assert.equal(victim.hp, PED_HP - 36);
+  // the heavy key throws the hook straight away, chain or none
+  idle(cb, ctx, 0.6);
+  cb.update(1 / 120, ctx);
+  assert.equal(cb.strike('heavy'), true);
+  assert.equal(moves[moves.length - 1], 'hook', 'Q did not throw the hook');
 });
 
-// The margin in the ladder is deliberate: 34 + 34 + 40 = 108 against a bar of
-// 100, so "three hits and they go down" is arithmetic in combat.js and not an
-// exact-equality boundary in somebody else's file. The same margin is what
-// makes a man who has already been clipped by a wing mirror die in two, which
-// is the right kind of emergent and is worth pinning as a property rather than
-// as a number.
-test('somebody a car already hurt goes down in two', () => {
+// A man a car already clipped is on the floor sooner: any blow that leaves
+// KO_HP (25) or less floors him, and nothing left is death. Worth pinning as a
+// property rather than as a number.
+test('somebody a car already hurt goes down sooner, and dies on the next', () => {
   const T = town();
   const victim = arena(T.walker());
   T.peds.hurt(victim, fist(PED_HP * 0.6, { panic: 0 }));
   assert.equal(victim.state, 'walk', 'a survivable blow put him on the floor');
   const cb = new Combat({ peds: T.peds, wallet: purse() });
   const ctx = facing(victim);
-
+  land(cb, ctx);                            // 40 -> 28
+  assert.equal(victim.state, 'walk', 'a jab floored a man with 40 HP left');
+  land(cb, ctx);                            // 28 -> 16: at KO_HP or less, he goes down
+  assert.equal(victim.dead, false);
+  assert.equal(victim.state, 'rag', 'a badly hurt man stayed up under a jab');
+  standUp(T, victim, FAR_X, FAR_Z);
+  arena(victim);
+  land(cb, ctx);                            // 16 -> 4: down again
+  assert.equal(victim.dead, false);
+  standUp(T, victim, FAR_X, FAR_Z);
+  arena(victim);
   land(cb, ctx);
-  assert.equal(victim.dead, false, 'the first punch killed a man with 40 HP left');
-  land(cb, ctx);
-  assert.equal(victim.dead, true, 'a badly hurt man took a full three punches');
+  assert.equal(victim.dead, true, 'there was nothing left and he is still alive');
 });
 
 // ==========================================================================
@@ -700,31 +731,31 @@ test('a body with no usable identity still has a pocket, and it is a number', ()
 
 // End to end: the killing blow collects, once, through the wallet — and it
 // collects the SAME figure whenever the session happens to be running.
-test('a kill pays out exactly the dead man\'s pocket, once, whatever the hour', () => {
+test("a kill pays out exactly the dead man's pocket, once, whatever the hour", () => {
   const expected = (() => {
     const T = town();
-    const victim = arena(T.walker());
+    const victim = softened(T, arena(T.walker()), 10);
     const money = purse();
     const cb = new Combat({ peds: T.peds, wallet: money });
     const ctx = facing(victim);
-    land(cb, ctx); land(cb, ctx); land(cb, ctx);
+    land(cb, ctx);
     assert.equal(victim.dead, true);
+    land(cb, ctx); land(cb, ctx);
     assert.equal(money.paid.length, 1, `${money.paid.length} payments for one corpse`);
     assert.equal(money.paid[0].n, pocketOf(victim.pid), 'the wallet was paid the wrong pocket');
     assert.equal(money.paid[0].what, 'kapsa', 'the HUD ticker was given the wrong label');
     return { kc: money.paid[0].n, pid: victim.pid };
   })();
 
-  // The same world, the same slot, the same man — three quarters of an hour
+  // The same world, the same slot, the same man, three quarters of an hour
   // later on every clock in the process.
   atClock(45 * 60e3, () => {
     const T = town();
-    const victim = arena(T.walker());
+    const victim = softened(T, arena(T.walker()), 10);
     assert.equal(victim.pid, expected.pid, 'the fixture minted a different citizen');
     const money = purse();
     const cb = new Combat({ peds: T.peds, wallet: money });
-    const ctx = facing(victim);
-    land(cb, ctx); land(cb, ctx); land(cb, ctx);
+    land(cb, facing(victim));
     assert.equal(money.paid.length, 1);
     assert.equal(money.paid[0].n, expected.kc,
       'the same man was worth a different amount an hour later');
@@ -739,16 +770,15 @@ test('a beating pays nothing, and a build with no wallet still fights', () => {
   const money = purse();
   const cb = new Combat({ peds: T.peds, wallet: money });
   const ctx = facing(victim);
-  land(cb, ctx);
-  land(cb, ctx);
-  assert.equal(money.paid.length, 0, 'somebody was robbed while they were still standing');
+  rhythm(cb, ctx, 3);
+  assert.equal(victim.dead, false);
+  assert.equal(money.paid.length, 0, 'somebody was robbed while they were still alive');
 
   const T2 = town();
-  const v2 = arena(T2.walker());
+  const v2 = softened(T2, arena(T2.walker()), 10);
   const hooks = watchHooks(T2.peds);
   const bare = new Combat({ peds: T2.peds });          // no wallet, no audio, no chatter
-  const ctx2 = facing(v2);
-  land(bare, ctx2); land(bare, ctx2); land(bare, ctx2);
+  land(bare, facing(v2));
   assert.equal(v2.dead, true, 'a build with no wallet cannot kill anybody');
   assert.equal(hooks.killed.length, 1);
 });
@@ -760,14 +790,17 @@ test('every landed blow is one crime, and the fatal one is not also a brawl', ()
   const victim = arena(T.walker());
   const cb = new Combat({ peds: T.peds, wallet: purse() });
   const seen = [];
-  cb.onCrime((kind, x, z) => { seen.push({ kind, x, z }); });
+  cb.onCrime((kind, x, z, who) => { seen.push({ kind, x, z, who }); });
   const ctx = facing(victim);
-  land(cb, ctx); land(cb, ctx); land(cb, ctx);
+  land(cb, ctx); land(cb, ctx);
+  softened(T, victim, 10);                  // the door is not a crime
+  land(cb, ctx);
   assert.deepEqual(seen.map((c) => c.kind), ['rvacka', 'rvacka', 'zabiti']);
   for (const c of seen) {
     assert.ok(Number.isFinite(c.x) && Number.isFinite(c.z), 'a crime with no scene');
     assert.ok(Math.hypot(c.x - FAR_X, c.z - FAR_Z) < 3,
       'the crime was reported somewhere other than where it happened');
+    assert.equal(c.who, victim, 'the crime does not say who it was done to');
   }
   // A swing that hits nothing is not a crime.
   ctx.player.pos.x = FAR_X + 900;
@@ -849,8 +882,11 @@ test('a corrupt or enormous dt does not poison the swing clock', () => {
   cb.update(600, ctx);
   for (let i = 0; i < 60; i++) cb.update(1 / 120, ctx);
   assert.equal(cb.busy, false, 'a hidden tab left the player mid-swing forever');
+  assert.ok(hooks.hit.length <= 2, 'one swing across a hidden tab landed twice');
+  const before = hooks.hit.length;
+  idle(cb, ctx, 0.6);
   land(cb, ctx);
-  assert.equal(hooks.hit.length, 2, 'the clock never recovered from the hidden tab');
+  assert.equal(hooks.hit.length, before + 1, 'the clock never recovered from the hidden tab');
 });
 
 // An empty street is a whiff, and a whiff is a complete, legal swing: the pose
@@ -867,12 +903,16 @@ test('a swing at nobody is a whiff, and it recovers cleanly', () => {
   assert.equal(hooks.hit.length, 0, 'a punch thrown at nothing hurt somebody');
   assert.equal(money.paid.length, 0);
   assert.equal(cb.busy, false, 'the whiff never recovered');
-  assert.ok(sfx.names.length > 0, 'a swing made no sound at all');
-  // aimLock is a contract with js/player.js — the body faces the camera and the
-  // stick strafes for as long as it is set. A swing that leaves it on leaves
-  // the player walking sideways for the rest of the session.
+  assert.ok(sfx.names.some((n) => n.startsWith('fight_swing')), 'a swing made no sound at all');
+  // The fists stay up for the stance (the body faces the camera, the stick
+  // strafes)… and come down by themselves when nothing else happens. A stance
+  // that never ends leaves the player walking sideways for the session.
+  assert.equal(cb.stance, true, 'a swing did not put the fists up');
+  assert.equal(ctx.player.aimLock, true);
+  idle(cb, ctx, 5);
+  assert.equal(cb.stance, false, 'the stance outlived its time');
   assert.equal(ctx.player.aimLock, false, 'the swing kept the aim lock');
-  assert.equal(ctx.player.combatPose, null, 'the pose hook outlived the swing');
+  assert.equal(ctx.player.combatPose, null, 'the pose hook outlived the stance');
 });
 
 // Both of these are ADDITIONS to js/pedestrians.js landing in the same run as
@@ -972,15 +1012,14 @@ test('somebody standing behind you does not shield the man you are swinging at',
 // robbed twice.
 test('a body on the ground is not a target', () => {
   const T = town();
-  const victim = arena(T.walker());
+  const victim = softened(T, arena(T.walker()), 10);
   const money = purse();
   const cb = new Combat({ peds: T.peds, wallet: money });
   const ctx = facing(victim);
-  land(cb, ctx); land(cb, ctx); land(cb, ctx);
+  land(cb, ctx);
   assert.equal(victim.dead, true);
   const hooks = watchHooks(T.peds);
   const paid = money.paid.length;
-
   for (let i = 0; i < 5; i++) land(cb, ctx);
   assert.equal(hooks.hit.length, 0, 'the player kept punching a corpse');
   assert.equal(money.paid.length, paid, 'the corpse was robbed twice');
@@ -1019,16 +1058,12 @@ test('reset() drops the fight and keeps the police subscribed', () => {
   const seen = [];
   cb.onCrime((kind) => { seen.push(kind); });
   const ctx = facing(victim);
-
-  land(cb, ctx);
-  land(cb, ctx);
+  assert.deepEqual(rhythm(cb, ctx, 2), ['jab', 'cross']);
   cb.reset();
   assert.equal(cb.busy, false);
-  // The ladder went with it: the next blow is a first punch, not a finisher.
-  const cit = poses();
-  const ctx2 = facing(victim, cit);
-  land(cb, ctx2);
-  assert.deepEqual(cit.swings(), ['punch1'], 'reset() left a finisher queued up');
+  assert.equal(cb.stance, false, 'reset() left the fists up');
+  // The chain went with it: the next press is a jab, not the hook.
+  assert.deepEqual(rhythm(cb, ctx, 1), ['jab'], 'reset() left the hook queued up');
   assert.equal(seen.length, 3, 'reset() unsubscribed the police');
 });
 
@@ -1046,4 +1081,351 @@ test('the same crime listener cannot subscribe twice', () => {
   cb.onCrime(undefined);
   land(cb, facing(victim));
   assert.equal(n, 1, `one blow reached the listener ${n} times`);
+});
+
+// ==========================================================================
+// 7. THE FIGHT ON A MODELLED BODY (js/fightpeds.js), Nov 2026
+// ==========================================================================
+//
+// With the people bank a body has recordings (human.js act()), and a body that
+// is floored by a fist falls from one instead of being thrown: pedestrians.js
+// hands it over upright as 'ko', and the crowd's half of the fight plays the
+// fall, the lying there and the getting up. These run the REAL door and the
+// REAL fight against a stand-in body that has the real clips' lengths.
+
+// A walker who will or will not fight back, picked from the fixture by who
+// they are (fightmoves.js fightsBack is a pure function of pid and archetype).
+function personWho(T, fights) {
+  for (let i = 0; i < 20; i++) {
+    for (const p of T.peds.peds) {
+      if (p.free || p.state !== 'walk' || !p.sch) continue;
+      if (fightsBack(p.pid, 'm30') === fights) { p.arch = 'm30'; return p; }
+    }
+    T.run(5);
+  }
+  assert.fail(`the fixture produced nobody who ${fights ? 'fights' : 'runs'}`);
+}
+
+function stepFight(cb, ctx, secs, dt = 1 / 60) {
+  for (let i = 0, n = Math.round(secs / dt); i < n; i++) { cb.update(dt, ctx); ctx.player.combatPose?.(); }
+}
+
+test('a modelled body floored by the hook falls from a recording, lies there, and gets up', () => {
+  const T = town();
+  const victim = arena(personWho(T, false));
+  const body = modelled();
+  victim.cit = body;
+  const hooks = watchHooks(T.peds);
+  const cb = new Combat({ peds: T.peds, wallet: purse() });
+  const ctx = facing(victim);
+
+  assert.deepEqual(rhythm(cb, ctx, 3), ['jab', 'cross', 'hook']);
+  assert.equal(hooks.hit.length, 3);
+  assert.equal(victim.state, 'ko', 'the hook threw a modelled body instead of flooring it');
+  assert.equal(victim.dead, false);
+  assert.equal(victim.mesh.rotation.x, 0, 'a recorded fall was also tipped over like a ragdoll');
+  assert.equal(victim.free, 1, "a floored body is still the shared schedule's");
+  assert.ok(body.roles().includes('hitHead'), 'the jab and the cross did not snap the head');
+  assert.ok(body.log.some((e) => e.role === 'hitBack' && e.mask === 'full'), 'the fall is not the whole body');
+
+  // a few seconds on the tarmac, then the recording of getting up, then away
+  stepFight(cb, ctx, 3);
+  assert.equal(victim.state, 'ko', 'he was up before he had lain there');
+  stepFight(cb, ctx, 5);
+  assert.ok(body.roles().includes('getUp'), 'he never played getting up');
+  assert.equal(victim.state, 'walk', 'he never got back on his feet');
+  assert.ok(victim.calm > 0 || victim.speed > 2, 'a man knocked down walked off calmly');
+});
+
+test('a knock-out that kills lays the body out where it fell, held on the last frame', () => {
+  const T = town();
+  const victim = softened(T, arena(personWho(T, false)), 10);
+  const body = modelled();
+  victim.cit = body;
+  const hooks = watchHooks(T.peds);
+  const money = purse();
+  const cb = new Combat({ peds: T.peds, wallet: money });
+  const ctx = facing(victim);
+  land(cb, ctx);
+  assert.equal(victim.dead, true);
+  assert.equal(hooks.killed.length, 1);
+  assert.equal(money.paid.length, 1, 'the pocket was not paid on the killing blow');
+  stepFight(cb, ctx, 1.2);
+  assert.equal(victim.state, 'dead', 'the fall never ended in a corpse');
+  const last = body.log[body.log.length - 1];
+  assert.equal(last.role, 'hitBack');
+  assert.equal(last.hold, true, 'the corpse would stand up a quarter second after the fight let go');
+  assert.equal(cb.crowd.list.length, 0, 'the fight kept holding a corpse');
+});
+
+test('somebody who fights back squares up, and their punches cost the player health', () => {
+  const T = town();
+  const victim = arena(personWho(T, true));
+  victim.cit = modelled();
+  const taken = [];
+  const vitals = { damage(n, cause) { taken.push({ n, cause }); } };
+  const crimes = [];
+  const cb = new Combat({ peds: T.peds, wallet: purse(), vitals });
+  cb.onCrime((k, x, z, who) => crimes.push({ k, who }));
+  const ctx = facing(victim);
+  land(cb, ctx);
+  assert.equal(victim.state, 'brawl', 'a man who fights back ran instead');
+  assert.equal(victim.brawl, true, 'the wanted rules cannot tell self-defence');
+  assert.equal(crimes.length, 1);
+
+  stepFight(cb, ctx, 4);
+  assert.ok(taken.length >= 1, "a brawler at arm's length never landed a punch");
+  for (const t of taken) {
+    assert.ok(t.n >= 4 && t.n <= 10, `one punch cost the player ${t.n}`);
+    assert.equal(t.cause, 'pěst');
+  }
+  assert.equal(crimes.length, 1, 'being hit back was charged to the player');
+
+  // a block facing the punch takes most of it
+  const before = taken.length;
+  ctx.block = true;
+  stepFight(cb, ctx, 4);
+  const blocked = taken.slice(before);
+  assert.ok(blocked.length >= 1, 'no punch arrived while blocking');
+  for (const t of blocked) assert.ok(t.n <= 2, `a blocked punch still cost ${t.n}`);
+});
+
+test('a brawler hurt enough runs, and one you walk away from gives up', () => {
+  const T = town();
+  const a = arena(personWho(T, true));
+  a.cit = modelled();
+  const cb = new Combat({ peds: T.peds, wallet: purse(), vitals: { damage() {} } });
+  const ctx = facing(a);
+  land(cb, ctx);
+  assert.equal(a.state, 'brawl');
+  // softened to 40 by the door, a cross takes him to 24: down (KO_HP); a jab at
+  // 40 leaves 28, under the brawler's own limit of 30, and he runs
+  softened(T, a, 40);
+  idle(cb, ctx, 1.2);
+  land(cb, ctx);
+  stepFight(cb, ctx, 0.5);
+  assert.equal(a.state, 'walk', 'a beaten brawler kept fighting');
+  assert.equal(a.brawl, false);
+
+  const T2 = town();
+  const b = arena(personWho(T2, true));
+  b.cit = modelled();
+  const cb2 = new Combat({ peds: T2.peds, wallet: purse(), vitals: { damage() {} } });
+  const ctx2 = facing(b);
+  land(cb2, ctx2);
+  assert.equal(b.state, 'brawl');
+  ctx2.player.pos.x += 30;                  // the player walks off
+  stepFight(cb2, ctx2, 4);
+  assert.equal(b.state, 'walk', 'a brawler followed the player across town');
+});
+
+test('a brawler lets go the moment the player cannot be fought', () => {
+  const T = town();
+  const b = arena(personWho(T, true));
+  b.cit = modelled();
+  const taken = [];
+  const cb = new Combat({ peds: T.peds, wallet: purse(), vitals: { damage(n) { taken.push(n); } } });
+  const ctx = facing(b);
+  land(cb, ctx);
+  assert.equal(b.state, 'brawl');
+  ctx.down = true;                          // SEJMUT
+  stepFight(cb, ctx, 1);
+  assert.equal(b.state, 'walk', 'a brawler kept beating a player who was down');
+  assert.equal(cb.takeHit(10, b.x, b.z), null, 'a downed player can still take punches');
+});
+
+test('every target source is searched and the nearest body wins', () => {
+  const T = town();
+  const victim = arena(T.walker());
+  const hooks = watchHooks(T.peds);
+  // a second source: the driver thrown out of a jacked car, closer than the walker
+  const driver = { x: victim.x, z: victim.z + 0.35, state: 'walk', dead: false, hp: 100, mesh: { position: { y: 0 } } };
+  const blows = [];
+  const jack = {
+    nearest(x, z, r, want) { return Math.hypot(driver.x - x, driver.z - z) < r && want(driver) ? driver : null; },
+    hurt(p, b) { blows.push(b.dmg); p.hp -= b.dmg; if (p.hp <= 0) p.dead = true; return true; },
+  };
+  const seen = [];
+  const cb = new Combat({ peds: T.peds, targets: [T.peds, jack, null, {}], wallet: purse() });
+  cb.onCrime((k, x, z, who) => seen.push(who));
+  land(cb, facing(victim));
+  assert.deepEqual(blows, [12], 'the nearer body in the other source was not hit');
+  assert.equal(hooks.hit.length, 0, 'the farther walker was hit instead');
+  assert.equal(seen[0], driver, 'the crime names somebody else');
+});
+
+test('every swing is announced once, for the other players to see', () => {
+  const T = town();
+  const victim = arena(T.walker());
+  const cb = new Combat({ peds: T.peds, wallet: purse() });
+  const sent = [];
+  cb.onSwing((m) => sent.push(m));
+  cb.onSwing((m) => sent.push(m));          // the same listener twice is one
+  const other = () => { throw new Error('the relay is down'); };
+  cb.onSwing(other);
+  const warn = console.warn; console.warn = () => {};
+  try { rhythm(cb, facing(victim), 3); } finally { console.warn = warn; }
+  assert.equal(sent.length, 6, 'a listener that threw ate the swing, or one listener counted twice');
+  assert.equal(cb.stance, true);
+});
+
+// The rhythm the way a player mashes it: the next press arrives while the fist
+// is still out, is buffered, and cuts the swing short at its chain time. That
+// cut is the combo itself, so it has to continue the chain rather than read as
+// a cold start (which threw jab, jab, jab in the first build of this).
+test('a press while the punch is still out cuts it short and continues the combo', () => {
+  const T = town();
+  const victim = arena(T.walker());
+  const cb = new Combat({ peds: T.peds, wallet: purse() });
+  const ctx = facing(victim);
+  const moves = [];
+  cb.onSwing((m) => moves.push(m));
+  cb.update(1 / 120, ctx);
+  cb.strike();
+  for (let k = 0; k < 3; k++) {
+    // well inside the swing, after the fist has gone out
+    for (let i = 0; i < 40; i++) { cb.update(1 / 120, ctx); ctx.player.combatPose?.(); }
+    assert.equal(cb.busy, true, 'the swing was over before the next press');
+    cb.strike();
+  }
+  for (let i = 0; i < 200; i++) cb.update(1 / 120, ctx);
+  assert.deepEqual(moves.slice(0, 3), ['jab', 'cross', 'hook'], 'mashing does not combo');
+});
+
+test('a fighter floored by the hook lies there a while before he comes back at you', () => {
+  const T = town();
+  const victim = arena(personWho(T, true));
+  victim.cit = modelled();
+  const cb = new Combat({ peds: T.peds, wallet: purse(), vitals: { damage() {} } });
+  const ctx = facing(victim);
+  const seen = [];
+  const watch = (secs) => {
+    for (let i = 0, n = Math.round(secs * 60); i < n; i++) {
+      cb.update(1 / 60, ctx); ctx.player.combatPose?.();
+      const r = cb.crowd.list.find((x) => x.p === victim);
+      const tag = victim.state + '/' + (r?.mode ?? '-');
+      if (seen[seen.length - 1]?.tag !== tag) seen.push({ tag, t: +cb.now.toFixed(2) });
+    }
+  };
+  land(cb, ctx);
+  assert.equal(victim.state, 'brawl');
+  // he squares up at arm's length; the player throws the heavy punch
+  arena(victim, ctx.player.pos.x, ctx.player.pos.z - RING);
+  const r = cb.crowd.list.find((x) => x.p === victim);
+  r.nextPunch = Infinity; r.swing = null;   // he does not get his punch in first
+  idle(cb, ctx, 0.5);                       // and the player is not still reeling from one
+  arena(victim, ctx.player.pos.x, ctx.player.pos.z - RING);
+  cb.update(1 / 60, ctx);
+  assert.equal(cb.strike('heavy'), true);
+  watch(9);
+  const tags = seen.map((s) => s.tag);
+  assert.ok(tags.includes('ko/fall') && tags.includes('ko/lie') && tags.includes('ko/getup'),
+    `the knock-down skipped a beat: ${JSON.stringify(seen)}`);
+  const lie = seen.find((s) => s.tag === 'ko/lie'), up = seen.find((s) => s.tag === 'ko/getup');
+  assert.ok(up.t - lie.t >= 2.3, `he lay there ${(up.t - lie.t).toFixed(2)} s`);
+  assert.equal(seen[seen.length - 1].tag, 'brawl/brawl', `he did not come back at you: ${JSON.stringify(seen)}`);
+});
+
+test('a brawler who is never hit back makes his point and walks off', () => {
+  const T = town();
+  const b = arena(personWho(T, true));
+  b.cit = modelled();
+  let taken = 0;
+  const cb = new Combat({ peds: T.peds, wallet: purse(), vitals: { damage(n) { taken += n; } } });
+  const ctx = facing(b);
+  land(cb, ctx);
+  assert.equal(b.state, 'brawl');
+  stepFight(cb, ctx, 13);
+  assert.equal(b.state, 'walk', 'he kept beating a man who never hit back');
+  assert.ok(taken > 0 && taken < 60, `standing still cost the player ${taken} before he gave up`);
+});
+
+// Review, 25 Nov 2026: a brawler floored by the hook who gets up too hurt to
+// go on walked off still carrying p.brawl, the self-defence flag, so the next
+// beating anybody gave him was free under the wanted rules (js/crimelaw.js).
+// Whoever the fight lets go of is no longer fighting.
+test('a brawler who gets up and walks away is no longer fighting, and hitting him again is a crime', () => {
+  const T = town();
+  const victim = arena(personWho(T, true));
+  victim.cit = modelled();
+  const cb = new Combat({ peds: T.peds, wallet: purse(), vitals: { damage() {} } });
+  const crimes = [];
+  cb.onCrime((k, x, z, who) => crimes.push({ k, brawl: !!who?.brawl }));
+  const ctx = facing(victim);
+  land(cb, ctx);
+  assert.equal(victim.state, 'brawl');
+  assert.equal(victim.brawl, true);
+  // hurt enough that the hook floors him and he will not come back at you
+  softened(T, victim, 45);
+  const r = cb.crowd.list.find((x) => x.p === victim);
+  r.nextPunch = Infinity; r.swing = null;
+  idle(cb, ctx, 0.5);
+  arena(victim, ctx.player.pos.x, ctx.player.pos.z - RING);
+  cb.update(1 / 60, ctx);
+  assert.equal(cb.strike('heavy'), true);
+  let rose = false;
+  for (let i = 0; i < 60 * 10 && !rose; i++) {
+    cb.update(1 / 60, ctx); ctx.player.combatPose?.();
+    rose = victim.state === 'walk';
+  }
+  assert.ok(rose, `he never got up: still '${victim.state}'`);
+  assert.ok(victim.hp > 0 && victim.hp <= 30, `the setup missed: he got up with ${victim.hp}`);
+  assert.equal(victim.brawl, false, 'he walked off still flagged as fighting you');
+  assert.equal(cb.crowd.list.some((x) => x.p === victim), false, 'the fight kept a record of him');
+  // and the next punch on him is charged as a brawl the player started
+  const before = crimes.length;
+  arena(victim, ctx.player.pos.x, ctx.player.pos.z - RING);
+  idle(cb, ctx, 1);
+  arena(victim, ctx.player.pos.x, ctx.player.pos.z - RING);
+  land(cb, ctx);
+  assert.equal(crimes.length, before + 1, 'the punch was not a crime at all');
+  assert.equal(crimes[crimes.length - 1].brawl, false, 'a later attack on him read as self-defence');
+});
+
+// Review, 25 Nov 2026: the left button and Q punched through a story film, the
+// ZATČEN and chapter cards and the open big map. main.js decides WHY (its
+// fistsTaken and fistsBusy); combat.js owns what the two flags mean, and that
+// is what is pinned here: `down` is a player nobody can fight, `hold` is hands
+// that belong to the UI for now while the street goes on around him.
+test('no swing starts while the player is not his own or his hands are the UI\'s', () => {
+  for (const flag of ['down', 'hold']) {
+    const T = town();
+    const victim = arena(T.walker());
+    const hooks = watchHooks(T.peds);
+    const cb = new Combat({ peds: T.peds, wallet: purse() });
+    const ctx = facing(victim);
+    const swings = [];
+    cb.onSwing((m) => swings.push(m));
+    cb.update(1 / 120, ctx);
+    ctx[flag] = true;
+    cb.update(1 / 120, ctx);
+    assert.equal(cb.strike('light'), false, `${flag}: the left button punched`);
+    assert.equal(cb.strike('heavy'), false, `${flag}: Q punched`);
+    ctx.input = { keys: new Set(), attackHeld: true };      // the button held down
+    stepFight(cb, ctx, 1, 1 / 120);
+    assert.deepEqual(swings, [], `${flag}: a held button punched`);
+    assert.equal(hooks.hit.length, 0);
+    // and nothing pressed meanwhile is thrown the moment the hands come back
+    ctx[flag] = false;
+    ctx.input = { keys: new Set(), attackHeld: false };
+    stepFight(cb, ctx, 0.5, 1 / 120);
+    assert.deepEqual(swings, [], `${flag}: a press from under the ${flag} was kept for later`);
+    assert.equal(land(cb, ctx), true, `${flag}: the fists never came back`);
+    assert.deepEqual(swings, ['jab']);
+  }
+});
+
+test('a brawler keeps at a player looking at the map, and lets go of one who is not his own', () => {
+  for (const [flag, stays] of [['hold', true], ['down', false]]) {
+    const T = town();
+    const b = arena(personWho(T, true));
+    b.cit = modelled();
+    const cb = new Combat({ peds: T.peds, wallet: purse(), vitals: { damage() {} } });
+    const ctx = facing(b);
+    land(cb, ctx);
+    assert.equal(b.state, 'brawl');
+    ctx[flag] = true;
+    stepFight(cb, ctx, 1);
+    assert.equal(b.state === 'brawl', stays, `${flag}: the brawler ${stays ? 'gave up' : 'kept fighting'}`);
+  }
 });

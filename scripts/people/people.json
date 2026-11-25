@@ -534,7 +534,16 @@
   "turnR": {
    "m": "m_turn_right_90",
    "f": "f_turn_right_90"
-  }
+  },
+  "fightJab": "Punch_Jab",
+  "fightCross": "Punch_Cross",
+  "fightHook": "Melee_Hook",
+  "fightHookRec": "Melee_Hook_Rec",
+  "hitHead": "Hit_Head",
+  "hitChest": "Hit_Chest",
+  "hitBack": "Hit_Knockback",
+  "fallDown": "Death01",
+  "getUp": "LayToIdle"
  },
  "clips": {
   "m_idle_look_around_01": {
@@ -642,6 +651,42 @@
   },
   "f_sit_chair_breathe_01": {
    "seat": true
+  },
+  "Punch_Jab": {
+   "loop": false,
+   "travel": "none"
+  },
+  "Punch_Cross": {
+   "loop": false,
+   "travel": "none"
+  },
+  "Melee_Hook": {
+   "loop": false,
+   "travel": "none"
+  },
+  "Melee_Hook_Rec": {
+   "loop": false,
+   "travel": "none"
+  },
+  "Hit_Head": {
+   "loop": false,
+   "travel": "none"
+  },
+  "Hit_Chest": {
+   "loop": false,
+   "travel": "none"
+  },
+  "Hit_Knockback": {
+   "loop": false,
+   "travel": "none"
+  },
+  "Death01": {
+   "loop": false,
+   "travel": "none"
+  },
+  "LayToIdle": {
+   "loop": false,
+   "travel": "none"
   }
  }
 }
