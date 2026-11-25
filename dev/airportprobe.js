@@ -124,7 +124,8 @@ export function shot(name, eye = null, look = null, W = 1280, H = 720, fov = 60)
 /**
  * Straight onto final with the passenger in 14A, landing at local hour `h`
  * (0..24, e.g. 23.5 for a night landing): 'home' comes down on 27 at
- * Pardubice, 'out' on 13 at SEZ (from a page opened with ?region=mahe).
+ * Pardubice, 'homePrg' on 24 at Prague, 'out' on 13 at SEZ (from a page
+ * opened with ?region=mahe).
  */
 export async function final(dir = 'home', h = 23.5) {
   const T = await import('/js/flight-trip.js');

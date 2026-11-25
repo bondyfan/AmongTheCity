@@ -3432,8 +3432,10 @@ Tests: `tests/flight.test.mjs` (with SEZ's real tile for the taxi routes),
 
 ### The lights after dark (js/airport-lights*.js, 25 Nov 2026)
 
-A landing whose arrival hour falls at night came down onto two dark runways:
-the paint was all there was. Now both airports light up from dusk.
+A landing whose arrival hour falls at night came down onto dark runways:
+the paint was all there was. Now all three airports light up from dusk
+(Pardubice and Mahé first; Prague, which arrived on main the same day, later
+that evening).
 
 * **The layout is data** (`js/airport-lights-plan.js`, pure, worker safe):
   `lkpdLights(plan)` from js/airport-plan.js (`RUNWAY` a, mid, b and width,
@@ -3448,8 +3450,22 @@ the paint was all there was. Now both airports light up from dusk.
   taxiway edges 60 m apart on the straight and 7 m in the turns. SEZ's lighting
   is not published where it could be read: the same edges and rows, a 600 m CAT
   I system off 13 over the sea without flashers, PAPI left at both ends, nothing
-  off 31. Centreline lights (white, red and white from 900 m, red for the last
-  300) are there for a runway that has them; neither does today.
+  off 31. Prague (`lkprLights(LKPR_PLAN, roads)`, `lkprRunways(plan)`) is the
+  eAIP's LKPR AD 2.14 and AD 2.9: 06/24 (the line js/flight-lkpr.js flies,
+  3 715 x 45 m) with centreline lights every 15 m (white, red and white from
+  900 m before the end you roll toward, red for the last 300); 24 a CAT II/III
+  of 900 m (the CAT I pattern with red side-row barrettes over the inner 270 m,
+  the crossbars inside that cut short of them), TDZ barrettes 60 to 900 m in at
+  an 18 m gauge, green wing bars, flashers; 06 a CAT I of 480 m with flashers;
+  12/30 (`LKPR_12_30`, from tile -23_-2, 3 250 x 45 m) without a centreline,
+  SALS 420 m off 12, a 900 m CAT I with flashers and wing bars off 30; PAPI
+  left of every end. As at the real field, 12/30 crosses 06/24 about 55 m past
+  12's threshold: `avoid` leaves out the edge (and approach) lights that would
+  stand on the other runway's paving, and 06/24's flush centreline runs on
+  through. Its taxiways have green centreline lights (30 m apart, 7.5 m in a
+  turn, one where ways meet, none on a runway) and no edge lights: the eAIP
+  has edges on a few named stretches only, which the tile's unnamed ways cannot
+  tell apart.
 * **A light shows what a real fixture shows.** Each one is `{ kind, x, z, h, c,
   b, nx, nz, papi?, flash? }`: `b` is the colour seen from behind it (where
   (eye - light) . n < 0), so a threshold row is green from the approach and red
@@ -3462,7 +3478,10 @@ the paint was all there was. Now both airports light up from dusk.
   flashers their sweep toward the threshold twice a second.
 * **The drawing** (`js/airport-lights.js`, `AirportLights`, built in main.js
   next to the lamp glows and updated right after them) is ONE InstancedMesh
-  for the airport of this page's region, drawn with js/lightpools.js's glow
+  (up to 6 144 lamps; Prague has about 3 600) for the airport being
+  approached: `sitesOf(region)` gives 'cz' Pardubice and Prague, 'mahe' SEZ,
+  and the mesh takes the lights of whichever is within reach of the camera or
+  the airliner (they are 106 km apart), drawn with js/lightpools.js's glow
   shader cloned with `ATC_GROUND`: the quad stands on its lamp rather than
   around it (seen from kilometres away at a grazing angle the lower half of a
   lamp's quad is under the paving in front of it), a lamp past the far plane is
@@ -3475,16 +3494,23 @@ the paint was all there was. Now both airports light up from dusk.
   runway's middle (the camera, or the airliner flying near it); its level is
   held against the night exposure the way stationkit's `night()` holds its
   lamps (times EXPOSURE_DAY over the exposure of the moment). Positions are
-  written once and again when the terrain under them loads (or SEZ's taxiways
-  stream in); once a frame only the few hundred lights whose colour depends on
-  the eye or the clock are rewritten. Knobs: `__atc.airportLights.tune`.
+  written once and again when the terrain under them loads (or SEZ's and
+  Prague's taxiways stream in: the cells within 2.6 or 4 km of the runway are
+  looked at once a second); once a frame only the few hundred lights whose colour depends on
+  the eye or the clock are rewritten (about 1 300 at Prague). Knobs:
+  `__atc.airportLights.tune`; `__atc.airportLights.siteId` says which
+  airport is lit.
 * **Co-op**: the same data gives the same lights on every machine (SEZ's tile
   roads are sorted before they are laid out), so nothing goes on the wire.
 
 Tests: `tests/airport-lights.test.mjs` (counts, spacing, colours from both
 sides, the PAPI at 1.5 to 4.2 degrees, the rabbit, taxiway lights never on a
-runway or on another taxiway, SEZ's real tile). `dev/airportprobe.js` has
-`final(dir, hour)` (straight onto final, landing at that local hour) and
+runway or on another taxiway, SEZ's real tile) and
+`tests/airport-lights-lkpr.test.mjs` (Prague: both runways from the eAIP, the
+CAT II/III side rows, TDZ and wing bars, SALS kept off 06/24, RRWW on the
+airliner's own final to 24, the taxiway centrelines from tile -23_-2).
+`dev/airportprobe.js` has `final(dir, hour)` (straight onto final, landing at
+that local hour; 'homePrg' lands on Prague's 24) and
 `cockpit()` (a pilot's eye for `view` and `shot`).
 
 ## A ticket for every train, bought on the phone (22 Nov 2026)
