@@ -3268,3 +3268,31 @@ Frank: "na každej vlak si musím koupit lístek ... vytáhnu mobil a tam si to 
   `reloadLast()`. The ride being ridden is not saved.
 * Harness: `__atc.tickets`, `__atc.phone`, `__atc.ticketScreen`. Tests:
   `tests/tickets.test.mjs`.
+
+## The start of the campaign: light, a real step, a quieter station, no helicopters (25 Nov 2026)
+
+Frank: helicopters by the house ("to je úplná blbost"), the surroundings of the start should be
+a wow, the station announcement is far too loud from far away, and stepping onto the edge of the
+roof must be a real step ("teďka tam jako tak jako přehupsne bez animace").
+
+* **The helicopters were a bug of the roof's own guard.** `roofWalk().collide` (js/prologue-ladder.js)
+  clamped ANY point the world asked about into the roof's rectangle, from anywhere; the machines
+  parked at the airports ask `world.collide` every frame, so they were carried to the roof in Kolín
+  and dropped beside the house. It now answers only for a walker (`opts.interior`) who is within
+  1.5 m of the deck and at its height.
+* **The story's light runs ahead of its clock** (js/prologue-clock.js `skyHours`, js/worldclock.js
+  `overrideSky` / `skyTod`). The sky's sun sets at nine, so eight o'clock was flat daylight. The
+  campaign shows the sky a later hour than its clock reads: the street in the last low sun, the
+  roof in the afterglow with windows and lamps coming on, the run for the train in the blue hour.
+  Only `updateSky` takes `skyTod()`; everything lit follows the sky's `nightK`. The HUD clock,
+  the departure board and every `tod()` consumer still read 20:00. Part two's hours are unchanged.
+* **The step onto the coping** (js/prologue-stepup.js, pure `stepUp(k)`): two short paces to the
+  wall with the walk cycle, the right foot lifted and set on the coping, the weight over it as the
+  leg straightens, the left foot brought up. `rooftop().pose` moves `step` at a fixed pace
+  (`UP_TIME`, `DOWN_TIME`) instead of easing a slide with a hop; down is the same played back.
+  The film's `step` shot is from the felt behind him so the legs are in frame (from in front of
+  the wall the wall hid them).
+* **The loudspeakers** (js/prologue-voice.js `paLevel`, `hear(metres)`): an announcement is full
+  within 55 m of the hall or the platform and gone 120 m further out, and its recording follows
+  him while it plays (`storyRecording().set`). prologue.js feeds the distance every frame.
+* Tests: `tests/prologue-opening.test.mjs`.

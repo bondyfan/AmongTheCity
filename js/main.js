@@ -106,7 +106,7 @@ import { closeNotice, connectNotice } from './netnotice.js';
 // netvehicles: PROXY cars for the peers, the only honest answer to "which car
 //   is he in" — see F8 below.
 // netui:      the HUD that can say "you are alone now" out loud.
-import { tod, setEpoch, setSoloTime } from './worldclock.js';
+import { tod, skyTod, setEpoch, setSoloTime } from './worldclock.js';
 import { ParkingLots } from './parkinglots.js';
 import { wireCityLife } from './citylife.js';
 import { StreetLife } from './streetlife.js';           // birds, dogs on leads, prams
@@ -4152,7 +4152,7 @@ function stepGame(dt) {
   // the shadow rig parks on the camera, but its HEIGHTS must be anchored to
   // the real ground — this world lives at absolute elevation (~220 m ASL),
   // and the default y≈0 anchor put the whole shadow frustum underground
-  updateSky(sky, tod(), camera, scene,
+  updateSky(sky, skyTod(), camera, scene,
     world?.terrain?.heightAt?.(camera.position.x, camera.position.z) ?? (camera.position.y - 6));
   lightPools?.update(dt, camera, world, sky, renderer.domElement.height, traffic?.cars, game.car, getSettings().flare !== false);
   updateHud(dt);

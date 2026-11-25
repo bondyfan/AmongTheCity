@@ -50,11 +50,18 @@ export function roofWalk(world, player, input) {
     support() {
       return top;
     },
-    collide(pos, r) {
-      if (state !== 'roof') return false;
+    // ONLY A WALKER WHO IS ON THE DECK. This used to pull ANY point the world
+    // asked about onto the roof, from anywhere: the helicopters parked at the
+    // airports ask world.collide every frame, so they were carried to this
+    // roof in Kolín and dropped beside the house (Frank, 25 Nov 2026: "jak
+    // potom slízá z toho baráku, tak tam jsou nějaké vrtulníky").
+    collide(pos, r, opts) {
+      if (state !== 'roof' || !opts?.interior) return false;
       const p = local(pos.x, pos.z),
         x0 = p.x,
         z0 = p.z;
+      if (!onDeck(p, 1.5)) return false;
+      if (Number.isFinite(opts.yHi) && Number.isFinite(opts.yLo) && (opts.yHi < top - 0.5 || opts.yLo > top + 2.5)) return false;
       p.x = Math.max(-4.3 + r, Math.min(4.3 - r, p.x));
       p.z = Math.max(0.5 + r, Math.min(24.6 - r, p.z));
       for (const [a, b, c, d] of solids) {
