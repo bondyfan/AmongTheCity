@@ -26,6 +26,7 @@
 
 import * as THREE from 'three';
 import { TREE_TAXA } from './tiledata.js';
+import { region } from './regions.js';
 
 // (11 to 14 came with the round 5 tiles, which say what genus a mapped tree
 // is: the ash, the robinia, the willow and the ornamental cherry are the ones
@@ -35,6 +36,8 @@ export const SP = {
   LINDEN: 0, MAPLE: 1, CHESTNUT: 2, PLANE: 3, POPLAR: 4, BIRCH: 5,
   SPRUCE: 6, PINE: 7, FRUIT: 8, SHRUB: 9, OAK: 10,
   ASH: 11, ROBINIA: 12, WILLOW: 13, CHERRY: 14,
+  // (the last free tag: the coconut palm of Mahé's coast, js/regions.js)
+  PALM: 15,
 };
 
 // h      height range in metres when nothing measured it
@@ -64,6 +67,9 @@ export const SPECIES = [
   { name: 'robinia',  h: [11, 19], b: 0.34, a: [0.62, 0.80], tau: 0.074, crown: 0x76994c, bark: 0x62574b },
   { name: 'willow',   h: [9, 16],  b: 0.14, a: [0.98, 1.20], tau: 0.085, crown: 0x86a468, bark: 0x6e665a },
   { name: 'cherry',   h: [5, 9],   b: 0.30, a: [0.88, 1.08], tau: 0.064, crown: 0x4e7c38, bark: 0x7a5145 },
+  // a coconut palm: a bare grey ringed stem, the crown a flat star of fronds
+  // at the very top (b 0.80: the leaves start four fifths of the way up)
+  { name: 'palm',     h: [12, 24], b: 0.80, a: [1.9, 2.4], tau: 0.045, crown: 0x5e8a34, bark: 0x9a8e78 },
 ];
 
 /** How far below the crown's centre the ground is, in crown radii (see header). */
@@ -93,7 +99,7 @@ function cellHash(gx, gz, salt) {
 // lowland: lime, maple and chestnut avenues, pine and oak woods on the sand
 // east of Pardubice, poplars on the floodplain, fruit trees in gardens.
 const { LINDEN, MAPLE, CHESTNUT, PLANE, POPLAR, BIRCH, SPRUCE, PINE, FRUIT, SHRUB, OAK,
-  ASH, ROBINIA, WILLOW, CHERRY } = SP;
+  ASH, ROBINIA, WILLOW, CHERRY, PALM } = SP;
 const STREET = [[LINDEN, 30], [MAPLE, 20], [CHESTNUT, 10], [PLANE, 10], [OAK, 7], [BIRCH, 8], [POPLAR, 4], [FRUIT, 11]];
 const PARK = [[LINDEN, 22], [MAPLE, 18], [CHESTNUT, 14], [OAK, 14], [PLANE, 8], [BIRCH, 10], [SPRUCE, 6], [PINE, 4], [FRUIT, 4]];
 const STAND = [[PINE, 34], [OAK, 26], [SPRUCE, 16], [BIRCH, 10], [LINDEN, 8], [POPLAR, 6]];
@@ -101,6 +107,24 @@ const ADMIX = [[BIRCH, 30], [OAK, 25], [PINE, 20], [SPRUCE, 10], [MAPLE, 15]];
 const LOW = [[FRUIT, 68], [BIRCH, 10], [SPRUCE, 10], [MAPLE, 12]];
 const MID = [[BIRCH, 18], [MAPLE, 20], [LINDEN, 18], [FRUIT, 12], [SPRUCE, 14], [PINE, 6], [OAK, 12]];
 const TALL = [[LINDEN, 20], [OAK, 22], [MAPLE, 12], [POPLAR, 14], [SPRUCE, 12], [PINE, 10], [PLANE, 6], [CHESTNUT, 4]];
+// ---- Mahé (js/regions.js): the island's own mix ---------------------------
+// Nothing in the Polabí tables grows on a granite island at 4° south. The
+// shapes stand in for what does: the takamaka's dark spreading dome is the
+// oak's, the breadfruit's big round crown the chestnut's, the casuarina's
+// open feathery top over the beaches the pine's, the albizia's umbrella over
+// the hill forest the plane's, the cinnamon scrub the maple's, the mangrove's
+// low dome the willow's. Which mix a tree draws from is its ZONE, carried in
+// the two low bits of the canopy raster (scripts/mahe/ground.mjs): 0 the
+// coastal plateau, 1 the lowland, 2 the hills above 250 m, 3 the mangrove.
+const TROPIC = region().id === 'mahe';
+const TROPIC_ZONES = [
+  [[PALM, 52], [OAK, 18], [PINE, 12], [CHESTNUT, 12], [LINDEN, 6]],
+  [[CHESTNUT, 20], [OAK, 15], [MAPLE, 15], [PALM, 16], [PLANE, 14], [LINDEN, 10], [FRUIT, 10]],
+  [[MAPLE, 26], [LINDEN, 20], [CHESTNUT, 18], [OAK, 14], [PLANE, 12], [ASH, 10]],
+  [[WILLOW, 72], [SHRUB, 28]],
+  // a planted tree in a town or a garden: palms, takamaka, breadfruit, mango
+  [[PALM, 42], [OAK, 18], [CHESTNUT, 16], [PLANE, 8], [FRUIT, 16]],
+];
 function pick(table, u) {
   let sum = 0;
   for (const e of table) sum += e[1];
@@ -179,7 +203,13 @@ const BLOCK = 72, STAND_M = 90;
 export function treeSpec(t, measured, out) {
   const id = t.seed;
   let sp, coherent;
-  if (t.bush) {
+  if (TROPIC && !t.bush && !(t.tx && taxonClass(t.tx) >= 0)) {
+    const m = t.wild ? t.h : measured;
+    const zone = m > 0 ? Math.round(m * 4) & 3 : 4;
+    const cell = cellHash(Math.floor(t.x / 40), Math.floor(t.z / 40), 91);
+    sp = rnd(id, 12) < 0.5 ? pick(TROPIC_ZONES[zone], rnd(cell, 3)) : pick(TROPIC_ZONES[zone], rnd(id, 13));
+    coherent = rnd(cell, 5);
+  } else if (t.bush) {
     sp = SHRUB; coherent = rnd(id, 11);
   } else if (t.wild) {
     // measured, unmapped: the height says what kind of thing it can be
@@ -236,6 +266,8 @@ export function treeSpec(t, measured, out) {
   out.leanDir = rnd(id, 8) * Math.PI * 2;
   // street trees are staked and pruned; forest stock leans for the light
   out.lean = (t.bush ? 0 : t.forest ? 0.075 : 0.035) * rnd(id, 9) * (sp === SPRUCE || sp === POPLAR ? 0.4 : 1);
+  // a coconut palm leans out over the sand, some of them a long way
+  if (sp === PALM) out.lean = 0.04 + 0.22 * rnd(id, 9) * rnd(id, 15);
   out.light = (rnd(id, 7) - 0.5) * (t.forest ? 0.11 : 0.06);
   out.variant = rnd(id, 10) < 0.5 ? 0 : 1;
   return out;

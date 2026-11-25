@@ -35,7 +35,7 @@ import * as wanted from './wanted.js';
 import { PRICE, kc } from './prices.js';
 import { tod, setSoloTime } from './worldclock.js';
 import { browserStore, blank } from './savegame.js';
-import { isPoint, notice } from './autosave.js';
+import { isPoint, notice, PART_ONE_END } from './autosave.js';
 import { loadMyLook, saveMyLook } from './characters/appearance.js';
 import { Progress } from './progress.js';
 import { Onboarding } from './onboarding.js';
@@ -54,6 +54,7 @@ import { standY, groundReady, motorwaySave } from './savespot.js';
 import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, pardubicePlatform } from './prologue-route.js';
 import { start as heistStart } from './heist-route.js';
 import { retry } from './story-retry.js';
+import { region, regionId, arrival } from './regions.js';
 
 const store = browserStore();
 
@@ -90,6 +91,10 @@ export function choose(choice) {
   startPick = typeof choice?.start === 'string' ? choice.start : null;
   const res = store.load();
   state = res.state;
+  // A position belongs to the region it was taken in (js/regions.js): Mahé's
+  // metres are not Pardubice's. Another region's spot is dropped, the rest of
+  // the career (money, car, stats) comes along.
+  if (state.pos && (state.pos.rg ?? 'cz') !== regionId()) state = { ...state, pos: null };
   // the look chosen in the creator lives in localStorage; a save made with one
   // brings it back to a browser that lost it
   if (state.look && !loadMyLook()) saveMyLook(state.look);
@@ -108,7 +113,8 @@ export function choose(choice) {
 /** A chapter selects the objective. The position is always in the streamed world. */
 export const storyTrip = () => state.storyTrip;
 export function activeStory() {
-  return solo && !freeroam && startPick !== 'praha' ? state.prologue : null;
+  // (the campaign is Czech: on Mahé there is no chapter to play)
+  return solo && !freeroam && startPick !== 'praha' && region().czech ? state.prologue : null;
 }
 // THE CAMPAIGN IS NOT SAVED BEFORE ITS END (Frank, 18 Nov 2026): a missed train
 // or a death starts it again from the street in Kolín, and so does closing the
@@ -127,6 +133,10 @@ export function checkpointStory(stage) {
   // part one of the campaign is a mission completed: its end is a point, and
   // the one write made while part two is still ahead (only part one holds it)
   if (stage === 'done' && applied) write('mission', partOneRunning());
+  if (stage === 'done' && replaying === 'part1') {
+    replaying = null;
+    toast('Kampaň zopakována', { icon: '🎬', sub: 'Poslední vlak, část 1', ms: 7000 });
+  }
 }
 /** The campaign from its first frame again: a new platform, a full countdown. */
 export function restartStory() {
@@ -141,12 +151,76 @@ const storyRunning = () => partOneRunning() || heistPending();
 // the one that says it is over. A save that ends at Vašek's table therefore
 // opens on his street at half past four in the morning.
 export function heistPending() {
-  return !!state && solo && !freeroam && startPick !== 'praha' && state.prologue === 'done' && state.heist !== 'done';
+  return !!state && solo && !freeroam && startPick !== 'praha' && region().czech && state.prologue === 'done' && state.heist !== 'done';
 }
 export function completeHeist() {
-  state.heist = 'done';
   retry.clear();
+  // THE BRIEFCASE IS PAID ONCE (Frank, 22 Nov 2026: the money was never added
+  // to the wallet; and whoever plays the part again gets nothing a second
+  // time, and is told so). A save that finished part two before this existed
+  // has never been paid, so its first replay pays.
+  const pay = heistReward();
+  if (pay) {
+    wallet.earn(pay, 'kufřík');
+    state.heistPaid = true;
+    toast('+ ' + kc(pay), { icon: '💼', kind: 'good', sub: 'Peníze z kufříku jsou tvoje', ms: 8000 });
+  } else {
+    toast('Kampaň zopakována', { icon: '🎬', sub: 'Odměnu ' + kc(PRICE.story.briefcase) + ' už máš, podruhé se nevyplácí', ms: 9000 });
+  }
+  state.heist = 'done';
+  replaying = null;
   if (applied) autosave('mission');      // part two is a mission completed too
+}
+/** What finishing part two would pay now: the briefcase, or 0 once it has been paid. */
+export function heistReward() {
+  return state.heistPaid ? 0 : PRICE.story.briefcase;
+}
+/** The last line of part two's end card: what he gets, or that he does not. */
+export function heistRewardNote() {
+  return heistReward()
+    ? 'Poslední vlak · v kufříku ' + kc(PRICE.story.briefcase)
+    : 'Opakování · odměnu ' + kc(PRICE.story.briefcase) + ' už máš, podruhé se nevyplácí';
+}
+
+// ---- playing a finished campaign again (js/campaignmenu.js) -----------------
+// A replay lives in memory like the campaign itself: the chapter is put back
+// to its start, nothing is written while it runs, and its end writes the same
+// 'done' the save already held. Closing the tab in the middle changes nothing.
+let replaying = null;          // 'part1' | 'part2' while a finished part is played again
+export const replayOf = () => replaying;
+/** The campaigns there are, for the settings tab. */
+// (a part being replayed is still a finished one: its card must not say otherwise)
+export function campaigns() {
+  const able = !!state && solo && startPick !== 'praha' && applied;
+  const busy = partOneRunning() || heistPending();
+  return {
+    able, busy, replaying,
+    list: [
+      { id: 'part1', title: 'Poslední vlak · část 1', sub: 'Z Kolína posledním vlakem za Vaškem',
+        done: state?.prologue === 'done' || replaying === 'part1', reward: 0, paid: false },
+      { id: 'part2', title: 'Poslední vlak · část 2', sub: 'Auto pod Kunětickou horou',
+        done: state?.heist === 'done' || replaying === 'part2', reward: PRICE.story.briefcase, paid: !!state?.heistPaid },
+    ],
+  };
+}
+/** May this part be started again now? Only a finished one, and never over a running one. */
+export function canReplay(part) {
+  const c = campaigns();
+  return c.able && !c.busy && !!c.list.find((p) => p.id === part)?.done;
+}
+/**
+ * Put the campaign back to the start of `part`. Returns where it begins
+ * ({ x, z, h? }), or null when it may not be replayed. main.js moves the
+ * player there and starts the part the way it starts after a failure.
+ */
+export function beginReplay(part) {
+  if (!canReplay(part)) return null;
+  replaying = part;
+  freeroam = false;            // (?devmode's free roam: the story is on for this)
+  retry.mark();                // he has seen its films: T skips them
+  if (part === 'part1') { beginStory(); return startPoint(); }
+  state.heist = null;          // part two is pending again; the save still says done
+  return { ...PART_ONE_END };
 }
 
 /** Where boot begins, before the world exists: the save's spot when it is in
@@ -347,8 +421,15 @@ function apply() {
     // raises is what sends the police out again)
     if (s.wanted.heat > 0) wanted.add(s.wanted.heat, s.wanted.crime);
     if (s.owed) settleOwed(s.owed.stars);
-    else if (activeStory() !== 'forecourt' && !storyRunning()) toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ od posledního uložení', ms: 7000 });
+    else if (activeStory() !== 'forecourt' && !arrival() && !storyRunning()) toast('Vítej zpět', { icon: '💾', sub: kc(s.money) + ' · pokračuješ od posledního uložení', ms: 7000 });
   }
+  // Arrived from another region (js/regions.js): the game as it was the moment
+  // you left beats the last save (the ticket is paid), but it is NOT written,
+  // saves stay autosave-only. The flight's landing hour too, alone only.
+  const came = arrival();
+  if (came?.carry?.live) applyLive(came.carry.live);
+  const landTod = came?.carry?.flight?.tod;
+  if (solo && Number.isFinite(landTod)) setSoloTime(((landTod % 1) + 1) % 1);
   if (loadNote === 'corrupt')
     toast('Uložená hra se nedala načíst', { icon: '⚠️', kind: 'warn', sub: 'Začínáš novou. Původní data jsou odložená.', ms: 9000 });
   if (loadNote === 'newer')
@@ -361,6 +442,25 @@ function apply() {
   const takePumps = (pois) => { for (const p of pois ?? []) if (p.t === 'fuel' && p.p) pumps.push({ x: p.p[0], z: p.p[1] }); };
   takePumps(city?.pois);
   city?.onTileLoaded?.((t) => takePumps(t.pois));
+}
+
+// ---- crossing to another region (js/regions.js) ------------------------------
+// What a reload would otherwise roll back to the last autosave: money, health,
+// the stars on you, and the menu's choice (co-op or alone) so the other side
+// boots straight into play. main.js hands this to regions.setCarryHook.
+export function live() {
+  return {
+    money: wallet.money(),
+    vitals: { hp: vitals.hp(), armour: vitals.armour(), energy: vitals.energy() },
+    wanted: { heat: wanted.heat(), crime: wanted.lastCrime() },
+    choice: { mode: solo ? 'single' : 'server', start: startPick, freeroam },
+  };
+}
+function applyLive(l) {
+  if (Number.isFinite(l.money)) wallet.setMoney(l.money);
+  if (l.vitals) vitals.restore(l.vitals);
+  wanted.clear();
+  if (l.wanted?.heat > 0) wanted.add(l.wanted.heat, l.wanted.crime);
 }
 
 // ---- saving -------------------------------------------------------------------
@@ -377,8 +477,9 @@ function snapshot() {
     tickets: tickets.snapshot(),
     prologue: state.prologue,
     heist: state.heist ?? null,
+    heistPaid: !!state.heistPaid,
     storyTrip: state.storyTrip,
-    pos: lastSafe,
+    pos: lastSafe && regionId() !== 'cz' ? { ...lastSafe, rg: regionId() } : lastSafe,
     tod: solo ? tod() : null,
     played: Math.round(played),
     vitals: { hp: vitals.hp(), armour: vitals.armour(), energy: vitals.energy() },
@@ -427,7 +528,7 @@ function write(point, held) {
 export function reloadLast() {
   if (!applied || !h || storyRunning()) return null;
   const s = store.load().state;
-  if (!(s?.savedAt > 0) || !s.pos) return null;
+  if (!(s?.savedAt > 0) || !s.pos || (s.pos.rg ?? 'cz') !== regionId()) return null;
   wallet.setMoney(s.money);
   tickets.restore(s.tickets);
   vitals.restore(s.vitals);

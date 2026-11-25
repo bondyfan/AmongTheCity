@@ -20,7 +20,8 @@
 // answers "is there a tree here", asked once per candidate trunk during the
 // scatter. Interpolating across a wood's edge would invent half-trees along it.
 
-const CANOPY_URL = (tx, tz) => `data/canopy/${tx}_${tz}.bin`;
+import { dataUrl } from './regions.js';
+const CANOPY_URL = (tx, tz) => dataUrl(`canopy/${tx}_${tz}.bin`);   // the live region's folder
 const NO_DATA = 255;
 const STEP = 0.25;                        // m per stored unit
 

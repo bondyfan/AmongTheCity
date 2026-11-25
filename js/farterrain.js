@@ -27,6 +27,7 @@
 
 import * as THREE from 'three';
 import { wmsUrl } from './ortho.js';
+import { region } from './regions.js';
 
 const STEP = 80;              // m between patch vertices
 const SINK = 2.0;             // m under the pooled minimum (heightAt is smooth between samples)
@@ -36,8 +37,9 @@ const DROP_R = 9000;          // …and past which it is disposed
 const PX = 512;               // photo pixels a tile
 const PHOTOS_AT_ONCE = 2;    // far photo requests in flight at most
 const SCAN = 20;              // frames between two looks at what to build or drop
-// what the land reads as where no photo is (low preset, a dead WMS tile)
-const BARE = 0x7d8a5c;
+// what the land reads as where no photo is (low preset, a dead WMS tile);
+// on Mahé (js/regions.js), which has no photo at all, the rainforest green
+const BARE = region().id === 'mahe' ? 0x355a2c : 0x7d8a5c;
 
 export class FarTerrain {
   constructor(scene, terrain) {

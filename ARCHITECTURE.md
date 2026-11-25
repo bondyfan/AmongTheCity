@@ -3067,6 +3067,173 @@ trains, pursuits and the ambient ambulance are local.
 Fleet: a room holds about 45 % more cars than one camera (84 against 58 at noon), the
 ghosts all round instead of in the cone.
 
+## Campaigns can be played again, and the briefcase pays once (22 Nov 2026)
+
+Frank: "v nastaveni nekde musi byt zalozka kampane aby clovek si mohl kliknout na jakoukoliv
+kampan kterou delal aby ji mohl delat znovu. (ale kdyz z toho neco vyhraje treba penize tak uz
+ty penize nedostane znovu ...)" and "na konci te druhe mise kdyz dostane ten kufr s penezi tak
+se mu ty penize neprictou".
+
+* **The briefcase** is `PRICE.story.briefcase` (250 000 Kč, what Vašek says). `career.completeHeist`
+  pays it into the wallet when `state.heistPaid` is not set, sets it (a saved field,
+  js/savegame.js) and says so in a toast. A save that finished part two before this has never
+  been paid: its first replay pays. `career.heistRewardNote()` is the second line of part two's
+  end card (js/heist-deal.js `note`): what is in the briefcase, or that a replay pays nothing.
+* **A replay** (`career.beginReplay(part)`) lives in memory like the campaign itself: part one
+  goes back to 'bridge' with a new platform, part two back to pending; nothing is written
+  while it runs (the existing `storyRunning()` hold), and its end writes the 'done' the save
+  already held. Closing the tab in the middle loses the replay and nothing else.
+  `career.campaigns()` lists the parts for the tab; `canReplay` refuses an unfinished part, a
+  running campaign, co-op and a start in Prague. A replay marks the retry (T skips films).
+  After a replayed part one, part two does not follow (its 'done' was never touched).
+* **Starting one** (js/main.js `replayCampaign`): the same black card and move a failure
+  makes (`storyOver` with `replay`), to Kolín's street or to Vašek's door; part one's maker
+  (`journeyFactory`) is loaded on demand, part two is made by the loop as after part one.
+* **The tab** (js/campaignmenu.js): js/settings.js has a page 'Kampaně' and raises
+  `atc:campaigns` with the empty page each time it is opened; main.js fills it. One card a
+  part, the reward and whether it was paid, "Hrát znovu", and "Ukončit opakování" (a reload:
+  nothing of a replay is on disk).
+* Tests: `tests/campaigns.test.mjs`.
+
+## Regions: Mahé is its own world (js/regions.js, js/mahe/, Nov 2026)
+
+Frank wants his players to fly from Pardubice airport to the Seychelles and play
+on Mahé. Mahé is 7 800 km from the Czech frame, so it is a separate REGION with
+its own origin, projection, data folder, sun, time zone, sea and side of the road.
+
+- **One region per page.** `regionId()` comes from the URL (`?region=mahe`,
+  absent = `cz`, so every existing link opens the Czech world unchanged).
+  Crossing is a page reload behind the boot cover: `enterRegion(id, spawn,
+  carry)` writes a hand-over to sessionStorage and navigates; boot reads it
+  once with `arrival()` (2 min TTL, must match the live region). main.js builds
+  ~40 systems once per page; the browser's teardown is the only complete one.
+  `setCarryHook` (main.js registers `career.live()` and the player's name)
+  carries money, health, stars and the menu's choice across, without writing
+  the save; the menu is skipped on arrival.
+- **A false origin.** Mahé is drawn 100 km NORTH of the Czech world's northern
+  edge (`REGIONS.mahe.offset = {x: 0, z: -100000}`, island at z -108..-80 km).
+  Dozens of modules hold hand-measured Czech coordinates (the station hall,
+  the D35, LKPD, the terrain stamps, the Labe weirs); with the island drawn
+  around zero every one within 25 km of Pardubice would have appeared in
+  Victoria. With the offset none can ever reach it, including ones not yet
+  written. Float32 stays at 7.8 mm, what Prague already runs at. Rule for new
+  code: a hand-measured Czech position needs no region check; anything that
+  behaves differently by region (side of the road, sun, data URL, ortho,
+  hospitals) reads `region()`.
+- **Data.** Every runtime data URL goes through `dataUrl(path)`: `data/` for
+  the Czech world, `data/regions/mahe/` for Mahé. The mesh worker gets the
+  region in its own URL (js/meshpool.js), so both build paths agree.
+  `scripts/lib/world-area.mjs` takes `ATC_REGION`; split-extracts and
+  build-region then REFUSE to run without their own RAW_DIR, OUT_DIR and
+  URL_DIR, so a Mahé build can never touch `public/data`. Mahé's own steps are
+  in scripts/mahe/ (fetch, coast, ground, extras, creole); see their headers.
+- **Side of the road.** `laneSide()` is +1 (keep right) or -1 (keep left).
+  js/ailane.js mirrors every lane at its two public entries; traffic.js
+  mirrors the spawn, the give-way rule (give way to the left), the kerb and the
+  bus bay side; kerbparking.js mirrors the parked rows. Cyclists are off on
+  Mahé until their riding line is mirrored. The cars are still left-hand drive
+  (follow-up).
+- **Time and sun.** `worldclock.tod()` adds `todShift()` (Mahé: +3 h on the
+  shared clock) and `setSoloTime` takes the local hour. sky.js reads
+  `region().sun` (Mahé: a 12.3 h day, the sun nearly overhead).
+- **Co-op.** One room, separate worlds: every state and event carries `rg`
+  (absent in the Czech world, so the Czech wire is unchanged); a client never
+  applies a packet from another region, hides that player and lists them as
+  "na Mahé". Wreckage snapshots stay Czech. No change to the relay.
+- **Mahé's look.** js/mahe/sea.js (the ocean to the horizon, coloured by the
+  lagoon map: shallows, reef crest, drop-off), species 15 = the coconut palm
+  (js/treeshapes.js, the canopy raster's two low bits carry the vegetation
+  zone), js/mahe/landmarks.js (Clock Tower, cathedral bell tower, temple
+  gopuram, market sign), js/mahe/boulders.js (granite), Creole wall and tin
+  roof colours baked into the tiles by scripts/mahe/creole.mjs.
+
+## Pardubice airport and the flight to the Seychelles (js/airport-*.js, js/flight*.js, js/airliner*.js, Nov 2026)
+
+Frank, 21 Nov 2026: "udelej novou sesion aby na letisti v pardubicich se dalo
+letat na Seychelly". Mahé itself and the region system are the other half
+(js/regions.js); this part is the airport, the aircraft and the journey.
+
+* **The plan is data** (`js/airport-plan.js`, worker safe, no three.js).
+  Terminál Jana Kašpara (opened 30 Jan 2018, 160 x 46 m) is one OSM ring of 26
+  points turned 2.74 degrees from the grid like runway 09/27; in a frame turned
+  by that angle every edge is axis aligned, so the plan is written in it (u east
+  along the building, v south across it): the glass hall, the porch, the two
+  wings, the doors, the walls inside, the eight counters, the two security
+  lanes, the gates, the boards and the zones. Also the apron: the stand (the top
+  of the turning loop the OSM markings draw east of the terminal, nose east, L1
+  to the building), the taxi routes as mapped taxiway vertices (`TAXI_OUT` to
+  the 09 line-up, `TAXI_IN` from the 27 exit), and the spawns the region system
+  names ('pce-airport', 'pce-arrival').
+* **The terminal** is a landmark (`js/landmarks-letiste.js`: the shell on the
+  real footprint, the curtain wall as one-sided glass so the inside looks out
+  and wraps the hall's corners, the doors as real holes, solids with door gaps
+  and the furniture) plus a near set (`js/airport-terminal.js`,
+  `airport-interior.js`, `airport-fit.js`, `airport-boards.js`, stationKit)
+  with the inside as the airport's own photographs show it: light grey 60 cm
+  tiles, white walls banded grey, red and dark grey, trusses under a tiled
+  ceiling, the gallery and its "letiště Pardubice" fascia, the counters, the
+  lanes, the gate lounges with rows of seats, the departure boards, the sliding
+  doors and the gate doors. The ground under the building rises 0.35 m across
+  it, so the whole set stands on a plinth just over its highest point.
+* **The aircraft** (`js/airliner-layout.js` pure numbers and walking,
+  `js/airliner.js` and its parts the exterior, `js/airliner-cabin.js` the
+  inside, built only when someone is near, `js/airstairs.js`,
+  `js/flight-passengers.js` the other people aboard): a generic A320-class twin,
+  no airline copied, registration OK-ATC. Plane-local frame: origin on the
+  ground between the main wheels, -z forward.
+* **The trip** (`js/flight-trip.js`): none, ticket, airside, boarding, aboard,
+  seated, flying, arrived, done; each step needs the one before (no gate before
+  the security arch, no seat without a scanned pass: the crew turn back anybody
+  who walked round the terminal). The fare is `PRICE.flight.mahe`, 14 900 Kč one
+  way, through js/wallet.js. The carrier is invented: flights ATC 740 and 741.
+* **The aircraft's sequence** (`js/flight-sequence.js`, pure): stand, doors,
+  taxi out (`js/flight-path.js`: fillets, a crew's speeds), take-off and climb
+  and the landing (`js/flight-profile.js`: VR 72 m/s, lift-off after 1.4 to 1.8
+  km, 25 degree turns, the 3 degree glide path, the flare, reverse and
+  autobrake), taxi in, parked. Seychelles International (`js/flight-airports.js`
+  from REGIONS.mahe.airport) has no parallel taxiway: departures backtrack to 13
+  and turn on the pad, arrivals turn round on the runway and backtrack.
+* **The passenger** (`js/flight-cabin.js`): up the airstairs, along the aisle,
+  a sidestep along row 14 and the campaign's own sit-down (js/prologue-seat.js)
+  onto 14A; on arrival the same backwards. world.airport (`js/airport-hooks.js`)
+  answers js/city.js supportY and collide for the cabin, the stairs, the
+  terminal's floor and doors, and the officer at the lanes.
+* **The ten hours** (`js/flight-cruise.js`, the montage in `js/flight.js`): held
+  at FL350 over the point where the climb ended, under it a scale model of a
+  cloud deck (160 m down, cells of tens of metres, so its rim stays inside the
+  1 400 m far plane at 7 degrees under the horizon), the hour driven through
+  worldclock.overrideTod from the departure hour through the stop in Dubai to
+  the far side's local hour, the trip's map on the HUD, T skips. Then the region
+  switch (js/regions.js enterRegion, a page reload) with the trip as the carry;
+  the far side resumes the passenger in 14A on final (`airport.resume`, main.js
+  reads `arrival()`); main.js registers Pardubice's spawns ('pce-airport',
+  'pce-arrival') on every page so the one on Mahé can send him home. Without a
+  Mahé description the far end is a labelled placeholder (back down on 27).
+* **At Seychelles International** the terminal is the region's solid building
+  behind the airport fence, so the way through it is a door played as a cut
+  (`js/flight-sez.js`): the check-in desk on the forecourt
+  (`js/flight-sezdesk.js`) sells the ticket home and walks you through to the
+  apron; after a flight in, the door on the terminal's face toward the stand
+  (found from its own OSM ring) lets you out. The taxi routes follow the tile's
+  mapped taxiways (`js/flight-taxiways.js`, Dijkstra over the taxiway and
+  runway lines). Nothing grows on an airfield's paving any more: the canopy
+  scatter of js/meshes.js clears runways, taxiways and aprons as it clears roads
+  (the raster read trees on SEZ's reclaimed land).
+* **Seeing and hearing it**: C between the passenger's eyes and a chase from
+  outside (`js/flight-camera.js`); the game's own synthesised jet at an
+  airliner's spool, through the cabin filter (audio.js `holdCabin`), the cabin's
+  air and the two-tone chime (`js/flight-sound.js`). The words are in
+  `js/flight-lines.js`, the HUD (boarding pass, trip map) in `js/flight-hud.js`.
+  `js/flight-life.js` creates the flight within 2.5 km of the airport and drops
+  it past 3.5 km unless a trip is under way; main.js holds only that.
+* **Co-op**: each player flies a plane of his own (nothing on the wire); the
+  region rule hides a player who is in the other region.
+
+Tests: `tests/flight.test.mjs` (with SEZ's real tile for the taxi routes),
+`tests/flight-cabin.test.mjs`, `tests/airliner.test.mjs`,
+`tests/airport-terminal.test.mjs`. `dev/airportprobe.js` walks the whole trip
+from a console for a harness.
+
 ## A ticket for every train, bought on the phone (22 Nov 2026)
 
 Frank: "na každej vlak si musím koupit lístek ... vytáhnu mobil a tam si to koupím."

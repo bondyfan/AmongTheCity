@@ -61,6 +61,7 @@
 // ==========================================================================
 
 import { DAY_LENGTH, START_TOD, WORLD_EPOCH_MS, CLOCK } from './config.js';
+import { todShift } from './regions.js';
 
 // A clock that cannot be moved by the OS. performance.now() is monotonic and
 // immune to wall-clock steps; Date.now() is neither. Node exposes it as a
@@ -154,7 +155,8 @@ export function setSoloTime(tod01) {
   _reanchor(t); _slew(t);
   const local = _wallAnchor + (t - _monoAnchor);
   const worldSeconds = (local - WORLD_EPOCH_MS) / 1000;
-  const current = START_TOD + worldSeconds / DAY_LENGTH;
+  // (`wanted` is the LOCAL hour of the live region, like tod() below)
+  const current = START_TOD + todShift() + worldSeconds / DAY_LENGTH;
   const current01 = current - Math.floor(current);
   const wanted01 = wanted - Math.floor(wanted);
   // Choose the nearest equivalent day so worldT stays numerically close to
@@ -202,7 +204,9 @@ export function overrideTod(tod01) {
 // mid-morning, which is the trade the shared world requires.
 export function tod() {
   if (_todOverride !== null) return _todOverride;
-  const d = START_TOD + worldT() / DAY_LENGTH;
+  // todShift: the live region's time zone against the Czech one the shared
+  // clock reads (js/regions.js). Victoria is three hours ahead; zero at home.
+  const d = START_TOD + todShift() + worldT() / DAY_LENGTH;
   return d - Math.floor(d);   // frac(), correct for negative d (pre-epoch)
 }
 

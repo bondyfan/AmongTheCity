@@ -1,4 +1,5 @@
 // ---- Among The City: all tunables in one place ----
+import { region } from './regions.js';
 
 // The world origin is the railway=station node of Pardubice hlavní nádraží —
 // which OSM parks amid the TRACKS. The 305 m functionalist hall spans
@@ -99,7 +100,10 @@ export const COLORS = {
   // bed in the middle of a roundabout. Deeper and less yellow than a mown
   // verge, because that is the difference you actually see from the road.
   green: { park: 0x6fa05a, wood: 0x4e7a44, grass: 0x7fa863, pitch: 0x6f9e75,
-    cemetery: 0x7a9468, bush: 0x4f7340 },
+    cemetery: 0x7a9468, bush: 0x4f7340,
+    // another region's own ground (Mahé, scripts/build-region.mjs islandKind):
+    // coral sand, weathered grey granite, mangrove, dry hill scrub
+    beach: 0xe6d8b0, rock: 0x8d8a82, mangrove: 0x3f6b3c, scrub: 0x6b8a4a },
   // …and what a pitch is FOR. Every one of the 1 996 of them was the same
   // green rectangle; the sport tag was in the tiles the whole time. Clay is
   // clay, a running track is red, a pool is water.
@@ -146,6 +150,11 @@ export const COLORS = {
   railBed: 0x6d6a62, rail: 0x3c3e42, sleeper: 0x5a5248,
   treeTrunk: 0x6b4a2e, treeCrown: [0x5d8a4a, 0x6a9a52, 0x527e42, 0x74a25e],
 };
+// Another region's unmapped ground (js/regions.js). Between Mahé's trees and
+// gardens the land is a deep tropical green on red-brown laterite, never the
+// grey-green of a Czech suburb verge. One number, read by the chunk builder in
+// both the worker and the main thread, which both know the region.
+if (region().id === 'mahe') COLORS.groundBase = 0x627f45;
 
 // building wall palettes by type — Czech city: pastel plasters in the old
 // town, gray panel housing, brick industry. Roofs derived darker.

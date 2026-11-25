@@ -30,9 +30,10 @@
 
 import { COLORS, CHUNK } from './config.js';
 import { drawMark, MARK_COLOR } from './mapmarks.js';
+import { dataUrl } from './regions.js';
 
-const PLACES_URL = 'data/places.json';
-const OVERVIEW_URL = 'data/overview.json';
+const PLACES_URL = dataUrl('places.json');      // the live region's files
+const OVERVIEW_URL = dataUrl('overview.json');
 const TAU = Math.PI * 2;
 
 // A zoom CEILING expressed as a multiplier is a promise the world keeps

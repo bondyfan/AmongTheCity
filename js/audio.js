@@ -83,11 +83,20 @@ const CABIN = { open: 20000, shut: 1700, shelf: 1.5 };   // Hz, Hz, dB at 150 Hz
 /** 0 = outside, 1 = in the driver's seat with the doors shut. */
 export function setCabin(k) {
   k = k > 0 ? (k < 1 ? k : 1) : 0;
+  if (k < cabinHold) k = cabinHold;
   if (!cabinLp || Math.abs(k - cabinK) < 0.01) return;
   cabinK = k;
   const t = ctx.currentTime;
   cabinLp.frequency.setTargetAtTime(CABIN.open * Math.pow(CABIN.shut / CABIN.open, k), t, 0.08);
   cabinShelf.gain.setTargetAtTime(CABIN.shelf * k, t, 0.08);
+}
+// An airliner's cabin (js/flight-sound.js) is a cabin too, but nobody in it is
+// driving, and js/caraudio.js sets the filter to 0 every frame it finds no
+// car. A hold is a floor under whatever anyone else asks for: 0 lets go.
+let cabinHold = 0;
+export function holdCabin(k) {
+  cabinHold = k > 0 ? (k < 1 ? k : 1) : 0;
+  if (cabinLp) { const was = cabinK; cabinK = -1; setCabin(was < 0 ? 0 : was); }
 }
 /** The street ducks under a fast car whichever engine voice is running. */
 export function engineDuck(speedMS) { if (ctx) duckSpeed(speedMS > 0 ? speedMS : 0); }

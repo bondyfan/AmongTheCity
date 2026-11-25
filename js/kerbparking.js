@@ -33,6 +33,8 @@
 // with a live object on it.
 
 import { pickCarColor } from './vehicles.js';
+import { laneSide } from './regions.js';
+const SIDE = laneSide();   // +1 keep right, -1 keep left (Mahé)
 import { strHash } from './identity.js';
 import { streetOf } from './geo.js';
 import { vergeAt, inZone, KERB_H } from './streets.js';
@@ -139,9 +141,12 @@ function rowStalls(city, r, row, rows, near, out) {
       // Traffic on the e = -1 side runs WITH the way (its right is (-dz, dx)), on
       // the other side against it; a one-way street runs with it on both. The
       // kerb is on the car's right whenever the car faces the way its side flows.
-      const fwd = e < 0 || !!r.ow;
+      // (where traffic keeps left, js/regions.js, the whole rule is mirrored:
+      // e' is the side as the mirror sees it, and the kerb lands on the left)
+      const e2 = e * SIDE;
+      const fwd = e2 < 0 || !!r.ow;
       const h = fwd ? Math.atan2(-dx, -dz) : Math.atan2(dx, dz);
-      const kerbRight = fwd ? e < 0 : true;
+      const kerbRight = (fwd ? e2 < 0 : true) === (SIDE > 0);
       out.push({ x, z, h: h + (rnd(x, z, 'kh') - 0.5) * 0.05, roll: kerbRight ? ROLL : -ROLL, s, car: null, burned: false });
       continue;
     }

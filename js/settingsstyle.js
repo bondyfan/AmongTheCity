@@ -93,4 +93,9 @@ export const SETTINGS_CSS = `
 .atc-opt input[type="range"] { width: 120px; accent-color: #7fa8e8; cursor: pointer; }
 .atc-set-note { font-size: 12px; opacity: 0.6; margin: 14px 2px 0; line-height: 1.5; }
 @media (max-width: 560px) { .atc-set-grid { grid-template-columns: 1fr; } }
+.atc-camp { grid-template-columns: 1fr; }
+.atc-camp-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; cursor: default; }
+.atc-camp-card small { display: block; opacity: 0.75; font-size: 12px; margin-top: 3px; }
+.atc-camp-card .atc-camp-state { opacity: 0.9; }
+.atc-camp-card .atc-camp-run { color: #ffd46c; white-space: nowrap; }
 `;
