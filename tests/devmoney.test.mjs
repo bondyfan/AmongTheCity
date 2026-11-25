@@ -71,7 +71,7 @@ test('every refusal has a Czech message', () => {
     assert.equal(typeof DEV_MONEY_WHY[why], 'string');
     assert.ok(DEV_MONEY_WHY[why].length > 3);
   }
-  for (const m of Object.values(DEV_MONEY_WHY)) assert.ok(!m.includes('—'), 'no em dash: ' + m);
+  for (const m of Object.values(DEV_MONEY_WHY)) assert.ok(!m.includes('\u2014'), 'no em dash: ' + m);
 });
 
 test('the quick buttons: about one flight among them, and each one valid', () => {
