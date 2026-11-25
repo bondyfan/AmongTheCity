@@ -131,6 +131,10 @@ export class Officers {
     this._rec = [];
     for (let i = 0; i < POOL_N; i++) this._rec.push(this._blank());
     this._bodies = [];            // built bodies not in use
+    /** How many men each unit's car carries (the most it ever put out). A man
+     *  down stays a record until the unit is dropped; the rest of the crew is
+     *  this number less the dead, in the car or out of it. */
+    this._crew = new Map();
     /** Officers currently out of their cars (read only, rebuilt per update). */
     this.out = [];
     this.stats = { deployed: 0, downs: 0 };
@@ -145,10 +149,17 @@ export class Officers {
     };
   }
 
-  /** How many officers of unit `u` are out of the car (down ones included). */
+  /** How many officers of unit `u` are out of the car and on their feet. */
   count(u) {
     let n = 0;
-    for (const r of this._rec) if (!r.free && r.unit === u) n++;
+    for (const r of this._rec) if (!r.free && r.unit === u && r.state !== 'down') n++;
+    return n;
+  }
+
+  /** How many of unit `u`'s officers are down for good (their records stay). */
+  dead(u) {
+    let n = 0;
+    for (const r of this._rec) if (!r.free && r.unit === u && r.state === 'down') n++;
     return n;
   }
 
@@ -158,23 +169,34 @@ export class Officers {
     return true;
   }
 
-  /** True when `u` has officers out and every one of them is down. */
+  /**
+   * True when nobody of `u`'s crew is left to drive: every man it ever put
+   * out is down. Not "every record still held is down": a partner who walked
+   * back to the car is freed from the records, and that read a car with a
+   * live man at the wheel as a hearse (review, 25 Nov 2026).
+   */
   allDown(u) {
-    let any = false;
-    for (const r of this._rec) {
-      if (r.free || r.unit !== u) continue;
-      if (r.state !== 'down') return false;
-      any = true;
-    }
-    return any;
+    const crew = this._crew.get(u) ?? 0;
+    return crew > 0 && this.dead(u) >= crew;
   }
 
-  /** Out of the car: `n` officers from unit `u` (whose `.car` is parked). */
+  /**
+   * Out of the car: `n` officers from unit `u` (whose `.car` is parked), or
+   * as many of its crew as are still alive. Returns how many got out: 0 when
+   * some are out already or nobody is left.
+   */
   deploy(u, n) {
     const car = u?.car;
     if (!car || this.count(u) > 0) return 0;
+    // a car that has lost nobody carries as many as the stars ask for (the
+    // partner rode along at one star too); once a man is down, the crew is
+    // what it was and the dead stay where they fell
+    const dead = this.dead(u), known = this._crew.get(u) ?? 0;
+    const crew = dead > 0 ? known : Math.max(known, n | 0);
+    const want = Math.min(n, crew - dead);
+    if (!(want > 0)) return 0;
     let made = 0;
-    for (let k = 0; k < n; k++) {
+    for (let k = 0; k < want; k++) {
       const r = this._rec.find((q) => q.free);
       if (!r) break;
       const h = car.heading ?? 0;
@@ -194,6 +216,7 @@ export class Officers {
       made++;
     }
     this.stats.deployed += made;
+    if (made > 0) this._crew.set(u, Math.max(crew, made + dead));
     return made;
   }
 
@@ -208,10 +231,12 @@ export class Officers {
   /** Gone this instant (the unit's car is being deleted). */
   dropUnit(u) {
     for (const r of this._rec) if (!r.free && r.unit === u) this._free(r);
+    this._crew.delete(u);
   }
 
   reset() {
     for (const r of this._rec) if (!r.free) this._free(r);
+    this._crew.clear();
     this.out.length = 0;
   }
 

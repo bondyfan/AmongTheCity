@@ -1947,9 +1947,12 @@ function updateStationCars(x, z) {
 // or a story film that has the camera and the body. The campaign's journey,
 // meeting and heist objects live for the whole chapter, so it is the film
 // itself that is asked (their `filming`), never whether a story exists.
+// Seat 14A too: seated in the airliner, or shuffling to or from it, the
+// player has no car, heli or jet and reads as on foot (flight.js cabinBusy).
 // The hands are the UI's (fistsBusy): the big map or any panel owns the mouse.
 function fistsTaken() {
-  return !!(vitals.down() || arrest || storyOver || journey?.filming || meeting?.filming || heist?.filming);
+  return !!(vitals.down() || arrest || storyOver || journey?.filming || meeting?.filming || heist?.filming
+    || flightNow()?.cabinBusy);
 }
 function fistsBusy() {
   return !!(worldMap?.open || document.body.dataset.panelOpen);

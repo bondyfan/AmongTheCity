@@ -352,6 +352,9 @@ export function createFlight(o) {
     get aboard() { return cabin.aboard(); },
     get flying() { return seq.phase !== 'stand' && seq.phase !== 'parked'; },
     get busy() { return trip.state !== 'none' && trip.state !== 'done'; },
+    /** The seat has the body: seated in 14A, or shuffling along the row to or
+     *  from it (js/main.js keeps the fists down meanwhile). */
+    get cabinBusy() { return cabin.busy; },
     get phase() { return seq.phase; },
     get trip() { return trip; },
     get plane() { return seq.m; },
