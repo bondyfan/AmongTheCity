@@ -4,8 +4,12 @@
 // lights out (pure: every player gets the same ones from the same data); this
 // draws them as camera-facing glows with the street lamps' own shader
 // (js/lightpools.js, cloned with its ATC_GROUND path), ONE InstancedMesh for
-// the airport of this page's region. Never THREE.Light objects: changing the
-// light count recompiles every material in the scene.
+// the airport being approached. The region of this page has its airports
+// (Pardubice and Prague in 'cz', Seychelles International on Mahé); the mesh
+// takes the lights of whichever one the camera or the airliner is near, and
+// lays them out again when that changes (they are 106 km apart, so never
+// both). Never THREE.Light objects: changing the light count recompiles every
+// material in the scene.
 //
 // What runs: nothing by day, nothing far from the airport. Within REACH of
 // the runway's middle (the camera, or the airliner flying near it) and from
@@ -14,7 +18,8 @@
 // the yellow caution zone, which show another colour from the other side,
 // the PAPI's white over red, the approach lights that face the approach only,
 // the flashers' sweep). Positions are written once and again only when the
-// terrain under them has loaded, or (at SEZ) when the tile's taxiways arrive.
+// terrain under them has loaded, or (at SEZ and Prague) when the tile's
+// taxiways arrive.
 //
 // Brightness: on from nightK (js/sky.js), held at the same level whatever the
 // night exposure is (the rule js/stationkit.js night() uses: a lamp that
@@ -23,10 +28,12 @@
 import * as THREE from 'three';
 import { EXPOSURE_DAY } from './sky.js';
 import * as PLAN from './airport-plan.js';
-import { lkpdLights, sezLights, lightColour, isDynamic } from './airport-lights-plan.js';
+import { LKPR_PLAN } from './flight-lkpr.js';
+import { CHUNK } from './config.js';
+import { lkpdLights, sezLights, lkprLights, lightColour, isDynamic } from './airport-lights-plan.js';
 
 const REACH = 16000;           // m from the runway's middle
-const MAX = 4096;              // instances (an airport has about a thousand)
+const MAX = 6144;              // instances (Pardubice about 600, Mahé 700, Prague 3 600)
 const ROADS_T = 1;             // s between looks for SEZ's taxiways in the tile
 const GROUND_T = 4;            // s between re-reads of the ground while near
 // live knobs (window.__atc.airportLights.tune from the console)
@@ -42,17 +49,30 @@ export const TUNE = {
   fall: 1 / 7000,              // brightness 1 / (1 + (d * fall)^2)
 };
 
+const half = (a, b) => ({ x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 });
+/**
+ * The airports of a region: each { id, centre (the main runway's middle),
+ * roads (how far round it the tile's taxiways are read, 0 for none), build(roads) }.
+ */
+export function sitesOf(region, mahe) {
+  if (region === 'mahe') {
+    const e = mahe?.runway?.ends;
+    return e ? [{ id: 'SEZ', centre: half(e['13'], e['31']), roads: 2600, build: (r) => sezLights(mahe, r) }] : [];
+  }
+  const R = PLAN.RUNWAY, P = LKPR_PLAN.runway;
+  return [
+    { id: 'LKPD', centre: { x: (R.a[0] + R.b[0]) / 2, z: (R.a[1] + R.b[1]) / 2 }, roads: 0, build: () => lkpdLights(PLAN) },
+    { id: 'LKPR', centre: half(P.threshold, P.far), roads: 4000, build: (r) => lkprLights(LKPR_PLAN, r) },
+  ];
+}
+
 export class AirportLights {
   /** `region` 'cz' or 'mahe'; `mahe` REGIONS.mahe.airport; `sea` the sea level (lamps over water stand on it) or null. */
   constructor(scene, { region, mahe = null, sea = null }) {
     this.scene = scene;
-    this.sez = region === 'mahe';
-    this.mahe = mahe;
+    this.sites = sitesOf(region, mahe);
+    this.site = null;           // the one whose lights the mesh holds
     this.sea = sea;
-    const e = mahe?.runway?.ends;
-    this.centre = this.sez
-      ? (e ? { x: (e['13'].x + e['31'].x) / 2, z: (e['13'].z + e['31'].z) / 2 } : null)
-      : { x: (PLAN.RUNWAY.a[0] + PLAN.RUNWAY.b[0]) / 2, z: (PLAN.RUNWAY.a[1] + PLAN.RUNWAY.b[1]) / 2 };
     this.mesh = null;
     this.src = null;
     this.lights = null;         // the plan's lights, once near
@@ -66,7 +86,7 @@ export class AirportLights {
 
   /** Take the lamp glows' shader from js/lightpools.js (main.js, once both exist). */
   attach(lightPools) {
-    if (this.mesh || !lightPools?.glowMat || !this.centre) return;
+    if (this.mesh || !lightPools?.glowMat || !this.sites.length) return;
     this.src = lightPools.glowMat;
     const mat = this.src.clone();
     delete mat.defines.STREET_LENS;
@@ -107,9 +127,9 @@ export class AirportLights {
     const nightK = sky?.nightK ?? 0;
     let on = (nightK - 0.08) / 0.3;
     on = on < 0 ? 0 : on > 1 ? 1 : on * on * (3 - 2 * on);
-    const c = this.centre, p = camera.position;
-    const near = Math.hypot(p.x - c.x, p.z - c.z) < REACH || (plane && Math.hypot(plane.x - c.x, plane.z - c.z) < REACH);
-    if (on <= 0.002 || !near) { m.visible = false; return; }
+    const p = camera.position, site = on > 0.002 ? this._nearest(p, plane) : null;
+    if (!site) { m.visible = false; return; }
+    if (site !== this.site) { this.site = site; this.lights = null; this._roadsKey = ''; }
     this._plan(dt, world);
     if (!this.lights?.length) { m.visible = false; return; }
     this._ground(dt, world);
@@ -134,31 +154,51 @@ export class AirportLights {
     m.visible = true;
   }
 
-  // the layout: once at Pardubice; at SEZ again whenever the tile's taxiways change
+  // the airport within REACH of the camera or the airliner, the nearest if two were
+  _nearest(p, plane) {
+    let best = null, bd = REACH;
+    for (const s of this.sites) {
+      let d = Math.hypot(p.x - s.centre.x, p.z - s.centre.z);
+      if (plane) d = Math.min(d, Math.hypot(plane.x - s.centre.x, plane.z - s.centre.z));
+      if (d < bd) { bd = d; best = s; }
+    }
+    return best;
+  }
+
+  /** The airport whose lights stand now ('LKPD', 'LKPR', 'SEZ'), or null. */
+  get siteId() { return this.site?.id ?? null; }
+
+  // the layout: once where it is all in the plan (Pardubice); where it takes
+  // the tile's taxiways, again whenever those change
   _plan(dt, world) {
-    if (!this.sez) {
-      if (!this.lights) this._take(lkpdLights(PLAN).lights);
+    const site = this.site;
+    if (!site.roads) {
+      if (!this.lights) this._take(site.build([]).lights);
       return;
     }
     if (this.lights && (this._roadsT -= dt) > 0) return;
     this._roadsT = ROADS_T;
-    const roads = this._sezRoads(world);
+    const roads = this._tileRoads(world, site);
     const key = roads.length + ':' + roads.reduce((a, r) => a + r.p.length * 7 + r.p[0][0], 0).toFixed(1);
     if (this.lights && key === this._roadsKey) return;
     this._roadsKey = key;
-    this._take(sezLights(this.mahe, roads).lights);
+    this._take(site.build(roads).lights);
   }
 
-  // SEZ's taxiway lines from the streamed tile (the same object may sit in several cells)
-  _sezRoads(world) {
-    const idx = world?.city?.chunkIndex, c = this.centre;
+  // the airport's taxiway lines from the streamed cells round it (the same
+  // object may sit in several cells)
+  _tileRoads(world, site) {
+    const idx = world?.city?.chunkIndex, c = site.centre, R = site.roads;
     if (!idx) return [];
     const seen = new Set(), out = [];
-    for (const cell of idx.values()) for (const r of cell.roads ?? []) {
-      if (r.t !== 'taxiway' || seen.has(r)) continue;
-      const q = r.p?.[0];
-      if (!q || Math.hypot(q[0] - c.x, q[1] - c.z) > 2600) continue;
-      seen.add(r); out.push(r);
+    const cx = Math.floor(c.x / CHUNK), cz = Math.floor(c.z / CHUNK), n = Math.ceil(R / CHUNK);
+    for (let i = -n; i <= n; i++) for (let j = -n; j <= n; j++) {
+      for (const r of idx.get((cx + i) + ',' + (cz + j))?.roads ?? []) {
+        if (r.t !== 'taxiway' || seen.has(r)) continue;
+        const q = r.p?.[0];
+        if (!q || Math.hypot(q[0] - c.x, q[1] - c.z) > R) continue;
+        seen.add(r); out.push(r);
+      }
     }
     // in the tile's own order, whatever order the cells were indexed in
     return out.sort((a, b) => a.p[0][0] - b.p[0][0] || a.p[0][1] - b.p[0][1]);
