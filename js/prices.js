@@ -287,7 +287,10 @@ export const PRICE = deepFreeze({
   // to Praha hl.n., charged as you board. UNVERIFIED: ČD's real fare was not
   // confirmed (the survey's search was inconclusive; RegioJet and Leo Express
   // are cheaper); the owner may set it.
-  train: { ticket: 169 },
+  // `local` is a single ride on any ordinary train, `fine` the conductor's
+  // surcharge for riding without a ticket, paid on top of the fare
+  // (js/tickets.js). Both are game numbers, not ČD's tariff.
+  train: { ticket: 169, local: 49, fine: 400 },
 
   // What the police take when they finally have you: charged per star at the
   // hospital door (js/career.js), where the stars are then cleared. Two stars

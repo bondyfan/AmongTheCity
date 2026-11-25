@@ -28,6 +28,7 @@
 // campaign, the free roam after it and co-op all follow the same rule.
 
 import * as wallet from './wallet.js';
+import { tickets } from './tickets.js';
 import * as vitals from './vitals.js';
 import * as fuel from './fuel.js';
 import * as wanted from './wanted.js';
@@ -337,6 +338,7 @@ function apply() {
   const s = state;
   if (s.savedAt > 0) {
     wallet.setMoney(s.money);
+    tickets.restore(s.tickets);
     vitals.restore(s.vitals);
     garage.restore(s.car, solo);
     if (solo && s.tod !== null) setSoloTime(s.tod);
@@ -372,6 +374,7 @@ function snapshot() {
   }
   return {
     money: wallet.money(),
+    tickets: tickets.snapshot(),
     prologue: state.prologue,
     heist: state.heist ?? null,
     storyTrip: state.storyTrip,
@@ -426,6 +429,7 @@ export function reloadLast() {
   const s = store.load().state;
   if (!(s?.savedAt > 0) || !s.pos) return null;
   wallet.setMoney(s.money);
+  tickets.restore(s.tickets);
   vitals.restore(s.vitals);
   try { jobs.load(s.jobs); } catch { /* an older save's board: keep the live one */ }
   wanted.clear();

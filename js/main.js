@@ -80,6 +80,10 @@ import { Clouds } from './clouds.js';
 import { WorldMap } from './worldmap.js';
 import { Trains } from './trains.js';
 import { trainPassengers } from './trainpeople.js';
+import { tickets, sayText } from './tickets.js';
+import { makePhone } from './phone.js';
+import { anyPanelOpen } from './panel.js';
+import { ticketApp } from './phone-tickets.js';
 import { Express, screenFade } from './express.js';
 import { Weapons } from './weapons.js';
 import { SpeedStreaks } from './speedfx.js';
@@ -344,6 +348,7 @@ let worldMap = null;   // the full-region map on M, and the waypoint it owns
 let trains = null;     // České dráhy on the real 532 km network
 let trainPeople = null; // who sits in the one near the player (js/trainpeople.js)
 let express = null;    // the R train Pardubice - Praha on top of them (js/express.js)
+let phone = null, ticketScreen = null;   // the player's phone and its ticket screen (js/phone.js, key L)
 let weapons = null;  // the rocket pod under that machine, and what it does to walls
 let streaks = null;  // the air, showing itself past 100 km/h
 let skids = null;    // …and the road, remembering what was done to it
@@ -1247,6 +1252,16 @@ function applyParkVisibility() {
 input.onKey('KeyT', () => {
   if (game.mode !== 'play' || document.body.dataset.panelOpen || storyOver) return;
   if (journey) journey.skip(); else (meeting ?? heist)?.skip();
+});
+// L takes the phone out (js/phone.js): the tickets for the trains. Not while
+// the campaign plays a scene (it has its own phone), and never over the map
+// or the settings.
+input.onKey('KeyL', () => {
+  if (game.mode !== 'play' || !phone || storyOver || arrest || vitals.down()) return;
+  if (phone.isOpen) { phone.close(); return; }
+  if (journey || meeting || heist) { ui_hint('Mobil teď nech v kapse'); return; }
+  if (document.body.dataset.panelOpen && !anyPanelOpen()) return;
+  phone.show(ticketScreen);
 });
 input.onKey('KeyN', () => {
   if (game.mode !== 'play' || !trains?.riding || trains.riding.halted) return;
@@ -2711,16 +2726,18 @@ function updateHud(dt) {
     else if (trains?.riding) {
       const t = trains.riding, act = trains.seatAction;
       const seat = act === 'sit' ? ' · <kbd>E</kbd> sednout si' : act === 'rise' ? ' · <kbd>E</kbd> vstát' : '';
+      const fare = tickets.hintAboard();
       hint.innerHTML = (t.label ? t.label + ' · ' : '') + (t.halted
         ? `<b>${t.stopName ?? 'Trať'}</b>` + (t.station ? ` · odjezd za ${Math.ceil(t.dwellLeft ?? 0)} s` : '') + seat
         : `Jedete do <b>${t.nextStopName ?? 'další stanice'}</b>` + seat
-          + (express?.skipping ? '' : ' · <kbd>N</kbd> do další stanice'));
+          + (express?.skipping ? '' : ' · <kbd>N</kbd> do další stanice')) + (fare ? ' · ' + fare : '');
       hint.classList.remove('hidden');
     }
     else if (!player.inCar && !journey && trains?.nearestBoardable?.(player.pos.x, player.pos.z, 9)?.station) {
       const t = trains.nearestBoardable(player.pos.x, player.pos.z, 9);
-      hint.innerHTML = (t.express ? t.label + ' · jízdenka ' + kc(PRICE.train.ticket) + ' · ' : '')
-        + (t.closed < 0.2 ? 'Nastup dveřmi' : 'Dveře se zavírají') + ` · odjezd za ${Math.ceil(t.dwellLeft ?? 0)} s`;
+      hint.innerHTML = (t.label ? t.label + ' · ' : '')
+        + (t.closed < 0.2 ? 'Nastup dveřmi' : 'Dveře se zavírají') + ` · odjezd za ${Math.ceil(t.dwellLeft ?? 0)} s`
+        + ' · ' + tickets.hintNear(t);
       hint.classList.remove('hidden');
     }
     else if (!player.inCar && !game.car && express?.hintAt(player.pos.x, player.pos.z)) {
@@ -3252,15 +3269,15 @@ async function boot() {
   trains = new Trains(scene, city, {
     terrain: world.terrain,   // (the terrain: trains ran 220 m underground)
     player,
-    // the express charges its ticket as he steps in (the other trains stay free)
-    onBoard: (t) => {
-      if (!t.express || t._paid) return;
-      t._paid = true;
-      if (!wallet.pay(PRICE.train.ticket, 'jízdenka')) ui_hint('Na jízdenku nemáš: jedeš načerno');
-    },
+    // every train wants a ticket, bought on the phone; the conductor checks it
+    // once the train has left (js/tickets.js)
+    onBoard: (t) => tickets.board(t),
     // the train is the one ride that showed the speedo without ever hiding it again
-    onAlight: () => $id('speedo').classList.add('hidden'),
+    onAlight: () => { $id('speedo').classList.add('hidden'); tickets.alight(); },
   });
+  tickets.say = (event, data) => { const t = sayText(event, data); if (t) policeToast(t.text, t); };
+  phone = makePhone({ clock: () => $id('tod-clock')?.textContent ?? '' });
+  ticketScreen = ticketApp({ tickets, trains, get express() { return express; }, player, money: wallet.money });
   // its floor, walls and doors, for the walker (js/city.js, js/railbarrier.js)
   world.rideDeck = trains.deck;
   trainPeople = trainPassengers(trains);
@@ -3786,6 +3803,8 @@ function stepGame(dt) {
   if (trains) trains.locked = !!journey;
   trains?.update(dt, focus);
   express?.update(dt, focus);
+  // the conductor: a ticket from the phone, the surcharge, or the platform
+  if (trains) tickets.update(dt, trains.riding, () => trains.alight());
   trainPeople?.update(dt, focus);
 
   if (game.jet) {
@@ -4542,6 +4561,7 @@ window.__atc = {
   get parked() { return parked; }, get peds() { return peds; }, get life() { return streetLife; },
   get cyclists() { return cyclists; },
   get trains() { return trains; }, get worldMap() { return worldMap; },
+  get tickets() { return tickets; }, get phone() { return phone; }, get ticketScreen() { return ticketScreen; },
   // multiplayer session (null in single player). net.onRemoteVehicle is wired
   // to the ghost fleet: a harness asserting "my friend is in a car" should ask
   // __atc.ghosts.pose(uid), not go looking for the car in traffic.

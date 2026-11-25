@@ -74,6 +74,9 @@ export function blank() {
     // Which autosave point wrote this save ('mission', 'sleep'), or '' for a
     // new game and for a save from before the points existed.
     point: '',
+    // Unused train tickets in the phone (js/tickets.js), kept with the money
+    // they were bought for: how many of each kind.
+    tickets: { os: 0, r: 0 },
   };
 }
 
@@ -119,7 +122,7 @@ export function sanitize(raw) {
   for (const [k, v] of Object.entries(obj(s.ach))) if (fin(v, 0) > 0) ach[str(k, 32)] = fin(v);
   const tips = {};
   for (const [k, v] of Object.entries(obj(onb.tips))) if (v) tips[str(k, 32)] = 1;
-  const wanted = obj(s.wanted);
+  const wanted = obj(s.wanted), tix = obj(s.tickets);
   return {
     v: SAVE_VERSION,
     savedAt: pos(s.savedAt),
@@ -156,6 +159,8 @@ export function sanitize(raw) {
       ? { stars: pos(s.owed.stars, 5) | 0 } : null,
     look: sanitizeLook(s.look),
     point: isPoint(s.point) ? s.point : '',
+    // 20 is the phone's own limit (js/tickets.js MAX_HELD)
+    tickets: { os: pos(tix.os, 20) | 0, r: pos(tix.r, 20) | 0 },
   };
 }
 

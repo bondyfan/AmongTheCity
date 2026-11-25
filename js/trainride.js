@@ -72,6 +72,16 @@ export function installRide(Trains, VMAX) {
       });
     },
 
+    /** The nearest station to (x, z) within r: { name, x, z, d }, or null (js/phone-tickets.js). */
+    stationNear(x, z, r = Infinity) {
+      let best = null, bd = r;
+      for (const p of this._stations) {
+        const d = Math.hypot(p.p[0] - x, p.p[1] - z);
+        if (d < bd) { bd = d; best = p; }
+      }
+      return best ? { name: best.n ?? 'Zastávka', x: best.p[0], z: best.p[1], d: bd } : null;
+    },
+
     /** The floor under the rider's feet, or null. */
     floorY() {
       const t = this.riding, at = this._at;

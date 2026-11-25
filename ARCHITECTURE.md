@@ -3066,3 +3066,38 @@ trains, pursuits and the ambient ambulance are local.
 
 Fleet: a room holds about 45 % more cars than one camera (84 against 58 at noon), the
 ghosts all round instead of in the cone.
+
+## A ticket for every train, bought on the phone (22 Nov 2026)
+
+Frank: "na každej vlak si musím koupit lístek ... vytáhnu mobil a tam si to koupím."
+
+* **The rule** (`js/tickets.js`, pure). A ticket is a single ride on one train, however
+  far, bought at any time and kept in the phone until used. Two kinds: `os` (any ordinary
+  train, `PRICE.train.local`) and `r` (the express, `PRICE.train.ticket`, also taken on an
+  ordinary train when nothing cheaper is held). Nobody is stopped at the door. Once the
+  train has run for `CHECK_AFTER` seconds (or as it stops at the next station, whichever
+  is first: N skips) the conductor checks: a ticket in the phone is marked and is good on
+  that train until the player leaves it, and for getting back on the same train
+  (`validOn`). Without one the fare and `PRICE.train.fine` are paid on the spot; without
+  the money for both, the player is put off at the next station with a platform
+  (`trains.alight()`), and nothing is taken.
+* **Wiring** (`js/main.js`): `Trains` `onBoard` and `onAlight` call `tickets.board(t)` and
+  `tickets.alight()`, the frame calls `tickets.update(dt, trains.riding, () =>
+  trains.alight())` right after the trains moved, `tickets.say` goes to the toasts
+  (`sayText`), and the two train hints end in `tickets.hintNear(t)` / `hintAboard()`. The
+  express no longer charges at its door.
+* **The phone** (`js/phone.js`, key L, listed in `#controls-hint`) is a panel
+  (`js/panel.js`: Escape, a click outside, one at a time, never keeps the mouse) in the
+  frame of the campaign's `.journey-phone`, rising from the bottom right; the game runs
+  on under it. A screen is `{ title, build(body), refresh(), key(digit) }`; the only one
+  is the tickets (`js/phone-tickets.js`): `ticketScreen()` is its content as plain data
+  (where he is, the trains standing or due there, the two tickets, what he holds, what
+  the conductor will make of him), `ticketApp()` draws it and refreshes it every 400 ms.
+  1 and 2 buy. L is refused while a campaign part runs (it has its own phone).
+  `trains.stationNear(x, z, r)` (in `js/trainride.js`) is the nearest station.
+* **The save.** Unused tickets are `tickets: { os, r }` in the save (`js/savegame.js`
+  `blank` and `sanitize`, no version step: an older save reads as none), written by
+  `career.snapshot()` beside the money and read back with it in `apply()` and
+  `reloadLast()`. The ride being ridden is not saved.
+* Harness: `__atc.tickets`, `__atc.phone`, `__atc.ticketScreen`. Tests:
+  `tests/tickets.test.mjs`.

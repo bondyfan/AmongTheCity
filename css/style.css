@@ -1433,3 +1433,54 @@ html, body { overscroll-behavior: none; touch-action: none; }
   background: #b9b5a7;
   box-shadow: 12px 0 #b9b5a7;
 }
+
+/* ---- the player's phone (js/phone.js, key L) ----
+   A panel (js/panel.js) in the dark frame of the campaign's phone
+   (.journey-phone), rising from the bottom right. The backdrop is barely
+   dimmed: the game runs on under it, and the train he is buying for leaves. */
+.atc-pn-back.atc-phone-back {
+  align-items: flex-end; justify-content: flex-end;
+  padding: 12px max(12px, 6vw) 0 12px; background: rgba(6, 9, 14, 0.2);
+}
+.atc-pn.atc-phone {
+  width: min(360px, 100%); height: min(640px, 92vh); max-height: none;
+  border: 6px solid #242931; border-bottom: 0; border-radius: 30px 30px 0 0;
+  background: linear-gradient(156deg, #2b4853, #173441 55%, #111f2a);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.65), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  animation: phoneUp 0.24s ease-out;
+}
+@keyframes phoneUp { from { transform: translateY(55%) rotate(5deg); opacity: 0.3; } }
+.atc-phone-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 22px 2px; font: 600 12px system-ui, sans-serif; color: #d5e2e8;
+  font-variant-numeric: tabular-nums;
+}
+.atc-phone-bar i { width: 26%; height: 6px; border-radius: 6px; background: #10181e; }
+.atc-phone .atc-pn-head { padding: 8px 18px 11px; }
+.atc-phone .atc-pn-head h2 { font-size: 18px; }
+.atc-phone .atc-pn-body { flex: 1; padding: 12px 14px 16px; }
+.atc-phone-where {
+  padding: 11px 13px; border-radius: 12px; margin-bottom: 10px;
+  background: rgba(8, 16, 22, 0.55); border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.atc-phone-where strong { display: block; font-size: 15.5px; color: #ffe2b0; }
+.atc-phone-where .ph-lines {
+  white-space: pre-line; font-size: 12.5px; line-height: 1.5; color: #c2d0d8; margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.atc-phone-where .ph-lines:empty { display: none; }
+.atc-phone-status {
+  padding: 8px 12px; border-radius: 10px; margin-bottom: 10px; font-size: 13px; font-weight: 700;
+  background: rgba(255, 255, 255, 0.07); line-height: 1.35;
+}
+.atc-phone-status.good { color: #9be8ab; background: rgba(86, 196, 110, 0.13); }
+.atc-phone-status.warn { color: #ffd166; background: rgba(255, 180, 84, 0.14); }
+.atc-phone .atc-pn-row { align-items: flex-start; gap: 9px; padding: 10px 11px; background: rgba(8, 16, 22, 0.45); }
+.atc-phone .atc-pn-row .pr-icon { font-size: 19px; width: 22px; }
+.atc-phone .atc-pn-row.bought { animation: phoneBought 0.7s ease-out; }
+.atc-phone .atc-pn-row.refused { animation: phoneRefused 0.35s ease-out; }
+@keyframes phoneBought { from { background: rgba(86, 196, 110, 0.5); } }
+@keyframes phoneRefused { 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+@media (max-width: 650px) {
+  .atc-pn-back.atc-phone-back { justify-content: center; padding: 8px 8px 0; }
+}
