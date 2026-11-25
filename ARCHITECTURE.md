@@ -3234,6 +3234,63 @@ Tests: `tests/flight.test.mjs` (with SEZ's real tile for the taxi routes),
 `tests/airport-terminal.test.mjs`. `dev/airportprobe.js` walks the whole trip
 from a console for a harness.
 
+### The lights after dark (js/airport-lights*.js, 25 Nov 2026)
+
+A landing whose arrival hour falls at night came down onto two dark runways:
+the paint was all there was. Now both airports light up from dusk.
+
+* **The layout is data** (`js/airport-lights-plan.js`, pure, worker safe):
+  `lkpdLights(plan)` from js/airport-plan.js (`RUNWAY` a, mid, b and width,
+  `TAXI_OUT` and `TAXI_IN` from where they leave the apron), `sezLights(desc,
+  roads)` from `REGIONS.mahe.airport` and the Mahé tile's taxiway lines (15 m
+  wide and over; the narrow service ways stay dark). Pardubice is the Czech
+  eAIP's AD 2.14/2.15 as read on 25 Nov 2026: edge lights 60 m apart and 1.5 m
+  outside the paving, yellow for the last 600 m; green thresholds that are red
+  ends from the runway, no wing bars, no centreline; 27 a PALS CAT I of 794.5 m
+  (barrettes every 30 m, Calvert crossbars at 150 to 750 m) with a flashing
+  light system, 09 a SALS of 420 m; PAPI left of each runway at 3 degrees; blue
+  taxiway edges 60 m apart on the straight and 7 m in the turns. SEZ's lighting
+  is not published where it could be read: the same edges and rows, a 600 m CAT
+  I system off 13 over the sea without flashers, PAPI left at both ends, nothing
+  off 31. Centreline lights (white, red and white from 900 m, red for the last
+  300) are there for a runway that has them; neither does today.
+* **A light shows what a real fixture shows.** Each one is `{ kind, x, z, h, c,
+  b, nx, nz, papi?, flash? }`: `b` is the colour seen from behind it (where
+  (eye - light) . n < 0), so a threshold row is green from the approach and red
+  from the runway, an edge light in the caution zone is yellow toward the end it
+  warns of and white back, and the approach lights and PAPI face the approach
+  only. `lightColour(L, eye, ly, t)` also gives the PAPI box its white over red
+  (the box nearest the runway set at 3.5 degrees, then 3.17, 2.83, 2.5: on the
+  path two white, two red; the PAPI stands abeam js/flight-profile.js's aiming
+  point, 300 m in, so the airliner's own glide path reads RRWW) and the
+  flashers their sweep toward the threshold twice a second.
+* **The drawing** (`js/airport-lights.js`, `AirportLights`, built in main.js
+  next to the lamp glows and updated right after them) is ONE InstancedMesh
+  for the airport of this page's region, drawn with js/lightpools.js's glow
+  shader cloned with `ATC_GROUND`: the quad stands on its lamp rather than
+  around it (seen from kilometres away at a grazing angle the lower half of a
+  lamp's quad is under the paving in front of it), a lamp past the far plane is
+  drawn at it, the same size on screen, and a lamp is seen through `fogK`
+  (0.12) of the haze in front of it and not through the wall at all (a bright
+  point carries through air that hides a building; the wall hides the
+  streamed edge, it is not weather, and from 9 km out on final at night the
+  whole airport stands behind it). Never
+  THREE.Light objects. Shown from dusk (`sky.nightK`) within 16 km of the
+  runway's middle (the camera, or the airliner flying near it); its level is
+  held against the night exposure the way stationkit's `night()` holds its
+  lamps (times EXPOSURE_DAY over the exposure of the moment). Positions are
+  written once and again when the terrain under them loads (or SEZ's taxiways
+  stream in); once a frame only the few hundred lights whose colour depends on
+  the eye or the clock are rewritten. Knobs: `__atc.airportLights.tune`.
+* **Co-op**: the same data gives the same lights on every machine (SEZ's tile
+  roads are sorted before they are laid out), so nothing goes on the wire.
+
+Tests: `tests/airport-lights.test.mjs` (counts, spacing, colours from both
+sides, the PAPI at 1.5 to 4.2 degrees, the rabbit, taxiway lights never on a
+runway or on another taxiway, SEZ's real tile). `dev/airportprobe.js` has
+`final(dir, hour)` (straight onto final, landing at that local hour) and
+`cockpit()` (a pilot's eye for `view` and `shot`).
+
 ## A ticket for every train, bought on the phone (22 Nov 2026)
 
 Frank: "na každej vlak si musím koupit lístek ... vytáhnu mobil a tam si to koupím."
