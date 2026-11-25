@@ -55,6 +55,7 @@ import { storyStart, newTrip, street, stationEntry, stationExit, kolinPlatform, 
 import { start as heistStart } from './heist-route.js';
 import { retry } from './story-retry.js';
 import { region, regionId, arrival } from './regions.js';
+import { airportMarks } from './airport-marks.js';
 
 const store = browserStore();
 
@@ -747,6 +748,8 @@ function rebuildMarks(x, z) {
   for (const p of pumps) if (Math.abs(p.x - x) < 6000 && Math.abs(p.z - z) < 6000)
     marks.push({ x: p.x, z: p.z, kind: 'fuel', rim: false });
   jobs.marks(marks);
+  // the airports the flight leaves from (js/airport-marks.js)
+  for (const m of airportMarks()) marks.push(m);
   const c = garage.car;
   if (c && h.game.car !== c) marks.push({ x: c.x, z: c.z, kind: 'car', rim: true });
 }

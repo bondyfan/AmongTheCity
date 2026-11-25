@@ -15,23 +15,42 @@
 // the taxi, the take-off) is js/flight.js; this file only knows where the
 // PASSENGER is in it.
 //
-// THE TWO FLIGHTS. Pardubice (PED) to the Seychelles (SEZ) is about 7 800 km:
-// no narrowbody does it in one, and nobody flies it direct, so the trip is
-// sold with a stop in Dubai, about ten hours door to door, as the brief asks.
-// The carrier is invented (the game copies no airline): its code is ATC.
+// THE FLIGHTS. Pardubice (PED) or Prague (PRG) to the Seychelles (SEZ) is
+// about 7 800 km: no narrowbody does it in one, and nobody flies it direct, so
+// the trip is sold with a stop in Dubai, about ten hours door to door, as the
+// brief asks. The carrier is invented (the game copies no airline): its code
+// is ATC. Each route names the airport it leaves from (`home`, the id
+// js/flight-life.js builds the aircraft at), where the passenger reappears
+// after the page switch (`spawn`, js/regions.js), the key of its announcements
+// (`pa`, js/flight-announce-lines.js) and the Czech for going there and being
+// there, because Czech declines its place names.
 
 import { PRICE } from './prices.js';
 
+const SEZ_SIDE = { to: 'SEZ', toName: 'Mahé (Seychely)', via: 'Dubaj', tzShift: 3, region: 'mahe', spawn: 'sez-arrival',
+  dest: 'sez', toward: 'na Mahé', at: 'na Mahé', welcome: 'Vítej na Mahé' };
 export const ROUTES = {
   out: {
-    dir: 'out', no: 'ATC 740', from: 'PED', to: 'SEZ', fromName: 'Pardubice', toName: 'Mahé (Seychely)',
-    via: 'Dubaj', fare: PRICE.flight.mahe, gate: '2', seat: '14A', hours: 10.2, tzShift: 3, region: 'mahe',
+    dir: 'out', no: 'ATC 740', pa: '740', from: 'PED', fromName: 'Pardubice', home: 'LKPD', port: 'Letiště Pardubice',
+    fare: PRICE.flight.mahe, gate: '2', seat: '14A', hours: 10.2, ...SEZ_SIDE,
+  },
+  prgOut: {
+    dir: 'prgOut', no: 'ATC 750', pa: '750', from: 'PRG', fromName: 'Praha', home: 'LKPR', port: 'Letiště Václava Havla Praha',
+    fare: PRICE.flight.mahe, gate: 'B 6', seat: '14A', hours: 10.0, ...SEZ_SIDE,
   },
   home: {
-    dir: 'home', no: 'ATC 741', from: 'SEZ', to: 'PED', fromName: 'Mahé', toName: 'Pardubice',
-    via: 'Dubaj', fare: PRICE.flight.mahe, gate: '1', seat: '14A', hours: 10.6, tzShift: -3, region: 'cz',
+    dir: 'home', no: 'ATC 741', pa: '741', from: 'SEZ', to: 'PED', fromName: 'Mahé', toName: 'Pardubice', home: 'SEZ', port: 'Letiště Mahé',
+    via: 'Dubaj', fare: PRICE.flight.mahe, gate: '1', seat: '14A', hours: 10.6, tzShift: -3, region: 'cz', spawn: 'pce-arrival',
+    dest: 'ped', toward: 'do Pardubic', at: 'v Pardubicích', welcome: 'Vítej doma v Pardubicích',
+  },
+  homePrg: {
+    dir: 'homePrg', no: 'ATC 751', pa: '751', from: 'SEZ', to: 'PRG', fromName: 'Mahé', toName: 'Praha', home: 'SEZ', port: 'Letiště Mahé',
+    via: 'Dubaj', fare: PRICE.flight.mahe, gate: '1', seat: '14A', hours: 10.4, tzShift: -3, region: 'cz', spawn: 'prg-arrival',
+    dest: 'prg', toward: 'do Prahy', at: 'v Praze', welcome: 'Vítej doma v Praze',
   },
 };
+/** The routes that leave from airport `home` ('LKPD', 'LKPR', 'SEZ'). */
+export const routesFrom = (home) => Object.values(ROUTES).filter((r) => r.home === home);
 const ORDER = ['none', 'ticket', 'airside', 'boarding', 'aboard', 'seated', 'flying', 'arrived', 'done'];
 
 export function newTrip() {

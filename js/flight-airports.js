@@ -1,4 +1,4 @@
-// ---- flight-airports.js: the two ends of the trip, in one shape ----
+// ---- flight-airports.js: the ends of the trip, in one shape ----
 // Pure data and arithmetic. The flight (js/flight.js) never asks "am I in
 // Pardubice": it asks the airport it is at for a departure runway, a taxi
 // route out, an outbound track, a landing runway, the taxi route in and the
@@ -15,6 +15,7 @@
 import { RUNWAY, LINEUP, TAXI_OUT, TAXI_IN, EXIT_27, STAND } from './airport-plan.js';
 import { headingOf } from './flight-path.js';
 import { taxiNetwork, nearestNode, shortest } from './flight-taxiways.js';
+import { prague } from './flight-lkpr.js';
 
 const bearing = (deg) => -deg * Math.PI / 180; // compass bearing → heading (ARCHITECTURE.md)
 const [ax, az] = RUNWAY.a, [bx, bz] = RUNWAY.b;
@@ -110,9 +111,14 @@ export function seychelles(desc, roadsFn = null) {
   };
 }
 
-/** The airport at the far end of a route: the real SEZ when the region gives one, else the placeholder. */
-export function destinationOf(route, mahe = null, roadsFn = null) {
+/**
+ * The airport at the far end of a route: Pardubice, Prague (js/flight-lkpr.js),
+ * or the real SEZ when the region gives one, else the placeholder.
+ * `roadsNear(stand)` gives the mapped taxiways round a stand, as they stream in.
+ */
+export function destinationOf(route, mahe = null, roadsNear = null) {
   if (route.to === 'PED') return { airport: LKPD, placeholder: false };
-  const sez = seychelles(mahe, roadsFn);
+  if (route.to === 'PRG') return { airport: prague(roadsNear), placeholder: false };
+  const sez = seychelles(mahe, roadsNear && mahe?.stand ? () => roadsNear(mahe.stand) : null);
   return sez ? { airport: sez, placeholder: false } : { airport: LKPD, placeholder: true };
 }

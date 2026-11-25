@@ -130,9 +130,12 @@ import { fillCampaigns } from './campaignmenu.js';
 // the airport and the flight to the Seychelles (js/flight-life.js says what it owns)
 import { airportLife } from './flight-life.js';
 import { SPAWNS as AIRPORT_SPAWNS } from './airport-plan.js';
-// Pardubice's two spawns for the flight home ('pce-airport', 'pce-arrival'): every page
-// knows them, so the one on Mahé can send the passenger back to final for 27
+import { PRG_SPAWNS } from './flight-lkpr.js';
+// Pardubice's two spawns for the flight home ('pce-airport', 'pce-arrival') and
+// Prague's ('prg-airport', 'prg-arrival'): every page knows them, so the one on
+// Mahé can send the passenger back to final for 27 or for 24
 registerSpawns('cz', AIRPORT_SPAWNS);
+registerSpawns('cz', PRG_SPAWNS);
 import { hours as storyHours } from './prologue-route.js';
 import { staminaHud } from './stamina.js';
 import { exitHudText, setExitLine } from './mwhud.js';
