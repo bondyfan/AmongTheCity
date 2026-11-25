@@ -16,6 +16,8 @@
 // session, so the section re-attaches on demand rather than exactly once.
 
 import { CAR_KINDS } from './vehicles.js';
+import { DEV_QUICK, DEV_MONEY_WHY, parseDevAmount, quickLabel } from './devmoney.js';
+import { kc } from './prices.js';
 
 export const isDevMode = () => /(^|[?&])devmode(=|&|$)/.test(location.search);
 
@@ -90,8 +92,29 @@ const CSS = `
   flex: 1; padding: 6px 8px; border-radius: 6px; background: #0f1725;
   color: #dbe7f6; border: 1px solid #33425c; font: 500 12.5px system-ui, sans-serif;
 }
-.atc-dev-row .atc-dev-btn { width: auto; flex: 0 0 auto; }
+/* the id is needed to beat "#atc-dev-grid .atc-dev-btn { width: 100% }": without
+   it the Spawnout button took the whole row and the dev tab scrolled sideways */
+#atc-dev-grid .atc-dev-row .atc-dev-btn { width: auto; flex: 0 0 auto; }
 .atc-set-h3.atc-dev-h3 { color: #ffb454; }
+#atc-dev-money { display: grid; gap: 8px; margin-bottom: 12px; }
+#atc-dev-money .atc-dev-row { grid-column: auto; }
+#atc-dev-money input {
+  flex: 1; min-width: 0; padding: 7px 9px; border-radius: 6px; background: #0f1725;
+  color: #dbe7f6; border: 1px solid #33425c; font: 500 13px system-ui, sans-serif;
+}
+#atc-dev-money input:focus { outline: none; border-color: #ffb454; }
+#atc-dev-money .atc-dev-quick { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; }
+#atc-dev-money .atc-dev-btn {
+  padding: 8px 10px; cursor: pointer; font: 600 12.5px/1.2 system-ui, sans-serif;
+  color: #dbe7f6; background: #1d2636; border: 1px solid #33425c; border-radius: 8px;
+}
+#atc-dev-money .atc-dev-btn:hover { background: #26334a; border-color: #4a6288; }
+#atc-dev-money .atc-dev-btn:active { transform: translateY(1px); }
+#atc-dev-money .atc-dev-add { color: #0b111b; background: #ffb454; border-color: #ffb454; }
+#atc-dev-money .atc-dev-add:hover { background: #ffc477; border-color: #ffc477; }
+#atc-dev-money .atc-dev-msg { margin: 0 2px; font: 500 12px/1.4 system-ui, sans-serif; color: #8ea3c0; }
+#atc-dev-money .atc-dev-msg.ok { color: #7fd18a; }
+#atc-dev-money .atc-dev-msg.bad { color: #ff8a7a; }
 
 `.replace('#2a3purple', '#2a3550');
 
@@ -171,12 +194,103 @@ function mountPose(actions, host) {
   });
 }
 
+// ---- money for testing -----------------------------------------------------
+// Paid things (first the flight to Mahé, about 20 000 Kč) have to be tried
+// without earning the fare first. The field takes any whole amount, the quick
+// buttons the usual ones; js/devmoney.js says what counts as an amount and
+// main.js's addMoney() pays it as a plain wallet.earn().
+function mountMoney(actions, host) {
+  if (document.getElementById('atc-dev-money')) return;
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+  const btn = (cls, text, fn) => {
+    const b = el('button', 'atc-dev-btn' + (cls ? ' ' + cls : ''), text);
+    b.type = 'button';
+    b.addEventListener('click', fn);
+    return b;
+  };
+
+  const box = el('div');
+  box.id = 'atc-dev-money';
+  const field = el('input');
+  field.type = 'text';                 // not "number": "20 000" with a gap is how Czech writes it
+  field.inputMode = 'numeric';
+  field.placeholder = 'Částka v Kč';
+  field.autocomplete = 'off';
+  field.setAttribute('aria-label', 'Kolik peněz přidat (Kč)');
+  const msg = el('p', 'atc-dev-msg');
+
+  // The answer to a press stays up for a few seconds, then the line goes
+  // back to the live balance.
+  let holdUntil = 0;
+  const say = (text, kind) => {
+    msg.textContent = text;
+    msg.classList.toggle('ok', kind === 'ok');
+    msg.classList.toggle('bad', kind === 'bad');
+    holdUntil = kind ? performance.now() + 4000 : 0;
+  };
+  const balance = () => {
+    const m = actions.money?.();
+    return Number.isFinite(m) ? 'Na účtu ' + kc(m) + '.' : '';
+  };
+  const give = (n) => {
+    const after = actions.addMoney?.(n);
+    if (!Number.isFinite(after)) { say('Nejdřív spusť hru, v menu se peníze nepřidávají.', 'bad'); return false; }
+    say('Přidáno ' + quickLabel(n) + '. Na účtu ' + kc(after) + '.', 'ok');
+    return true;
+  };
+  const submit = () => {
+    const r = parseDevAmount(field.value);
+    if (!r.ok) { say(DEV_MONEY_WHY[r.why], 'bad'); field.focus(); return; }
+    if (give(r.amount)) field.value = '';
+  };
+
+  // Typing here must not drive the game: input.js listens on window and
+  // would take the digits and the letters as key presses. Escape still
+  // closes the panel, because settings.js catches it in the capture phase,
+  // before it ever reaches this field.
+  field.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+  });
+  field.addEventListener('keyup', (e) => e.stopPropagation());
+
+  const row = el('div', 'atc-dev-row');
+  row.append(field, btn('atc-dev-add', 'Přidat', submit));
+  const quick = el('div', 'atc-dev-quick');
+  for (const n of DEV_QUICK) quick.appendChild(btn('', quickLabel(n), () => give(n)));
+
+  const h = el('h3', 'atc-set-h3 atc-dev-h3', '💰 Peníze');
+  box.append(row, quick, msg);
+  // under the pose readout, above the traffic rows: it is the other thing
+  // this tab gets opened for
+  const after = document.getElementById('atc-dev-copy');
+  if (after?.parentNode === host) after.after(h, box);
+  else host.prepend(h, box);
+
+  // The balance line keeps up with spending elsewhere (a ticket bought with
+  // the panel shut, a pump), on a timer for the same reason as the pose.
+  setInterval(() => {
+    if (holdUntil && performance.now() < holdUntil) return;
+    if (holdUntil) say('');
+    const b = balance();
+    if (msg.textContent !== b) msg.textContent = b;
+  }, 500);
+}
+
 /**
  * actions: {
  *   teleport(place) — place is one of DEV_PLACES
  *   spawnCar(kind)  — kind is a CAR_KINDS entry
  *   pose()          — { x, y, z, lat, lon, headingDeg, pitchDeg, tile, chunk,
  *                       ride, place } for the readout
+ *   addMoney(n)     : earn n whole koruna; → the new balance, or null when
+ *                     there is no game to give it to yet
+ *   money()         : the balance, for the line under the money buttons
  * }
  * Safe to call repeatedly; it re-attaches only when the section is missing.
  */
@@ -196,6 +310,7 @@ export function initDevMode(actions) {
     // where you are and what you are looking at, first: it is the thing you
     // open this tab for while something is going wrong
     mountPose(actions, body);
+    mountMoney(actions, body);
 
     const h = document.createElement('h3');
     h.className = 'atc-set-h3 atc-dev-h3';
