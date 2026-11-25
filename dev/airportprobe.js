@@ -121,6 +121,24 @@ export function shot(name, eye = null, look = null, W = 1280, H = 720, fov = 60)
   return url.length;
 }
 
+/**
+ * Straight onto final with the passenger in 14A, landing at local hour `h`
+ * (0..24, e.g. 23.5 for a night landing): 'home' comes down on 27 at
+ * Pardubice, 'out' on 13 at SEZ (from a page opened with ?region=mahe).
+ */
+export async function final(dir = 'home', h = 23.5) {
+  const T = await import('/js/flight-trip.js');
+  const carry = T.carryFor({ ...T.newTrip(), state: 'flying', dir, no: T.ROUTES[dir].no, seat: '14A' }, { dep: 0.4, arr: h / 24 });
+  A().airport.resume(carry);
+  return carry;
+}
+/** A pilot's eye: the airliner's nose, looking `ahead` m along its heading and `down` degrees under the horizon. */
+export function cockpit(ahead = 2000, down = 3.2) {
+  const m = flight().plane, fx = -Math.sin(m.heading), fz = -Math.cos(m.heading);
+  const eye = [m.x + fx * 17, m.y + 4.2, m.z + fz * 17];
+  return [eye, [eye[0] + fx * ahead, eye[1] - Math.tan(down * Math.PI / 180) * ahead, eye[2] + fz * ahead]];
+}
+
 /** The whole way from the counter to seat 14A, as the player does it. → the trip's state at each step. */
 export function toSeat() {
   const log = [];

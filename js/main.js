@@ -133,6 +133,7 @@ import { createHeist } from './heist.js';
 import { fillCampaigns } from './campaignmenu.js';
 // the airport and the flight to the Seychelles (js/flight-life.js says what it owns)
 import { airportLife } from './flight-life.js';
+import { AirportLights } from './airport-lights.js';   // runway, approach and taxiway lights after dark
 import { SPAWNS as AIRPORT_SPAWNS } from './airport-plan.js';
 import { PRG_SPAWNS } from './flight-lkpr.js';
 // Pardubice's two spawns for the flight home ('pce-airport', 'pce-arrival') and
@@ -199,6 +200,7 @@ let world = null, player = null, vehicles = null, traffic = null, sky = null, mi
 let journey = null, meeting = null, vasekCar = null;
 let heist = null;        // part two of the campaign (js/heist.js), after the saved end of part one
 let airport = null;      // js/flight-life.js: the terminal, the airliner and the trip, near an airport
+let airportLights = null; // js/airport-lights.js: the airport's lights at night
 const flightNow = () => airport?.flight ?? null;
 // the airliner as something the streamer must keep up with (not at cruise: nothing below is seen)
 const airFlier = () => { const f = flightNow(); return f?.flying && f.phase !== 'cruise' ? f.plane : null; };
@@ -2565,6 +2567,17 @@ async function initDev() {
         parked.push(car);
         ui_hint?.('🚗 ' + kind);
       },
+      // Money for testing paid things (the flight to Mahé). An ordinary
+      // earning: the HUD tickers it, the next autosave point keeps it, and in
+      // co-op it is this player's wallet only, as every wallet is. Refused at
+      // the menu, because the save is put into the game on its first step
+      // (career.js apply) and would replace whatever was given before it.
+      addMoney(n) {
+        if (game.mode !== 'play') return null;
+        wallet.earn(n, 'dev');
+        return wallet.money();
+      },
+      money: () => wallet.money(),
     };
     initDevMode(actions);
     // ?tp=x,z[,heading] — stand exactly where a report was filed. Every bug in
@@ -3333,6 +3346,8 @@ async function boot() {
   trees.setQuality(getSettings());
   sky = makeSky(scene, renderer);
   lightPools = new LightPools(scene);
+  airportLights = new AirportLights(scene, { region: regionId(), mahe: REGIONS.mahe.airport, sea: region().sea?.level ?? null });
+  airportLights.attach(lightPools);
   farSkyline = new FarSkyline(scene, world);
   farTerrain = new FarTerrain(scene, world.terrain);
   // (an island region: the ocean to the horizon, coloured by its lagoon map)
@@ -4267,6 +4282,7 @@ function stepGame(dt) {
   updateSky(sky, skyTod(), camera, scene,
     world?.terrain?.heightAt?.(camera.position.x, camera.position.z) ?? (camera.position.y - 6));
   lightPools?.update(dt, camera, world, sky, renderer.domElement.height, traffic?.cars, game.car, getSettings().flare !== false);
+  airportLights?.update(dt, camera, world, sky, renderer.domElement.height, airFlier());
   updateHud(dt);
 
   // ---- the body, the wallet, the tank ----
@@ -4783,6 +4799,7 @@ window.__atc = {
   get postfx() { return postfx; },
   get heli() { return heli; }, get clouds() { return clouds; },
   get sky() { return sky; }, get lightPools() { return lightPools; },
+  get airportLights() { return airportLights; },
   openness, get farTerrain() { return farTerrain; },
   get settings() { return getSettings(); },
   // A/B of the ground's street-level detail: __atc.groundDetail.value = 0 / 1

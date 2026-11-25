@@ -177,6 +177,14 @@ const GLOW_VERT = /* glsl */`
   #ifdef STREET_LENS
     varying float vResolved;
   #endif
+  #ifdef ATC_GROUND
+    // js/airport-lights.js: lamps a few decimetres over a runway, seen from
+    // kilometres away and at a grazing angle (see there)
+    uniform float uVista;   // past this depth a light is drawn at it, the same size on screen
+    uniform float uLift;    // the quad's centre stands this share of its radius above the lamp
+    uniform float uFogK;    // a lamp is seen through this share of the haze in front of it
+    uniform float uFall;    // brightness 1 / (1 + (depth * uFall)^2)
+  #endif
   varying vec2 vP;
   varying vec3 vCol;
   varying float vK;
@@ -200,9 +208,29 @@ const GLOW_VERT = /* glsl */`
     float fade = 1.0 - smoothstep(uRange * 0.80, uRange, depth);
     if (uNear > 0.0) fade *= smoothstep(uNear * 0.80, uNear, depth);
     vK = fade * mix(1.0, min(1.0, (uSize * uSize) / (size * size) * 3.0), uGive);
+    #ifdef ATC_GROUND
+      // A lamp on the ground seen from far off is a quad many metres across
+      // whose lower half is under the paving in front of it, so it is drawn
+      // standing on the lamp instead of centred on it (a pixel's shift from a
+      // kilometre); one beyond the far plane is drawn at uVista, scaled with it.
+      vec3 trueMv = mvPosition.xyz;
+      vK /= 1.0 + depth * depth * uFall * uFall;
+      mvPosition.y += size * uLift;
+      if (depth > uVista) { float q = uVista / depth; mvPosition.xyz *= q; size *= q; }
+    #endif
     mvPosition.xy += position.xy * size;
     gl_Position = projectionMatrix * mvPosition;
     #include <fog_vertex>
+    #ifdef ATC_GROUND
+      #ifdef USE_FOG
+        // the haze where the lamp really is, thinned: a bright point carries
+        // through air that hides a building. Not the wall: it hides the
+        // streamed edge, it is not weather, and from 9 km out on final the
+        // whole airport stands behind it.
+        vFogDepth = 0.0;
+        vAtcRay = (vec4(trueMv * uFogK, 0.0) * viewMatrix).xyz;
+      #endif
+    #endif
   }`;
 const GLOW_FRAG = /* glsl */`
   uniform float uOn;
