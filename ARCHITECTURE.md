@@ -2342,6 +2342,17 @@ hora) has something to stand on. Small modules round `js/player.js`:
   still (`onArrest`). main.js `busted()` kneels the player (`player.held`),
   shows ZATČEN and steps back to the last save (`career.reloadLast`); in the
   campaign, which is not saved, it is the campaign's own restart.
+  The card's clock is `js/arrest-card.js` (`arrestCard`, `arrestStep`,
+  `arrestLift`; `pumpArrest` only does what each step does). **SEJMUT
+  overrides ZATČEN**: a death on his knees (police gunfire does not ask about
+  handcuffs) drops the arrest at once, in the death handler (`dropArrest`) and
+  again in the clock, so the death owns the body: the hospital in free roam,
+  the restart in the campaign. Before 25 Nov 2026 the arrest ran on, stepped
+  the down body back to the last save, and the hospital then moved it again
+  and stacked its fee on the reset. A campaign replay is not raised during an
+  arrest (`replayCampaign` asks `arrest` before and after its await), and the
+  clock lets go if a campaign card is up in free roam all the same.
+  `tests/arrest-card.test.mjs`.
 * **Sounds**: `scripts/gen-move-audio.mjs` (ElevenLabs, run only when asked).
   Until the files exist `audio.sfxOr` plays the old door pair instead.
 * **Looking at it**: `dev/moves.html` stages one car and the player on a flat

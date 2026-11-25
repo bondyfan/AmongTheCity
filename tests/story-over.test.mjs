@@ -128,8 +128,8 @@ test('the card as it was, blind to the body, leaves that second death down for g
 
 test('a death under a card that came up over a living man is undone by the move and starts nothing after it', () => {
   // The card of failStory('busted') or failStory('train'): he is alive under
-  // it. The arrest itself (main.js pumpArrest) is not driven here, only what
-  // it ends in, the same failStory. Then he is run over 0.1 s before the move.
+  // it. The arrest itself is driven in tests/arrest-card.test.mjs; here it is
+  // what it ends in, the same failStory. Then he is run over 0.1 s before the move.
   const g = campaign();
   g.built = true;
   g.fail();
@@ -247,5 +247,5 @@ test('main.js asks the same rule where a death goes, card included, and again be
   assert.match(bed, /wallet\.pay\(PRICE\.hospital\.fee, 'nemocnice'\);\s+vitals\.revive\(\);/, 'the ordinary bed is as it was');
   // a replay never comes up over a body that is down, not even after its await
   const replay = main.slice(main.indexOf('async function replayCampaign('), main.indexOf("window.addEventListener('atc:campaigns'"));
-  assert.match(replay, /if \(storyOver \|\| vitals\.down\(\) \|\| !career\.canReplay\(part\)\) return false;/);
+  assert.match(replay, /if \(storyOver \|\| arrest \|\| vitals\.down\(\) \|\| !career\.canReplay\(part\)\) return false;/);
 });
