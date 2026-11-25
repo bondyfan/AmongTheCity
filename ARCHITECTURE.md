@@ -2191,6 +2191,16 @@ save has part one and not part two. Like part one it is played in one sitting:
 * **Failing** goes through main.js `failStory`: with a heist it shows
   `heist.failText(why)`, stands the player where `heist.rewind()` says (the
   villa's gate once reached, else Vašek's street) and plays on.
+* **The black card's clock** is `js/story-over.js` (`overCard`, `dueMove`,
+  `dueLift`; main.js `pumpStoryOver` only does what the move does). The body
+  goes back at 1.4 s, the card lifts once the start is built and 3.4 s have
+  passed, or after 30 s. `dueMove` is given `vitals.down()` every frame: a
+  death UNDER the card (he stands alive at the start while it is still being
+  built) puts the card back before its move, so he is moved and revived again
+  1 s later. Before 25 Nov 2026 that second death was dropped (`failStory`
+  returns while a card is up) and he stayed down until a reload. The death
+  handler's 2.2 s timer asks `vitals.down()` too, so a death the card already
+  undid starts nothing once the card has lifted. `tests/story-over.test.mjs`.
 * **The balaclava** (`js/heist-mask.js`) hangs on `parts.headS`, a head socket
   added to the modelled human beside the two hand sockets.
 * **Sound**: `scripts/gen-heist-audio.mjs` (ElevenLabs, run only when asked).
