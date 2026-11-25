@@ -16,7 +16,7 @@
 //
 // A CAMPAIGN'S BLACK CARD OWNS HIM TOO. A replay raised while he is held
 // would be reset to the last save by the arrest a moment before it starts;
-// main.js replayCampaign refuses during an arrest, and this clock lets go if
+// main.js startCampaign refuses during an arrest, and this clock lets go if
 // a card is up all the same.
 // Pure: no three.js, no world. Tested in tests/arrest-card.test.mjs.
 

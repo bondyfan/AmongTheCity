@@ -37,7 +37,7 @@ function campaign({ watch = true, seesCard = true, chapter = 'bridge', journeys 
     } });
   };
   g.fail = fail;
-  // the Kampaně tab: a card over a finished save (main.js replayCampaign)
+  // the Kampaně tab: a card over a finished save (main.js startCampaign)
   g.replay = (part) => { if (g.card || vitals.down()) return false; g.card = overCard({ replay: part }); g.cards++; return true; };
   g.frame = () => {
     g.now += DT;
@@ -231,7 +231,7 @@ test('main.js runs its card on this clock and asks the body before it fails the 
   assert.ok(pump.indexOf('vitals.revive()') > pump.indexOf('dueMove('), 'the revive is part of the move');
   assert.ok(!/o\.t \+= dt|o\.moved = true/.test(pump), 'no second clock beside it');
   // a replay begins once: the second move of its card goes where the first went
-  assert.match(pump, /at = o\.at \?\?= career\.beginReplay\(o\.replay\)/);
+  assert.match(pump, /at = o\.at \?\?= career\.beginPart\(o\.replay\)/);
   assert.equal(main.match(/storyOver = overCard\(/g)?.length, 2, 'both cards are made by the clock');
   assert.match(main, /if \(game\.mode === 'play' && vitals\.down\(\)\) failStory\('death'\);/);
 });
@@ -246,6 +246,6 @@ test('main.js asks the same rule where a death goes, card included, and again be
   assert.ok(bed.indexOf('inStory()') < bed.indexOf('nearestHospital('), 'asked before he is moved or billed');
   assert.match(bed, /wallet\.pay\(PRICE\.hospital\.fee, 'nemocnice'\);\s+vitals\.revive\(\);/, 'the ordinary bed is as it was');
   // a replay never comes up over a body that is down, not even after its await
-  const replay = main.slice(main.indexOf('async function replayCampaign('), main.indexOf("window.addEventListener('atc:campaigns'"));
-  assert.match(replay, /if \(storyOver \|\| arrest \|\| vitals\.down\(\) \|\| !career\.canReplay\(part\)\) return false;/);
+  const replay = main.slice(main.indexOf('async function startCampaign('), main.indexOf("window.addEventListener('atc:campaigns'"));
+  assert.match(replay, /if \(storyOver \|\| arrest \|\| vitals\.down\(\) \|\| !career\.canStart\(part\)\) return false;/);
 });

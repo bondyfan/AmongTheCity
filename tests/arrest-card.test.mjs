@@ -214,7 +214,7 @@ test('main.js runs the card on this clock, lets go on a death, and guards the re
   const down = main.slice(main.indexOf('vitals.onDown((cause) => {'), main.indexOf('const chapter = career.activeStory();'));
   assert.ok(down.indexOf('dropArrest();') > 0 && down.indexOf('dropArrest();') < down.indexOf('const inStory'));
   // both guards of the replay, before and after its await
-  const replay = main.slice(main.indexOf('async function replayCampaign('), main.indexOf("window.addEventListener('atc:campaigns'"));
+  const replay = main.slice(main.indexOf('async function startCampaign('), main.indexOf("window.addEventListener('atc:campaigns'"));
   assert.match(replay, /if \(game\.mode !== 'play' \|\| net \|\| storyOver \|\| arrest \|\| journey \|\| meeting \|\| heist \|\| vitals\.down\(\)\) return false;/);
-  assert.match(replay, /if \(storyOver \|\| arrest \|\| vitals\.down\(\) \|\| !career\.canReplay\(part\)\) return false;/);
+  assert.match(replay, /if \(storyOver \|\| arrest \|\| vitals\.down\(\) \|\| !career\.canStart\(part\)\) return false;/);
 });

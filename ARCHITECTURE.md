@@ -3220,14 +3220,34 @@ se mu ty penize neprictou".
   `career.campaigns()` lists the parts for the tab; `canReplay` refuses an unfinished part, a
   running campaign, co-op and a start in Prague. A replay marks the retry (T skips films).
   After a replayed part one, part two does not follow (its 'done' was never touched).
-* **Starting one** (js/main.js `replayCampaign`): the same black card and move a failure
-  makes (`storyOver` with `replay`), to Kolín's street or to Vašek's door; part one's maker
-  (`journeyFactory`) is loaded on demand, part two is made by the loop as after part one.
+* **Starting one** (js/main.js `startCampaign`): the same black card and move a failure
+  makes (`storyOver` with `replay`, which `career.beginPart` turns into a replay or a first
+  play), to Kolín's street or to Vašek's door; part one's maker (`journeyFactory`) is loaded
+  on demand, part two is made by the loop once `career.heistPending()` says it runs.
+* **Every part has an end, and the next waits at its start** (Frank, 25 Nov 2026: "ty mise
+  musí mít vždycky konec, a ne, že to automaticky začne další mise"). js/campaignparts.js
+  lists the parts (`PARTS`: id, title, start `at`, place) and their end card
+  (`endCard`: "Část N · Konec"), which the table film and the deal film show, a skip (T)
+  included. Part two is DUE once part one is saved as done and RUNS only once started
+  (`heistOn`, in memory): at its start mark, or as a replay. So a save made between the
+  parts, or by an older build that started part two on its own, opens in free roam.
+  `career.nextPart()` is the first unfinished part when nothing runs; js/career.js puts it
+  on both maps (mark kind 'story', a diamond, js/mapmarks.js), js/campaignmark.js stands an
+  amber column with the part's name at its start, and main.js `pumpCampaignStart` walks it
+  through `gateStep`: inside 3.2 m on foot (6 m at the wheel) starts the part, but only once
+  he has been outside it. The gate is told every frame, a closed start included, so the end
+  of part one, which stands him ON part two's start, begins nothing.
+* **Quitting** (js/main.js `quitCampaign`, `career.quitCampaign`): from the tab, a second
+  click confirms. No card and no restart: the part's objects go, the story clock lets go,
+  and he stays where he stands, off any story deck (`quitSpot`: the roof in Kolín to its
+  street, the coach to its platform, the villa's rooms to the ground). Nothing is written. A
+  first play is unfinished again and waits at its start; a replay leaves the part finished.
 * **The tab** (js/campaignmenu.js): js/settings.js has a page 'Kampaně' and raises
   `atc:campaigns` with the empty page each time it is opened; main.js fills it. One card a
-  part, the reward and whether it was paid, "Hrát znovu", and "Ukončit opakování" (a reload:
-  nothing of a replay is on disk).
-* Tests: `tests/campaigns.test.mjs`.
+  part, the reward and whether it was paid, "Hrát znovu" for a finished part, "Další na
+  řadě" with its place and "Navigovat na start" for the part that waits, and "Ukončit
+  kampaň" or "Ukončit opakování" while a part runs.
+* Tests: `tests/campaigns.test.mjs`, `tests/campaignflow.test.mjs`.
 
 ## Regions: Mahé is its own world (js/regions.js, js/mahe/, Nov 2026)
 

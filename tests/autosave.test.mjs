@@ -136,8 +136,12 @@ test('the campaign writes nothing before its end, and its end is the mission poi
   assert.equal(c.activeStory(), 'done', 'the finished campaign started again');
   assert.deepEqual([h.player.pos.x, h.player.pos.z], [1213, 1448]);
 
-  // part two (js/heist.js) is pending from here: nothing is written while it
-  // runs, and its end is the next mission point
+  // part two (js/heist.js) waits at its start by Vašek's door (Frank, 25 Nov
+  // 2026: a part never begins by itself); once started nothing is written while
+  // it runs, and its end is the next mission point
+  assert.equal(c.heistPending(), false, 'part two started by itself');
+  assert.equal(c.nextPart()?.id, 'part2');
+  assert.deepEqual(c.beginPart('part2'), { x: 1213.6, z: 1448, h: -Math.PI / 2 });
   assert.equal(c.heistPending(), true);
   play(c, h, 10, 3);
   assert.equal(c.autosave('mission'), false, 'an autosave in the middle of part two');

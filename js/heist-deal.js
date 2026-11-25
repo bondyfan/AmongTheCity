@@ -1,3 +1,4 @@
+import { endCard } from './campaignparts.js';
 import * as THREE from 'three';
 import { storyRecording, storyDuck } from './audio.js';
 import { voiceToMouth } from './characters/mouth.js';
@@ -165,10 +166,14 @@ export function dealScene({ scene, player, hud, lights, set, friend, done, note 
       return true;
     },
     // T after a failed mission (js/story-retry.js)
+    // T: the talk goes, the part's end card stays (Frank, 25 Nov 2026: every
+    // part has its end); the street at noon follows it as always
     skip() {
       if (!live) return false;
-      hud.veil(false);
-      finish();
+      if (beat !== 'end') {
+        quiet('end');
+        hud.veil(true, endCard('part2')[0], note ?? endCard('part2')[1]);
+      }
       return true;
     },
     update(dt) {
@@ -192,7 +197,7 @@ export function dealScene({ scene, player, hud, lights, set, friend, done, note 
       } else if (beat === 'out') {
         if (age > SILENT.out) {
           quiet('end');
-          hud.veil(true, 'Konec druhé části', note ?? 'Poslední vlak');
+          hud.veil(true, endCard('part2')[0], note ?? endCard('part2')[1]);
         }
       } else if (beat === 'end' && age > 4.8) finish();
     },

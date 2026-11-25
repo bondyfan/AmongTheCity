@@ -132,6 +132,9 @@ import * as career from './career.js';
 import { meetVasek } from './prologue-parking.js';
 import { createHeist } from './heist.js';
 import { fillCampaigns } from './campaignmenu.js';
+import { startGate, gateStep, quitSpot } from './campaignparts.js';
+import { campaignMark } from './campaignmark.js';
+import { storyClock } from './prologue-clock.js';
 // the airport and the flight to the Seychelles (js/flight-life.js says what it owns)
 import { airportLife } from './flight-life.js';
 import { AirportLights } from './airport-lights.js';   // runway, approach and taxiway lights after dark
@@ -263,32 +266,82 @@ async function journeyFactory() {
     // how many cars the street has so far: the film waits for the number to settle
     crowd: () => parked.length + (traffic?.cars?.size ?? 0) });
 }
-// A FINISHED CAMPAIGN PLAYED AGAIN (the Kampaně tab, js/campaignmenu.js): the
-// same black card and the same move a failure makes, to the start of the part
-// he chose. js/career.js keeps the save as it was until the replay's own end.
-async function replayCampaign(part) {
+// A PART OF THE CAMPAIGN BEGINS (js/campaignparts.js): the one that waits at
+// its start mark, walked or driven into, or a finished one played again from
+// the Kampaně tab (js/campaignmenu.js). The same black card and the same move
+// a failure makes, to the start of the part. js/career.js keeps the save as it
+// was until the part's own end.
+async function startCampaign(part) {
   // (not in handcuffs either: the arrest steps back to the last save, and would
   // take the replay's money, tickets and jobs back with it a moment before it starts)
   if (game.mode !== 'play' || net || storyOver || arrest || journey || meeting || heist || vitals.down()) return false;
-  if (!career.canReplay(part)) return false;
+  if (!career.canStart(part)) return false;
   if (game.heli || game.jet) { ui_hint('Nejdřív přistaň a vystup'); return false; }
+  const again = career.canReplay(part);
   if (part === 'part1') await journeyFactory();
-  if (storyOver || arrest || vitals.down() || !career.canReplay(part)) return false;
+  if (storyOver || arrest || vitals.down() || !career.canStart(part)) return false;
   const veil = document.createElement('div');
   veil.className = 'story-over';
-  veil.innerHTML = '<div><strong></strong><span>Kampaň začíná znovu</span></div>';
+  veil.innerHTML = '<div><strong></strong><span></span></div>';
   veil.querySelector('strong').textContent = part === 'part1' ? 'Poslední vlak · část 1' : 'Poslední vlak · část 2';
+  veil.querySelector('span').textContent = again ? 'Kampaň začíná znovu' : 'Kampaň začíná';
   document.body.append(veil);
   requestAnimationFrame(() => veil.classList.add('on'));
   storyOver = overCard({ veil, replay: part });
   return true;
 }
+// QUIT THE PART THAT RUNS (Frank, 25 Nov 2026: "kampan se musi dat ukoncit..
+// asi v nastaveni - kampan a tam ukoncit"). No card and no restart: he stays
+// in free roam where he stands, off whatever deck the story stood him on; a
+// part played for the first time waits at its start again (js/career.js).
+function quitCampaign() {
+  if (game.mode !== 'play' || net || storyOver || arrest || vitals.down()) return false;
+  if (!journey && !meeting && !heist && !career.replayOf()) return false;
+  const chapter = career.activeStory(), aboard = !!journey?.aboard;
+  journey?.dispose(); journey = null;
+  meeting?.close?.(); meeting = null;
+  heist?.close(); heist = null;
+  if (!career.quitCampaign()) return false;
+  storyClock.release();
+  document.body.classList.remove('story-cinema');
+  heistHost.quiet(null);
+  player.held = null;
+  if (player.ragdoll) player.endRagdoll();
+  const ground = world.heightAt(player.pos.x, player.pos.z);
+  const at = quitSpot({ chapter, aboard, inCar: !!(game.car || player.inCar), x: player.pos.x, z: player.pos.z, y: player.y, ground });
+  if (at) {
+    if (!at.drop) { player.pos.x = at.x; player.pos.z = at.z; }
+    player.y = world.heightAt(player.pos.x, player.pos.z);
+    player.vy = 0;
+    camInit = false;
+  }
+  campaignGate.armed = false;          // not straight back into the part he left
+  policeToast('Kampaň ukončena', { icon: '🎬', ms: 8000,
+    sub: career.nextPart() ? 'Můžeš ji začít znovu na jejím startu · značka na mapě' : 'Uložená hra se nemění' });
+  return true;
+}
+// The start of the part that waits: its mark in the world and the gate into it.
+const campaignGate = startGate();
+let startMark = null;
+function pumpCampaignStart(dt) {
+  const next = game.mode === 'play' && !net ? career.nextPart() : null;
+  if (next || startMark) {
+    startMark ??= campaignMark(scene);
+    startMark.update(dt, next, next ? world.heightAt(next.at.x, next.at.z) : 0, player.pos.x, player.pos.z);
+  }
+  // (the gate is told every frame, a closed start included: while a part runs,
+  // or a card is up, it forgets the mark, so the part that waits again after
+  // it never begins under his feet: part one ends ON part two's start)
+  const open = next && !storyOver && !arrest && !journey && !meeting && !heist && !vitals.down() && !game.heli && !game.jet;
+  if (gateStep(campaignGate, open ? next : null, player.pos.x, player.pos.z, !!(game.car || player.inCar))) startCampaign(next.id);
+}
 window.addEventListener('atc:campaigns', (e) => {
   const { box, close } = e.detail;
-  fillCampaigns(box, { ...career.campaigns(), inGame: game.mode === 'play', net: !!net }, {
-    play: (id) => { close(); replayCampaign(id); },
-    // nothing of a replay is on disk: the saved game is one reload away
-    quit: () => location.reload(),
+  fillCampaigns(box, { ...career.campaigns(), next: career.nextPart(), inGame: game.mode === 'play', net: !!net }, {
+    play: (id) => { close(); startCampaign(id); },
+    quit: () => { close(); quitCampaign(); },
+    // the navigation to the start of the part that waits
+    route: (p) => { close(); worldMap?.setWaypoint?.(p.at.x, p.at.z); ui_hint('Navigace: ' + p.place); },
   });
 });
 function failStory(why) {
@@ -337,7 +390,7 @@ function pumpStoryOver(dt) {
     let at;
     if (heist) at = heist.rewind();
     // (a replay begins once: a second move of the same card goes where the first went)
-    else if (o.replay) at = o.at ??= career.beginReplay(o.replay) ?? { x: player.pos.x, z: player.pos.z };
+    else if (o.replay) at = o.at ??= career.beginPart(o.replay) ?? { x: player.pos.x, z: player.pos.z };
     else { career.restartStory(); at = career.startPoint(); }
     if (Number.isFinite(at.h) && (heist || o.replay === 'part2')) player.heading = at.h;
     player.pos.x = at.x; player.pos.z = at.z;
@@ -4022,6 +4075,7 @@ function stepGame(dt) {
   airport?.update(dt, sky?.nightK ?? 0);
   pumpStoryOver(dt);
   pumpArrest(dt);
+  pumpCampaignStart(dt);
   carjack?.update(dt, player.pos.x, player.pos.z, game.car);
   if (meeting?.finished) { meeting.close(); meeting = null; }
   const focus = game.car ?? player.pos;
@@ -4353,7 +4407,8 @@ function stepGame(dt) {
     meeting ??= meetVasek(vasekCar, scene, world, worldMap, career.checkpointStory, player);
     meeting.update(player, dt);
   }
-  // part two begins where part one was saved, and is saved again at its end
+  // part two runs once it has been started (at its mark by Vašek's door, or as
+  // a replay: js/career.js heistPending), and is saved again at its end
   if (!heist && !meeting && !journey && !storyOver && career.heistPending())
     heist = createHeist({ scene, world, player, map: worldMap, input, traffic, host: heistHost,
       complete: career.completeHeist, reward: career.heistRewardNote });

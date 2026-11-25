@@ -56,6 +56,7 @@ import { start as heistStart } from './heist-route.js';
 import { retry } from './story-retry.js';
 import { region, regionId, arrival } from './regions.js';
 import { airportMarks } from './airport-marks.js';
+import { PARTS, partOf } from './campaignparts.js';
 
 const store = browserStore();
 
@@ -138,6 +139,12 @@ export function checkpointStory(stage) {
     replaying = null;
     toast('Kampaň zopakována', { icon: '🎬', sub: 'Poslední vlak, část 1', ms: 7000 });
   }
+  if (stage === 'done') tellNext();
+}
+// The part that waits now, said once when the last one ends (js/campaignparts.js).
+function tellNext() {
+  const p = nextPart();
+  if (p) toast('Další: ' + p.title, { icon: '🎬', sub: 'Začíná: ' + p.place + ' · značka na mapě', ms: 9000 });
 }
 /** The campaign from its first frame again: a new platform, a full countdown. */
 export function restartStory() {
@@ -147,12 +154,18 @@ export function restartStory() {
 const partOneRunning = () => !!state?.prologue && state.prologue !== 'done' && solo && !freeroam && startPick !== 'praha';
 const storyRunning = () => partOneRunning() || heistPending();
 
-// PART TWO (js/heist.js) follows the saved end of part one and is played in
-// one sitting like it: nothing is written while it runs, and the next write is
-// the one that says it is over. A save that ends at Vašek's table therefore
-// opens on his street at half past four in the morning.
+// PART TWO (js/heist.js) is DUE once part one is saved as done, and RUNS only
+// once it has been started: at its start mark by Vašek's door, from the
+// Kampaně tab, or as a replay (Frank, 25 Nov 2026: a part never begins by
+// itself when the last one ends). It is played in one sitting like part one:
+// nothing is written while it runs, and the next write says it is over. The
+// start lives in memory, so a save made between the parts, or by an older
+// build that started part two on its own, opens in free roam with the mark.
+let heistOn = false;
+const campaignHere = () => !!state && solo && !freeroam && startPick !== 'praha' && region().czech;
+const heistDue = () => campaignHere() && state.prologue === 'done' && state.heist !== 'done';
 export function heistPending() {
-  return !!state && solo && !freeroam && startPick !== 'praha' && region().czech && state.prologue === 'done' && state.heist !== 'done';
+  return heistOn && heistDue();
 }
 export function completeHeist() {
   retry.clear();
@@ -170,7 +183,9 @@ export function completeHeist() {
   }
   state.heist = 'done';
   replaying = null;
+  heistOn = false;
   if (applied) autosave('mission');      // part two is a mission completed too
+  tellNext();
 }
 /** What finishing part two would pay now: the briefcase, or 0 once it has been paid. */
 export function heistReward() {
@@ -194,15 +209,53 @@ export const replayOf = () => replaying;
 export function campaigns() {
   const able = !!state && solo && startPick !== 'praha' && applied;
   const busy = partOneRunning() || heistPending();
+  const done = { part1: state?.prologue === 'done', part2: state?.heist === 'done' };
   return {
     able, busy, replaying,
-    list: [
-      { id: 'part1', title: 'Poslední vlak · část 1', sub: 'Z Kolína posledním vlakem za Vaškem',
-        done: state?.prologue === 'done' || replaying === 'part1', reward: 0, paid: false },
-      { id: 'part2', title: 'Poslední vlak · část 2', sub: 'Auto pod Kunětickou horou',
-        done: state?.heist === 'done' || replaying === 'part2', reward: PRICE.story.briefcase, paid: !!state?.heistPaid },
-    ],
+    running: partOneRunning() ? 'part1' : heistPending() ? 'part2' : null,
+    list: PARTS.map((p) => ({ id: p.id, title: p.title, sub: p.sub, place: p.place,
+      done: done[p.id] || replaying === p.id,
+      reward: p.id === 'part2' ? PRICE.story.briefcase : 0, paid: p.id === 'part2' && !!state?.heistPaid })),
   };
+}
+/**
+ * The part that waits at its start mark: the first one not yet finished, or
+ * null (all done, one running, a replay on, co-op, Prague, free roam, Mahé).
+ * { id, n, title, sub, at: { x, z, h }, place } (js/campaignparts.js).
+ */
+export function nextPart() {
+  if (!campaignHere() || !applied || partOneRunning() || heistPending() || replaying) return null;
+  if (state.prologue !== 'done') return partOf('part1');
+  if (state.heist !== 'done') return partOf('part2');
+  return null;
+}
+/** May this part be started now: a finished one again, or the one that waits. */
+export const canStart = (part) => canReplay(part) || nextPart()?.id === part;
+/**
+ * Start `part`: the replay of a finished one, or the first play of the one
+ * that waits. Returns where it begins ({ x, z, h? }), or null. main.js moves
+ * the player there under the black card, as for a replay.
+ */
+export function beginPart(part) {
+  if (canReplay(part)) return beginReplay(part);
+  if (nextPart()?.id !== part) return null;
+  if (part === 'part1') { beginStory(); return startPoint(); }
+  heistOn = true;
+  return { ...partOf('part2').at };
+}
+/**
+ * QUIT THE PART THAT RUNS (Frank, 25 Nov 2026: "kampan se musi dat ukoncit").
+ * Nothing is written: a part is saved only at its end, so the save on disk is
+ * already the game from before it began. A first play is unfinished again and
+ * waits at its start; a replay leaves the part finished as it was. Whatever
+ * happened meanwhile in the live game (money, the clock) stays.
+ */
+export function quitCampaign() {
+  if (!partOneRunning() && !heistPending() && !replaying) return false;
+  if (partOneRunning()) state.prologue = replaying === 'part1' ? 'done' : null;
+  if (heistOn) { heistOn = false; if (replaying === 'part2') state.heist = 'done'; }
+  replaying = null;
+  return true;
 }
 /** May this part be started again now? Only a finished one, and never over a running one. */
 export function canReplay(part) {
@@ -221,6 +274,7 @@ export function beginReplay(part) {
   retry.mark();                // he has seen its films: T skips them
   if (part === 'part1') { beginStory(); return startPoint(); }
   state.heist = null;          // part two is pending again; the save still says done
+  heistOn = true;
   return { ...PART_ONE_END };
 }
 
@@ -509,7 +563,7 @@ export function autosave(point) {
   return write(point, storyRunning());
 }
 // `held`: a story still running holds the write back. The end of part one
-// passes only partOneRunning(), because part two is pending from that frame on.
+// passes only partOneRunning() (false by then): part two is not running.
 function write(point, held) {
   if (!isPoint(point) || !applied || !h || vitals.down() || held) return false;
   // where you stand NOW: a mission's end may have just put you somewhere
@@ -753,6 +807,9 @@ function rebuildMarks(x, z) {
   jobs.marks(marks);
   // the airports the flight leaves from (js/airport-marks.js)
   for (const m of airportMarks()) marks.push(m);
+  // the part of the campaign that waits at its start (js/campaignparts.js)
+  const next = nextPart();
+  if (next) marks.push({ x: next.at.x, z: next.at.z, kind: 'story', rim: true, label: next.title });
   const c = garage.car;
   if (c && h.game.car !== c) marks.push({ x: c.x, z: c.z, kind: 'car', rim: true });
 }

@@ -5,13 +5,14 @@
 // drawn by one function, and each map only decides WHERE.
 //
 // A mark is { x, z, kind, rim? }:
-//   kind  'courier' | 'taxi' | 'car' | 'fuel' | 'goal' | 'airport'
+//   kind  'courier' | 'taxi' | 'car' | 'fuel' | 'goal' | 'airport' | 'story'
 //   rim   true = when it is off the minimap window, pin a chevron to the rim
 //         on its bearing (your own car wants this, forty job offers do not)
 //
 // Shapes differ as well as colours, so the marks survive a colour-blind
 // reader and a 150 px phone minimap: square parcel, round fare, pentagon car,
-// small drop for fuel, ring for the introduction's goal.
+// small drop for fuel, ring for the introduction's goal, a diamond with an
+// eye for the start of the campaign's next part (js/campaignparts.js).
 
 const TAU = Math.PI * 2;
 const DARK = 'rgba(14,18,26,0.92)';
@@ -23,6 +24,7 @@ export const MARK_COLOR = {
   fuel: '#7fb6ff',
   goal: '#cfe0ff',
   airport: '#b9a4ff',
+  story: '#ffc860',
 };
 
 /** Draw one mark centred on (sx, sy). `s` is its half-size in canvas pixels. */
@@ -45,6 +47,12 @@ export function drawMark(g, kind, sx, sy, s) {
     g.lineTo(sx - s * 0.72, sy + s);
     g.lineTo(sx - s, sy - s * 0.2);
     g.closePath();
+  } else if (kind === 'story') {
+    g.moveTo(sx, sy - s * 1.3);
+    g.lineTo(sx + s * 1.1, sy);
+    g.lineTo(sx, sy + s * 1.3);
+    g.lineTo(sx - s * 1.1, sy);
+    g.closePath();
   } else if (kind === 'fuel') {
     g.moveTo(sx, sy - s * 1.1);
     g.quadraticCurveTo(sx + s * 1.1, sy + s * 0.2, sx, sy + s * 0.95);
@@ -54,7 +62,7 @@ export function drawMark(g, kind, sx, sy, s) {
   }
   g.fill();
   g.stroke();
-  if (kind === 'taxi' || kind === 'goal') {          // the dark eye: a marker, not a dot
+  if (kind === 'taxi' || kind === 'goal' || kind === 'story') {          // the dark eye: a marker, not a dot
     g.beginPath();
     g.arc(sx, sy, s * 0.34, 0, TAU);
     g.fillStyle = DARK;

@@ -182,8 +182,10 @@ test('what cannot be replayed: an unfinished part, a co-op game, a start in Prag
   assert.equal(c.canReplay('part1'), false, 'the campaign is still being played');
   assert.equal(c.beginReplay('part1'), null);
   for (const stage of ['station', 'coach', 'arrival', 'forecourt', 'done']) c.checkpointStory(stage);
-  assert.equal(c.canReplay('part1'), false, 'part two is running');
+  assert.equal(c.canReplay('part1'), true, 'part one is finished and part two only waits at its start');
   assert.equal(c.canReplay('part2'), false, 'never finished');
+  c.beginPart('part2');
+  assert.equal(c.canReplay('part1'), false, 'part two is running');
   c.completeHeist();
   assert.equal(c.canReplay('part1'), true);
   assert.equal(c.canReplay('nothing'), false);
@@ -208,9 +210,9 @@ test('the tab: one card a campaign, the reward and that it is paid once, and it 
   assert.match(src('settings.js'), /atc:campaigns/);
   const main = src('main.js');
   assert.match(main, /addEventListener\('atc:campaigns'/);
-  assert.match(main, /career\.beginReplay\(o\.replay\)/);
+  assert.match(main, /career\.beginPart\(o\.replay\)/);
   assert.match(main, /reward: career\.heistRewardNote/);
-  assert.match(src('heist-deal.js'), /hud\.veil\(true, 'Konec druhé části', note \?\? 'Poslední vlak'\)/);
+  assert.match(src('heist-deal.js'), /hud\.veil\(true, endCard\('part2'\)\[0\], note \?\? endCard\('part2'\)\[1\]\);/);
   for (const f of ['campaignmenu.js', 'career.js', 'settings.js'])
     assert.ok(!src(f).includes(String.fromCharCode(0x2014)) || f !== 'campaignmenu.js', 'an em dash in ' + f);
 });

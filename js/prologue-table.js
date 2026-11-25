@@ -1,3 +1,4 @@
+import { endCard } from './campaignparts.js';
 import * as THREE from 'three';
 import { voiceToMouth } from './characters/mouth.js';
 import { tableTalk, hospitalMessage } from './prologue-dialogue.js';
@@ -98,7 +99,8 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
       voice?.stop();
       hud.say();
       hud.action();
-      hud.veil(true, 'Konec první části', 'Poslední vlak');
+      // the part's own end (js/campaignparts.js): nothing follows it by itself
+      hud.veil(true, ...endCard('part1'));
     }
   }
   function next() {
@@ -146,10 +148,17 @@ export function tableScene({ scene, world, player, hud, lights, set, friend, don
       if (beat === 'ask') enter('sit');
       return true;
     },
-    // T after a failed mission (js/story-retry.js): the job is known, out he goes
+    // T after a failed mission (js/story-retry.js): the job is known, so the
+    // talk goes; the part's end card stays (Frank, 25 Nov 2026: every part
+    // has its end), and the street follows it as always
     skip() {
       if (!live) return false;
-      finish();
+      if (beat !== 'end') {
+        ++token;
+        voice?.stop();
+        hud.phone();
+        enter('end');
+      }
       return true;
     },
     update(dt) {
