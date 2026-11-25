@@ -29,6 +29,7 @@ import { NameTags } from './nametags.js';
 import { strHash, lookForUid, baseUid, localUid, shortId } from './identity.js';
 import { sanitizeLook, setLookFor } from './characters/appearance.js';
 import { setEpoch } from './worldclock.js';
+import { MOVES, movePose } from './fightmoves.js';
 import { CLOSE_CODES } from './netnotice.js';
 import { regionId, REGIONS, DEFAULT_REGION } from './regions.js';
 
@@ -288,6 +289,7 @@ export const CityNetWS = {
 // holding the NetGame instance; capped so single player (nobody draining)
 // can never grow it. NetGame.update drains it into sendEvent each frame.
 const _outbox = [];
+const _fistPose = {};      // scratch for a peer's punch (_fightPose)
 export function queueEvent(type, data) {
   if (_outbox.length > 32) _outbox.length = 0;   // nobody listening — drop, don't leak
   _outbox.push({ type, ...(data || {}) });
@@ -595,6 +597,13 @@ class NetGame {
   // damageBuilding find every building the sphere touches — identical to a
   // ground/airburst hit, so approximate positions still wreck the right wall.
   _applyEvent(ev, ctx) {
+    // a peer threw a punch (js/combat.js onSwing): their avatar throws it too.
+    // Only the sight of it: who it hit is their tab's, as being run over is.
+    if (ev.type === 'fist' && typeof ev.m === 'string' && MOVES[ev.m]) {
+      const r = this.remotes.get(ev.from);
+      if (r) r.fist = { m: ev.m, t0: nowMs() };
+      return;
+    }
     if (ev.type === 'boom' && ctx.weapons
         && Number.isFinite(ev.x) && Number.isFinite(ev.y) && Number.isFinite(ev.z)) {
       // {remote:true} is not a nicety. Without it weapons.js treats a peer's
@@ -730,6 +739,8 @@ class NetGame {
       ...(_myName ? { nm: _myName } : {}),
       ...(_myLook ? { ap: _myLook } : {}),
       ...(RG() ? { rg: RG() } : {}),
+      // the fists are up (js/combat.js): the others draw your guard
+      ...(ctx.combat?.stance ? { fs: 1 } : {}),
     }, 0);   // our own 10 Hz gate already throttled; don't double-gate
   }
 
@@ -854,8 +865,29 @@ class NetGame {
         // alone the gait drew a sprinting player with a jogger's stride and the
         // legs spinning half as fast again as on the sprinter's own screen
         r.cit.walk(r.walkT, Math.min(1.25, r.speed / WALK.jog), 0, r.speed);
+        this._fightPose(r, s, now);
       }
     }
+  }
+
+  // A peer's punch (a 'fist' event) or their guard (`fs` in the state), on a
+  // modelled body. The punch is played from the moment the event arrived: a
+  // tenth of a second behind their screen, which nobody can see in a punch.
+  _fightPose(r, s, now) {
+    const b = r.cit;
+    if (typeof b?.act !== 'function') return;
+    const legs = r.speed < 0.3 ? 1 : 0;
+    if (r.fist) {
+      const m = MOVES[r.fist.m], t = (now - r.fist.t0) / 1000;
+      if (m && t < m.end / m.speed) {
+        movePose(m, t, _fistPose);
+        b.act(_fistPose.role, _fistPose.t, 1, m.key === 'hook' ? 1 : legs);
+        b.fist?.(1);
+        return;
+      }
+      r.fist = null;
+    }
+    if (s.fs) { b.act('fightJab', 0, 1, legs, 0.15); b.fist?.(1); }
   }
 
   // ---- the one per-frame call main.js makes ----

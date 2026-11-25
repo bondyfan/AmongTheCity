@@ -26,6 +26,11 @@ const P = {
   talk: q.get('talk') === '1',        // everybody speaks: jaws work, standing bodies gesture
   mouth: q.get('mouth') != null ? parseFloat(q.get('mouth')) : null,   // a jaw held open this far, 0..1
   birds: q.get('birds') === '1',      // a row of each bird: seated, pecking, flying
+  // &pose=act&act=fightJab[,fightCross]&mask=upper|full: the fight's one-off
+  // recordings (js/characters/actlayer.js) played in turn; &fist=1 closes the hands
+  act: (q.get('act') || 'fightJab').split(','),
+  mask: q.get('mask') || 'upper',
+  fist: q.get('fist') != null ? parseFloat(q.get('fist')) : 1,
 };
 // &rig=dummy: the crash-test humans of js/characters/dummy.js stand in for every citizen
 if (q.get('rig') === 'dummy') (await import('../js/characters/dummy.js')).installDummies();
@@ -166,6 +171,15 @@ function pose(time, dt) {
       if (P.pose === 'kick') c.kickPose(P.t ?? (time * 0.9) % 1);
       if (P.pose === 'aim') c.aimPose(1, 0);
       if (P.pose === 'hands') c.handsPose(1);
+    } else if (P.pose === 'act') {
+      c.walk(0, 0, 0, 0);
+      // each role in turn, a beat of standing between: the clip's own length
+      const lens = P.act.map((r) => c.actDur?.(r) || 1), tot = lens.reduce((a, b) => a + b + 0.4, 0);
+      let u = P.t != null ? P.t : time % tot, i = 0;
+      if (c.frozen != null) u = c.frozen * lens[0] * (P.strip / Math.max(1, P.strip - 1));     // a film strip of the first clip
+      else if (P.t == null) while (i < lens.length - 1 && u > lens[i] + 0.4) { u -= lens[i] + 0.4; i++; }
+      c.act?.(P.act[i], u, 1, Number.isFinite(+P.mask) ? +P.mask : P.mask);
+      c.fist?.(P.fist);
     } else if (P.pose === 'stand') c.walk(0, 0, 0, 0);
     else if (P.pose === 'sit') { c.sitPose(1); c.group.position.y = 0.45 - 0.739; }
     else if (P.pose === 'bench') { c.sitPose(1, 0); c.group.position.y = 0.45 - 0.739; }

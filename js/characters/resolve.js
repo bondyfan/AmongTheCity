@@ -11,7 +11,10 @@
 //      hand out to a door, a vault, a pistol raised, the campaign's own
 //      keyframes), that joint takes the game's angle: added on top of the clip
 //      while the difference is small, replacing it once it is large.
-//   3. A change of clip cross-fades from the pose that was showing.
+//   3. A one-off recording the owner asked for this step (a punch, a flinch,
+//      a fall: js/characters/actlayer.js) is laid over the upper body or the
+//      whole of it.
+//   4. A change of clip cross-fades from the pose that was showing.
 //
 // All quaternions are flat x, y, z, w; slots are js/characters/skeletonmap.js.
 
@@ -22,6 +25,7 @@ import { sampleClip, mixLocals } from './clipbank.js';
 import { pickGait, idleAt } from './animset.js';
 import { roleClip } from './avatars.js';
 import { talking } from './mouth.js';
+import { upperMask, mixWorld, ACT_LINGER } from './actlayer.js';
 
 // standing: a fidget may start in about four windows of ten; a recorded one runs up to twelve seconds
 const IDLE = { period: 24, chance: 0.4 };
@@ -159,11 +163,35 @@ export function makeResolver(av, J, st, hold) {
         hip[0] += (bp.x / s - hip[0]) * ho; hip[1] += (bp.y / s - hip[1]) * ho; hip[2] += (bp.z / s - hip[2]) * ho;
       }
     }
-    const nk = ck ?? 'proc';
+    // the one-off layer: what the owner asked for in the last quarter second
+    const act = st.act;
+    let actKey = null;
+    st.actOn = false;
+    if (act && act.clip && act.w > 0 && (act.hold || now - act.at < ACT_LINGER)) {
+      sampleClip(act.clip, act.t, S.B, _hB);
+      if (out !== S.out) { S.out.set(out.subarray(0, n * 4)); out = S.out; }
+      // the legs' share: 'upper' none, 'full' all, or a number between (a
+      // guard takes the recording's bent knees while standing, not walking)
+      const legs = act.mask === 'full' ? 1 : act.mask === 'upper' ? 0 : +act.mask || 0;
+      const w = act.w > 1 ? 1 : act.w;
+      let mask = null;
+      if (legs < 1) {
+        const up = av.upMask ??= upperMask(rig);
+        mask = legs > 0 ? (st.actMask ??= new Float32Array(n)) : up;
+        if (legs > 0) for (let i = 0; i < n; i++) mask[i] = up[i] + (1 - up[i]) * legs;
+      }
+      mixWorld(rig, out, out, S.B, w, mask);
+      if (legs > 0) for (let c = 0; c < 3; c++) hip[c] += (_hB[c] - hip[c]) * w * legs;
+      st.actOn = true;
+      if (act.w > 0.5) actKey = act.clip.name;
+    }
+    const nk = actKey ? 'act:' + actKey : ck ?? 'proc';
     if (nk !== key) {
       if (key !== null) {
         prev.set(cur); prevHip[0] = lastHip[0]; prevHip[1] = lastHip[1]; prevHip[2] = lastHip[2];
-        fade = 0; fadeDur = nk === 'proc' || key === 'proc' ? 0.16 : 0.28;
+        // into and out of a punch is quick: a fist does not drift there
+        const quick = nk.startsWith('act:') || (key && key.startsWith('act:'));
+        fade = 0; fadeDur = quick ? (act?.fade ?? 0.08) : nk === 'proc' || key === 'proc' ? 0.16 : 0.28;
       }
       key = nk;
     }
@@ -191,7 +219,7 @@ export function makeResolver(av, J, st, hold) {
     cur, resolve, socket, sitClip, base: setBase,
     cut() { key = null; fade = 1; },
     /** True when nothing but a recorded clip is showing, so the baked far body can stand in. */
-    canFar() { return st.kind !== 'proc' && !moved; },
+    canFar() { return st.kind !== 'proc' && !moved && !st.actOn; },
     get key() { return key; },
   };
 }

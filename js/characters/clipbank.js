@@ -122,7 +122,10 @@ export function bakeClip(clip, src, tgt, { fps = 30, loop = true, travel = 'none
     const u = travel === 'none' && gone > 0.2 ? f / (frames - 1) : 0;
     hip[f * 3] -= x0 + (x1 - x0) * u; hip[f * 3 + 1] -= restY; hip[f * 3 + 2] -= z0 + (z1 - z0) * u;
   }
-  return { name, dur, fps: frames / dur, frames, loop, q, hip, bones: n, travel: gone };
+  // tx, tz: the same travel as a figure-space vector (+z is backwards), so the
+  // owner of a pinned one-off (a stagger, a fall) can move the body as far
+  // and the same way as the recording did
+  return { name, dur, fps: frames / dur, frames, loop, q, hip, bones: n, travel: gone, tx: (x1 - x0) * step, tz: (z1 - z0) * step };
 }
 
 /**

@@ -35,11 +35,13 @@ import { SLOT, SLOT_COUNT } from './skeletonmap.js';
 import { deltasFromJoints } from './retarget.js';
 import { figureMatrices, skinMatrices, skinMatricesMapped } from './skinpose.js';
 import { pickGait } from './animset.js';
-import { motionSet, retainHi, releaseHi, partGeometry } from './avatars.js';
+import { motionSet, retainHi, releaseHi, partGeometry, roleClip } from './avatars.js';
 import { makeFarBody, farRow } from './farbody.js';
 import { makeResolver } from './resolve.js';
 import { addHandProp } from './props.js';
 import { JAW_OPEN, setMouth, startTalk, mouthLevel } from './mouth.js';
+import { makeFist, applyFist } from './fist.js';
+import { ACT_LINGER } from './actlayer.js';
 
 const TAU = Math.PI * 2;
 const _pg = {};
@@ -126,7 +128,11 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
     if (wantSharp) retainHi(head);
   }
 
-  const st = { calm, kind: 'idle', phase: seed, lastT: NaN, v: 0, sitK: 1, moveK: 0, far: false, frame: -1, t: 0, seed: (seed * 1e6) | 0 };
+  const st = { calm, kind: 'idle', phase: seed, lastT: NaN, v: 0, sitK: 1, moveK: 0, far: false, frame: -1, t: 0, seed: (seed * 1e6) | 0,
+    act: null, actOn: false, fistW: 0, fistAt: 0 };
+  // a one-off recording by role, looked up once per role for this body
+  const acts = new Map();
+  const actClip = (role) => { if (!acts.has(role)) acts.set(role, roleClip(av, role)); return acts.get(role); };
   const R = makeResolver(av, J, st, hold);
   const fig = new Float32Array(n * 16);
   let farB = null;
@@ -146,6 +152,8 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
         _jq.toArray(R.cur, av.jaw * 4);
       }
     }
+    // the fingers close over whatever pose that was (a punch, a guard)
+    if (st.fistW > 0 && performance.now() * 0.001 - st.fistAt < ACT_LINGER) applyFist(av.fist ??= makeFist(av.rig), R.cur, st.fistW);
     figureMatrices(av.rig, R.cur, hip, av.root, fig);
     skinMatrices(fig, av.inv, n, skeleton.boneMatrices);
     if (skeleton.boneTexture) skeleton.boneTexture.needsUpdate = true;
@@ -267,6 +275,31 @@ export function makeHuman(av, look = {}, { near = false, seed = Math.random(), u
     mouth(level) { setMouth(st, level, performance.now() * 0.001); },
     /** Says something for this many seconds: the jaw works, and a body standing still gestures. */
     talk(seconds) { startTalk(st, seconds, performance.now() * 0.001); },
+    /**
+     * Lay a one-off recording over this body for the next frame drawn: the
+     * clip of `role` (js/characters/avatars.js roles: fightJab, hitHead,
+     * fallDown...) at `t` seconds, `w` of it (0..1), over the 'upper' body or
+     * the 'full' one. Call it every step it should show; it lets go a quarter
+     * second after the last call, unless `hold` keeps it (a body laid out
+     * where it fell). `mask` may also be a number: the legs' share, 0..1.
+     * Returns the clip's length in seconds, or 0 when this body has no such
+     * recording (nothing is drawn then).
+     */
+    act(role, t, w = 1, mask = 'upper', fade = 0.08, hold = false) {
+      const c = actClip(role);
+      if (!c) return 0;
+      const a = st.act ??= { clip: null, t: 0, w: 0, mask: 'upper', at: 0, fade: 0.08, hold: false };
+      a.clip = c; a.t = t; a.w = w; a.mask = mask; a.fade = fade; a.hold = !!hold; a.at = performance.now() * 0.001;
+      return c.dur;
+    },
+    /** Let go of the one-off recording at once (a body thrown by a car). */
+    actStop() { if (st.act) { st.act.w = 0; st.act.hold = false; } st.fistW = 0; },
+    /** The length of a role's recording on this body, in seconds (0: none). */
+    actDur(role) { return actClip(role)?.dur ?? 0; },
+    /** The travel a role's recording makes, figure metres { x, z } (+z backwards), or null. */
+    actTravel(role) { const c = actClip(role); return c ? { x: c.tx ?? 0, z: c.tz ?? 0 } : null; },
+    /** Close the hands, 0 open .. 1 a fist, for the next quarter second. */
+    fist(w) { st.fistW = w; st.fistAt = performance.now() * 0.001; },
     /** What the body is playing right now: 'idle', 'move', 'sit', 'talk', a fidget's name, or 'proc'. */
     get clipKey() { return R.key; },
     /** Resolve now (tests, a still frame taken outside the render loop). */
