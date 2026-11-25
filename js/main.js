@@ -26,7 +26,7 @@ import { CityWorld } from './city.js';
 import { planRings, planCarRings } from './streamplan.js';
 import { input } from './input.js';
 import { Player, worldSeatAnchor, localSeatAnchor } from './player.js';
-import { Carjack, witnessed } from './carjack.js';
+import { Carjack } from './carjack.js';
 import { setDriver, setPassenger } from './cardoor.js';
 import { isLocked, unlock } from './carlocks.js';
 import { Vehicles, driveStep, lampMats, carLabel, carSubtitle, eyeAnchor,
@@ -58,7 +58,8 @@ import { PRICE, pumpBrand, pumpPrice, kc2, kc } from './prices.js';
 import { Combat } from './combat.js';
 import * as wanted from './wanted.js';
 import { Police } from './police.js';
-import { RoadLaw } from './roadlaw.js';
+import { RoadLaw, policeNear } from './roadlaw.js';
+import { CrimeLaw } from './crimelaw.js';
 import { createLawHud } from './lawhud.js';
 import { toast as policeToast } from './toasts.js';
 import { Ambulance } from './ambulance.js';
@@ -320,6 +321,7 @@ function pumpStoryOver(dt) {
     vitals.revive();
     statusbar.hideBanner();
     wanted.clear?.();
+    crimeLaw?.clear();
     let at;
     if (heist) at = heist.rewind();
     else if (o.replay) at = career.beginReplay(o.replay) ?? { x: player.pos.x, z: player.pos.z };
@@ -373,6 +375,7 @@ let police = null;       // the patrol that wants you — js/police.js
 let ambulance = null;    // and the one that comes for the body — js/ambulance.js
 let roadLaw = null;      // the limit of your road and the police who watch it: js/roadlaw.js
 let lawHud = null;       // the limit disc and the model line on the HUD: js/lawhud.js
+let crimeLaw = null;     // who saw it, who rings it in, and when: js/crimelaw.js
 let chatter = null;      // who says what, and when — js/chatter.js
 let chatBubbles = null;  // …and the sprite it is drawn in — js/chatbubbles.js
 let postfx = null;   // bloom + god rays — what makes lamps and headlights GLOW
@@ -1494,6 +1497,9 @@ input.onKey('KeyE', () => {
     // same, the hand goes out, and it does not give. A car with a peer at the
     // wheel is open: they are sitting in it.
     const locked = !inTraffic && !holder && isLocked(car);
+    // a parked car that is nobody's to take (not yours, not the story's, not
+    // one you have sat in): taking it is theft, a star if police see it
+    const theft = !inTraffic && !holder && !car.owned && !car.unlocked && !car.story;
     player.boardVehicle(car, seat, {
       locked,
       jack: !!car._driverIn && seat === 0,
@@ -1527,6 +1533,7 @@ input.onKey('KeyE', () => {
         camDist = CAM_DIST_MIN;
         if (s !== 0) return;             // passenger seat: no engine, no speedo
         game.car = car;
+        if (theft) crimeLaw?.report('kradez', car.x, car.z);
         if (meeting?.driving(car)) fpView = true;
         // Claimed from onSeated for the same reason the helicopter is: the
         // walk-up is cancellable, and taking a car off everybody else's street
@@ -1624,10 +1631,10 @@ function jackDriver(car) {
   sfxOr(String(thrown?.body?.arch?.key ?? 'm').startsWith('f') ? 'voice_carjack_f' : 'voice_carjack_m', null, 0.9);
   setTimeout(() => sfxOr('body_fall', null, 0.8), 420);
   try { peds?.panic?.(car.x, car.z, 16); } catch { /* the crowd is not the point */ }
-  const others = [];
-  if (traffic) for (const c of traffic.cars) if (c !== car) others.push(c);
-  const saw = witnessed(car.x, car.z, { peds, cars: others, city: world?.city, night: sky?.nightK ?? 0 });
-  if (saw) wanted.add('prepadeni');
+  // The driver rings the police himself (Frank, 25 Nov 2026): two stars when
+  // the call goes through, unless he is dead by then and nobody else saw it;
+  // at once if a patrol is watching. js/crimelaw.js.
+  crimeLaw?.report('prepadeni', car.x, car.z, thrown ?? null);
 }
 
 // A runner with a policeman on him goes down (js/policecops.js onTackle).
@@ -1685,6 +1692,7 @@ function pumpArrest(dt) {
     player.held = null;
     const at = career.reloadLast();
     wanted.clear();
+    crimeLaw?.clear();
     if (at) {
       world.city.ensureTiles?.(at.x, at.z)?.catch?.(() => {});
       world.terrain.ensure?.(at.x, at.z);
@@ -1931,7 +1939,7 @@ function combatInput(dt) {
 // arrived a slice later than that module did, and reaching into it from
 // outside would have been worse than the six lines below. DOM writes only on
 // CHANGE — this runs inside stepGame, which can go three times a frame.
-let _starsShown = -1, _huntedShown = null;
+let _starsShown = -1, _huntedShown = null, _lostShown = false;
 function updateStars() {
   const el = $id('wanted');
   if (!el) return;
@@ -1957,6 +1965,13 @@ function updateStars() {
   if (hunted !== _huntedShown) {
     _huntedShown = hunted;
     el.classList.toggle('hunted', hunted);
+  }
+  // Nobody has you: the stars blink while the minute's search runs out
+  // (Frank, 25 Nov 2026), solid again the moment a unit sees you.
+  const lost = wanted.searching();
+  if (lost !== _lostShown) {
+    _lostShown = lost;
+    el.classList.toggle('lost', lost);
   }
 }
 
@@ -2788,7 +2803,7 @@ function updateHud(dt) {
     $id('speed-unit').textContent = `km/h · ${Math.round(game.heli.y)} m`;
   }
   // the limit of this road beside the speed, the model under the fuel
-  lawHud?.(game.car, roadLaw?.limit ?? 0, game.car ? carLabel(game.car) : '');
+  lawHud?.(game.car, roadLaw?.limit ?? 0, game.car ? carLabel(game.car) : '', roadLaw?.threshold);
   // vehicle name card: counted down per frame, not on the 0.2 s hint tick, so
   // three seconds is three seconds and not "three seconds rounded to a tick"
   if (_carNameHold > 0) {
@@ -3420,7 +3435,7 @@ async function boot() {
     // …and only when it was YOUR car. p.by is the vehicle the blow came from,
     // so an AI Octavia mowing somebody down two streets away no longer hands
     // the player a star for an accident they were not part of.
-    if (p.by && p.by === game.car) wanted.add('srazeni');
+    if (p.by && p.by === game.car) crimeLaw?.report('srazeni', p.x, p.z, p);
     // Somebody is on the tarmac. Above 6 m/s they are not getting up on their
     // own, which is the line js/ambulance.js draws between a fright and a
     // casualty — and it comes for the PLACE, not the body, because
@@ -3434,7 +3449,7 @@ async function boot() {
     // or if you did it with your hands — and in that second case combat.js has
     // already raised 'zabiti' through onCrime, so charging again here would be
     // the double bill this hook was just fixed for.
-    if (p.by && p.by === game.car) wanted.add('zabiti');
+    if (p.by && p.by === game.car) crimeLaw?.report('zabiti', p.x, p.z, p);
     ambulance?.call(p.x, p.z);
   };
 
@@ -3565,11 +3580,16 @@ async function boot() {
   });
 
   // ---- fists, and the people who mind ----
-  combat = new Combat({ peds, chatter, wallet, audio: { sfxAt } });
+  // `targets`: the thrown-out driver of a jacked car can be hit too (js/carjack.js
+  // nearest/hurt); a Combat that does not read the option ignores it.
+  combat = new Combat({ peds, targets: [peds, carjack], chatter, wallet, audio: { sfxAt } });
   // A landed punch and a killing one are two different crimes, and combat.js
-  // is the only thing that can tell them apart.
-  combat.onCrime((kind, x, z) => {
-    wanted.add(kind);
+  // is the only thing that can tell them apart. Whether anybody minds is
+  // js/crimelaw.js's: a punch only when police see it, a killing when they
+  // see it or a witness rings in. `victim` (the fight session's 4th argument)
+  // says who it was, so he is never his own witness.
+  combat.onCrime((kind, x, z, victim) => {
+    crimeLaw?.report(kind, x, z, victim ?? null);
     // Everyone nearby saw it. peds.panic is chained into chatter.bang in this
     // file already, so the shouting comes for free.
     peds.panic(x, z, 18);
@@ -3588,6 +3608,34 @@ async function boot() {
   // only your own heat.
   roadLaw = new RoadLaw({ traffic, police, wanted, toast: policeToast });
   lawHud = createLawHud(document);
+  // …and every other crime: who saw it, who can phone (Frank, 25 Nov 2026,
+  // "aby to fungovalo jako v GTAčku"). Witnesses are the pedestrians drawn
+  // near the player and the drivers of cars around; a car's driver can still
+  // phone while it has one (ai), anybody else while they are alive.
+  const isCar = (w) => w && w.len !== undefined && w.wid !== undefined && typeof w.heading === 'number';
+  crimeLaw = new CrimeLaw({
+    wanted,
+    toast: policeToast,
+    policeAt: (x, z, r) => policeNear(x, z, r, traffic, police),
+    alive: (w) => !!w && !w.dead && (isCar(w) ? !!w.ai : true),
+    witnesses: (x, z, r, victim) => {
+      const out = [], r2 = r * r;
+      for (const p of peds?.peds ?? []) {
+        if (p === victim || p.dead) continue;
+        const dx = p.x - x, dz = p.z - z;
+        if (dx * dx + dz * dz <= r2) out.push(p);
+      }
+      if (traffic) for (const c of traffic.cars) {
+        if (!c.ai || c === game.car) continue;
+        const dx = c.x - x, dz = c.z - z;
+        if (dx * dx + dz * dz <= r2) out.push(c);
+      }
+      return out;
+    },
+  });
+  // The thrown-out driver run down by the car he was thrown out of: a crime
+  // like any other, and if he is dead his own call never goes through.
+  if (carjack) carjack.onRunOver = (r, killed) => crimeLaw?.report(killed ? 'zabiti' : 'srazeni', r.x, r.z, r);
 
   // ---- the body, the wallet and the tank ----
   statusbar.init();
@@ -3872,7 +3920,7 @@ function stepGame(dt) {
   airport?.update(dt, sky?.nightK ?? 0);
   pumpStoryOver(dt);
   pumpArrest(dt);
-  carjack?.update(dt, player.pos.x, player.pos.z);
+  carjack?.update(dt, player.pos.x, player.pos.z, game.car);
   if (meeting?.finished) { meeting.close(); meeting = null; }
   const focus = game.car ?? player.pos;
   // STREAM WHERE YOU WILL BE, NOT WHERE YOU ARE. Everything downstream of this
@@ -4173,6 +4221,7 @@ function stepGame(dt) {
   const _eyes = game.car ?? player.pos;
   _wntCtx.x = _eyes.x; _wntCtx.z = _eyes.z;
   _wntCtx.onFoot = _vitCtx.onFoot; _wntCtx.car = game.car; _wntCtx.police = police;
+  crimeLaw?.update(dt);             // calls that are due go through first
   wanted.update(dt, _wntCtx);
   _polCtx.x = _eyes.x; _polCtx.z = _eyes.z; _polCtx.car = game.car;
   _polCtx.onFoot = _vitCtx.onFoot; _polCtx.y = game.car ? NaN : player.y;
@@ -4655,6 +4704,8 @@ window.__atc = {
   get roadWorks() { return roadWorks; },
   get ambulance() { return ambulance; },
   get roadLaw() { return roadLaw; },
+  get crimeLaw() { return crimeLaw; },
+  get carjack() { return carjack; },
   get traffic() { return traffic; },
   said: () => (chatter?._live ?? []).map((u) => ({ id: u.id, text: u.text, a: +u.a.toFixed(2) })),
   get interiors() { return world?.interiors; },

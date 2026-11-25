@@ -2885,15 +2885,45 @@ the sign lasts 3 s. `#limit-sign` is a Czech B 20a disc left of the number in `#
 (`.over` above the limit, `.way` more than 50 % above it), `#car-model` the model under
 `#fuel` (`vehicles.carLabel`). Only while you drive.
 
-**One star in front of the police.** "Víc než 50 %" is read as more than 50 % OVER the limit
-(over 75 in a 50). Held for 0.6 s with a patrol car, a pursuit unit or an officer on foot
-within 50 m: `wanted.add` of `rychlost`. A red light: the approach you drive is WATCHED from
+**One star in front of the police.** The speed is Frank's table of 25 Nov 2026,
+`roadlaw.js policeLimit(limit, motorway)`: 30 -> 100, 50 -> 130, 90 -> 160, a motorway (road
+class `motorway`) 90 over its limit, every other limit min(2 x limit, 130); strictly above it.
+(The first rule, 21 Nov, was 50 % over.) Held for 0.6 s with a patrol car, a pursuit unit or
+an officer on foot within 50 m: `wanted.add` of `rychlost`. The HUD speed is amber over the
+limit and red only above that threshold (`roadLaw.threshold`, `lawhud.js`). A red light: the approach you drive is WATCHED from
 before its hold point (`traffic.js sigStop`, the point the AI stops at, a couple of metres
 short of the paint); 3 m past it at over 2 m/s while `traffic.lightOf(e)` is 2 (the AI's own
 phase on the shared clock), with police within 50 m: `cervena`. A traffic offence tops the
 heat up to 30, inside the first star (18 to 45), never past it, so it is one star however
 often, kept fresh, and nobody shoots below three (`policetune.js`). An 8 s cooldown per
 offence. Local state like the rest of the wanted level.
+
+**The search** (`js/wanted.js`, 25 Nov 2026, Frank: "když mě nevidí, tak ať ta hvězdička bliká
+a do minuty ať se ztratí"). Stars no longer wear off one at a time. While a unit sees you
+(its own `sees` from police.js's building test out to 150 m, or anything within 22 m; a unit
+that publishes no `sees` by the old street radius) they are solid. `SEEN_HOLD` (2 s) after the
+last sighting or the last crime (a crime is a report) they blink (`searching()`, `#wanted.lost`,
+a hard beacon blink; dimmed under reduced motion), and `LOST_T` (60 s) of that clears every
+star at once with one edge down. A sighting makes them solid and the next search starts from
+zero. No new sight tests: wanted.js reads the units' flags at 4 Hz.
+
+**Who saw it** (`js/crimelaw.js`, 25 Nov 2026, Frank: "aby to fungovalo jako v GTAčku"). Every
+crime the player commits is reported here, not to `wanted.add` directly: the fists
+(`combat.onCrime(kind, x, z, victim)`), a pedestrian hit or killed by the player's car, the
+driver pulled out of his car (`jackDriver`), a thrown-out driver run down, a parked car
+somebody left open being taken (`kradez`). `RULES` says per crime who has to see it: with
+police within 50 m (`policeNear`: patrols, pursuit units, officers on foot) it is charged at
+once; otherwise, if the rule allows a call, the victim (a jacked driver, a man knocked down)
+or a bystander within 40 m (pedestrians drawn near the player, drivers of cars around) rings
+the police and it is charged `CALL_T` (9 s) later, unless by then every caller is dead. A
+punch is police only, and free against somebody fighting back (`p.brawl`, the fight
+session's flag). Crimes against the police (`naraz`, `napadeni_policisty` 2 stars,
+`zabiti_policisty` 3 stars) always count; `policecops.js` charges running an officer down as
+`zabiti_policisty`. The old lit-window witness (`carjack.witnessed`) is no longer asked. The
+thrown-out driver is a body (`js/carjack.js`): hp, killed by the player's car above 7 m/s and
+knocked over below, `nearest` / `hurt` so Combat's `targets: [peds, carjack]` can hit him, and a
+corpse that lies for 40 s. Kill him before his call goes through with nobody else there and
+there are no stars.
 
 **No walking on the rails** (`js/railbarrier.js`, called from `city.js collide()` for
 walkers, `opts.interior`: the player and anybody else moved that way, the thrown-out
