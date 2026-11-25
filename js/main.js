@@ -51,6 +51,7 @@ import { shouldEject, launchDamage, impactDamage } from './ejection.js';
 import { sameLevel } from './levelsep.js';
 import * as fuel from './fuel.js';
 import { retry, setHome, parkHome } from './story-retry.js';
+import { overCard, dueMove, dueLift } from './story-over.js';
 import { straighten } from './garage.js';
 import { indexPumps, pumpAt as pumpAtForecourt } from './pumps.js';
 import * as statusbar from './statusbar.js';
@@ -276,7 +277,7 @@ async function replayCampaign(part) {
   veil.querySelector('strong').textContent = part === 'part1' ? 'Poslední vlak · část 1' : 'Poslední vlak · část 2';
   document.body.append(veil);
   requestAnimationFrame(() => veil.classList.add('on'));
-  storyOver = { veil, t: 0, moved: false, replay: part };
+  storyOver = overCard({ veil, replay: part });
   return true;
 }
 window.addEventListener('atc:campaigns', (e) => {
@@ -302,14 +303,14 @@ function failStory(why) {
   document.body.append(veil);
   requestAnimationFrame(() => veil.classList.add('on'));
   retry.mark();            // he has seen its films: from now on T skips them
-  storyOver = { veil, t: 0, moved: false };
+  storyOver = overCard({ veil });
 }
 function pumpStoryOver(dt) {
   const o = storyOver;
   if (!o) return;
-  o.t += dt;
-  if (!o.moved && o.t > 1.4) {
-    o.moved = true;
+  // (js/story-over.js keeps the card's clock: a death UNDER the card, while the
+  // start is still being built, makes this move and its revive due again)
+  if (dueMove(o, dt, vitals.down())) {
     // part two has its own way back, and its own start when it is replayed
     const two = heist || o.replay === 'part2';
     if (!two) { journey?.dispose(); journey = null; meeting?.close?.(); meeting = null; }
@@ -332,7 +333,8 @@ function pumpStoryOver(dt) {
     crimeLaw?.clear();
     let at;
     if (heist) at = heist.rewind();
-    else if (o.replay) at = career.beginReplay(o.replay) ?? { x: player.pos.x, z: player.pos.z };
+    // (a replay begins once: a second move of the same card goes where the first went)
+    else if (o.replay) at = o.at ??= career.beginReplay(o.replay) ?? { x: player.pos.x, z: player.pos.z };
     else { career.restartStory(); at = career.startPoint(); }
     if (Number.isFinite(at.h) && (heist || o.replay === 'part2')) player.heading = at.h;
     player.pos.x = at.x; player.pos.z = at.z;
@@ -343,7 +345,7 @@ function pumpStoryOver(dt) {
   }
   // wait for the street to exist again (he may have died in Pardubice)
   const ready = o.moved && world.terrain.ready(player.pos.x, player.pos.z) && world.built.has(chunkKey(player.pos.x, player.pos.z));
-  if (o.moved && (heist || !journey) && (ready && o.t > 3.4 || o.t > 30)) {
+  if ((heist || !journey) && dueLift(o, ready)) {
     // (a replayed part two is made by the loop below, as it is after part one)
     if (!heist && o.replay !== 'part2' && career.activeStory() === 'bridge') journey = startJourney('bridge');
     o.veil.classList.remove('on');
@@ -3760,7 +3762,9 @@ async function boot() {
     hideCarName();
     // In the campaign there is no hospital to wake up in: it starts again.
     if ((startJourney && career.activeStory() && career.activeStory() !== 'done') || heist) {
-      setTimeout(() => { if (game.mode === 'play') failStory('death'); }, 2200);
+      // (still down: a death under the black card is already undone by then,
+      // and must not start the campaign over a second time once the card lifts)
+      setTimeout(() => { if (game.mode === 'play' && vitals.down()) failStory('death'); }, 2200);
       return;
     }
     setTimeout(() => {
