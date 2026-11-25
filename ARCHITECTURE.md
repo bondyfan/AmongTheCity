@@ -851,6 +851,75 @@ export class PlaceFinder {
 A HUD readout bottom-left showing town + street, and the destination handed to
 Navigation whenever the world map's waypoint changes.
 
+## The satnav, redone (25 Nov 2026)
+
+Frank: "Minimapa je teďka taková rozmazaná, hnusná" and the route was "modrá,
+velká, tlustá čára, která si zobrazuje trošku i za mnou". Both had one cause
+each, and both are fixed at the cause.
+
+- **The disc was blurry** because the whole 4.9 km window was painted into one
+  2048 px bitmap (0.42 px/m) and stretched about five times on a Retina
+  screen. Now the map comes from `js/maptiles.js`: one small canvas per 120 m
+  chunk cell, painted at the disc's own device px/m (`mapstyle.tilePpm`),
+  nearest first, inside a per-frame budget (0.9 ms, 6 ms only while the disc
+  would show a hole). A tile gathers its 3×3 neighbourhood and covers a whole
+  number of pixels past its edge (`bleedPx`), so neighbours overlap with
+  identical pixels. `city.onTileLoaded` cells make only the tiles over them
+  stale; a stale tile is shown until its fresh copy is ready. 64 tiles cached.
+- **Two layers, so the frame does not pay for it.** Drawing a dozen tiles into
+  a disc that turns every frame cost ~1.5 ms of frame time (A/B in one drive),
+  and the outlined street names drawn at a new angle every frame cost about
+  as much again (the glyph cache is keyed by angle). So `js/mapwindow.js`
+  copies the 5×5 tiles around the player 1:1 onto whole pixels of ONE canvas,
+  north up, inside `#minimap-map` (a div `js/minimap.js` injects under the
+  canvas), and moves it with a CSS transform: translate, rotate, scale. The
+  compositor turns and zooms it; the picture changes only on a new cell
+  (~every 120 m) or a newly painted tile. `#minimap` is now a transparent
+  canvas (backing store = CSS size × device pixel ratio, hence the explicit
+  CSS size) with only what moves: the route, traffic, marks, friends, the
+  arrow, the rim, and the names as pre-rendered sprites that are only turned
+  (`minimaplabels.js`). `minimap.snapshot()` composes both for screenshots;
+  never `toDataURL` the live canvas, a readback can push it off the GPU path.
+  Measured A/B in one drive (Pardubice, 25 Nov 2026): frame median 8.9 ms
+  with the disc drawn, 8.9 ms with it skipped (the old disc: 7.9 vs 8.1).
+- **The look** is `js/mapstyle.js`: a night-satnav palette of its own (dark
+  ground, roads graded by class: motorway amber, primary pale yellow, side
+  streets grey, all with a dark casing, drawn casings-first and fills by rank,
+  bridges last), water, parks, buildings with a hairline edge.
+- **The disc turns with the camera** (heading-up): `update(px, pz, camYaw,
+  cars, peers, { body, speed })`. The arrow shows the body or car against the
+  camera, the N badge rides the rim, street labels are flipped upright
+  (`minimaplabels.uprightAngle`). The view radius follows speed between 95 m
+  and 190 m (`mapstyle.viewRadiusFor`), eased.
+- **The route** is drawn on the disc and on the region map from ONE tracker:
+  `navigation.routeCum`, `routeS`, `routeI` (read-only getters) and
+  `js/routeahead.js` (`sliceAhead` writes nothing behind the car's arclength;
+  `blendStart` bends the first metres out of the player's arrow).
+  `js/maproute.js` strokes it: glow, dark edge, blue, pale core, and a white
+  manoeuvre arrow at the next left/right turn. The region map draws the
+  whole remaining route and keeps the dashed thread only where no road goes
+  (no route, or past the end of a partial one).
+- **The line on the road** (`js/navline.js` + `js/navribbon.js`): the old
+  near-end fade was per VERTEX, and a straight OSM street has vertices up to
+  a hundred metres apart, so the fade was smeared across the car and the road
+  behind it glowed. Each vertex now carries its arclength (`aS`) and the
+  fragment shader cuts per pixel against the car's (uniforms written every
+  frame, no buffer upload between rebuilds; `navribbon.NAV_CUT_GLSL` and its
+  JS twin `navCut` for the tests). It is 0.8 m wide instead of 1.8, sits in
+  the driven half of the road (`navigation.routeOff` per route point:
+  `laneHalf(road)` = a quarter of the width on a two-way road, 0 on a oneway;
+  signed by `regions.laneSide()`, so it keeps left on Mahé), bends out of the
+  car over 24 m and is rebuilt when the car drifts more than 1.1 m off its
+  head. 14 cm over the deck with a polygon offset: at 5 cm a rolling road rose
+  over the chord between samples and the line showed as dashes.
+
+Tests: `tests/routeahead.test.mjs`, `tests/navribbon.test.mjs`,
+`tests/minimap-tiles.test.mjs` (tiles, the window's whole-pixel copies and its
+CSS transform, the disc headless), and the NavLine cases in
+`tests/navigation-roundabout.test.mjs` now sample the shader's cut along every
+quad. Dev harness: `dev/navprobe.js` (seat a car, pin, drive the route, time
+the minimap, post shots to a local sink).
+
 ## Chunks are meshed off the main thread — js/meshworker.js + js/meshpool.js
 A dense Pardubice chunk is 30–330 ms of geometry. Slicing the builder against a
 frame budget spread that cost out; it never removed any of it. Now the work

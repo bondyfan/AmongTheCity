@@ -30,6 +30,7 @@
 
 import { COLORS, CHUNK } from './config.js';
 import { drawMark, MARK_COLOR } from './mapmarks.js';
+import { drawNavRoute } from './maproute.js';
 import { dataUrl } from './regions.js';
 
 const PLACES_URL = dataUrl('places.json');      // the live region's files
@@ -333,6 +334,9 @@ export class WorldMap {
     // Gameplay marks (job offers, your car, pumps), by reference from
     // js/career.js. Same array the minimap reads, same glyphs (js/mapmarks.js).
     this.markers = null;
+    this.nav = null;              // js/navigation.js: the route still ahead (setRoute)
+    this._navRt = {};             // its scratch (js/maproute.js drawNavRoute)
+    this._navT = { cx: 0, cy: 0, k: 1, c: 1, s: 0, ox: 0, oz: 0 };
     this._peers = null;           // co-op roster for THIS frame, by reference
     // Click a friend and the waypoint FOLLOWS them: uid of the peer being
     // chased, or null. A static flag on the spot where somebody stood two
@@ -1000,6 +1004,9 @@ export class WorldMap {
     if (this.followUid) this.stopFollow();
     this._setWaypoint(x, z);
   }
+
+  /** The route source, the same navigation the HUD disc draws from. */
+  setRoute(nav) { this.nav = nav || null; }
 
   _setWaypoint(x, z) {
     this.waypoint = x === null || x === undefined ? null : { x, z };
@@ -1752,14 +1759,23 @@ export class WorldMap {
     const hasP = px !== undefined;
     const wp = this.waypoint;
 
-    // the thread from the player to the flag: a dashed line reads as "route"
-    // without pretending we did any routing
-    if (wp && hasP) {
+    // the route still ahead, the satnav blue the HUD disc and the road use;
+    // nothing of what is already driven
+    let routed = 0;
+    if (wp && this.nav) {
+      const T = this._navT;
+      T.cx = W / 2; T.cy = H / 2; T.k = k; T.ox = this.cx; T.oz = this.cz;
+      routed = drawNavRoute(g, this.nav, T, 4 * dpr, this._navRt, hasP ? px : NaN, hasP ? pz : NaN, 30);
+    }
+    // the thread to the flag where no road goes: the whole way when there is
+    // no route, and from where a partial route stops to the pin
+    if (wp && hasP && (!routed || this.nav.partial)) {
+      const fx = routed ? this._navRt.end.x : px, fz = routed ? this._navRt.end.z : pz;
       g.setLineDash(DASH);
       g.lineWidth = 1.6 * dpr;
       g.strokeStyle = 'rgba(255,210,26,0.66)';
       g.beginPath();
-      g.moveTo(W / 2 + (px - this.cx) * k, H / 2 + (pz - this.cz) * k);
+      g.moveTo(W / 2 + (fx - this.cx) * k, H / 2 + (fz - this.cz) * k);
       g.lineTo(W / 2 + (wp.x - this.cx) * k, H / 2 + (wp.z - this.cz) * k);
       g.stroke();
       g.setLineDash(EMPTY_DASH);
