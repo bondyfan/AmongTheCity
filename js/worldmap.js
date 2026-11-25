@@ -1797,8 +1797,20 @@ export class WorldMap {
       for (let i = 0; i < marks.length; i++) {
         const m = marks[i];
         const sx = W / 2 + (m.x - this.cx) * k, sy = H / 2 + (m.z - this.cz) * k;
-        if (sx > -20 && sx < W + 20 && sy > -20 && sy < H + 20)
+        if (sx > -20 && sx < W + 20 && sy > -20 && sy < H + 20) {
           drawMark(g, m.kind, sx, sy, ms);
+          // a named mark (an airport) says what it is beside its glyph
+          if (m.label) {
+            g.font = this._pfont;
+            g.textAlign = 'left';
+            g.textBaseline = 'middle';
+            g.lineWidth = 3 * dpr;
+            g.strokeStyle = 'rgba(14,18,26,0.85)';
+            g.strokeText(m.label, sx + ms * 1.8, sy);
+            g.fillStyle = MARK_COLOR[m.kind] ?? '#ffffff';
+            g.fillText(m.label, sx + ms * 1.8, sy);
+          }
+        }
       }
     }
 

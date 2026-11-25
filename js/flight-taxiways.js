@@ -17,7 +17,8 @@ export function taxiNetwork(roads) {
   const nodes = [], edges = [];
   const ways = roads.filter((r) => KINDS.has(r.t) && r.p?.length > 1);
   const nodeAt = (x, z, runway) => {
-    for (let i = 0; i < nodes.length; i++) if (Math.hypot(nodes[i].x - x, nodes[i].z - z) < JOIN) return i;
+    // a junction is on the runway if ANY of its ways is (whichever way was read first)
+    for (let i = 0; i < nodes.length; i++) if (Math.hypot(nodes[i].x - x, nodes[i].z - z) < JOIN) { if (runway) nodes[i].runway = true; return i; }
     nodes.push({ x, z, runway });
     edges.push([]);
     return nodes.length - 1;

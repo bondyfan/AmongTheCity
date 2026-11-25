@@ -3184,8 +3184,9 @@ letat na Seychelly". Mahé itself and the region system are the other half
 * **The trip** (`js/flight-trip.js`): none, ticket, airside, boarding, aboard,
   seated, flying, arrived, done; each step needs the one before (no gate before
   the security arch, no seat without a scanned pass: the crew turn back anybody
-  who walked round the terminal). The fare is `PRICE.flight.mahe`, 14 900 Kč one
-  way, through js/wallet.js. The carrier is invented: flights ATC 740 and 741.
+  who walked round the terminal). The fare is `PRICE.flight.mahe`, 20 000 Kč one
+  way, through js/wallet.js. The carrier is invented: flights ATC 740 (Pardubice),
+  750 (Prague) and the ways home 741 and 751.
 * **The aircraft's sequence** (`js/flight-sequence.js`, pure): stand, doors,
   taxi out (`js/flight-path.js`: fillets, a crew's speeds), take-off and climb
   and the landing (`js/flight-profile.js`: VR 72 m/s, lift-off after 1.4 to 1.8
@@ -3229,10 +3230,51 @@ letat na Seychelly". Mahé itself and the region system are the other half
 * **Co-op**: each player flies a plane of his own (nothing on the wire); the
   region rule hides a player who is in the other region.
 
+### Choosing where to fly, five real minutes, Prague (25 Nov 2026)
+
+Frank, 25 Nov 2026: in Pardubice he saw no way of flying. Three reasons: the
+flight was only made outside the campaign (and a career is in the campaign
+until part two is done), nothing on the map said where the airport is, and the
+dev teleport put you in the middle of the runway. Now:
+
+* **The flight exists during the campaign too**; the desks then sell nothing
+  and say why (`lines.storyFirst`): the region switch reloads the page and the
+  campaign is not saved before its end, so a flight would throw it away.
+* **The airports are on both maps** (`js/airport-marks.js`, the 'airport' glyph
+  of js/mapmarks.js, named on the big map), added to js/career.js's marks.
+* **"Kam letíme?"** (`js/flight-booking.js` on js/panel.js, the list from
+  `js/flight-destinations.js`): every desk shows real places; only those with a
+  route in js/flight-trip.js can be bought, today Mahé from Pardubice and
+  Prague, and Pardubice or Prague from Mahé. The rest say "Připravujeme".
+* **Five real minutes** (`js/flight-schedule.js`, pure; Frank: "do 5 minut jako
+  reálného času, ne herního"): boarding opens 20 s after the ticket, last call at
+  3:30, the gate closes at 4:30, the departure is due at 5:00, counted in frame
+  seconds (a game hour is a real minute, so the world clock could not do it).
+  Sitting down in 14A sooner closes the doors at once. One past the gate is
+  waited for; one who never reached it is put on the next flight, free. The
+  boards and the boarding pass show the countdown.
+* **The desks** (`js/flight-checkin.js`): Pardubice's counters, arch and gate
+  agent, and the desk-and-passage of the airports whose terminal is a solid OSM
+  building, with the schedule and its announcements; js/flight.js keeps the
+  aircraft and the cabin.
+* **Announcements** (`js/flight-announce.js`, `js/flight-announce-lines.js`,
+  `scripts/gen-flight-audio.mjs`, ElevenLabs as Frank asked, files in
+  `public/assets/flight/`): the gate's boarding, last call and closing for each
+  flight (Czech then English at home, English first on Mahé), and in the cabin
+  the crew's welcome, the doors, the captain before take-off and on the descent,
+  the welcome on arrival. Queued, never two at once, heard in the hall and less
+  on the apron, the cabin ones only aboard; subtitles on the HUD.
+* **Prague, Václav Havel (LKPR)** (`js/flight-lkpr.js`, `js/flight-prgdesk.js`):
+  the check-in set in front of Terminal 1, the passage through it to a remote
+  stand by the non-Schengen pier, the mapped taxiways to runway 24, departures
+  and arrivals on 24; spawns 'prg-airport' and 'prg-arrival'.
+  `js/flight-life.js` keeps one flight for the nearest of the page's airports.
+
 Tests: `tests/flight.test.mjs` (with SEZ's real tile for the taxi routes),
 `tests/flight-cabin.test.mjs`, `tests/airliner.test.mjs`,
-`tests/airport-terminal.test.mjs`. `dev/airportprobe.js` walks the whole trip
-from a console for a harness.
+`tests/airport-terminal.test.mjs`, `tests/flight-schedule.test.mjs`,
+`tests/flight-announce.test.mjs`, `tests/flight-lkpr.test.mjs`.
+`dev/airportprobe.js` walks the whole trip from a console for a harness.
 
 ## A ticket for every train, bought on the phone (22 Nov 2026)
 

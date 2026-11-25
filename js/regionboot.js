@@ -8,6 +8,7 @@
 // Pure apart from what regions.js reads (the URL, sessionStorage once).
 
 import { region, arrival, spawnPose, dataUrl } from './regions.js';
+import { ROUTES } from './flight-trip.js';
 
 /** The URL of the live region's tile manifest. */
 export const manifestUrl = () => dataUrl('manifest.json');
@@ -36,8 +37,10 @@ const placeOf = (r) => ({ id: r.id, name: r.name, to: r.to, at: r.at });
 export function regionStartPoint(careerStart) {
   const r = region(), a = arrival();
   if (a) {
+    // a flight names where it lands ("do Prahy", "do Pardubic"): the career's own place may be the other city
+    const landing = ROUTES[a.carry?.flight?.trip?.dir]?.toward ?? null;
     return { x: a.pose.x, z: a.pose.z, heading: a.pose.heading, y: a.pose.y,
-      place: r.czech ? careerStart().place : placeOf(r), saved: false, arrived: true };
+      place: r.czech ? careerStart().place : placeOf(r), saved: false, arrived: true, landing };
   }
   const sp = careerStart();
   if (r.czech) return sp;
@@ -48,7 +51,7 @@ export function regionStartPoint(careerStart) {
 
 /** The boot cover's line: "Přijíždíte do Pardubic…", "Přilétáte na Mahé…". */
 export function arriveLine(sp, fallback) {
-  if (sp?.arrived && sp.place?.to) return 'Přilétáte ' + sp.place.to + '…';
+  if (sp?.arrived && (sp.landing || sp.place?.to)) return 'Přilétáte ' + (sp.landing ?? sp.place.to) + '…';
   if (!region().czech && sp?.place?.to) return 'Přijíždíte ' + sp.place.to + '…';
   return fallback(sp?.place);
 }
